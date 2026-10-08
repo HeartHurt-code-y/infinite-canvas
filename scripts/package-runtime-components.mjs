@@ -11,13 +11,15 @@ import {
   COMPONENT_REPO_ROOT,
   componentBytesSha256,
   componentFileSha256,
+  componentPlatform,
   describeRuntimeComponent,
   RUNTIME_COMPONENTS,
   runtimeComponentArchiveUrl,
+  validateMacRuntimeComponent,
 } from "./runtime-component-catalog.mjs";
 
 const ZIP_HELPER = fileURLToPath(new URL("./runtime-component-zip.py", import.meta.url));
-export const COMPONENT_ZIP_RECIPE = "windows-regular-files-deflate6-1980-v1";
+export const COMPONENT_ZIP_RECIPE = "native-files-symlinks-deflate6-1980-v2";
 
 export function componentArchiveCacheKey(component, helperSha256) {
   return componentBytesSha256(
@@ -25,11 +27,25 @@ export function componentArchiveCacheKey(component, helperSha256) {
   );
 }
 
-export function resolveComponentPython(root = COMPONENT_REPO_ROOT, environment = process.env) {
+export function resolveComponentPython(
+  root = COMPONENT_REPO_ROOT,
+  environment = process.env,
+  platform = process.platform,
+) {
   const candidates = [
     environment.IC_COMPONENT_PYTHON,
-    path.join(root, "src-tauri/resources/ai-media-runtime/python/python.exe"),
-    path.join(root, "src-tauri/resources/blender/runtime/4.5/python/bin/python.exe"),
+    ...(platform === "darwin"
+      ? [
+          path.join(root, "src-tauri/resources/ai-media-runtime/python/bin/python3.11"),
+          path.join(
+            root,
+            "src-tauri/resources/blender/runtime/Blender.app/Contents/Resources/4.5/python/bin/python3.11",
+          ),
+        ]
+      : [
+          path.join(root, "src-tauri/resources/ai-media-runtime/python/python.exe"),
+          path.join(root, "src-tauri/resources/blender/runtime/4.5/python/bin/python.exe"),
+        ]),
   ].filter(Boolean);
   const executable = candidates.find((candidate) => existsSync(candidate));
   if (!executable)
@@ -60,8 +76,18 @@ function invokeZipHelper(python, specPath, archivePath, verify, runner) {
 
 export async function packageRuntimeComponent(
   component,
-  { sourceRoot, packageDirectory, python, applicationVersion, runner, progress = console.log } = {},
+  {
+    sourceRoot,
+    packageDirectory,
+    python,
+    applicationVersion,
+    platform = process.platform,
+    arch = process.arch,
+    runner,
+    progress = console.log,
+  } = {},
 ) {
+  const identity = assertComponentPlatform(platform, arch);
   await mkdir(packageDirectory, { recursive: true });
   if ((await lstat(packageDirectory)).isSymbolicLink())
     throw new Error("Component package cache must not be a junction");
@@ -69,7 +95,10 @@ export async function packageRuntimeComponent(
   const cachePath = path.join(packageDirectory, `${component.id}-${key}.json`);
   const specPath = path.join(packageDirectory, `.spec-${randomUUID()}.json`);
   const temporary = path.join(packageDirectory, `.archive-${randomUUID()}.zip`);
-  await writeFile(specPath, JSON.stringify({ root: sourceRoot, files: component.files }));
+  await writeFile(
+    specPath,
+    JSON.stringify({ root: sourceRoot, files: component.files, platform: identity }),
+  );
   try {
     let cached;
     try {
@@ -125,7 +154,10 @@ export async function packageRuntimeComponent(
       ...component,
       archive: {
         format: "zip",
-        url: runtimeComponentArchiveUrl(component.id, cached.sha256, { applicationVersion }),
+        url: runtimeComponentArchiveUrl(component.id, cached.sha256, {
+          applicationVersion,
+          platform: identity,
+        }),
         size: cached.size,
         sha256: cached.sha256,
       },
@@ -144,26 +176,37 @@ export async function packageRuntimeComponents({
   progress = console.log,
 } = {}) {
   assertComponentPlatform(platform, arch, environment.TAURI_ENV_TARGET_TRIPLE);
+  if (environment.CARGO_BUILD_TARGET)
+    assertComponentPlatform(platform, arch, environment.CARGO_BUILD_TARGET);
+  const identity = componentPlatform(platform, arch);
   const applicationVersion = JSON.parse(
     await readFile(path.join(root, "package.json"), "utf8"),
   ).version;
-  const python = resolveComponentPython(root, environment);
+  const python = resolveComponentPython(root, environment, platform);
   const packageDirectory = path.join(root, ".cache/runtime-components/packages");
   const components = [];
   for (const definition of RUNTIME_COMPONENTS) {
     progress(`[components:pack] ${definition.id}: validating complete prepared tree`);
-    const component = await describeRuntimeComponent(definition, { root });
+    const component = await describeRuntimeComponent(definition, { root, platform, arch });
+    if (platform === "darwin" && process.platform === "darwin")
+      await validateMacRuntimeComponent(definition, { root, arch });
     components.push(
       await packageRuntimeComponent(component, {
         sourceRoot: path.join(root, definition.sourcePath),
         packageDirectory,
         python,
         applicationVersion,
+        platform,
+        arch,
         progress,
       }),
     );
   }
-  const catalog = buildRuntimeComponentCatalog({ applicationVersion, components });
+  const catalog = buildRuntimeComponentCatalog({
+    applicationVersion,
+    components,
+    platform: identity,
+  });
   const catalogPath = path.join(root, COMPONENT_CATALOG_RESOURCE);
   const bytes = JSON.stringify(catalog, null, 2) + "\n";
   await mkdir(path.dirname(catalogPath), { recursive: true });

@@ -1,0 +1,613 @@
+{
+ "192": {
+  "class_type": "UNETLoader",
+  "inputs": {
+   "weight_dtype": "default",
+   "unet_name": "minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors"
+  },
+  "_meta": {
+   "title": "UNET加载器"
+  }
+ },
+ "253": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "vae": [
+    "36",
+    0
+   ],
+   "samples": [
+    "226",
+    1
+   ]
+  },
+  "_meta": {
+   "title": "VAE解码"
+  }
+ },
+ "254": {
+  "class_type": "VAEDecodeAudio",
+  "inputs": {
+   "vae": [
+    "37",
+    0
+   ],
+   "samples": [
+    "226",
+    1
+   ]
+  },
+  "_meta": {
+   "title": "VAE解码_Audio"
+  }
+ },
+ "255": {
+  "class_type": "KSamplerSelect",
+  "inputs": {
+   "sampler_name": "euler"
+  },
+  "_meta": {
+   "title": "K采样器选择"
+  }
+ },
+ "332": {
+  "class_type": "ComfyMathExpression",
+  "inputs": {
+   "expression": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+   "values.a": [
+    "336",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "Math Expression"
+  }
+ },
+ "256": {
+  "class_type": "RandomNoise",
+  "inputs": {
+   "noise_seed": 155927397809123
+  },
+  "_meta": {
+   "title": "随机噪波"
+  }
+ },
+ "115": {
+  "class_type": "VAEDecodeAudio",
+  "inputs": {
+   "vae": [
+    "37",
+    0
+   ],
+   "samples": [
+    "144",
+    1
+   ]
+  },
+  "_meta": {
+   "title": "VAE解码_Audio"
+  }
+ },
+ "214": {
+  "class_type": "VHS_VideoCombine",
+  "inputs": {
+   "images": [
+    "116",
+    0
+   ],
+   "pix_fmt": "yuv420p",
+   "format": "video/h264-mp4",
+   "frame_rate": 24,
+   "pingpong": false,
+   "save_output": true,
+
+   "loop_count": 0,
+   "save_metadata": true,
+   "crf": 19,
+   "trim_to_audio": false,
+   "no_preview": false,
+   "audio": [
+    "115",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "合并为视频"
+  }
+ },
+ "335": {
+  "class_type": "easy float",
+  "inputs": {
+   "value": 1.5
+  },
+  "_meta": {
+   "title": "浮点数"
+  }
+ },
+ "116": {
+  "class_type": "VAEDecode",
+  "inputs": {
+   "vae": [
+    "36",
+    0
+   ],
+   "samples": [
+    "144",
+    1
+   ]
+  },
+  "_meta": {
+   "title": "VAE解码"
+  }
+ },
+ "336": {
+  "class_type": "PrimitiveFloat",
+  "inputs": {
+   "value": 10
+  },
+  "_meta": {
+   "title": "视频时长（秒）"
+  }
+ },
+ "139": {
+  "class_type": "LTXVSeparateAVLatent",
+  "inputs": {
+   "av_latent": [
+    "226",
+    1
+   ]
+  },
+  "_meta": {
+   "title": "Separate AV Latent"
+  }
+ },
+ "337": {
+  "class_type": "ResolutionSelector",
+  "inputs": {
+   "aspect_ratio": "16:9 (Widescreen)",
+   "megapixels": 0.7,
+   "multiple": 32
+  },
+  "_meta": {
+   "title": "分辨率选择器"
+  }
+ },
+ "339": {
+  "class_type": "Text Multiline",
+  "inputs": {
+   "text": "subject_definitions:\n<Subject 1> is the young Chinese woman lecturer in <Picture 1>, with shoulder-length wavy dark-brown hair parted in the center, refined makeup featuring soft eye shadow, subtle contouring, and deep-red lipstick, and an office-ready outfit consisting of a wine-red satin long-sleeve blouse with a softly open V-collar and sleeves rolled just past the wrist, tucked crisply into a high-waisted black pencil skirt with a side slit at the lower hem, paired with black pointed-toe heels. Her facial features, hairstyle, complexion, and overall appearance are fully preserved from <Picture 1>.\n<Audio 1> is the voice-timbre reference for <Subject 1> (S1), containing a spoken Chinese vocal layer; only the warm, clear female voice timbre, measured speaking pace, and articulate articulation are used, without copying the original spoken content.\n\nsummary:\n[reference generation + audio reference] A 10-second 16:9 video: <Subject 1> sits at a bright modern desk in a clean, softly lit study, faces the camera with a confident and approachable teaching manner, delivers one spoken Chinese line, then closes her lips and holds a gentle smile toward the camera to close the shot.\n\nretention_analysis:\n<Subject 1> (appears in [Shot 1]): fully_preserved - her facial features, shoulder-length wavy dark-brown center-parted hairstyle, refined makeup, and the wine-red satin blouse tucked into the high-waisted black pencil skirt from <Picture 1> are fully retained.\n<Audio 1>: reference - only the warm clear female voice timbre and measured speaking pace guide (S1)'s delivery; the spoken content comes entirely from the new dialogue line and is not copied from the source signal.\n\ndetailed_description:\nThe target video uses a modern educational live-action style with bright soft daylight pouring through an off-frame side window, a slightly warm color grade, and a shallow depth of field that gently blurs the background study into a clean, distraction-free backdrop.\n\n[Shot 1] A medium shot opens on <Subject 1>, the young Chinese woman lecturer from <Picture 1>, seated upright at a tidy modern light-wood desk. She faces the camera directly with a confident, calm, approachable teaching posture—shoulders relaxed, back straight, hands resting naturally near the desk surface. Her shoulder-length wavy dark-brown hair falls softly around her face in a center part, and her refined makeup—soft eye shadow, subtle contouring, and deep-red lipstick—matches <Picture 1>. She wears the wine-red satin long-sleeve blouse with the front collar opening into a tasteful V, the sleeves rolled just past the wrist, tucked crisply into a high-waisted black pencil skirt whose side slit rests modestly at the lower hem. Black pointed-toe heels are just visible at the bottom edge of the frame. On the desk in front of her, a slim open laptop glows softly beside a closed notebook and a clear glass of water that catches the daylight, while behind her, a softly blurred bookshelf with neatly arranged books and a small trailing green plant complete the modern-study backdrop.\n\nAs the shot begins, <Subject 1> lifts her right hand toward the camera and holds up two fingers in a confident, clear gesture, accompanied by a warm teaching smile. The camera executes a slow, small-amplitude push-in motion, tightening from a medium shot to a medium close-up. <Subject 1> (S1), speaking with the warm, clear female voice timbre and measured pacing referenced from <Audio 1>, says, <d>[Chinese] 开始之前，你其实只需要准备两样东西。把它们搞清楚，能帮你省下大几千的冤枉钱。</d>\n\nShe finishes the line, lowers her hand back toward the desk, gently closes her lips, and holds a calm, assured smile toward the camera until the final frame. The slow push-in settles naturally as the scene ends.\n\noverall_soundscape:\nQuiet modern study room tone with a faint low computer-fan hum from the laptop, a very soft rustle of the satin blouse as her hand moves, and the subtle click of a pen rolling faintly on the desk near the close of the scene.\n\nnon_diegetic_music:\nN/A\n"
+  },
+  "_meta": {
+   "title": "多行文本"
+  }
+ },
+ "53": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "lora_name": "minimax_h3_turbo_v4_step600_ema_pruned_comfyui.safetensors",
+   "strength_model": 1.PROJECT_MODEL_BINDING,
+   "model": [
+    "128",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "LoRA加载器(仅模型)"
+  }
+ },
+ "36": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+  },
+  "_meta": {
+   "title": "VAE加载器"
+  }
+ },
+ "58": {
+  "class_type": "MiniMaxH3MemoryEfficientSageAttentionPatch",
+  "inputs": {
+   "model": [
+    "192",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "MiniMax H3 Memory Efficient Sage Attention Patch"
+  }
+ },
+ "37": {
+  "class_type": "VAELoader",
+  "inputs": {
+   "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+  },
+  "_meta": {
+   "title": "VAE加载器"
+  }
+ },
+ "38": {
+  "class_type": "CLIPLoader",
+  "inputs": {
+   "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+   "type": "minimax",
+   "device": "default"
+  },
+  "_meta": {
+   "title": "CLIP加载器"
+  }
+ },
+ "140": {
+  "class_type": "MinimaxH3LatentUpscaler3D",
+  "inputs": {
+   "mode": "scale by multiplier",
+   "mode.scale": [
+    "335",
+    0
+   ],
+   "enable_chunking": false,
+   "model_name": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+   "latent": [
+    "139",
+    0
+   ],
+   "precision": "fp16",
+   "align": 32,
+   "device": "cuda"
+  },
+  "_meta": {
+   "title": "Minimax H3 Latent Upscaler (3D)"
+  }
+ },
+ "261": {
+  "class_type": "BasicScheduler",
+  "inputs": {
+   "scheduler": "beta",
+   "denoise": 1,
+   "model": [
+    "53",
+    0
+   ],
+   "steps": 12
+  },
+  "_meta": {
+   "title": "基础调度器"
+  }
+ },
+ "142": {
+  "class_type": "LTXVConcatAVLatent",
+  "inputs": {
+   "audio_latent": [
+    "139",
+    1
+   ],
+   "video_latent": [
+    "140",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "Concat AV Latent"
+  }
+ },
+ "340": {
+  "class_type": "LoadAudio",
+  "inputs": {
+   "audio": "PROJECT_REFERENCE_FILE",
+   "audioUI": ""
+  },
+  "_meta": {
+   "title": "加载音频"
+  }
+ },
+ "264": {
+  "class_type": "VHS_VideoCombine",
+  "inputs": {
+   "images": [
+    "253",
+    0
+   ],
+   "pix_fmt": "yuv420p",
+   "format": "video/h264-mp4",
+   "frame_rate": 24,
+   "pingpong": false,
+   "save_output": false,
+   "filename_prefix": "一采预览",
+   "loop_count": 0,
+   "save_metadata": true,
+   "crf": 19,
+   "trim_to_audio": false,
+   "no_preview": false,
+   "audio": [
+    "254",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "合并为视频"
+  }
+ },
+ "144": {
+  "class_type": "SamplerCustomAdvanced",
+  "inputs": {
+   "guider": [
+    "223",
+    0
+   ],
+   "latent_image": [
+    "142",
+    0
+   ],
+   "noise": [
+    "256",
+    0
+   ],
+   "sigmas": [
+    "289",
+    1
+   ],
+   "sampler": [
+    "255",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "自定义采样器(高级)"
+  }
+ },
+ "265": {
+  "class_type": "MiniMaxH3ReferenceToVideo",
+  "inputs": {
+   "width": [
+    "337",
+    0
+   ],
+   "length": [
+    "332",
+    1
+   ],
+   "vae": [
+    "36",
+    0
+   ],
+   "prompt": [
+    "339",
+    0
+   ],
+   "audio_vae": [
+    "37",
+    0
+   ],
+   "clip": [
+    "38",
+    0
+   ],
+   "height": [
+    "337",
+    1
+   ],
+   "ref_images.ref_image_0": [
+    "326",
+    0
+   ],
+   "ref_images.ref_image_1": [
+    "1326",
+    0
+   ],
+   "ref_images.ref_image_2": [
+    "1327",
+    0
+   ],
+   "ref_images.ref_image_3": [
+    "1328",
+    0
+   ],
+   "ref_images.ref_image_4": [
+    "1329",
+    0
+   ],
+   "ref_images.ref_image_5": [
+    "1330",
+    0
+   ],
+   "ref_images.ref_image_6": [
+    "1331",
+    0
+   ],
+   "ref_images.ref_image_7": [
+    "1332",
+    0
+   ],
+   "ref_images.ref_image_8": [
+    "1333",
+    0
+   ],
+   "ref_audios.ref_audio_0": [
+    "340",
+    0
+   ],
+   "ref_audios.ref_audio_1": [
+    "1340",
+    0
+   ],
+   "ref_audios.ref_audio_2": [
+    "1341",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "MiniMax H3 Reference to Video"
+  }
+ },
+ "223": {
+  "class_type": "BasicGuider",
+  "inputs": {
+   "conditioning": [
+    "265",
+    0
+   ],
+   "model": [
+    "53",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "基础引导"
+  }
+ },
+ "289": {
+  "class_type": "SplitSigmas",
+  "inputs": {
+   "step": 8,
+   "sigmas": [
+    "261",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "分离Sigmas"
+  }
+ },
+ "226": {
+  "class_type": "SamplerCustomAdvanced",
+  "inputs": {
+   "guider": [
+    "223",
+    0
+   ],
+   "latent_image": [
+    "265",
+    1
+   ],
+   "noise": [
+    "256",
+    0
+   ],
+   "sigmas": [
+    "289",
+    0
+   ],
+   "sampler": [
+    "255",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "自定义采样器(高级)"
+  }
+ },
+ "128": {
+  "class_type": "LoraLoaderModelOnly",
+  "inputs": {
+   "lora_name": "MysticXXX_MMH3-V1.safetensors",
+   "strength_model": 0.PROJECT_MODEL_BINDING,
+   "model": [
+    "58",
+    0
+   ]
+  },
+  "_meta": {
+   "title": "LoRA加载器(仅模型)"
+  }
+ },
+ "326": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "PROJECT_REFERENCE_FILE"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1326": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "PROJECT_REFERENCE_FILE"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1327": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "PROJECT_REFERENCE_FILE"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1328": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "PROJECT_REFERENCE_FILE"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1329": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "PROJECT_REFERENCE_FILE"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1340": {
+  "class_type": "LoadAudio",
+  "inputs": {
+   "audio": "PROJECT_REFERENCE_FILE",
+   "audioUI": ""
+  },
+  "_meta": {
+   "title": "加载音频"
+  }
+ },
+ "1341": {
+  "class_type": "LoadAudio",
+  "inputs": {
+   "audio": "PROJECT_REFERENCE_FILE",
+   "audioUI": ""
+  },
+  "_meta": {
+   "title": "加载音频"
+  }
+ },
+ "1330": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "__UNUSED_SLOT__.png"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1331": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "__UNUSED_SLOT__.png"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1332": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "__UNUSED_SLOT__.png"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ },
+ "1333": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "__UNUSED_SLOT__.png"
+  },
+  "_meta": {
+   "title": "加载图像"
+  }
+ }
+}

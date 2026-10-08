@@ -1,0 +1,13 @@
+FFmpeg binary and source provenance
+Binary version (verified with -L): 9.0.1-essentials_build-www.gyan.dev
+Original binary distributor URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+Original distributor/build information: https://www.gyan.dev/ffmpeg/builds/
+Upstream source repository: https://git.ffmpeg.org/ffmpeg.git
+Upstream project: https://ffmpeg.org/
+Release tag reference derived from binary version (not resolved to a commit): n9.0.1
+Exact FFmpeg source commit: not recorded by the original prepared manifest/binary version output.
+Local corresponding-source archive: none. This component does not include the complete corresponding source of FFmpeg or its statically linked dependencies.
+This notice does not make a source-delivery offer or assert that generic upstream source is the exact corresponding source for this distributor build.
+Build configuration reported by this binary: --enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-cairo --enable-fontconfig --enable-iconv --enable-gnutls --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-zlib --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-sdl2 --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxvid --enable-libaom --enable-libopenjpeg --enable-libvpx --enable-mediafoundation --enable-libass --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi --enable-openal --enable-libgme --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libtheora --enable-libvo-amrwbenc --enable-libgsm --enable-libopencore-amrnb --enable-libopus --enable-libspeex --enable-libvorbis --enable-librubberband
+License text: COPYING.GPLv3 (GNU GPL version 3 or later).
+Original binary license notice and build banner: LICENSE-NOTICE.txt.

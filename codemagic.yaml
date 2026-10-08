@@ -270,3 +270,64 @@ workflows:
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json.sig
       - src-tauri/target/release/bundle/helper/install-macos.sh
+
+  macos-online-package:
+    name: macOS Online Package
+    instance_type: mac_mini_m2
+    max_build_duration: 180
+    environment:
+      groups:
+        - updater_signing
+      vars:
+        CI: "true"
+        IC_PUBLISH_ONLINE_RELEASE: "false"
+      node: 24
+    cache:
+      cache_paths:
+        - ~/.pnpm-store
+        - ~/.cargo/registry
+        - ~/.cargo/git
+        - .cache/tauri-editions/online/target
+    scripts:
+      - name: Set up pnpm
+        script: |
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@12.5.1 --activate
+          pnpm config set store-dir "$HOME/.pnpm-store"
+      - name: Set up Rust
+        script: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$CM_ENV"
+      - name: Install dependencies
+        script: pnpm install --frozen-lockfile
+      - name: Check native architecture and affected distribution tests
+        script: |
+          set -euo pipefail
+          test "$(node -p 'process.arch')" = arm64
+          if [ -n "${CM_COMMIT:-}" ]; then
+            test "$(git rev-parse HEAD)" = "$(git rev-parse "${CM_COMMIT}^{commit}")"
+          fi
+          export IC_COMPONENT_PYTHON="$(command -v python3)"
+          "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
+          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs
+      - name: Prepare optional macOS signing identity
+        script: bash scripts/prepare-macos-online-signing.sh
+      - name: Build and verify online DMG and updater
+        script: bash scripts/build-macos-online.sh
+      - name: Publish only when requested
+        script: |
+          set -euo pipefail
+          if [ "${IC_PUBLISH_ONLINE_RELEASE:-false}" = true ]; then
+            version="$(node -p "require('./package.json').version")"
+            pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
+          fi
+    artifacts:
+      - .cache/tauri-editions/online/artifacts/*/dmg/*.dmg
+      - .cache/tauri-editions/online/artifacts/*/macos/*.app.tar.gz
+      - .cache/tauri-editions/online/artifacts/*/macos/*.app.tar.gz.sig
+      - .cache/tauri-editions/online/artifacts/*/helper/install-macos.sh
+      - .cache/tauri-editions/online/artifacts/*/*.json
+      - .cache/runtime-components/packages/*.zip
+      - src-tauri/resources/component-catalog.json

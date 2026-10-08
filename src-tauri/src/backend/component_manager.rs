@@ -158,6 +158,8 @@ struct Stamp {
     modified: Option<SystemTime>,
     directory: bool,
     link: bool,
+    #[cfg(unix)]
+    mode: u32,
 }
 #[derive(Clone)]
 struct CachedComponent {
@@ -302,8 +304,8 @@ fn load_catalog(resources: &Path) -> Result<ComponentCatalog, String> {
 fn validate_catalog(catalog: &ComponentCatalog) -> Result<(), String> {
     if catalog.schema_version != 1
         || catalog.application_version != env!("CARGO_PKG_VERSION")
-        || catalog.platform != "windows-x86_64"
-        || !cfg!(all(windows, target_arch = "x86_64"))
+        || Some(catalog.platform.as_str())
+            != component_platform(std::env::consts::OS, std::env::consts::ARCH)
         || catalog.components.len() != IDS.len()
         || catalog.features.len() != FEATURES.len()
     {
@@ -332,6 +334,15 @@ fn validate_catalog(catalog: &ComponentCatalog) -> Result<(), String> {
         }
         safe_relative(&component.bundle_path)?;
         validate_files(&component.files)?;
+        if component.files.iter().any(|file| {
+            if cfg!(target_os = "macos") {
+                file.mode.is_none()
+            } else {
+                file.is_symlink()
+            }
+        }) {
+            return Err("组件文件类型或权限与当前平台不匹配".into());
+        }
         if !component.files.iter().any(|file| {
             file.path == manifest
                 && file.sha256 == component.manifest_sha256
@@ -364,6 +375,14 @@ fn validate_catalog(catalog: &ComponentCatalog) -> Result<(), String> {
         dependency_closure(catalog, id)?;
     }
     Ok(())
+}
+fn component_platform(os: &str, arch: &str) -> Option<&'static str> {
+    match (os, arch) {
+        ("windows", "x86_64") => Some("windows-x86_64"),
+        ("macos", "aarch64") => Some("darwin-aarch64"),
+        ("macos", "x86_64") => Some("darwin-x86_64"),
+        _ => None,
+    }
 }
 fn dependency_closure(
     catalog: &ComponentCatalog,
@@ -456,6 +475,8 @@ pub(crate) fn pose_runtime_ready(root: &Path) -> bool {
 }
 
 fn stamp(path: PathBuf) -> Stamp {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     match path.symlink_metadata() {
         Ok(metadata) => Stamp {
             path,
@@ -463,6 +484,8 @@ fn stamp(path: PathBuf) -> Stamp {
             modified: metadata.modified().ok(),
             directory: metadata.is_dir(),
             link: is_link(&metadata),
+            #[cfg(unix)]
+            mode: metadata.permissions().mode(),
         },
         Err(_) => Stamp {
             path,
@@ -470,6 +493,8 @@ fn stamp(path: PathBuf) -> Stamp {
             modified: None,
             directory: false,
             link: false,
+            #[cfg(unix)]
+            mode: 0,
         },
     }
 }
@@ -697,7 +722,7 @@ impl ComponentManager {
                 }
             }
         } else {
-            // Full macOS distributions predate this Windows-only ZIP catalog. Their native
+            // Full distributions may predate the ZIP catalog. Their native
             // resources retain the existing pins and remain usable independently of it.
             root = runtime.resolve(ready);
             if root.is_none() && (bundled.exists() || stored.exists()) {
@@ -1215,6 +1240,11 @@ fn remove_guarded_stage(parent: &Path, stage: &Path) -> Result<(), String> {
     }
     fn validate(path: &Path, parent: &Path) -> Result<(), String> {
         let metadata = path.symlink_metadata().map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        if metadata.file_type().is_symlink() {
+            // Remove the link itself only. Never traverse its target during cleanup.
+            return Ok(());
+        }
         if is_link(&metadata)
             || (!metadata.is_dir() && !metadata.is_file())
             || !path
@@ -1253,11 +1283,13 @@ fn remove_guarded_stage(parent: &Path, stage: &Path) -> Result<(), String> {
             let metadata = current
                 .symlink_metadata()
                 .map_err(|error| error.to_string())?;
-            if is_link(&metadata)
-                || !current
-                    .canonicalize()
-                    .map_err(|error| error.to_string())?
-                    .starts_with(parent)
+            let removable_link = cfg!(unix) && current == path && metadata.file_type().is_symlink();
+            if !removable_link
+                && (is_link(&metadata)
+                    || !current
+                        .canonicalize()
+                        .map_err(|error| error.to_string())?
+                        .starts_with(parent))
             {
                 return Err("暂存路径被替换，停止清理".into());
             }
@@ -1267,6 +1299,10 @@ fn remove_guarded_stage(parent: &Path, stage: &Path) -> Result<(), String> {
             current = current.parent().ok_or("暂存路径越界")?;
         }
         let metadata = path.symlink_metadata().map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        if metadata.file_type().is_symlink() {
+            return fs::remove_file(path).map_err(|error| error.to_string());
+        }
         if metadata.is_dir() {
             for entry in fs::read_dir(path).map_err(|error| error.to_string())? {
                 remove(
@@ -1464,6 +1500,33 @@ fn publish_atomic(
 mod tests {
     use super::*;
     #[test]
+    fn component_platform_maps_only_supported_architectures() {
+        assert_eq!(
+            component_platform("windows", "x86_64"),
+            Some("windows-x86_64")
+        );
+        assert_eq!(
+            component_platform("macos", "aarch64"),
+            Some("darwin-aarch64")
+        );
+        assert_eq!(component_platform("macos", "x86_64"), Some("darwin-x86_64"));
+        assert_eq!(component_platform("windows", "aarch64"), None);
+        assert_eq!(component_platform("macos", "arm"), None);
+        assert_eq!(component_platform("linux", "x86_64"), None);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn stamp_cache_detects_permission_changes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("engine");
+        fs::write(&path, b"bytes").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let stamps = vec![stamp(path.clone())];
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!unchanged(&stamps));
+    }
+    #[test]
     fn atomic_publish_restores_previous_on_rename_or_final_verification_failure() {
         for fail_rename in [true, false] {
             let temp = tempfile::tempdir().unwrap();
@@ -1557,6 +1620,22 @@ mod tests {
         assert!(!stage.exists());
         assert!(remove_guarded_stage(temp.path(), &previous).is_err());
         assert_eq!(fs::read(previous.join("keep")).unwrap(), b"old");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn guarded_stage_cleanup_removes_links_without_following_targets() {
+        let temp = tempfile::tempdir().unwrap();
+        let stage = temp
+            .path()
+            .join(format!(".component-stage-{}", Uuid::new_v4()));
+        let outside = temp.path().join("outside");
+        fs::create_dir(&stage).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("keep"), b"outside-bytes").unwrap();
+        std::os::unix::fs::symlink(&outside, stage.join("alias")).unwrap();
+        remove_guarded_stage(temp.path(), &stage).unwrap();
+        assert!(!stage.exists());
+        assert_eq!(fs::read(outside.join("keep")).unwrap(), b"outside-bytes");
     }
     #[test]
     fn restart_recovers_a_unique_verified_previous_after_first_publication_rename() {

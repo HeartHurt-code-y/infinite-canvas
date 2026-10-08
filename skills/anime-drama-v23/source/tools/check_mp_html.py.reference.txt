@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""check_mp_html.py —— 项目说明页面安全校验（铁律 D2-q）
+
+为什么必须有它（2026-09-19 用户实测反馈）：
+  我出的项目说明介绍页在浏览器里看着很好，**粘进项目说明编辑器就塌了** ——
+  因为发布编辑器编辑器会**主动剥掉**一批 CSS：
+    · `display:flex` / `grid`  → 剥（并排内容会塌成竖排）
+    · `float:` / `position:`  → 剥
+    · `linear-gradient`       → 剥（背景变透明）
+    · `box-shadow` / `text-shadow` / `::before` / `::after` → 剥
+    · `<style>` / `class` / `id` / 外链 CSS        → 剥
+  而我那页用了大量 flex（门禁表、成绩单 2×2、适合谁）→ 全塌。
+
+  判据（通用）：**「在浏览器里好看」与「粘进目标平台还好看」是两件事。**
+    交付物要在**它真正要被使用的地方**验收，不能在「我这边看起来对」就收工。
+
+项目说明安全写法：
+  · 只用行内 `style="..."`；不用 `<style>` / `class` / `id`
+  · 需要并排 → 用 `<table>`（发布编辑器对表格支持最好）
+  · 背景用纯色；不要渐变/阴影/伪元素
+  · 每个文字元素显式写 `font-size` + `line-height` + `color`（不依赖继承）
+
+用法：
+  python tools/check_mp_html.py <html 文件> [<html 文件> ...]
+  python tools/check_mp_html.py --all        # 校验 skill 根目录下所有「项目说明*.html」
+
+退出码：0 = 通过；1 = 有硬违规；3 = 文件读不到
+"""
+import argparse
+import re
+import sys
+from pathlib import Path
+
+# ---- 硬拦：发布编辑器编辑器会剥掉/会塌版面的写法 ----
+FORBIDDEN = [
+    (r"<style[\s>]", "<style> 块（发布编辑器会剥掉；必须全部改成行内 style）"),
+    (r"\sclass\s*=", "class 属性（发布编辑器会剥掉；样式必须写成行内 style）"),
+    (r"\sid\s*=\"", "id 属性（发布编辑器会剥掉）"),
+    (r"display\s*:\s*flex", "display:flex（**会塌成竖排**；并排内容改用 <table>）"),
+    (r"display\s*:\s*grid", "display:grid（发布编辑器不支持；改用 <table>）"),
+    (r"\bflex(-wrap|-direction)?\s*:", "flex 相关属性（发布编辑器会剥掉）"),
+    (r"grid-template", "grid-template（发布编辑器不支持）"),
+    (r"\bfloat\s*:", "float（发布编辑器会剥掉）"),
+    (r"\bposition\s*:", "position（发布编辑器会剥掉）"),
+    (r"linear-gradient|radial-gradient", "渐变背景（发布编辑器会剥掉 → 背景变透明）"),
+    (r"box-shadow|text-shadow", "阴影（发布编辑器会剥掉）"),
+    (r"::before|::after", "伪元素（发布编辑器会剥掉）"),
+    (r"@media", "@media 媒体查询（发布编辑器会剥掉）"),
+    (r"<link[\s>]", "外链样式（发布编辑器会剥掉）"),
+    (r"<script[\s>]", "<script>（项目说明正文里不会执行）"),
+    (r"<iframe[\s>]", "<iframe>（项目说明正文不支持）"),
+]
+
+# ---- 软提示：不算违规，但值得看一眼 ----
+WARN = [
+    (r"font-size\s*:\s*([0-9.]+)px", "字号小于 11px（手机上难读）", 11.0),
+    (r"<img[^>]+src=\"https?://", "外链图片（项目说明需要重新上传，否则会掉图）", None),
+]
+
+
+def check(path):
+    """返回 (hard: [(行号, 内容, 原因)], warn: [(行号, 内容, 原因)])"""
+    raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    # ⚠ 先剥掉 HTML 注释再检查 —— 第一版没做这一步，于是**文件头那段「写规矩的注释」**
+    #   里提到的 `display:flex` / `linear-gradient` / `<style>` 被当成了真违规（4 处误报）。
+    #   判据（本项目反复出现的同一条）：**判据本身要有判别器** ——
+    #   检查的必须是「会被渲染的内容」，注释不会被渲染（发布编辑器粘贴时也会丢掉）。
+    text = re.sub(r"<!--.*?-->", "", raw, flags=re.S)
+    lines = raw.splitlines()
+    hard, warn = [], []
+    for pat, why in FORBIDDEN:
+        for m in re.finditer(pat, text, re.I):
+            ln = text[:m.start()].count("\n") + 1
+            hard.append((ln, lines[ln - 1].strip()[:64], why))
+    for pat, why, limit in WARN:
+        for m in re.finditer(pat, text, re.I):
+            if limit is not None:
+                try:
+                    if float(m.group(1)) >= limit:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+            ln = text[:m.start()].count("\n") + 1
+            warn.append((ln, lines[ln - 1].strip()[:64], why))
+    # 正向要求：必须有外层 section（发布编辑器正文的推荐容器）
+    if "<section" not in text:
+        hard.append((0, "（全文）", "缺少外层 <section> 容器（项目说明正文推荐用 section 包裹）"))
+    return hard, warn
+
+
+def main():
+    ap = argparse.ArgumentParser(description="项目说明页面安全校验（粘贴即排版）")
+    ap.add_argument("files", nargs="*", help="要校验的 html 文件")
+    ap.add_argument("--all", action="store_true",
+                    help="校验 skill 根目录下所有「*项目说明*.html」")
+    args = ap.parse_args()
+
+    root = Path(__file__).resolve().parent.parent
+    files = [Path(f) for f in args.files]
+    if args.all:
+        files += sorted(root.glob("*项目说明*.html"))
+    files = [f for f in files if f.exists()]
+    if not files:
+        print("❌ 没有找到要校验的文件（用 --all 或传路径）")
+        sys.exit(3)
+
+    bad_total = 0
+    for f in files:
+        hard, warn = check(f)
+        print("=" * 68)
+        print("项目说明安全校验 · %s" % f.name)
+        print("=" * 68)
+        if hard:
+            bad_total += len(hard)
+            print("❌ 硬违规 %d 处（发布编辑器编辑器会剥掉 → 粘贴后会塌版面）：" % len(hard))
+            for ln, txt, why in hard[:40]:
+                print("   第 %-4s 行  %s" % (ln or "—", why))
+                if txt and txt != "（全文）":
+                    print("         %s" % txt)
+        else:
+            print("✅ 无硬违规 —— 可以放心粘进项目说明")
+        if warn:
+            print("⚠️  软提示 %d 处（不拦，看一眼）：" % len(warn))
+            for ln, txt, why in warn[:12]:
+                print("   第 %-4s 行  %s" % (ln, why))
+        print()
+
+    if bad_total:
+        print("❌ 合计 %d 处硬违规 —— **拒绝交付**。" % bad_total)
+        print("   改法：并排内容改用 <table>；去掉 flex/grid/float/position/渐变/阴影/伪元素；")
+        print("        样式全部写成行内 style；每个文字元素显式写 font-size/line-height/color。")
+        sys.exit(1)
+    print("✅ 全部通过：项目说明「粘贴即排版」。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

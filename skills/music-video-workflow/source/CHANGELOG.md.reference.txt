@@ -1,0 +1,176 @@
+# CHANGELOG · mv-auto-pipeline 进化史
+
+> 每一支 MV 跑完后，把本次沉淀的修复记录在这里，并打一份快照 + git tag。
+> 回退方法见 `tools/rollback.py`。**最新版本在最上面。**
+
+---
+
+## V1.0.6 · 凭证跨项目自愈：永远不再问用户要 key（2026-09-17）
+
+**一句话**：key 早就永久记住了，是**代码不读**——读取链从「只认当前项目 `.env`」升级为四级自愈，「写在记忆里不算修好，代码能读到才算修好」
+
+**触发（用户原话）**
+> 「我不是说了把这些key永久记住吗，怎么还找我要？」
+
+**根因诊断（关键：记忆没丢，是代码不读）**
+
+- key **确实早就永久记住了** —— 2026-09-14 就写进 `~/.project_provider/MEMORY.md`（第 450~453 行，三把 key 全文），
+  同处还有「默认一律用消费级」的计费铁律。**记忆层没有问题。**
+- 真正的断点在 `references/rh_client.py`：
+  - `load_dotenv(project_root)` 写死读 `<项目根>/.env` —— **换个新项目就等于没有凭证**；
+  - `resolve_key()` 只会查 `cli_key` / `project_provider_API_KEY` / `project_provider_API_KEY_C` 三个来源；
+  - `build_mv_workflow.py` 甚至没调过 `load_dotenv`。
+  → 新项目一跑就抛「❌ 缺少 project_provider API Key」，用户看到的就是「又找我要」。
+
+**判据升级（本版最重要的一条，已写进铁律 D12）**
+> **写在 `MEMORY.md` 里不算修好，代码能读到才算修好。**
+> 凡「用户说过一次、以后不该再问」的东西，必须落成**代码可读的持久化文件**。
+> 只写记忆不写代码 = 下次一定还会再问一遍，而且用户会认为你根本没记。
+
+**改法**
+
+- 新建**用户级凭证** `~/.project_provider/credentials/mv-auto-pipeline/keys.env`
+  （位置约定与既有 `credentials/meituan-living-deals-assistant/token.json` 同规矩；**不进 git、不进 skill 包**）。
+- 读取链升级为**四级**：`--api-key` > 真实环境变量（**永不被文件改写**）
+  > `<项目根>/.env`（项目级覆盖，不同项目可用不同账号）> 用户级 `keys.env`（跨项目兜底）。
+- `resolve_key()` 新增 **`self_heal`（无条件加载）** —— 调用方忘了先 `load_dotenv` 也读得到。
+  ⚠️ 写成「环境变量为空才加载」是**错**的：环境变量已有时不加载 → `LAST_SOURCE` 留空 → 诊断报告**说谎**。
+- 新增 `enterprise_key()`：**企业级与消费级同级自愈**。只修消费级 = 用户级文件里的企业级 key 形同虚设
+  （要用时照样报「没给企业级 key」）。`build_mv_workflow.py` 无显式 `load_dotenv`，正是靠 `resolve_key` 自愈才读得到。
+- 新增 `credential_report()`：只报「有没有 + 从哪来（`real-env`/`project-env`/`user-env`）」，**不打印 key 本体**。
+- `_INJECTED` 快照机制：排除「本模块自己注入过的键」，否则第二次 `load` 会把自己上次写的当成
+  「真实环境变量」→ 项目级再也覆盖不了用户级。保证**幂等**。
+- 报错文案改为四条路（原三条），且指向**实际使用的**凭证路径（新增 `cred_path` 参数可覆盖）。
+
+**回归**
+
+- 新增离线单测 `examples/test_credentials.py`（**22 条断言**，零算力零网络零真钱），核心是
+  「**全新空目录 + 无 `.env` + 不传任何 key → 必须自愈读到**」；另锁「项目级覆盖用户级」
+  「真实环境变量压过项目 `.env`」「连续两次 load 幂等」「报错文案指向实际凭证路径」。
+- `tools/checks.txt`：169 → **200 条**（新增 30 条）。此前**一条凭证相关的不变式都没有** ——
+  这正是「记了却读不到」能潜伏至今的原因。
+- 同步：`SKILL.md` 新增**铁律 D12** + 阶段〇「凭证：四级读取」整节 + 错误处理表 +1 行；
+  `references/README.md` 凭证小节重写。
+
+**发版踩坑（记一笔）**
+
+- 手改过 `VERSION` 就**不要**再让 `snapshot.py` 自增（它从现值 +0.0.1，会跳号）——
+  本版按 `tools/README.md` 纪律 5 用 `--version 1.0.6` **显式指定**。
+
+---
+
+## V1.0.5 · 池满退役改成「限时」而不是「限次」（2026-09-18）
+
+**一句话**：V1.0.4 发出去几分钟后就发现池满的处理会把进程**挂死**——判据从「错了几次」改成「等了多久」，并对两条车道一视同仁
+
+- **V1.0.4 留下的两个毛病**（都是「只让企业级退役」惹的）：
+  ① **消费级车道池满会无限重试** —— 池子真满了，进程就永远转不停（没有任何出口）；
+  ② 反过来说，**3 次（≈2 分钟）就退役又太狠** —— 池子只是有点挤而已，退役反而把活推给兜底路径直接判死。
+  → **判据错了**：该看的是「等了多久」而不是「错了几次」。挤就等着，等够了才交棒。
+- **改法**：新增 `BUSY_GIVE_UP_SEC`（默认 **1800s = 30 分钟**，0 = 永不放弃）+ 每车道 `busy_since`；
+  池满持续超过这个时长 → 该车道退役、队列交给兜底路径，**两条车道一视同仁**；
+  一旦某次提交成功就把 `strikes` 与 `busy_since` 一起清零（别让「曾经挤过」永久记仇）。
+- **单测新增 ④b：两条车道**全都**池满** —— 只测「一条车道退役」是测不出挂死的。
+  断言整个调度必须在秒级收敛，且 4 段最终**全部由兜底路径跑完**（实测 1.4s 收敛，不挂）。
+- 退出原因写得更明确：退役时打印实际等待秒数并写入 `状态/调度日志.csv`（「池满持续 Ns 超过 1800s」），
+  而不是原来那句语焉不详的「连续 3 次池满」。
+- 文档同步：`SKILL.md` 铁律 D11 的判据段重写（并给 V1.0.4 的旧描述加对照指针，避免读者照旧理解）、
+  `references/README.md` 补「池满不会挂死」、`tools/checks.txt` 新增 6 条不变式。
+
+**验证**：`test_parallel_lanes.py` **37/37 通过**（新增 ④b「两条车道全都池满 → 1.4s 内收敛、4 段全部由兜底跑完」）；`test_account_fallback.py` 回归 **6/6 通过**；`smoke_test.py` 离线全链回归 **rc=0 全通过**；全脚本编译通过；`tools/checks.txt` **169 条不变式 169/169 通过**。
+
+---
+
+## V1.0.4 · 双池并行（2026-09-18）
+
+**一句话**：把「消费级 + 企业级」从「失败才降级」升级为「**两条车道同时开工**」，并给真钱上了闸、把最阴的「静默丢活」堵死
+
+- 需求：用户「消费级+企业级一起并行」。要的不是降级，是**两把 key 同时跑、墙钟减半**。
+- 机制：`--enterprise-parallel` → **一个共享任务队列 + 两条车道同时抢**（消费级 `--workers` 宽 ∥ 企业级 `--workers-e` 宽）。为什么不用「对半切开」：实测单段机器耗时 600~900s 差得很远，静态对半必然一条车道先空转；共享队列让「谁先空出手谁接着取」。离线单测实测并行度 ≈ 2.0x（6 段 × 0.3s 串行应 1.8s，实测墙钟 0.91s）。
+- **第三个独立开关**：`--api-key-e`（提供凭证）/ `--allow-enterprise-fallback`（授权降级）/ `--enterprise-parallel`（授权并行）三者**互不推定**。给了 key ≠ 同意花钱，同意降级 ≠ 同意并行。
+- **真钱封顶** `--enterprise-parallel-max N`：最多 N 段走企业级，额度用满该车道退役、剩下的回消费级。不设 = 不限；开跑前打印最坏 / 对半两档预估（实测单段 727s × ¥6/h ≈ ¥1.21/段）。
+- **池满 = 没烧钱** → 新增 `SubmitBusy`（实测 `{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}`）：段**放回队列**重试，**绝不记 `failed`**。`run_one` 因此变成**三态**返回（True / False / **None = 池满可重试**）。
+  ⚠️ 双池模式下池满**不走降级** —— 两条车道同时在跑，正确动作是放回队列让另一条接走；本车道自己改走真钱的话，消费级一旦被占，5 个 worker 会把**整片同时甩给企业级 = 全片烧真钱**。
+- **「可重试」≠「可降级」**：新增 `TRANSIENT_PAT`（QUEUE/BUSY/TOO_MANY/RATE_LIMIT/OVERLOAD/WORKER/并发/占用/排队/繁忙）。`DEGRADE_PAT` 故意含 `余额|超出|APIKEY_`（那些确实该改走企业级），但它们**不是瞬时错误**，重试一万次也一样，所以**不进** `TRANSIENT_PAT`。
+- ⚠️ **修「静默丢活」**（双池并行最阴的错，不报错、只让成片凭空短一截）：企业级车道会因「真钱封顶用满」或「连续 3 次池满」**主动退役**，而退役那一刻它可能刚把一段 `put` 回队列、消费级车道却早已因「当时队列空」退出 → 那几段**既没跑也没记 failed**，账面上看不出任何异常。修法：车道全停后**队列兜底**，把队列里剩的段一律回落消费级单池跑完。
+- **台账能加列了**：`append_csv` 原来只要文件存在就直接 `writerow`，而 `DictWriter` 对「row 里有、fieldnames 里没有」的键会直接 raise —— **给台账加一列 = 让跑过的项目再跑一次就崩**（《野心家》的 成本台账.csv 已经 22 行）。改为**自动升级表头**：老列顺序保持在前、新列补到末尾、缺的填空，老行不丢。新增「**钱包元**」列（企业级段的 供应商报告费用为 0，真钱记这里）。
+- **口径更正**：`accountStatus.currentTaskCounts` = **此刻正在跑的任务数**，不是并发额度 —— 无任务时两把 key 都返回 `0`。之前记的「消费级支持 5 并发」是误读（那只是当时正好在跑 5 个）。账号并发上限**没有接口能读**，只能靠「池满放回」自适应兜住。
+- **测试基建**：`BUSY_BACKOFF_BASE`（池满退避基数）/ `SUPERVISE_TICK`（并行巡检间隔）提成模块常量 —— 否则单测测「连续 3 次池满退役」要真等 2 分钟、任何并行测试的墙钟下限都是 5s。
+- 新增离线单测 `examples/test_parallel_lanes.py`（**零算力、零网络**）：①池满→`SubmitBusy` ②`run_one` 三态不写 `failed` ③**真钱封顶不被绕过**且全部段跑完 ④**池满退役后不许静默丢活** ⑤两车道真的同时在跑（峰值并发 ≥2）⑥台账加列不崩 ⑦调度日志留痕齐全 ⑧`main()` 的**真钱预检**必须把「并行 / 封顶 / 按秒扣真钱」明说给用户看（这段静默失效 = 用户看不到账单警告）。
+- **发版工具自身的一个漂移源**：`tools/snapshot.py::prepend_changelog` 原来是**无条件**往 CHANGELOG 顶部插一条 —— 本版手写了条目后再跑一次 snapshot 就会出现**两个 `## V1.0.4`**。加了幂等守卫（CHANGELOG 里已有该版本号段落就不重复插，并按实际结果报告「已追加 / 已有（跳过）」）。判据就是本 skill 自己写着的：**同一个版本号写两遍就是漂移源**。
+- **`tools/README.md` 的「当前状态」早就不对了**（停在 `VERSION=1.0` / 57 条不变式，而 VERSION 已到 1.0.3）→ 改为**不再重复写版本号**、只指向 `VERSION`，并顺手修掉一处**文档承诺但不存在**的开关（写的 `snapshot.py --check`，真实参数是 `--check-only`）。
+- **发版踩坑（本次真翻车并已修）**：手写了 `VERSION` 和 CHANGELOG 条目之后才跑 `snapshot.py`，而 `snapshot.py` 的 `--kind patch` 会**从 `VERSION` 现值自增** → 本版一度被发成 **V1.0.5**（跳号），CHANGELOG 里同时挂着 `V1.0.5`（机器生成）与 `V1.0.4`（手写）两条。
+  **正确做法**：手改过 `VERSION` 之后必须用 `--version 1.0.4` 显式指定，让「版本号只有一处来源」继续成立；或干脆不手改 `VERSION`，让它自增。已把这条写进 `tools/README.md`。
+- 文档同步：`SKILL.md` 新增**铁律 D11（双池并行）**、阶段九补双池 CLI、错误处理表 +1 行、目录树注释更新、版本历史；`references/README.md` 补双池 CLI/机制/计费（含「两把 key 同一钱包」与 `currentTaskCounts` 更正）；`tools/checks.txt` 新增 35 条不变式。
+
+**验证**：离线单测 `test_parallel_lanes.py` **35/35 通过**（含「封顶 2 段实测企业级只取 2 段、8 段全跑完」「企业级连续 3 次池满退役后 5 段仍全部跑完」「`main()` 预检漏报真钱 = 失败」）；`test_account_fallback.py` 回归 **6/6 通过**；`smoke_test.py` 离线全链回归 **rc=0 全通过**；全脚本编译通过；`tools/checks.txt` **163 条不变式 163/163 通过**。
+
+---
+
+## V1.0.3 · 凭证接入（2026-09-18）
+
+**一句话**：补实两处「文档承诺过、代码里根本没有」的功能 —— 在途任务 rescue（不重复烧币）与企业级降级（必须显式授权花钱，含 DEGRADE_PAT + 熔断 + 留痕 + 单测）
+
+- 补实①在途任务 rescue（旧版会双倍烧币）：status=submitted 的段原先被当新任务重新提交。现在段一旦有 taskId 就先拿它去轮询 —— SUCCESS 就下载交付、RUNNING 继续等、FAILED 才重提；TimeoutError/outputs 未就绪时保留 submitted + taskId（任务还在平台上跑），真失败才置 failed（taskId 仍保留便于回挖 failedReason）。新增统一出口 finish_from_results()，新提交与 rescue 共用，口径不会分叉。
+- 补实②企业级降级必须显式授权：--api-key-e 原先根本没接进代码（args._pool_name 硬编码 "consumer"，状态/调度日志.csv 从不生成）。现在两个开关分开：--api-key-e = 提供凭证，--allow-enterprise-fallback = 授权花钱。判据：提供凭证与授权花钱是两件事，不能由前者推定后者；没加授权时即使给了企业级 key 也只打印提示、绝不降级。
+- 降级只对「池子被占」类错误生效：新增 DEGRADE_PAT（QUEUE/BUSY/LIMIT/TOO_MANY/RATE/OVERLOAD/WORKER/APIKEY_/并发/占用/排队/余额/超出/繁忙）；像 WORKFLOW_NOT_EXISTS 这种自己的 bug 一律不降级 —— 别拿真钱补自己的错。并加熔断：连续 3 次「降级也失败」即停手，不再白花真钱。
+- 降级留痕：每次降级写 状态/调度日志.csv（时间/段/事件/原因/计费口径），否则事后算不清「这段烧的是币还是钱」。
+- 每段各自记账（去掉全局 args._pool_name，多线程会互相污染）：pool 改为 run_one 局部变量，落进 log.json / rh_state.json / 成本台账「账号」列；企业级段的钱包消耗另记 money 字段。
+- 新增离线单测 examples/test_account_fallback.py（零算力、零网络）：把四种判定钉死 —— ①未授权必拒 ②错误不像「池子被占」必拒 ③授权+池子被占才降级并留痕 ④连续 3 次降级失败必熔断。理由：离线冒烟测试永远碰不到这条**烧真钱**的分支，必须单独测。
+- 文档同步：SKILL.md 铁律 D10 重写（rescue / 显式授权 / DEGRADE_PAT / 熔断 / 留痕 / 单测），错误处理表更新「消费级被占用」处置；references/README.md 补 CLI 示例与「凭证配置」小节（.env 三把 key：project_provider_API_KEY / project_provider_API_KEY_E / 项目模型_API_KEY）；tools/checks.txt 新增 16 条不变式。
+
+**验证**：离线单测 examples/test_account_fallback.py 6/6 通过（未授权拒绝 / 错误不匹配拒绝 / 授权后降级并写调度日志 / 熔断生效）；真实 rescue 端到端实测：用段 22 的真实 taskId 把状态改成 submitted 后重跑，日志出现「♻ 段 22 发现在途任务 → rescue」且**没有 [submit]**（确认未重复烧币），并正常下载 + 按帧贴合到 14.5s（测完已还原 rh_state/成本台账/log.json）；batch_run_mv / rh_client / check_alignment / plan_mv_storyboard 四脚本编译通过；--dry-run 回归正常；tools/checks.txt 128 条不变式 128/128 通过。
+
+---
+## V1.0.2 · 《野心家》（2026-09-18）
+
+**一句话**：首次真实项目端到端实跑复盘：打掉「全链能不能真跑通」的七个坑（母带注入 / 台账占位串 / 失败原因回挖 / 分辨率双入参 / 空镜图泄漏 / 按帧贴合 / 关 8 边界假阳性）
+
+- 修坑①（会毁全片）母带从未注入音频加载节点：offset 模式只注 node 85 的「起点+时长」，从不替换 node 34 LoadAudio 里的示例 mp3 → 「窗口取对了、歌是别人的」。新增 song_path() + upload_cached()：与 music_mode 无关，母带都原样注入 node 34，且全片只上传一次（sha1 指纹 + 状态/素材上传台账.json）。
+- 修坑②（首镜 FAILED 真凶）上传台账缓存住了「未完成状态」：台账里 song.mp3 的 fileName 是占位串 <上传:song.mp3>，被 upload_cached() 原样返回并注进 node 34 → 平台报 LoadAudio「audio - Invalid audio file: <上传:song.mp3>」。判据写死：RH 的 fileName 永远形如 api/<hash>.<ext>，以 < 开头的一律判「未上传」并重传。
+- 修坑③（报错被吞）任务失败拿不到真实原因：FAILED 时 /task/openapi/status 只回 {"code":0,"msg":"success","data":"FAILED"}，旧版照它抛错 → 报错信息就是「任务失败: code=0 msg=success」，等于没报。真实原因在 /task/openapi/outputs（code=805 APIKEY_TASK_STATUS_ERROR）的 data.failedReason（含 node_id / traceback）。新增 rh_client.fetch_failure() / format_failure()，poll_task 失败自动回挖。
+- 修坑④（分辨率）把「档位数字」注进了枚举字段：旧实现把「分辨率档 2」这个数字注进 node 61 的 aspect_ratio → 平台判非法枚举。分辨率其实是两个入参：aspect_ratio（枚举字符串，16:9 = "16:9 (Widescreen)"，没有 Landscape 字样）+ megapixels（数字档位，默认 2），必须分开注。实测 2MP@16:9 = 1920×1088。
+- 修坑⑤（空镜段泄漏别人的脸）原工作流 node 36 挂着示例人物图，空镜段只走 nodeInfoList 时那张图会被当成本段参考。新增 bake_workflow()：把注入烧进工作流 JSON + 摘掉指向图槽的连线 + 用 workflow 整包直传（rh_client 在给了 workflow 时根本不发 nodeInfoList），并顺手剥掉本地 API JSON 里的 _meta（真 API 格式没这个键）。
+- 修坑⑥（Σ 漂移）conform 用 -t 秒数 → ffmpeg 把输出上取整到帧边界，22 段各多 1 帧 → Σ 比曲长多 0.42s，正好顶破「Σ各段 = 全曲长」判据（容差 0.4s）。改按帧贴合 （-frames:v N，段 i 目标帧数 = round(end*24) - round(start*24)）：由于 start_i == end_{i-1} 且 start_0 == 0，逐段求和天然望远镜相消 → 实测误差 0.0023s。
+- 修坑⑦（校验器假阳性）关 8 在歌曲开头边界把 i0 夹到 0：do_verify 原写 i0 = max(0, exp + off)，段 1 的 exp = 0 → off = -15..-1 全被夹到 0，等于同一段参考被反复比较，取「首个最优」时 off = -15 先中选 → 滞后被误报成 -1.5s（而相关系数明明是 1.00）。正解：越界偏移直接跳过，不 clamp。判据：相关度满分却报大滞后 = 校验器的问题。
+- 提示词校验器五处回补（本项目把全片 22 段的警告清零）：① 空镜段 retention_analysis 必须补 <Subject N> 行（否则 RET-NOMARK + RET-MISS + LBL-UNUSED 三码齐发）；② Negative 改两级拼装（旧实现按列表元素数截断，把 "no lip sync, no mouthing lyrics, no extra vocals" 当 1 个元素 → 实际 11 词判 NEG-LONG）；③ 中文运镜描述要补官方英文三维度句（否则 CAM-VAGUE）；④ 上传顺序块必须含「图片上传顺序」字样（PIC-ORDER）；⑤ 表演指导行必须独立成行且风格句必须最靠前（否则 LANG-MIX 与 VAGUE-CINE 互斥打架）。
+- 新增 plan_mv_storyboard.py --rewrite-md：设计阶段补完 visual_brief 后不会回头重写分镜表 → 交付物里风格停在「（未锁）」、画面构想整列「（待填）」。新入口只重写 markdown、不碰 storyboard.json（幂等且不可能覆盖已设计内容），并新增「逐段细纲」段落（画面 / 歌词 / 尾帧 / 下段切点 / 段内逐镜）。
+- 首镜试产实测回写注册表：resolution_measured = 1920×1088 @24fps（与枚举推算一致）；audio_policy = master_direct 确认（成片自带母带 AAC 音轨）；frame_align_confirmed = true，实测规律 = align_frames(window) + 17（10.7s 窗口 → 260+17 = 277 帧 = 11.542s）。⚠️ 从 node 71 表达式抄的 +24 复现不出来（+24 应得 284 帧）→ 结论：不靠公式预测成片长度，一律按帧 conform。
+
+**验证**：《野心家》22 段全部真实生成成功（首镜 1 段 + 批量 21 段，5 并发，墙钟 57 分钟，0 失败）：消耗 6,406 供应商报告费用（占余额 0.46%）；按帧贴合后 Σ = 277.087s vs 曲长 277.081s（数据核验误差 0.0023s）；关 8 对齐三验 22/22 通过（滞后全部 ≈ +0.0s、相关度 0.80~1.00）；双成片 final.mp4 277.106s / final_master.mp4 277.081s；tools/checks.txt 112 条不变式 112/112 通过；9 张审核页 + 对齐验收页 + production_log.md 全部生成。
+
+---
+## V1.0.1 · 技能自检（2026-09-17）
+
+**一句话**：首次复盘迭代：修掉段长区间的口径漂移（校验器假阳性），并补齐两份 README 与 6 条新不变式。
+
+- 修真 bug（校验器假阳性）：plan_mv_storyboard.qc() 硬边界原写 MIN_REQ-0.3（=4.7s），而 cut_segments() 契约是 min_dur=4.0，导致 4.0~4.7s 的段合法产出却被自己判死（冒烟测试实测 4.6s 被误报「越出 [4,15]」，连关 4 都会拦）。改用显式常量 H3_MIN_SEC/H3_MAX_SEC = 4.0/15.0，并把「硬区间」与「请求区间」两个概念命名写清防止再漂。
+- 修误导注释：SHOT_NOSYNC 尾注原写「不允许对口型」，而 MS 中景同时在 SHOT_SYNC 与 SHOT_NOSYNC 两个池里（有意为之，中景两种模式都能承载），极易读成中景禁止对口型。改为显式说明「判能否对口型只认 SHOT_ALLOW_LIPSYNC」。
+- 消灭版本号漂移源：SKILL.md 正文顶部原硬写「当前精确版本：V1.0」，与 VERSION 文件重复。改为「以 VERSION 为唯一权威」，正文不再重复精确版本号（drama 出过 VERSION=1.5 而正文停在 V1.3 的事故）。
+- 补交付形态：新增 references/README.md（10 个脚本 CLI 用法 + 三个实现要点 + 四个 project_provider 口径坑 + 计费口径）与 tools/README.md（进化/回退纪律），与 drama-auto-pipeline 交付形态对齐。
+- SKILL.md 阶段五补「两个区间别混」告警块：项目视频模型 硬区间 [4,15] vs 请求时长区间 [5,15]（下限 5.0 因 17 帧公式带 max(5,…)）。
+- checks.txt 新增 6 条不变式（63 -> 64 条）：项目视频模型 常量、qc 比较式、SKILL 两个区间别混、版本单一权威来源、两份 README 存在性。
+
+**验证**：tools/checks.txt 64 条不变式 64/64 通过（rc=0）；compileall 全绿；离线冒烟测试复跑：4.6s 段不再误报，降为软提示「请求 5.167s -> 裁回 4.6s，属正常」，第 3 步输出 ✅ 硬性机检全过；关 6 全过（窗口合计 45.00s = 曲长）；关 5 机检 5/5 段通过。
+
+---
+## V1.0 · 技能首建（2026-09-17）
+
+**一句话**：音乐 MV 全自动生成 SOP 首版：一首歌（+可选一张主角图）→ 一条完整 MV。歌词时间轴强制对齐、只在中近景设计口型、项目视频模型 用官方 sings: 唱歌框架、音画对齐三重验收。
+
+- 立「音乐是唯一时间基准」铁律（A1/A5）：所有段长与切点都从歌词时间轴推导；逐行带 hit_ratio 与 review_needed，空档 >2s 显式插 [instrumental]，禁止凭空估时、禁止切半句。
+- 歌词对齐用字符级 Needleman-Wunsch 全局对齐（纯标准库 DP）：官方歌词定文本 + ASR 定时间，同时防住「听写错字污染歌词」与「时间对不上字」两类事故。
+- 落地「只有中近景才对口型 + 不是每句都对口型」（B1/B2）：景别白名单 SHOT_SYNC={ECU,CU,MCU,MS}，sync_ratio 等距抽样默认 45%，连续对口型 <=3，关 4 与关 6 双重硬机检。
+- 发声行改用官方英文框架 sings:（C2，唱歌不是说台词）：sync 段逐句独立成行；no_sync 段零 sings 行 + NO_SYNC_DECL 声明 + Negative 压 no lip sync / no mouthing lyrics / no extra vocals。
+- MV 全片禁用 <Audio N>（C3）：声音只来自歌曲母带（工作流切窗注入），写 <Audio N> 会 LBL-UNDEF 且与母带口径自相矛盾；机检 S3 拦截。
+- 原创机制①时长贴合 conform（D7）：请求时长向上对齐 17 帧网格、成片裁/补回窗口长度，保证 Σ各段 = 全曲长；不这么做 项目视频模型 每段多 0.1~0.4s，几十段累加就漂到音乐后面。
+- 原创机制②双成片（D8）：final.mp4（逐段内嵌音乐，可交叉验证）+ final_master.mp4（画面轨 + 原曲母带重贴，绝对对齐，交付首选）。
+- 对齐三验替代全量互相关（E4）：时长 / RMS 包络局部相关（滞后≈0s）/ 人声能量非空；10 帧每秒包络 + ±1.5s 局部搜索把十亿级采样运算降到万级，纯标准库秒级出结果。
+- 8 道审核关（E1/E2）：比短剧多两道硬门禁（关 5 提示词、关 6 音乐窗口与口型对齐）；支持逐关审或一次性放权；门禁用 sha1 防串改，提示词改动即置回 pending 且不静默改写 sha1。
+- 工作流 MV-1（PROJECT_WORKFLOW_BINDING）契约入库：87 提示词 / 85 音乐窗口（决定每次跑多长）/ 61 分辨率（默认 2）/ 42 图片槽；contract_verified=false 时提交前硬校验，契约不过直接拒绝生成。
+- 无主角模式完整通道（C6）：no_hero -> text_only -> 跳过资产阶段与关 3 -> 全片 no_sync -> NO_HERO_DECL 声明「全片不出现固定主角面孔」。
+- 移植进化与回退机制（F1~F5）：tools/snapshot.py 发版（自检 + CHANGELOG + zip + git tag）、tools/rollback.py 回退、tools/checks.txt 回归自检 57 条不变式。
+
+**验证**：离线冒烟测试端到端跑通（examples/smoke_test.py，45s 合成曲）：切 5 段 · 对口型占比 40% · 窗口合计 45.00s = 曲长 · 5/5 段 项目视频模型 机检全绿 · 9 张审核页全部生成；10 个脚本编译通过；回归自检 57/57 通过。⚠ 工作流真实字段名仍为 TBD、contract_verified=false，等 project_provider API Key 接入后实测回写。
+
+---

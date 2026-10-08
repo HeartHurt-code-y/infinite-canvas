@@ -1,0 +1,860 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+drama_to_h3_prompts.py —— 30 秒分镜 → H3 6~15s 小段拆分器
+==========================================================
+drama-auto-pipeline 阶段五的机读转换层。输入土豆格式 30 秒分镜（md + json），
+输出：
+  1) 每段一个 H3 六段式提示词 txt（02_过程/prompts/shot_NN.txt）
+  2) 合并的 storyboard.json（batch_run_drama.py 直接可读，status=approved 才放行批量）
+  3) 拆分报告（终端打印：时长测算 / 台词容量 / 尾帧链分组 / 超限警告）
+
+拆分规则（与 SKILL.md 阶段五一致）：
+- 一句完整台词不跨段；台词行以「角色名："..."」或「角色名画外音："..."」识别
+- 动态时长公式：duration = ceil(台词字数 / 4.5) + 1.5s 收尾缓冲，硬区间 [4, 15] 秒
+  ⚠ 实测修正（2026-09-12）：14 字 → 5.9s；空镜无台词给 4s 下限
+- 单段台词硬上限 62 字（62/4.5+1.5 ≈ 15.3s）；超限自动在镜头边界再拆
+- 空镜镜头无台词时并入口头段或邻段，不单独成段（除非其本身是关系落点）
+- 段间衔接链：同场景且同主体 → tailframe；跨场景/换视角 → origin 起新链
+  （实测 8 段全串行 49 分钟；分链并行可压一半，见 SKILL.md V0.2 修订）
+
+用法：
+  python drama_to_h3_prompts.py \\
+    --storyboard-md 02_过程/storyboard_30s/storyboard_30s.md \\
+    --units 02_过程/script/units_30s.json \\
+    --assets 02_过程/assets/assets.json \\
+    --out-dir 02_过程/prompts \\
+    --out-json 02_过程/storyboard_30s/storyboard.json \\
+    [--dry-run]
+
+依赖：纯标准库，无第三方包。
+"""
+import argparse
+import json
+import math
+import os
+import re
+import sys
+
+# ---------- 常量（实测校准值，勿凭感觉改） ----------
+CHARS_PER_SEC = 4.5          # 中文台词语速基准：约 4.5 字/秒（唯一来源：drama_schema.CPS_BY_LANG）
+TAIL_BUFFER_SEC = 1.5        # 每段收尾缓冲
+DUR_MIN, DUR_MAX = 4, 15     # H3 单段硬区间
+# ⚠ V2.0.10：单段台词容量上限**不再是独立数字** —— 它必须等于关 4 / 关 5 机检用的
+#   drama_schema.max_chars()。旧值硬编码 62（= 只留 1.5s 收尾，占比 91%），
+#   与关 5 的 S6（占比 ≤85% → 15s 段上限 57 字）**差 5 字**：
+#   59 字的段在这里判「合格」、到关 5 判「超标」。同一条约束两个数就是 bug。
+#   现改为函数派生（也顺带支持日语 7 モーラ/秒）。
+#   ⏳ 遗留债务：本文件的时长公式 `ceil(字数/语速)+1.5` 是**第二个变体**
+#      （关 4/关 5 用 `min(dur-1.2s, 0.85×dur)`），尚未统一，见 CHANGELOG 待办。
+EMPTY_SHOT_DUR = 4           # 无台词空镜段时长下限
+SILENT_SHOT_SEC = 2          # 合并进台词段的每个无台词镜头追加 2s
+
+# ---------- H3 V2.4 对齐常量（与 batch_run_drama.py / h3-ref2va-optimizer V2.4 同口径） ----------
+# R34 活人感表演指导行：段内有角色时**必写**，落在 detailed_description 的
+# `[Shot 1]` **之前**、与风格句同段；纯空镜 / 无人段豁免。
+# 模板逐字取自 h3-ref2va-optimizer/references/09-liveness.md（正文哈希 e1a9e82e9b7ca8b4）。
+DEFAULT_ACTING_DIRECTION = (
+    "Acting direction for the whole sequence: nobody stands idle or poses for the "
+    "camera. Every character is always occupied with some small piece of business \u2014 "
+    "handling a object, finishing a movement, glancing at something off-topic. "
+    "In every exchange one character acts while the other reacts, and reactions "
+    "arrive a beat late, the way real people respond while their attention is still "
+    "somewhere else. Small involuntary gestures (swallowing, shifting weight, thumb "
+    "rubbing an edge, a delayed look-up) matter more than polished facial expressions."
+)
+
+# 视频提示词的叙述层必须是中文：h3 V2.4 的 LANG-MIX 口径下，
+# detailed_description 里允许的英文只有 R34 表演指导行与官方运镜句两类，
+# 英文风格句会被判「成句英文叙述」。
+DEFAULT_STYLE_ZH = "真人实拍，电影感光影，浅景深，全片风格统一不漂移。"
+
+# R36 ① 台词语言标记（官方英文名）
+LANG_CODE = {"zh": "Chinese", "ja": "Japanese", "en": "English",
+             "中文": "Chinese", "日语": "Japanese", "英语": "English",
+             "chinese": "Chinese", "japanese": "Japanese", "english": "English"}
+# R36 ②③ 叙述层用中文名
+LANG_ZH = {"zh": "中文", "ja": "日语", "en": "英语",
+           "中文": "中文", "日语": "日语", "英语": "英语",
+           "chinese": "中文", "japanese": "日语", "english": "英语"}
+# R36 语速基准 / R39 时长对齐 / 台词容量：唯一来源都在 references/drama_schema.py。
+# 本文件原先自带 R36 的 CPS_BY_LANG 与 R39 的 FRAME_ALIGN+align_duration 各一份副本
+# （与 batch_run_drama.py 的另一份**恰好一致** —— 碰巧一致不是设计，见 drama_schema 说明）。
+from drama_schema import CPS_BY_LANG as _CPS_BY_LANG  # noqa: E402
+from drama_schema import align_duration  # noqa: E402
+from drama_schema import cps_of as _shared_cps_of  # noqa: E402
+from drama_schema import max_chars as _max_chars  # noqa: E402
+
+
+def seg_line_cap(dur=DUR_MAX, cps=None):
+    """单段台词字数上限 —— 与关 4 / 关 5 机检**同一公式**（V2.0.10）。
+
+    旧硬编码 SEG_LINE_CAP = 62 是第三个独立定义，且与关 5 的 S6 差 5 字。
+    """
+    return _max_chars(dur, cps if cps else CHARS_PER_SEC)
+
+
+def lang_code_of(lang):
+    """任意写法 → 官方英文语言名（`<d>[Chinese]` 用）。"""
+    return LANG_CODE.get(str(lang or "zh").strip().lower(), "Chinese")
+
+
+def lang_zh_of(lang):
+    """任意写法 → 中文语言名（summary / Subject 叙述层用）。"""
+    return LANG_ZH.get(str(lang or "zh").strip().lower(), "中文")
+
+
+def cps_of(lang):
+    """R36：按语言取语速基准（V2.0.10 起委托给共享模块，本文件不再自带副本）。"""
+    return _shared_cps_of(lang_zh_of(lang))
+
+
+def _has_cjk(s):
+    return bool(re.search(r"[\u4e00-\u9fff]", s or ""))
+
+
+def _poss_from(text):
+    """说话人性别代词（用于画外音 / 内心独白的唇闭合声明）。"""
+    s = text or ""
+    if "女" in s or "woman" in s.lower() or "female" in s.lower():
+        return "her"
+    if "男" in s or " man" in s.lower() or "male" in s.lower():
+        return "his"
+    return "their"
+
+
+def strip_dialogue(text, dialogue_re):
+    """从镜头文本里剔掉已被台词行覆盖的「角色名：\"…\"」片段，只留动作描述。"""
+    if not text:
+        return ""
+    out = dialogue_re.sub(" ", text)
+    # 无角色名的写法（「旁白：\"…\"」「画外音：\"…\"」）也要剥掉，
+    # 否则会被当成动作描述混进节拍行
+    out = re.sub(r"(?:旁白|画外音(?:继续)?)[：:][\"“][^\"”]*[\"”]", " ", out)
+    out = re.sub(r"[\s]+", " ", out)
+    return re.sub(r"^[，。；、,;.\s]+|[，。；、,;\s]+$", "", out).strip()
+
+
+def h3_line_beat(name, sn, aid, text, kind, lang_code, poss="their",
+                 truncated=False, cross_cut=False, gaze="", narrator_voice="",
+                 use_audio=True):
+    """一条有声源行 —— H3 V2.4 铁律 35 官方英文框架（框架词英文 / 内容原文 / 一句一行）。
+
+    kind: line（画面内台词）/ offscreen（画外音）/ inner（内心独白）
+          / narrator（旁白）/ together（齐说）/ sing（唱）
+    官方依据：ref-en §5.4（旁白三规则）/ base-en §4.4（<cutoff> / <scenetrans>）。
+    """
+    # 铁律 D23 第 2 条：无图通道下音色不进提示词（没上传音频，写 <Audio N> 既
+    # LBL-UNDEF 又 IMG-CONFLICT），中文台词改由后期 音色设计能力 配。
+    aud = (f"用 <Audio {aid}> 的音色" if aid else "") if use_audio else ""
+    sn_part = f" ({sn})" if sn else ""
+    d = f"<d>[{lang_code}]{text}{'<cutoff>' if truncated else ''}</d>"
+    st = " <scenetrans>" if cross_cut else ""
+    pre = ""
+    if gaze:
+        pre = gaze if gaze.endswith(("。", ".", "！", "？")) else gaze + "。"
+    if kind == "narrator":
+        # 旁白是独立发声源：稳定声音描述 + (Sx)，不对应任何 <Subject N>
+        return (f"→{pre}{narrator_voice or '一位清亮的旁白'}{sn_part} "
+                f"says in an off-screen voiceover: {d} "
+                f"while nobody on screen is speaking.{st}")
+    if kind == "inner":
+        return (f"→{pre}{name}{aud}{sn_part} says in an off-screen voiceover as "
+                f"{poss} inner thoughts: {d} while {poss} lips remain "
+                f"completely closed.{st}")
+    if kind == "offscreen":
+        return (f"→{pre}{name}{aud}{sn_part} says in an off-screen voiceover: {d} "
+                f"while {poss} lips remain completely closed.{st}")
+    if kind == "together":
+        return f"→{pre}{name}{aud}{sn_part} shout together, {d}{st}"
+    if kind == "sing":
+        return f"→{pre}{name}{aud}{sn_part} sings: {d}{st}"
+    return f"→{pre}{name}{aud}{sn_part} says: {d}{st}"
+
+# 台词行正则：「林晚照："..."」「陈屿画外音："..."」
+# 关键约束：画外音标记必须**紧跟说话人名字**（名字边界在正则里强制），
+# 否则「她画外音继续」会被当成说话人（贪的是「她」前面的叙述文字）。
+# 名字前的边界：行首 或 中文句末标点。
+DIALOGUE_RE = re.compile(
+    r'(?:^|[。？！；]\s*)([一-龥]{2,8}?)(画外音(?:继续)?|旁白)?[：:][\"“]([^\"”]+)[\"”]')
+# 镜头行正则：「镜头1：...」「镜头12：...」
+SHOT_RE = re.compile(r'^镜头(\d+)[：:]\s*(.*)$')
+# 人物站位行
+STANCE_RE = re.compile(r'^人物站位[：:]\s*(.*)$')
+# 单元标题：「## unit_01 · 不速之客」
+UNIT_RE = re.compile(r'^##\s*(unit_\d+)\s*[·\-—]?\s*(.*)$')
+
+
+# ---------- 解析 ----------
+
+def _build_dialogue_re(char_names):
+    """提供角色名集合时，只认「角色名+冒号+引号」——
+    彻底解决「念出上面的字」「字迹有点抖」这类叙述文字被误捕为说话人。
+    未提供时退回结构启发式（可能把「她画外音继续」误当说话人）。"""
+    if char_names:
+        names = "|".join(re.escape(n) for n in sorted(char_names, key=len, reverse=True))
+        return re.compile(rf'({names})(画外音(?:继续)?|旁白)?[：:][\"“]([^\"”]+)[\"”]')
+    return DIALOGUE_RE
+
+
+def parse_storyboard_md(md_path, char_names=None):
+    """把土豆 30s 分镜 md 解析为机读结构：
+    {unit_id: {title, stance, shots: [{idx, text, dialogues: [{speaker, line, voiceover}]}]}}
+    """
+    text = open(md_path, encoding="utf-8").read()
+    dialogue_re = _build_dialogue_re(char_names)
+    units = {}
+    cur_unit, cur_shot = None, None
+    in_storyboard = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = UNIT_RE.match(line)
+        if m:
+            cur_unit = m.group(1)
+            units[cur_unit] = {"title": m.group(2).strip(), "stance": "", "shots": []}
+            cur_shot = None
+            in_storyboard = False
+            continue
+        if cur_unit is None:
+            continue
+        if line.startswith("【分镜】"):
+            in_storyboard = True
+            continue
+        if line.startswith("【角色声线】") or line.startswith("【禁止项】"):
+            in_storyboard = False
+            continue
+        if not in_storyboard:
+            continue
+        sm = SHOT_RE.match(line)
+        if sm:
+            cur_shot = {"idx": int(sm.group(1)), "text": sm.group(2),
+                        "dialogues": []}
+            shot_text = sm.group(2)
+            for dm in dialogue_re.finditer(shot_text):
+                cur_shot["dialogues"].append({
+                    "speaker": dm.group(1),
+                    "line": dm.group(3),
+                    "voiceover": bool(dm.group(2)),
+                    # V1.8.4：保留「旁白」与「画外音」的语义差别 ——
+                    # 原实现只存 bool，两者被压成同一个 offscreen 路径，
+                    # 导致旁白走不到官方 ref-en §5.4 的写法（稳定声音描述 + (Sx)）。
+                    "kind": ("narrator" if (dm.group(2) or "").startswith("旁白")
+                             else ("offscreen" if dm.group(2) else "line")),
+                })
+            units[cur_unit]["shots"].append(cur_shot)
+            continue
+        pm = STANCE_RE.match(line)
+        if pm:
+            units[cur_unit]["stance"] = pm.group(1)
+            continue
+        # 跨行台词兜底：镜头行里没匹配到但本行有对白
+        if cur_shot is not None and line:
+            for dm in dialogue_re.finditer(line):
+                cur_shot["dialogues"].append({
+                    "speaker": dm.group(1),
+                    "line": dm.group(3),
+                    "voiceover": bool(dm.group(2)),
+                    "kind": ("narrator" if (dm.group(2) or "").startswith("旁白")
+                             else ("offscreen" if dm.group(2) else "line")),
+                })
+    return units
+
+
+def load_voice_profiles(md_path):
+    """从分镜 md 文末提取【声线档案】→ {角色名: 声线描述原文}"""
+    text = open(md_path, encoding="utf-8").read()
+    profiles = {}
+    for m in re.finditer(r'\*\*【(.+?)声线】\*\*\s*(.+?)(?=\n\n|\n\*\*【|\Z)', text, re.S):
+        profiles[m.group(1)] = re.sub(r'\s+', ' ', m.group(2)).strip()
+    return profiles
+
+
+# ---------- 拆分 ----------
+
+def line_chars(shot):
+    return sum(len(d["line"]) for d in shot["dialogues"])
+
+
+def shot_duration(shot):
+    """单镜头耗时估算：台词时长 + 缓冲；无台词空镜给下限。"""
+    n = line_chars(shot)
+    if n == 0:
+        return EMPTY_SHOT_DUR
+    return max(DUR_MIN, math.ceil(n / CHARS_PER_SEC) + TAIL_BUFFER_SEC)
+
+
+def split_unit(unit_id, unit, max_dur=DUR_MAX, max_shots=4):
+    """把一个 30s 单元的镜头列表贪心拆成 H3 小段。
+    返回 [{kw, shots, narration(合并台词), dur, speakers}]
+
+    封段触发条件（命中任一即封段开新段）：
+    1. 加上下一镜后总时长 > max_dur（15s 硬上限）
+    2. 加上下一镜后台词字数 > seg_line_cap(该段时长)（V2.0.10：与关 5 S6 同公式）
+    3. 本段已容纳 max_shots 个镜头（默认 3，防单段过载）
+    4. 上一镜是空镜（"空镜"开头）且本段已有台词——空镜封段作收尾
+
+    ⚠ 实测教训（2026-09-12）：不封段一个 30s 单元会整吞 8 镜，单段 41 字台词
+    挤在 11.5s 里语速爆炸，且丢失镜头切换信息。每段 1~3 镜是 H3 甜区。
+    """
+    segs = []
+    cur_shots, cur_chars = [], 0
+    for shot in unit["shots"]:
+        sc = line_chars(shot)
+        is_empty_shot = shot["text"].startswith("空镜")
+        would_chars = cur_chars + sc
+        would_dur = (math.ceil(would_chars / CHARS_PER_SEC) + TAIL_BUFFER_SEC) if would_chars else shot_duration(shot)
+        should_close = cur_shots and (
+            would_dur > max_dur
+            or would_chars > seg_line_cap(min(max_dur, would_dur))
+            or (len(cur_shots) >= max_shots and sc > 0)  # 容量只对台词镜生效
+            or (is_empty_shot and cur_chars > 0 and not _is_final_shot(shot, unit))
+        )
+        # 段首豁免：本段尚无台词时继续吞镜头，直到撞上第一句台词
+        # （unit 开头的无台词镜头与下一句台词段合并，不单独成段）
+        if cur_shots and cur_chars == 0:
+            should_close = False
+        if should_close:
+            segs.append(cur_shots)
+            cur_shots, cur_chars = [], 0
+        cur_shots.append(shot)
+        cur_chars += sc
+    if cur_shots:
+        segs.append(cur_shots)
+
+    out = []
+    for i, group in enumerate(segs):
+        lines = [d["line"] for s in group for d in s["dialogues"]]
+        narration = "".join(lines)
+        if narration:
+            dur = max(DUR_MIN, min(DUR_MAX,
+                                   math.ceil(len(narration) / CHARS_PER_SEC)
+                                   + TAIL_BUFFER_SEC
+                                   + SILENT_SHOT_SEC * sum(1 for s in group if not s["dialogues"])))
+        else:
+            # 空镜段按镜头数给时长：1 镜 4s，2 镜 6s
+            dur = EMPTY_SHOT_DUR + SILENT_SHOT_SEC * (len(group) - 1)
+        speakers = []
+        for s in group:
+            for d in s["dialogues"]:
+                # V1.8.4：旁白是独立发声源（不占 <Subject N> / <Audio N>），
+                # 空名是解析兜底产生的伪说话人 —— 两者都不能当成画面角色。
+                if (d.get("kind") or "").lower() == "narrator":
+                    continue
+                nm = (d.get("speaker") or "").strip()
+                if nm and nm not in ("旁白", "画外音") and nm not in speakers:
+                    speakers.append(nm)
+        # 段关键词：取本组第一个镜头的第一个中文短句
+        first_text = group[0]["text"]
+        kw = re.sub(r'[，。：""、\s].*$', '', first_text)[:12] or f"{unit_id}段{i+1}"
+        out.append({
+            "kw": kw,
+            "unit_id": unit_id,
+            "shot_range": [group[0]["idx"], group[-1]["idx"]],
+            "shots": group,
+            "narration": narration,
+            "dur": round(dur, 1),
+            "speakers": speakers,
+            "stance": unit["stance"],
+            "first_in_unit": i == 0,
+        })
+    return out
+
+
+def _is_final_shot(shot, unit):
+    return shot is unit["shots"][-1]
+
+
+def _is_unit_last_seg(seg, all_segs, idx):
+    """该段是否是其 unit 的最后一段（收尾段允许空镜独立成段）。"""
+    for j in range(idx + 1, len(all_segs)):
+        if all_segs[j]["unit_id"] != seg["unit_id"]:
+            return True          # 已进入下一 unit → 本段是收尾段
+        return False             # 同 unit 还有后续段 → 不是收尾段
+    return True                  # 全片最后一段
+
+
+def assign_links(all_segs, unit_scene_map):
+    """跨场景/换视角 → origin；同单元内续接 → tailframe。
+    保守默认：只有同一单元内的后续段才 tailframe，跨单元一律 origin。
+    （跨单元即使同场景也建议 origin——实测跨单元人物站位变化大，尾帧接力易穿帮）
+    """
+    for i, seg in enumerate(all_segs):
+        if i == 0 or seg["first_in_unit"]:
+            seg["link"] = "origin"
+        else:
+            seg["link"] = "tailframe"
+    return all_segs
+
+
+# ---------- H3 提示词生成 ----------
+
+def voice_to_en(cn_profile, speaker):
+    """中文声线档案 → 英文音色锚。机翻模板，精修交给 Agent。"""
+    gender = "female" if ("女" in cn_profile) else "male"
+    age_m = re.search(r'(\d{2})\s*岁', cn_profile)
+    age = age_m.group(1) if age_m else "mid-20s"
+    warm = "warm and soft" if ("暖" in cn_profile or "糯" in cn_profile) else \
+           "clean and steady"
+    pace = "slightly slow" if "慢" in cn_profile or "缓" in cn_profile else "moderate"
+    return (f"a {warm} young Chinese {gender} voice, around {age} years old, "
+            f"with a {pace} speaking pace")
+
+
+def build_h3_prompt(seg, seq, char_map, scene_map, voice_profiles, continuing,
+                    image_mode="ref", char_desc=None, scene_desc=None,
+                    lang="zh", cross_shot=None, acting_direction="",
+                    narrator_voice_zh="", upload_block=True, dialect_zh=""):
+    """生成单段 H3 六段式提示词（V2.4 口径，与 batch_run_drama.gen_drama_prompt 同源）。
+
+    char_map: {角色名: asset_id}；scene_map: {场景名: asset_id}
+
+    image_mode（铁律 D23，2026-09-15《世界要毁灭了》实战固化）：
+      "ref"       有参考图（默认）
+      "text_only" 无图模式 / 文生视频通道：
+        - 提示词前加「无图模式（已确认）」声明块（校验器据此判 IMG-MODE 而非 IMG-DECL）
+        - 全文不出现任何 <Picture N>，保留标记降级 weak_reference
+        - 角色/场景外观由 char_desc / scene_desc 用文字定义
+
+    V1.8.4 对齐 h3-ref2va-optimizer V2.4（升级点，逐条有校验器对应码）：
+      · 铁律 35 官方英文框架台词：`角色 (S1) says: <d>[语言]台词</d>`，**一句一行**
+        （埋在段落中间报 DLG-FMT；框架词必须用官方英文原文）
+      · R34 活人感表演指导行：段内有角色必写，落在 [Shot 1] 之前、与风格句同段
+        （缺则报 LIVE-MISS；纯空镜/无人段豁免）
+      · R36 外语四层语言控制：<d>[Language] + summary 声明 + Subject 声明 + Negative 反向声明
+      · R37 跨镜口径：summary 显式声明 + 逐句 <scenetrans>
+      · R39 17 帧对齐：段长写对齐后的实际值（请求 12s 实得 12.25s）
+      · `<cutoff>`：台词到片尾说不完才加（说得完还加反而被掐断）
+      · 图片上传顺序块 + 场景 Subject + 逐图去污染句 + Negative
+    """
+    text_only = (image_mode == "text_only")
+    char_desc = char_desc or {}
+    scene_desc = scene_desc or {}
+    lang_code = lang_code_of(lang)
+    lang_zh = lang_zh_of(lang)
+    # 防御性过滤（split_unit 已过滤，这里兜住手工/旧 JSON 的脏数据）
+    speakers = [nm for nm in (seg.get("speakers") or [])
+                if (nm or "").strip() and nm not in ("旁白", "画外音")]
+    shots = seg.get("shots") or []
+    scene_name = (seg.get("scene") or "本段场景").strip()
+    dur_actual = align_duration(seg.get("dur"))          # R39
+    # R37：多镜头段即跨镜；显式传入优先
+    cross_shot_mode = (bool(cross_shot) if cross_shot is not None
+                       else len(shots) > 1)
+
+    # 画面角色（真实在场）——空镜段没有 speakers，退化成纯场景 Subject（铁律 5）
+    people = speakers if speakers else []
+    slots = [("char", nm) for nm in people]
+    if not text_only:
+        slots.append(("scene", scene_name))
+        if continuing:
+            slots.append(("tail", scene_name))
+    scene_slot_idx = next((i for i, (k, _) in enumerate(slots, 1) if k == "scene"), None)
+    # 旁白是独立发声源：按实际发声顺序续编 (Sx)，且不占 <Subject N>
+    narrator_sid = f"S{len(people) + 1}"
+
+    # ---------- 图片上传顺序（铁律 17）----------
+    up_rows = []
+    for i, (kind, nm) in enumerate(slots, start=1):
+        if kind == "char":
+            up_rows.append(f"@图片{i}：{nm}人物主参考，锁定面容、发型、服装和体型")
+        elif kind == "scene":
+            up_rows.append(f"@图片{i}：场景参考，锁定空间、色彩和光线方向")
+        else:
+            up_rows.append(f"@图片{i}：上一段尾帧，锁定姿势与构图")
+    # 铁律 D23：无图模式没有任何参考图，写「图片上传顺序」与声明自相矛盾
+    up_block = ("图片上传顺序：\n" + "\n".join(up_rows) + "\n") \
+        if (upload_block and up_rows and not text_only) else ""
+
+    # ---------- subject_definitions ----------
+    subj_lines, audio_lines, retention_lines = [], [], []
+    subj_idx = {}
+    for i, (kind, nm) in enumerate(slots, start=1):
+        if kind == "char":
+            subj_idx[nm] = i
+            if text_only:
+                desc = char_desc.get(nm) or "【待补：年龄/性别/发型/配饰/上装/下装】"
+                subj_lines.append(f"<Subject {i}>：{nm}，{desc}。无参考图，由文字描述定义。")
+                retention_lines.append(
+                    f"<Subject {i}>：weak_reference {nm}全套外观"
+                    f"（无参考图，外观以本次文字定义为唯一标准）。")
+            else:
+                desc = (char_desc.get(nm) or "").strip()
+                line = f"<Subject {i}>：{nm}，{desc}。" if desc else f"<Subject {i}>：{nm}。"
+                # R36 ③：外语版必须在该说话角色的 Subject 定义里写「说 X 语言」，
+                # 否则 H3 是中文语境模型，很可能直接改用中文朗读
+                if lang_code != "Chinese":
+                    _dia = f"（{dialect_zh}）" if dialect_zh else ""
+                    line += f"该角色说{lang_zh}{_dia}。"
+                line += (f"完全参照 <Picture {i}> 外观，保留其面部特征、发型与整体形象。"
+                         f"<Picture {i}> 不得展示参考图自带的棚拍纯色背景，"
+                         f"替换为{scene_name}的实际场景环境。")
+                subj_lines.append(line)
+                retention_lines.append(f"<Subject {i}>：fully_preserved {nm}的全套外观。")
+        elif kind == "scene":
+            if text_only:
+                sc = scene_desc.get(nm) or "【待补：空间结构 / 主光源方向 / 色彩】"
+                subj_lines.append(f"<Subject {i}>：{nm}，{sc}。无参考图，由文字描述定义。")
+                retention_lines.append(
+                    f"<Subject {i}>：weak_reference {nm}"
+                    f"（无参考图，空间与光线以本次文字定义为唯一标准）。")
+            else:
+                subj_lines.append(
+                    f"<Subject {i}>：{nm}（场景）。完全参照 <Picture {i}> 外观，"
+                    f"锁定空间布局、色彩与光线方向。"
+                    f"<Picture {i}> 不得展示参考图自带的棚拍纯色背景，"
+                    f"替换为{scene_name}的实际场景环境。")
+                retention_lines.append(
+                    f"<Subject {i}>：fully_preserved {nm}（空间布局、色彩与光线方向）。")
+        else:
+            subj_lines.append(
+                f"<Picture {i}>：上一段尾帧，仅用于承接姿势与构图，不是独立主体。")
+
+    if not text_only:
+        # 音色槽只给画面角色（旁白/画外音走后期 TTS，不进 <Audio N> 编号）
+        for i, nm in enumerate(people, start=1):
+            audio_lines.append(
+                f"<Audio {i}> 是 <Subject {i}>（S{i}）的音色参考，"
+                f"含一段{lang_zh}人声，仅取用其音色与语速。")
+
+    subjects = "\n".join(subj_lines)
+    retention = "\n".join(retention_lines)
+
+    # ---------- 台词 ----------
+    dlg_re = _build_dialogue_re(set(people) or None)
+    beat_rows = []
+    for sh in shots:
+        act = strip_dialogue(sh.get("text") or "", dlg_re)
+        if act:
+            beat_rows.append("→" + act)
+        for d in sh.get("dialogues") or []:
+            nm = d["speaker"]
+            kind = d.get("kind") or ("offscreen" if d.get("voiceover") else "line")
+            if kind == "narrator":
+                # 旁白不是画面角色：不绑 <Audio N>，(Sx) 走 narrator_sid
+                beat_rows.append(h3_line_beat(
+                    None, narrator_sid, None, d["line"], kind, lang_code,
+                    narrator_voice=narrator_voice_zh,
+                    gaze=str(d.get("gaze_zh") or "").strip()))
+            else:
+                aid = subj_idx.get(nm)
+                beat_rows.append(h3_line_beat(
+                    nm, (f"S{aid}" if aid else ""), aid, d["line"], kind, lang_code,
+                    poss=_poss_from(voice_profiles.get(nm, "")),
+                    truncated=bool(d.get("cutoff")),
+                    cross_cut=bool(d.get("cross_cut")),
+                    gaze=str(d.get("gaze_zh") or "").strip(),
+                    use_audio=not text_only))
+
+    # ---- <cutoff>：本段台词总量超预算（说完不）→ 最后一句末尾加 <cutoff> ----
+    dlg_texts = [d["line"] for sh in shots for d in (sh.get("dialogues") or [])]
+    need_secs = sum(len(x) for x in dlg_texts) / max(cps_of(lang), 0.1) + 1.2
+    if need_secs > dur_actual and beat_rows:
+        for _i in range(len(beat_rows) - 1, -1, -1):
+            if "</d>" in beat_rows[_i]:
+                beat_rows[_i] = beat_rows[_i].replace("</d>", "<cutoff></d>")
+                break
+
+    # ---------- summary ----------
+    who = "与".join(people) if people else "本段无人物"
+    has_aud = "" if text_only else " + audio reference"
+    if text_only:
+        cont = ""
+    else:
+        cont = ("Continuing directly from the exact pose and the same scene in "
+                f"<Picture {scene_slot_idx}>. " if (continuing and scene_slot_idx) else "")
+    summary = (f"[reference generation{has_aud}] {dur_actual:g} 秒一镜到底（16:9），"
+               f"场景是{scene_name}。{cont}{who}同框。")
+    if lang_code != "Chinese":
+        summary += f"全片对白一律为{lang_zh}。"              # R36 ②
+    if cross_shot_mode and dlg_texts:
+        summary += ("台词不要求与本镜画面同步收尾，若一句没说完，声音直接延续到下一镜，"
+                    "语速保持平稳，不加快、不吞字。")          # R37
+
+    # ---------- detailed_description ----------
+    cam_zh = (seg.get("camera_lock_zh")
+              or "镜头保持稳定中景平视，机位不跳轴，不要突然推拉")
+    # 叙述层必须中文（LANG-MIX 口径）
+    style_zh = (seg.get("style_prompt_zh")
+                or (seg.get("style_prompt") if _has_cjk(seg.get("style_prompt") or "")
+                    else DEFAULT_STYLE_ZH))
+    # R34 表演指导行：段内有角色必写；纯空镜/无人段豁免
+    acting = ""
+    if people:
+        acting = (acting_direction or seg.get("acting_direction_zh")
+                  or seg.get("acting_direction") or DEFAULT_ACTING_DIRECTION)
+    acting_block = (acting + chr(10)) if acting else ""
+
+    # ---------- Negative（英文，≤10 词，末尾带逗号）----------
+    negative = (seg.get("negative")
+                or ("no other people, no text, no watermark, no camera static, "))
+    # R36 ④：外语版 Negative 必须反向压掉**非目标语言**（同 batch_run_drama.V1.8.4）
+    if lang_code != "Chinese" and "no Chinese dialogue" not in negative:
+        _ban = ("no Chinese dialogue" if lang_code == "English"
+                else "no Chinese dialogue, no English dialogue")
+        negative = negative.rstrip().rstrip(",") + ", " + _ban + "."
+
+    declare = ""
+    if text_only:
+        cover = "\n".join(
+            f"- <Subject {i}> {nm}：需补一张正面清晰的人物主参考（锁面容、发型、服装）"
+            for i, nm in enumerate(people, start=1))
+        if scene_slot_idx:
+            cover += (f"\n- <Subject {scene_slot_idx}> {scene_name}："
+                      f"需补一张场景参考（锁空间结构、色彩、光线方向）")
+        declare = ("无图模式（已确认）：本条提示词没有任何参考图，全部 Subject 由文字描述定义。\n"
+                   "上线前须补以下参考图后重新生成：\n" + cover + "\n\n")
+
+    return f"""{declare}{up_block}subject_definitions:
+{subjects}
+{chr(10).join(audio_lines)}
+
+summary:
+{summary}
+
+retention_analysis:
+{retention}
+
+detailed_description:
+{style_zh}
+{acting_block}{cam_zh}。
+[Shot 1] {dur_actual:g}s，场景是{scene_name}。
+{chr(10).join(beat_rows)}
+
+overall_soundscape:
+{seg.get('soundscape', 'Soft ambient scene sounds, gentle natural room tone, no music, no background score.')}
+
+non_diegetic_music:
+N/A
+
+Negative: {negative}
+"""
+
+
+
+
+# ---------- 主流程 ----------
+
+def main():
+    global CHARS_PER_SEC
+    p = argparse.ArgumentParser()
+    p.add_argument("--storyboard-md", required=True, help="土豆格式 30s 分镜 md")
+    p.add_argument("--units", help="units_30s.json（可选，补 scene/characters 元数据）")
+    p.add_argument("--assets", help="assets.json（可选，解析 char_ref/scene_ref/voice_ref）")
+    p.add_argument("--char-map", help='角色→资产ID 映射 JSON，如 {"林晚照":"char_01","陈屿":"char_02"}')
+    p.add_argument("--scene-map", help='场景→资产ID 映射 JSON，如 {"屿间咖啡馆":"scene_01"}')
+    p.add_argument("--out-dir", default="02_过程/prompts")
+    p.add_argument("--out-json", default="02_过程/storyboard_30s/storyboard.json")
+    p.add_argument("--image-mode", choices=["ref", "text_only"], default="ref",
+                   help="ref=有参考图（默认）；text_only=无图模式/文生视频通道（铁律 D23）")
+    p.add_argument("--char-desc", help='无图模式用：角色外观 JSON，如 {"陈远":"32 岁中国男性，黑色短寸发，浅蓝色工装衬衫"}')
+    p.add_argument("--scene-desc", help='无图模式用：场景描述 JSON，如 {"监测中心":"夜晚室内，两排弧形控制台，冷蓝屏幕光"}')
+    p.add_argument("--chars-per-sec", type=float, default=None,
+                   help="台词语速基准（默认按 --lang 自动取：中文 4.5 字/秒、"
+                        "日语 7.0 モーラ/秒、英语 2.5 词/秒）。铁律 D25 / R36")
+    p.add_argument("--lang", default="zh", choices=["zh", "ja", "en"],
+                   help="台词语言（仅用于报告提示与语速基准建议；铁律 D25）")
+    p.add_argument("--approve", action="store_true",
+                   help="直接标记 status=approved（默认 draft，需人工确认后改）")
+    p.add_argument("--dialect-zh", default="",
+                   help='方言 / 口音说明，如 "関東標準語"（R36 ③ 写进 Subject 定义）')
+    p.add_argument("--cross-shot", choices=["auto", "on", "off"], default="auto",
+                   help="R37 跨镜口径：auto=多镜头段自动判定（默认）；on=强制声明；off=不声明")
+    p.add_argument("--acting-direction",
+                   help="R34 活人感表演指导行（英文模板，逐字覆盖）；缺省用 09-liveness 模板")
+    p.add_argument("--narrator-voice-zh", default="",
+                   help='旁白的稳定声音描述，如 "一位清亮的女声旁白"（R36 / ref-en §5.4）')
+    p.add_argument("--no-upload-block", action="store_true",
+                   help="不写「图片上传顺序」块（默认写；校验器缺它报 PIC-ORDER 警告）")
+    p.add_argument("--dry-run", action="store_true", help="只打印拆分报告，不写文件")
+    args = p.parse_args()
+
+    # 铁律 D25 / R36：外语版按语言切换语速基准
+    # （中文 4.5 字/秒 / 日语 7 モーラ/秒 / 英语 2.5 词/秒）
+    _auto = cps_of(args.lang)
+    if args.chars_per_sec is None:
+        if _auto != CHARS_PER_SEC:
+            print(f"[info] 语速基准 {CHARS_PER_SEC} → {_auto} 字(モーラ)/秒（按 --lang {args.lang} 自动切换）")
+            CHARS_PER_SEC = _auto
+    elif args.chars_per_sec != CHARS_PER_SEC:
+        print(f"[info] 语速基准 {CHARS_PER_SEC} → {args.chars_per_sec} 字(モーラ)/秒（--lang {args.lang}）")
+        CHARS_PER_SEC = args.chars_per_sec
+
+    # R37 跨镜口径：auto=None（多镜头段自动判定）/ on=True / off=False
+    # ⚠️ 必须在 out_segments 组装**之前**定义（第 7 批曾把它放在 dry-run 前 → UnboundLocalError）
+    _cshot = {"auto": None, "on": True, "off": False}[args.cross_shot]
+
+    voice_profiles = load_voice_profiles(args.storyboard_md)
+    char_names = set(voice_profiles)
+    if args.char_map:
+        char_names |= set(json.loads(args.char_map))
+    units = parse_storyboard_md(args.storyboard_md, char_names or None)
+
+    # 元数据
+    units_meta = {}
+    if args.units and os.path.exists(args.units):
+        uj = json.load(open(args.units, encoding="utf-8"))
+        for u in (uj.get("units") if isinstance(uj, dict) else uj) or []:
+            units_meta[u.get("unit_id", "")] = u
+    char_map = json.loads(args.char_map) if args.char_map else {}
+    scene_map = json.loads(args.scene_map) if args.scene_map else {}
+    char_desc = json.loads(args.char_desc) if args.char_desc else {}
+    scene_desc = json.loads(args.scene_desc) if args.scene_desc else {}
+    if args.image_mode == "text_only" and not char_desc:
+        print("[warn] --image-mode text_only 但未提供 --char-desc，"
+              "角色 Subject 会留【待补：…】占位，关 5 校验前必须补齐")
+    if args.assets and os.path.exists(args.assets):
+        for a in json.load(open(args.assets, encoding="utf-8")):
+            nm = a.get("name", "")
+            if a.get("type") == "character" and nm and nm not in char_map:
+                char_map[nm] = a["asset_id"]
+            if a.get("type") == "scene" and nm and nm not in scene_map:
+                scene_map[nm] = a["asset_id"]
+            # 场景名常带修饰（「屿间咖啡馆·吧台内」），额外索引场景名第一个词，
+            # 供剧本里「屿间咖啡馆（吧台内）」这类写法匹配
+            if a.get("type") == "scene" and nm:
+                base = re.split(r'[·（(]', nm)[0].strip()
+                if base and base not in scene_map:
+                    scene_map[base] = a["asset_id"]
+    if not char_map:
+        print("[warn] 未提供角色映射（--char-map / --assets），char_ref 将按说话顺序兜底编号")
+
+    # 拆分
+    all_segs = []
+    report = ["—— 拆分报告 ——"]
+    for uid, unit in units.items():
+        segs = split_unit(uid, unit)
+        report.append(f"{uid}「{unit['title']}」{len(unit['shots'])} 镜 → {len(segs)} 段")
+        all_segs.extend(segs)
+
+    # 第一轮时长估算（拆分后立刻算，后续合并要在此基础上做）
+    for seg in all_segs:
+        n = len(seg["narration"])
+        silent = sum(1 for s in seg["shots"] if not s["dialogues"])
+        if n:
+            seg["dur"] = round(min(DUR_MAX, math.ceil(n / CHARS_PER_SEC)
+                                   + TAIL_BUFFER_SEC + SILENT_SHOT_SEC * silent), 1)
+        else:
+            seg["dur"] = EMPTY_SHOT_DUR + SILENT_SHOT_SEC * (len(seg["shots"]) - 1)
+
+    # 后置合并：无台词的纯空镜段并入前一段（除非它是 unit 收尾段——
+    # 收尾空镜承担"余味"功能，独立成段）。单元首个无台词段也允许被合并：
+    # 它不是"开场建立"（开场段=有内容的首段），只是偶然无台词的第一段。
+    merged = []
+    for i, seg in enumerate(all_segs):
+        prev = merged[-1] if merged else None
+        if (prev is not None and not seg["narration"]
+                and prev["dur"] + seg["dur"] <= DUR_MAX
+                and not _is_unit_last_seg(seg, all_segs, i)):
+            prev["shots"].extend(seg["shots"])
+            prev["shot_range"][1] = seg["shot_range"][1]
+            prev["dur"] = round(prev["dur"] + seg["dur"] - SILENT_SHOT_SEC, 1)
+        else:
+            merged.append(seg)
+    all_segs = merged
+    assign_links(all_segs, units_meta)
+
+    # 组装 + 校验
+    out_segments = []
+    total_dur, warn_count = 0.0, 0
+    for i, seg in enumerate(all_segs, 1):
+        n_chars = len(seg["narration"])
+        cap_warn = ""
+        if seg["dur"] >= DUR_MAX and n_chars > seg_line_cap(seg["dur"]):
+            cap_warn = (f" ⚠ 台词 {n_chars} 字超 {seg_line_cap(seg['dur'])} 上限"
+                        f"（该段 {seg['dur']:g}s），说完会被截断！")
+            warn_count += 1
+        total_dur += seg["dur"]
+        speaker = seg["speakers"][0] if seg["speakers"] else None
+        scene_name = units_meta.get(seg["unit_id"], {}).get("scene", "")
+        seg["scene"] = scene_name          # 无图模式建场景 Subject 用（铁律 D23）
+        scene_ref = scene_map.get(scene_name)
+        if scene_ref is None and scene_name:
+            # 模糊匹配：剧本写「屿间咖啡馆（吧台内）」，资产写「屿间咖啡馆·吧台内」
+            base = re.split(r'[·（(]', scene_name)[0].strip()
+            scene_ref = scene_map.get(base, "scene_01")
+        if scene_ref is None:
+            scene_ref = "scene_01"
+        out_segments.append({
+            "seq": i,
+            "kw": seg["kw"],
+            "mode": "lecturer",
+            "link": seg["link"],
+            "narration": seg["narration"],
+            "dur": seg["dur"],
+            "char_ref": char_map.get(speaker, f"char_01"),
+            "scene_ref": scene_ref,
+            "voice_ref": char_map.get(speaker, "char_01"),
+            "unit_id": seg["unit_id"],
+            "shot_range": seg["shot_range"],
+            "speakers": seg["speakers"],
+            # ---- V1.8.4：把 H3 V2.4 需要的口径一并落盘，下游 batch_run_drama 可直接用 ----
+            "dialogue_language": lang_zh_of(args.lang),
+            "dialect_zh": args.dialect_zh,
+            "cross_shot": (len(seg["shots"]) > 1 if _cshot is None else _cshot),
+            "dialogue": [
+                {"char_id": char_map.get(d["speaker"], d["speaker"]),
+                 "text": d["line"],
+                 "kind": d.get("kind") or ("offscreen" if d.get("voiceover") else "line")}
+                for sh in seg["shots"] for d in sh["dialogues"]],
+            "beats": [
+                {"type": "action",
+                 "zh": strip_dialogue(sh["text"], _build_dialogue_re(set(seg["speakers"]) or None))}
+                for sh in seg["shots"] if strip_dialogue(sh["text"], _build_dialogue_re(set(seg["speakers"]) or None))] +
+                [{"type": ("narration" if (d.get("kind") == "narrator") else d.get("kind")),
+                  "char_id": char_map.get(d["speaker"], d["speaker"]),
+                  "text": d["line"]}
+                 for sh in seg["shots"] for d in sh["dialogues"]],
+        })
+        report.append(
+            f"  段{i:02d} [{seg['link']:9s}] {seg['dur']:>4.1f}s · {n_chars:>2d}字 · "
+            f"{','.join(seg['speakers']) or '(空镜)'} · {seg['kw']}{cap_warn}")
+
+    report.append(f"—— 合计 {len(all_segs)} 段 / 预计总时长≈{total_dur:.0f}s "
+                  f"({'达标' if 100 <= total_dur <= 140 else '⚠ 偏离 2 分钟目标'}) ——")
+    if total_dur < 100:
+        report.append(f"  ⚠ 总时长偏短：想凑 2 分钟，每 30s 单元台词需 60~90 字 "
+                      f"（实测教训：每段 H3 台词 50~70 字）")
+        warn_count += 1
+    print("\n".join(report))
+
+    _kw = dict(image_mode=args.image_mode, char_desc=char_desc, scene_desc=scene_desc,
+               lang=args.lang, cross_shot=_cshot,
+               acting_direction=args.acting_direction or "",
+               narrator_voice_zh=args.narrator_voice_zh,
+               upload_block=not args.no_upload_block, dialect_zh=args.dialect_zh)
+
+    if args.dry_run:
+        # 预览首末段提示词
+        first, last = all_segs[0], all_segs[-1]
+        print("\n== 段1 提示词预览 ==\n" + build_h3_prompt(
+            first, 1, char_map, scene_map, voice_profiles, continuing=False, **_kw))
+        print("== 末段提示词预览 ==\n" + build_h3_prompt(
+            last, len(all_segs), char_map, scene_map, voice_profiles,
+            continuing=last["link"] != "origin", **_kw))
+        if warn_count:
+            print(f"\n⚠ {warn_count} 条警告待处理")
+        return
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(args.out_json), exist_ok=True)
+    for i, seg in enumerate(all_segs, 1):
+        txt = build_h3_prompt(seg, i, char_map, scene_map, voice_profiles,
+                              continuing=seg["link"] != "origin", **_kw)
+        with open(os.path.join(args.out_dir, f"shot_{i:02d}.txt"), "w", encoding="utf-8") as f:
+            f.write(txt)
+
+    payload = {
+        "status": "approved" if args.approve else "draft",
+        "note": "由 drama_to_h3_prompts.py 自动拆分；approved 后方可进批量",
+        "segments": out_segments,
+    }
+    with open(args.out_json, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    print(f"\n✅ 已写 {len(all_segs)} 个提示词到 {args.out_dir}/shot_NN.txt")
+    print(f"✅ 已写 {args.out_json}（status={payload['status']}）")
+    if warn_count:
+        print(f"⚠ {warn_count} 条警告待处理，建议人工核对后再 approve")
+
+
+if __name__ == "__main__":
+    main()

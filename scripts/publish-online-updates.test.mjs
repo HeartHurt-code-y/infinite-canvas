@@ -25,12 +25,15 @@ function url(objectKey) {
   return `https://sd20-zq.tos-cn-beijing.volces.com/${objectKey.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-async function fixture(t, version = "0.2.1") {
+async function fixture(t, version = "0.2.1", platform = PLATFORM) {
+  const channel = `${platform}-online`;
+  const feedKey = tosUpdatesObjectKey(`${channel}/latest.json`);
+  const isMac = platform.startsWith("darwin-");
   const root = await mkdtemp(path.join(os.tmpdir(), "ic-online-publish-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const directory = path.join(root, `.cache/tauri-editions/online/artifacts/${version}`);
   const packages = path.join(root, ".cache/runtime-components/packages");
-  await mkdir(path.join(directory, "nsis"), { recursive: true });
+  await mkdir(path.join(directory, isMac ? "macos" : "nsis"), { recursive: true });
   await mkdir(packages, { recursive: true });
   const components = [];
   for (const { id } of RUNTIME_COMPONENTS) {
@@ -42,20 +45,30 @@ async function fixture(t, version = "0.2.1") {
       id,
       localPath,
       format: "zip",
-      url: runtimeComponentArchiveUrl(id, sha256, { applicationVersion: version }),
+      url: runtimeComponentArchiveUrl(id, sha256, { applicationVersion: version, platform }),
       size: body.length,
       sha256,
     });
   }
   const artifacts = [];
-  for (const [extension, body] of [
-    ["exe", Buffer.from("verified fixture installer")],
-    ["exe.sig", Buffer.from("verified updater signature\n")],
-  ]) {
-    const basename = `无限画布_${version}_x64-online-setup.${extension}`;
-    const relative = `nsis/${basename}`;
+  const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+  const updater = isMac
+    ? `macos/无限画布_${version}_${arch}-online.app.tar.gz`
+    : `nsis/无限画布_${version}_x64-online-setup.exe`;
+  const paths = [
+    [updater, Buffer.from("verified fixture installer")],
+    [`${updater}.sig`, Buffer.from("verified updater signature\n")],
+  ];
+  if (isMac)
+    paths.push(
+      [`dmg/无限画布_${version}_${arch}-online.dmg`, Buffer.from("verified disk image")],
+      ["helper/install-macos.sh", Buffer.from("verified installation helper")],
+    );
+  for (const [relative, body] of paths) {
+    const basename = path.basename(relative);
     const localPath = path.join(directory, relative);
-    const objectKey = tosUpdatesObjectKey(`${CHANNEL}/${basename}`);
+    const objectKey = tosUpdatesObjectKey(`${channel}/${basename}`);
+    await mkdir(path.dirname(localPath), { recursive: true });
     await writeFile(localPath, body);
     artifacts.push({
       path: relative,
@@ -70,19 +83,19 @@ async function fixture(t, version = "0.2.1") {
     version,
     notes: "online",
     pub_date: "2026-10-08T00:00:00.000Z",
-    platforms: { [PLATFORM]: { url: artifacts[0].url, signature: "verified updater signature" } },
+    platforms: { [platform]: { url: artifacts[0].url, signature: "verified updater signature" } },
   };
   const manifest = {
     schemaVersion: 1,
     edition: "online",
     applicationVersion: version,
-    platform: PLATFORM,
-    channel: CHANNEL,
+    platform,
+    channel,
     catalogSha256: "a".repeat(64),
     feed: {
       localPath: path.join(directory, "latest.json"),
-      objectKey: FEED_KEY,
-      url: url(FEED_KEY),
+      objectKey: feedKey,
+      url: url(feedKey),
     },
     artifacts,
     componentArchives: components,
@@ -94,12 +107,22 @@ async function fixture(t, version = "0.2.1") {
     verified: true,
     edition: "online",
     applicationVersion: version,
-    platform: PLATFORM,
-    channel: CHANNEL,
+    platform,
+    channel,
     catalogSha256: manifest.catalogSha256,
     installer: { sha256: artifacts[0].sha256, updaterSignatureVerified: true },
     executable: { compiledPinsVerified: true, sha256: "c".repeat(64) },
-    nsisResourceCount: 107,
+    ...(isMac
+      ? {
+          bundleResourceCount: 107,
+          macos: {
+            codeSignatureVerified: true,
+            architectureVerified: true,
+            updateArchiveBytesVerified: true,
+              dmg: { dmgVerified: true, applicationBytesVerified: true, codeSignatureVerified: true, sha256: artifacts[2].sha256 },
+          },
+        }
+      : { nsisResourceCount: 107 }),
     componentArchiveCount: 7,
     publishManifestVerified: true,
     sourceFreshnessVerified: true,
@@ -121,7 +144,7 @@ async function fixture(t, version = "0.2.1") {
     verifyRelease,
     verificationCalls: () => verificationCalls,
     writeManifest: () => writeFile(manifestPath, encode(manifest)),
-    options: { root, distributionDirectory: directory, verifyRelease },
+    options: { root, distributionDirectory: directory, platform, verifyRelease },
   };
 }
 
@@ -207,6 +230,55 @@ test("dry-run verifies complete local objects without creating a transport or re
   assert.equal(report.published, false);
   assert.equal(report.objects.length, 9);
   assert.equal(f.verificationCalls(), 1);
+});
+
+test("both Mac channels publish their DMG, updater/signature, installation helper and seven components before the feed", async (t) => {
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const f = await fixture(t, "0.2.2", platform);
+    const transport = mockTransport();
+    const report = await publishOnlineEdition({ ...f.options, transportFactory: () => transport });
+    assert.equal(report.published, true);
+    assert.equal(report.platform, platform);
+    assert.equal(report.channel, `${platform}-online`);
+    assert.equal(report.objects.length, 11);
+    assert.equal(report.publicObjectsVerified, true);
+    const mutations = writes(transport);
+    assert.equal(mutations.length, 12);
+    assert.equal(mutations.at(-1).objectKey, tosUpdatesObjectKey(`${platform}-online/latest.json`));
+    assert.ok(report.objects.some(({ objectKey }) => objectKey.endsWith(".dmg")));
+    assert.ok(report.objects.some(({ objectKey }) => objectKey.endsWith("/install-macos.sh")));
+    assert.equal(
+      report.objects.some(({ objectKey }) => objectKey.includes("windows-x86_64")),
+      false,
+    );
+    assert.ok(f.feed.platforms[platform].url.endsWith(".app.tar.gz"));
+  }
+});
+
+test("Mac publication refuses incomplete native/DMG/resource validation and component URLs from another platform before credentials", async (t) => {
+  const f = await fixture(t, "0.2.2", "darwin-aarch64");
+  for (const change of [
+    { macos: { ...f.verification.macos, architectureVerified: false } },
+    { macos: { ...f.verification.macos, updateArchiveBytesVerified: false } },
+    { macos: { ...f.verification.macos, dmg: { dmgVerified: true } } },
+    { bundleResourceCount: 0 },
+  ])
+    await assert.rejects(
+      publishOnlineEdition({
+        ...f.options,
+        verifyRelease: async () => ({ ...f.verification, ...change }),
+        transportFactory: () => {
+          throw new Error("must not read credentials");
+        },
+      }),
+      /full online release verification/,
+    );
+  f.manifest.componentArchives[0].url = f.manifest.componentArchives[0].url.replace(
+    "darwin-aarch64",
+    "windows-x86_64",
+  );
+  await f.writeManifest();
+  await assert.rejects(prepareOnlinePublication(f.options), /trusted catalog\/cache contract/);
 });
 
 test("failed signature/compiled pin verification stops before transport construction", async (t) => {

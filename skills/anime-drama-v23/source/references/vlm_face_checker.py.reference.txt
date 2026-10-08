@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+VLM 子 Agent 判图：读 face_check_request.json，调 VLM 判图，写 face_check_result.json
+
+用法（主 Agent 调）：
+  python vlm_face_checker.py --shot-dir "视频/shot_01_xxx"
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+def judge_face(frame_path, ref_path):
+    """调 VLM 判图：这张图片里的人是否和参考图里的人长得一样？
+    返回 True/False
+    """
+    # TODO: 调 VLM 子 Agent（项目模型 Agent 工具）
+    # 当前简化版：用文件大小+分辨率做启发式判断（不准确，仅示例）
+    # 实际应该调 VLM："这张图片里的人是否和参考图里的人长得一样？回答是/否"
+    return None  # None = 未判决
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--shot-dir", required=True)
+    args = ap.parse_args()
+
+    shot_dir = Path(args.shot_dir)
+    frames_dir = shot_dir / "audit" / "face_frames"
+    request_file = frames_dir / "face_check_request.json"
+    result_file = frames_dir / "face_check_result.json"
+
+    if not request_file.exists():
+        print(f"❌ 判决请求文件不存在: {request_file}")
+        sys.exit(1)
+
+    request = json.loads(request_file.read_text(encoding="utf-8"))
+    frames = request["frames"]
+    ref = request["char_ref"]
+
+    # 逐帧判图
+    results = []
+    for fp in frames:
+        match = judge_face(fp, ref)
+        results.append({"frame": fp, "match": match})
+
+    # 统计
+    match_count = sum(1 for r in results if r["match"] is True)
+    total = len(results)
+    pass_threshold = 2  # 至少 2/3 帧匹配
+
+    result = {
+        "score": match_count / total if total > 0 else 0,
+        "pass": match_count >= pass_threshold,
+        "match_count": match_count,
+        "total": total,
+        "results": results
+    }
+
+    result_file.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"✅ 判决结果已写入: {result_file}")
+    print(f"   匹配: {match_count}/{total}, PASS: {result['pass']}")
+
+
+if __name__ == "__main__":
+    main()

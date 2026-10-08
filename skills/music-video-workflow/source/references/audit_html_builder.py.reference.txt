@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""MV 审核页生成器（mv-auto-pipeline · 铁律 E2/E5）
+
+8 道关 ↔ 8 张页，一关不漏；徽章读真实状态（不许永远显示「待审核」）；
+缺失也要显式渲染（「未审」而不是什么都不显示）；图片用 file:/// 绝对路径
+（相对路径在 host 预览服务下会解析不到 —— drama 铁律 D12 的教训）。
+
+  --stage lyrics      01_歌词时间轴审核.html     关 1
+  --stage style       02_风格审核.html           关 2
+  --stage cast        03_人物与资产审核.html     关 3
+  --stage storyboard  04_分镜审核.html           关 4
+  --stage prompt      05_提示词审核.html         关 5（生成视频前的硬门禁）
+  --stage music       06_音乐窗口与口型审核.html 关 6（生成视频前的硬门禁）
+  --stage video       07_分段视频审核.html       关 7
+  --stage final       08_成片审核.html           关 8
+  --stage overview    全链总览.html             收尾交付
+  --stage all         全部生成
+
+用法：
+  python audit_html_builder.py --project-root "<项目根>" --stage all
+"""
+import argparse
+import html
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime
+
+CSS = """
+:root{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--tx:#1c2025;--tx2:#5b6570;
+--ok:#137a4b;--warn:#a06000;--bad:#c0392b;--hl:#2f6fed}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);
+font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+header{background:var(--card);border-bottom:1px solid var(--line);padding:16px 24px;position:sticky;top:0;z-index:9}
+h1{margin:0 0 8px;font-size:18px}
+.kpi{display:flex;gap:18px;flex-wrap:wrap;color:var(--tx2);font-size:13px}
+.kpi b{color:var(--tx)}
+main{padding:20px 24px 80px}
+.wrap{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:auto;margin-bottom:16px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{background:#fafbfc;color:var(--tx2);font-weight:600;position:sticky;top:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.card 项目视频模型{margin:0 0 8px;font-size:15px}
+.card .sub{color:var(--tx2);font-size:12px;margin-bottom:8px}
+.badge{display:inline-block;padding:2px 9px;border-radius:999px;font-size:12px;border:1px solid var(--line);color:var(--tx2);background:#fafbfc}
+.b-ok{color:var(--ok);border-color:#bfe3cd;background:#eefaf2}
+.b-warn{color:var(--warn);border-color:#f0dcb0;background:#fff8e6}
+.b-bad{color:var(--bad);border-color:#f2c4bf;background:#fdecea}
+.b-skip{color:#8a939c;border-color:#e3e6ea;background:#f4f5f7}
+.thumbs{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0}
+.thumbs img{height:96px;border:1px solid var(--line);border-radius:6px;background:#fff}
+.thumbs figure{margin:0;text-align:center;font-size:11px;color:var(--tx2)}
+.miss{display:inline-flex;align-items:center;justify-content:center;height:96px;width:72px;
+border:1px dashed #e08b84;border-radius:6px;color:var(--bad);font-size:11px;background:#fff6f5}
+pre{background:#fafbfc;border:1px solid var(--line);border-radius:8px;padding:10px;
+white-space:pre-wrap;word-break:break-word;font-size:12px;max-height:340px;overflow:auto}
+video{width:100%;max-height:320px;border-radius:8px;background:#000}
+.box{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-bottom:16px}
+.box 项目视频模型{margin:0 0 8px;font-size:14px}ul{margin:0;padding-left:20px}
+.red{color:var(--bad)}.green{color:var(--ok)}
+.tl{position:relative;padding-left:22px}
+.tl .st{position:relative;padding:8px 0 14px 14px;border-left:2px solid var(--line)}
+.tl .st:last-child{border-left-color:transparent}
+.tl .dot{position:absolute;left:-8px;top:12px;width:12px;height:12px;border-radius:50%;background:var(--hl)}
+.tl .st.ok .dot{background:var(--ok)}.tl .st.skip .dot{background:#c6ccd2}
+"""
+
+
+def esc(x):
+    return html.escape("" if x is None else str(x))
+
+
+def uri(p):
+    """审核页里所有图片/视频路径一律 file:/// 绝对路径（相对路径在 host 预览服务下解析不到）。"""
+    try:
+        ap = os.path.abspath(p).replace("\\", "/").lstrip("/")
+        return "file:///" + ap
+    except Exception:  # noqa: BLE001
+        return p
+
+
+def img_or_miss(p, label=""):
+    if p and os.path.isfile(p):
+        return f"<figure><img src='{esc(uri(p))}'><figcaption>{esc(label)}</figcaption></figure>"
+    return f"<span class='miss'>缺图<br>{esc(label)}</span>"
+
+
+def read(p, d=None):
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError):
+        return d
+
+
+def page(root, out_name, title, body, kpi: list):
+    nav = (" · ".join(f"<a href='{esc(f)}'>{esc(f.split('_',1)[-1].replace('.html',''))}</a>"
+                      for f in sorted(os.listdir(os.path.join(root, "审核")))
+                      if f.endswith(".html"))) if os.path.isdir(os.path.join(root, "审核")) else ""
+    doc = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>{esc(title)}</title><style>{CSS}</style></head><body>
+<header><h1>{esc(title)}</h1><div class="kpi">{''.join(kpi)}</div>
+<div style="margin-top:8px;font-size:12px;color:#8a939c">{nav}</div></header>
+<main>{body}</main></body></html>"""
+    d = os.path.join(root, "审核")
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, out_name)
+    open(p, "w", encoding="utf-8").write(doc)
+    print(f"  → {p}")
+    return p
+
+
+def badge(state):
+    m = {"approved": ("b-ok", "已通过"), "reviewed_ok": ("b-ok", "机检通过"),
+         "partial": ("b-warn", "部分通过"), "pending": ("b-warn", "待审核"),
+         "reviewed": ("b-warn", "已审待确认"), "draft": ("b-warn", "草稿"),
+         "skipped": ("b-skip", "已跳过"), "machine_failed": ("b-bad", "机检不过"),
+         "failed": ("b-bad", "失败"), "none": ("b-skip", "未审")}
+    c, t = m.get(state, ("b-warn", state or "未知"))
+    return f"<span class='badge {c}'>{esc(t)}</span>"
+
+
+# ------------------------------------------------------------------ 各关
+def s_lyrics(root):
+    d = read(os.path.join(root, "歌词", "lyrics.json"))
+    if not d:
+        return page(root, "01_歌词时间轴审核.html", "关 1 · 歌词时间轴审核",
+                    "<div class='box'><项目视频模型>未审</项目视频模型><p class='red'>还没有 歌词/lyrics.json</p>"
+                    "<p>先跑 <code>extract_lyrics.py</code> 再跑 <code>align_lyrics.py</code>。</p></div>",
+                    ["<span>状态 " + badge("none") + "</span>"])
+    st = d.get("stats") or {}
+    rows = []
+    for r in d["lines"]:
+        cls = "b-warn" if r.get("review_needed") else ""
+        mark = "⚠ 待核" if r.get("review_needed") else "✅"
+        mm = lambda t: f"{int(t//60)}:{t%60:05.2f}"
+        rows.append(f"<tr class='{cls}'><td>{r['idx']}</td><td>{mm(r['start'])}</td>"
+                    f"<td>{mm(r['end'])}</td><td>{r['end']-r['start']:.2f}s</td>"
+                    f"<td>{esc(r['text'])}</td>"
+                    f"<td>{r.get('hit_ratio', 1):.0%}</td><td>{mark}</td></tr>")
+    body = (f"<div class='wrap'><table><thead><tr><th>#</th><th>起</th><th>止</th><th>时长</th>"
+            f"<th>歌词</th><th>对齐命中</th><th>状态</th></tr></thead><tbody>{''.join(rows)}</tbody>"
+            f"</table></div>"
+            f"<div class='box'><项目视频模型>怎么改</项目视频模型><ul>"
+            f"<li>文本不对 → 改 <code>歌词/lyrics_raw.txt</code> 重跑 align_lyrics.py</li>"
+            f"<li>时间不对 → 改 <code>歌词/lyrics.lrc</code> 后 <code>align_lyrics.py --lrc ... --qc-only</code></li>"
+            f"<li><b>⚠ 待核</b>行必须人工听一遍（铁律 A2：ASR 只给时间，文本必须校正）</li>"
+            f"<li>确认后回对话说「歌词时间轴通过」</li></ul></div>")
+    return page(root, "01_歌词时间轴审核.html", "关 1 · 歌词时间轴审核", body,
+                [f"<span>曲长 <b>{esc(d.get('song_duration'))}s</b></span>",
+                 f"<span>行数 <b>{len(d['lines'])}</b></span>",
+                 f"<span>对齐命中率 <b>{st.get('hit_ratio', 0):.1%}</b></span>",
+                 f"<span>待核行 <b class='{'red' if st.get('review_lines') else 'green'}'>"
+                 f"{esc(st.get('review_lines', 0))}</b></span>"])
+
+
+def s_style(root):
+    sb = read(os.path.join(root, "分镜脚本", "storyboard.json"), {}) or {}
+    so = read(os.path.join(root, "状态", "style_options.json"), {}) or {}
+    st = read(os.path.join(root, "状态", "pipeline_state.json"), {}) or {}
+    locked = (sb.get("style_prompt") or st.get("style_prompt") or {})
+    opts = so.get("options") or ([locked] if locked else [])
+    tip = "" if so.get("options") else \
+        "<div class='box'><项目视频模型 class='red'>备选方向未归档</项目视频模型><p>只渲染了已锁定方向（不假装有三个候选）。</p></div>"
+    cards = []
+    for o in opts:
+        sel = "✅ 已锁定" if o.get("option") == so.get("locked_choice") else ""
+        cards.append(f"<div class='card'><项目视频模型>{esc(o.get('option'))} · {esc(o.get('label'))} {sel}</项目视频模型>"
+                     f"<div class='sub'>参考片：{esc(o.get('ref_films'))}</div>"
+                     f"<div class='sub'>镜头语言：{esc(o.get('shot_language'))}</div>"
+                     f"<div class='sub'>调色：{esc(o.get('palette'))}</div>"
+                     f"<div class='sub'>适合：{esc(o.get('fit_scenes'))}</div>"
+                     f"<pre>{esc(o.get('prompt_zh') or o.get('prompt_en'))}</pre></div>")
+    return page(root, "02_风格审核.html", "关 2 · 风格审核",
+                tip + f"<div class='grid'>{''.join(cards) or '<div class=card>尚未推荐风格方向</div>'}</div>",
+                [f"<span>状态 {badge('approved' if locked else 'pending')}</span>"])
+
+
+def s_cast(root):
+    sb = read(os.path.join(root, "分镜脚本", "storyboard.json"), {}) or {}
+    no_hero = (sb.get("meta") or {}).get("no_hero")
+    blocks = []
+    for base, kind in (("人物资产", "char"), ("场景资产", "scene"), ("道具资产", "prop")):
+        d0 = os.path.join(root, base)
+        if not os.path.isdir(d0):
+            continue
+        for d in sorted(os.listdir(d0)):
+            full = os.path.join(d0, d)
+            if not os.path.isdir(full):
+                continue
+            img = os.path.join(full, "images", "front.png") if kind == "char" \
+                else os.path.join(full, "main.png")
+            prof = os.path.join(full, "profile.md")
+            pd = open(prof, encoding="utf-8").read()[:900] if os.path.isfile(prof) else ""
+            blocks.append(f"<div class='card'><项目视频模型>{esc(d)}</项目视频模型>"
+                          f"<div class='thumbs'>{img_or_miss(img, d)}</div>"
+                          f"<pre>{esc(pd)}</pre></div>")
+    tip = ("<div class='box'><项目视频模型>无主角模式</项目视频模型><p>本片为无主角音乐 MV，"
+           "人物资产阶段跳过，画面由场景/氛围/群像承载（铁律 C6）。</p></div>") if no_hero else ""
+    if no_hero:
+        return page(root, "03_人物与资产审核.html", "关 3 · 人物与资产审核",
+                    tip + f"<div class='grid'>{''.join(blocks) or '<div class=card>无资产</div>'}</div>",
+                    ["<span>状态 " + badge("skipped") + "（无主角模式）</span>"])
+    return page(root, "03_人物与资产审核.html", "关 3 · 人物与资产审核",
+                f"<div class='grid'>{''.join(blocks) or '<div class=card>还没有资产</div>'}</div>",
+                [f"<span>状态 {badge('approved' if blocks else 'pending')}</span>"])
+
+
+def s_storyboard(root):
+    sb = read(os.path.join(root, "分镜脚本", "storyboard.json"), {}) or {}
+    m = sb.get("meta") or {}
+    rows = []
+    for s in sb.get("segments", []):
+        w = s["music_window"]
+        rows.append(f"<tr><td>{s['seq']}</td><td>{w['start']:.2f}–{w['end']:.2f}s</td>"
+                    f"<td>{w['dur']:.2f}s</td><td>{esc(s.get('structure'))}</td>"
+                    f"<td>{'🎤 对口型' if s['sing_mode']=='sync' else '—'}</td>"
+                    f"<td>{esc(s.get('shot_size'))}</td>"
+                    f"<td>{esc((s.get('lyric_text') or '（间奏）').replace(chr(10),' / '))}</td>"
+                    f"<td>{esc(s.get('visual_brief') or '（待填）')}</td></tr>")
+    body = (f"<div class='box'><项目视频模型>口型规则（铁律 B1/B2）</项目视频模型><ul>"
+            f"<li>只有<b>中近景</b>（大特写/特写/近景/中景）才设计对口型</li>"
+            f"<li>不是每句都对口型 —— 目标占比 45%（建议 35%~60%）</li>"
+            f"<li>不对口型段必须声明「嘴唇不跟随歌词开合」</li></ul></div>"
+            f"<div class='wrap'><table><thead><tr><th>段</th><th>音乐窗口</th><th>时长</th>"
+            f"<th>结构</th><th>口型</th><th>景别</th><th>歌词</th><th>画面构想</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>")
+    return page(root, "04_分镜审核.html", "关 4 · MV 分镜审核", body,
+                [f"<span>段数 <b>{esc(m.get('segments'))}</b></span>",
+                 f"<span>对口型段 <b>{esc(m.get('sync_segments'))}</b>"
+                 f"（{(m.get('sync_ratio') or 0):.0%}）</span>",
+                 f"<span>窗口合计 <b>{esc(m.get('window_sum'))}s</b> / 曲长 "
+                 f"<b>{esc((sb.get('song') or {}).get('duration'))}s</b></span>",
+                 f"<span>状态 {badge(sb.get('status') or 'draft')}</span>"])
+
+
+def s_prompt(root):
+    rv = read(os.path.join(root, "状态", "prompt_review.json"), {}) or {}
+    cards = []
+    for r in rv.get("segments", []):
+        thumbs = "".join(img_or_miss(os.path.join(root, s["path"]),
+                                     f"图片 · {esc(s.get('name'))}") for s in (r.get("slots") or []))
+        ck = "".join(f"<tr><td>{esc(c['name'])}</td><td>{'✅' if c['ok'] else '⛔'}</td>"
+                     f"<td>{esc(c['note'])}</td></tr>" for c in (r.get("checks") or []))
+        val = ""
+        for k, v in (r.get("validators") or {}).items():
+            if not isinstance(v, dict):
+                continue
+            if v.get("skipped"):
+                val += f"<div class='sub'>{k} 校验器：跳过（{esc(v.get('reason'))}）</div>"
+            else:
+                val += (f"<div class='sub'>{k} 校验器：错误 <b>{esc(v.get('errors'))}</b> · "
+                        f"警告 {esc(v.get('warns'))}</div>")
+        pp = os.path.join(root, "视频", r.get("dir", ""), "prompt.txt")
+        txt = open(pp, encoding="utf-8").read() if os.path.isfile(pp) else "（缺 prompt.txt）"
+        w = r.get("music_window") or {}
+        cards.append(
+            f"<div class='card'><项目视频模型>段 {r['seq']} {badge(r.get('status'))}</项目视频模型>"
+            f"<div class='sub'>音乐窗口 {w.get('start')}–{w.get('end')}s（{w.get('dur')}s）· "
+            f"口型 {esc(r.get('sing_mode'))} · 景别 {esc(r.get('shot_size'))} · "
+            f"sha1 {esc(r.get('sha1'))}</div>"
+            f"<div class='thumbs'>{thumbs or '<span class=miss>本段无参考图</span>'}</div>"
+            f"<div class='sub'>歌词：{esc((r.get('lyric_text') or '—').replace(chr(10),' / '))}</div>"
+            f"{val}<div class='wrap'><table><tbody>{ck}</tbody></table></div>"
+            f"<pre>{esc(txt)}</pre></div>")
+    top = (f"<div class='box'><项目视频模型>分辨率复核（只确认、不重选）</项目视频模型><ul>"
+           f"<li>分镜记录档位：{esc(rv.get('resolution_desc') or '（未记录）')}</li>"
+           f"<li>工作流默认分辨率值：<b>{esc((rv.get('resolution_default') or 2))}</b>（用户指定 2）</li>"
+           f"<li>已确认：{'✅ ' + esc(rv.get('confirmed_resolution')) if rv.get('resolution_confirmed') else '⏳ 待确认'}</li>"
+           f"</ul></div>")
+    return page(root, "05_提示词审核.html", "关 5 · 视频提示词审核（硬门禁）",
+                top + f"<div class='grid'>{''.join(cards) or '<div class=card>还没有提示词</div>'}</div>",
+                [f"<span>段数 <b>{esc(len(rv.get('segments') or []))}</b></span>",
+                 f"<span>机检通过 <b>{sum(1 for r in (rv.get('segments') or []) if r.get('status')=='reviewed_ok')}</b></span>",
+                 f"<span>状态 {badge(rv.get('status') or 'none')}</span>",
+                 f"<span>分辨率 {'✅ 已复核' if rv.get('resolution_confirmed') else '⏳ 未复核'}</span>"])
+
+
+def s_music(root):
+    mp = read(os.path.join(root, "状态", "music_plan.json"), {}) or {}
+    rows = []
+    for k, w in sorted((mp.get("windows") or {}).items(), key=lambda x: int(x[0])):
+        rows.append(f"<tr><td>{k}</td><td>{w['start']:.2f}s</td><td>{w['end']:.2f}s</td>"
+                    f"<td>{w['dur']:.2f}s</td><td>{esc(w.get('sing_mode'))}</td>"
+                    f"<td>{esc(w.get('shot_size'))}</td>"
+                    f"<td>{esc(w.get('lyric_lines'))}</td></tr>")
+    prob = "".join(f"<li class='red'>{esc(p)}</li>" for p in (mp.get("problems") or [])) or "<li class='green'>无</li>"
+    warn = "".join(f"<li>{esc(p)}</li>" for p in (mp.get("warns") or []))
+    body = (f"<div class='box'><项目视频模型>音乐窗口计划（跑视频前的硬门禁）</项目视频模型>"
+            f"<p>窗口合计 <b>{esc(mp.get('window_sum'))}s</b> / 曲长 <b>{esc(mp.get('song_duration'))}s</b> · "
+            f"对口型占比 <b>{(mp.get('sync_ratio') or 0):.0%}</b></p></div>"
+            f"<div class='box'><项目视频模型>硬性问题</项目视频模型><ul>{prob}</ul></div>"
+            + (f"<div class='box'><项目视频模型>提示</项目视频模型><ul>{warn}</ul></div>" if warn else "")
+            + f"<div class='wrap'><table><thead><tr><th>段</th><th>窗口起</th><th>窗口止</th>"
+              f"<th>时长</th><th>口型</th><th>景别</th><th>歌词行</th></tr></thead>"
+              f"<tbody>{''.join(rows)}</tbody></table></div>")
+    return page(root, "06_音乐窗口与口型审核.html", "关 6 · 音乐窗口与口型对齐（硬门禁）", body,
+                [f"<span>窗口合计 <b>{esc(mp.get('window_sum'))}s</b></span>",
+                 f"<span>结论 <b class='{'green' if mp.get('ok') else 'red'}'>"
+                 f"{'✅ 全过' if mp.get('ok') else '⛔ 有问题'}</b></span>",
+                 f"<span>状态 {badge('approved' if mp.get('ok') else 'none')}</span>"])
+
+
+def s_video(root):
+    sb = read(os.path.join(root, "分镜脚本", "storyboard.json"), {}) or {}
+    cards = []
+    for s in sb.get("segments", []):
+        d = [x for x in (os.listdir(os.path.join(root, "视频"))
+                         if os.path.isdir(os.path.join(root, "视频")) else [])
+             if x.startswith(f"shot_{s['seq']:02d}_")]
+        vp = os.path.join(root, "视频", d[0], "output.mp4") if d else ""
+        lg = read(os.path.join(root, "视频", d[0], "log.json"), {}) if d else {}
+        v = (f"<video controls preload='none' src='{esc(uri(vp))}'></video>"
+             if vp and os.path.isfile(vp) else "<div class='miss' style='width:100%'>还没有视频</div>")
+        w = s["music_window"]
+        cards.append(f"<div class='card'><项目视频模型>段 {s['seq']} {badge(lg.get('status') or 'none')}</项目视频模型>"
+                     f"<div class='sub'>窗口 {w['start']:.2f}–{w['end']:.2f}s · 目标 {w['dur']:.2f}s · "
+                     f"实得 {esc(lg.get('dur') or '—')}s · {esc(lg.get('conform'))} · "
+                     f"{esc(lg.get('cost_s') or '—')}s · {esc(lg.get('coins') or '—')} 币</div>"
+                     f"{v}</div>")
+    return page(root, "07_分段视频审核.html", "关 7 · 分段视频审核",
+                f"<div class='grid'>{''.join(cards)}</div>",
+                [f"<span>段数 <b>{esc(len(sb.get('segments') or []))}</b></span>"])
+
+
+def s_final(root):
+    fd = os.path.join(root, "视频", "final")
+    rows = []
+    for f in ("final.mp4", "final_master.mp4"):
+        p = os.path.join(fd, f)
+        if os.path.isfile(p):
+            stt = os.stat(p)
+            rows.append(f"<tr><td>{esc(f)}</td><td>{stt.st_size//1024//1024} MB</td>"
+                        f"<td>{datetime.fromtimestamp(stt.st_mtime):%Y-%m-%d %H:%M:%S}</td>"
+                        f"<td>{esc(rel_or(p, root))}</td></tr>")
+    meta = ("<div class='wrap'><table><thead><tr><th>文件</th><th>大小</th><th>更新时间</th>"
+            "<th>路径</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>") \
+        if rows else "<div class='box'><项目视频模型>还没有成片</项目视频模型></div>"
+    vids = "".join(f"<video controls preload='none' src='{esc(uri(os.path.join(fd, f)))}'></video>"
+                   f"<div class='sub'>{esc(f)}</div>"
+                   for f in ("final_master.mp4", "final.mp4") if os.path.isfile(os.path.join(fd, f)))
+    va = os.path.join(fd, "对齐验收.html")
+    link = f"<div class='box'><项目视频模型>对齐验收</项目视频模型><p><a href='{esc(uri(va))}'>打开 对齐验收.html</a></p></div>" \
+        if os.path.isfile(va) else ""
+    return page(root, "08_成片审核.html", "关 8 · 成片审核",
+                vids + meta + link,
+                [f"<span>成片 {badge('approved' if os.path.isfile(os.path.join(fd,'final_master.mp4')) else 'none')}</span>"])
+
+
+def rel_or(p, root):
+    try:
+        return os.path.relpath(p, root)
+    except ValueError:
+        return p
+
+
+def s_overview(root):
+    sb = read(os.path.join(root, "分镜脚本", "storyboard.json"), {}) or {}
+    ly = read(os.path.join(root, "歌词", "lyrics.json"), {}) or {}
+    mp = read(os.path.join(root, "状态", "music_plan.json"), {}) or {}
+    rv = read(os.path.join(root, "状态", "prompt_review.json"), {}) or {}
+    st = read(os.path.join(root, "状态", "pipeline_state.json"), {}) or {}
+    ledger = os.path.join(root, "状态", "成本台账.csv")
+    coins = cost_s = 0
+    nseg = 0
+    if os.path.isfile(ledger):
+        import csv as _csv
+        for row in _csv.DictReader(open(ledger, encoding="utf-8-sig")):
+            nseg += 1
+            coins += int(row.get("供应商报告费用") or 0)
+            cost_s += int(row.get("生成耗时s") or 0)
+    fd = os.path.join(root, "视频", "final")
+    final_p = os.path.join(fd, "final_master.mp4") if os.path.isfile(os.path.join(fd, "final_master.mp4")) \
+        else os.path.join(fd, "final.mp4")
+    fsz = os.path.getsize(final_p) // 1024 // 1024 if os.path.isfile(final_p) else 0
+    stages = [
+        ("① 歌词提取与对齐", bool(ly), f"{len(ly.get('lines') or [])} 行 → 歌词/lyrics.json"),
+        ("② 风格锁定", bool(sb.get("style_prompt")), (sb.get("style_prompt") or {}).get("label", "")),
+        ("③ 人物与资产", bool(os.path.isdir(os.path.join(root, "人物资产"))),
+         "无主角模式（跳过）" if (sb.get("meta") or {}).get("no_hero") else "人物/场景/道具"),
+        ("④ MV 分镜", bool(sb.get("segments")),
+         f"{(sb.get('meta') or {}).get('segments')} 段 · 对口型 {(sb.get('meta') or {}).get('sync_ratio', 0):.0%}"),
+        ("⑤ 项目视频模型 提示词", bool(rv.get("segments")), f"{len(rv.get('segments') or [])} 段 · {rv.get('status')}"),
+        ("⑥ 音乐窗口核对", bool(mp), f"合计 {mp.get('window_sum')}s / 曲长 {mp.get('song_duration')}s"),
+        ("⑦ 批量生成", nseg > 0, f"{nseg} 段落账 · {cost_s}s · {coins} 币"),
+        ("⑧ 拼接成片", bool(fsz), f"{fsz} MB"),
+        ("⑨ 对齐验收", os.path.isfile(os.path.join(fd, "对齐验收.html")), "视频/final/对齐验收.html"),
+    ]
+    tl = "".join(
+        f"<div class='st {'ok' if ok else 'skip'}'><span class='dot'></span>"
+        f"<b>{esc(n)}</b> {badge('approved' if ok else 'skipped')}"
+        f"<div class='sub'>{esc(det)}</div></div>" for n, ok, det in stages)
+    body = (f"<div class='box'><项目视频模型>MV 全貌</项目视频模型><ul>"
+            f"<li>歌曲：{esc((sb.get('song') or {}).get('file'))} · 曲长 "
+            f"<b>{esc((sb.get('song') or {}).get('duration'))}s</b></li>"
+            f"<li>成片：{fsz} MB · {esc(rel_or(final_p, root))}</li>"
+            f"<li>机器生成耗时合计：<b>{cost_s}s（{cost_s/3600:.2f} h）</b> —— 并发下用户等待 ≈ "
+            f"{cost_s/3600/5:.2f} h</li>"
+            f"<li>供应商报告费用：<b>{coins}</b>（逐段实测累加，非估算）</li></ul></div>"
+            f"<div class='box'><项目视频模型>流程时间轴</项目视频模型><div class='tl'>{tl}</div></div>"
+            f"<div class='box'><项目视频模型>产物文件清单</项目视频模型><ul>"
+            f"<li>歌词时间轴：<code>歌词/lyrics.json</code> · <code>歌词/lyrics.lrc</code></li>"
+            f"<li>分镜：<code>分镜脚本/storyboard.json</code> · <code>分镜脚本/分镜表.md</code></li>"
+            f"<li>提示词：<code>视频/shot_NN_*/prompt.txt</code></li>"
+            f"<li>成片：<code>视频/final/final_master.mp4</code>（交付版）· "
+            f"<code>final.mp4</code>（逐段内嵌音乐版）</li></ul></div>"
+            f"<div class='box'><项目视频模型>复盘三问（铁律 F1）</项目视频模型><ul>"
+            f"<li>实测 vs 预设：段数 / 时长 / 币 / 耗时 差多少？</li>"
+            f"<li>翻车清单：哪里报错、哪里返工、用户提了什么？</li>"
+            f"<li>可沉淀项：能不能变成铁律 / 代码改动 / 自检项？</li></ul></div>")
+    return page(root, "全链总览.html", "MV 全链总览", body,
+                [f"<span>段数 <b>{esc((sb.get('meta') or {}).get('segments'))}</b></span>",
+                 f"<span>曲长 <b>{esc((sb.get('song') or {}).get('duration'))}s</b></span>",
+                 f"<span>成片 <b>{fsz} MB</b></span>",
+                 f"<span>生成耗时合计 <b>{cost_s}s</b></span>",
+                 f"<span>供应商报告费用 <b>{coins}</b></span>"])
+
+
+STAGES = {"lyrics": s_lyrics, "style": s_style, "cast": s_cast, "storyboard": s_storyboard,
+          "prompt": s_prompt, "music": s_music, "video": s_video, "final": s_final,
+          "overview": s_overview}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--stage", default="all", choices=list(STAGES) + ["all"])
+    args = ap.parse_args()
+    root = os.path.abspath(args.project_root)
+    todo = list(STAGES) if args.stage == "all" else [args.stage]
+    print(f"生成审核页（{len(todo)} 张）→ {os.path.join(root, '审核')}")
+    for s in todo:
+        STAGES[s](root)
+    print("完成。")
+
+
+if __name__ == "__main__":
+    main()

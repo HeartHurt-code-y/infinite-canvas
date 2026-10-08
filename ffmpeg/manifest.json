@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "version": "9.0.1-essentials_build-www.gyan.dev",
+  "source": "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+  "ffmpegSha256": "72a489eccd008c2ec2c0a5856c5c75bc3d8bbfa90166c4566865c246445e6aa3",
+  "ffprobeSha256": "19202b23c0043f15ad1b7bce2344f406fd52bd6efd8f995ce02e7392a1cec52f",
+  "preparedAt": "2026-09-06T14:44:51.842Z",
+  "license": {
+    "spdx": "GPL-3.0-or-later",
+    "path": "COPYING.GPLv3",
+    "sha256": "0b383d5a63da644f628d99c33976ea6487ed89aaa59f0b3257992deac1171e6b",
+    "noticePath": "LICENSE-NOTICE.txt",
+    "sourcePath": "SOURCE.txt",
+    "correspondingSourceBundled": false
+  }
+}

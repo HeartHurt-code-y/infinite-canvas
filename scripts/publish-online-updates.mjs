@@ -1,4 +1,4 @@
-// Publish only the verified Windows online edition. The public feed is the final mutation.
+// Publish only a verified native online edition. The public feed is the final mutation.
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,7 +14,6 @@ import {
 import { verifyEditionRelease } from "./verify-edition-release.mjs";
 import { tosUpdatesObjectKey, tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 
-const CHANNEL = `${COMPONENT_PLATFORM}-online`;
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -82,7 +81,12 @@ function compareVersions(left, right) {
   return 0;
 }
 
-function assertFeed(feed, version) {
+function updaterName(version, platform) {
+  return platform === "windows-x86_64"
+    ? `无限画布_${version}_x64-online-setup.exe`
+    : `无限画布_${version}_${platform === "darwin-aarch64" ? "aarch64" : "x64"}-online.app.tar.gz`;
+}
+function assertFeed(feed, version, platformId = COMPONENT_PLATFORM) {
   exactKeys(feed, ["version", "notes", "pub_date", "platforms"], "Online feed");
   requireValue(
     VERSION.test(feed.version) &&
@@ -92,12 +96,12 @@ function assertFeed(feed, version) {
       Number.isFinite(Date.parse(feed.pub_date)),
     "Invalid online feed identity",
   );
-  exactKeys(feed.platforms, [COMPONENT_PLATFORM], "Online feed platforms");
-  const platform = feed.platforms[COMPONENT_PLATFORM];
+  exactKeys(feed.platforms, [platformId], "Online feed platforms");
+  const platform = feed.platforms[platformId];
   exactKeys(platform, ["url", "signature"], "Online feed platform");
   requireValue(
     platform.url ===
-      `${tosUpdatesPublicBaseUrl()}/${CHANNEL}/${encodeURIComponent(`无限画布_${feed.version}_x64-online-setup.exe`)}` &&
+      `${tosUpdatesPublicBaseUrl()}/${platformId}-online/${encodeURIComponent(updaterName(feed.version, platformId))}` &&
       typeof platform.signature === "string" &&
       platform.signature.length > 0 &&
       !platform.resourceManifest &&
@@ -122,8 +126,15 @@ async function assertLocalObject(entry, root) {
 export async function prepareOnlinePublication({
   distributionDirectory,
   root = COMPONENT_REPO_ROOT,
+  platform = COMPONENT_PLATFORM,
   verifyRelease = verifyEditionRelease,
 }) {
+  requireValue(
+    ["windows-x86_64", "darwin-aarch64", "darwin-x86_64"].includes(platform),
+    "Unsupported online publication platform",
+  );
+  const channel = `${platform}-online`;
+  const isMac = platform.startsWith("darwin-");
   root = path.resolve(root);
   const directory = path.resolve(root, distributionDirectory);
   const relative = path.relative(root, directory).split(path.sep).join("/");
@@ -138,20 +149,31 @@ export async function prepareOnlinePublication({
   const verification = await verifyRelease({
     distributionDirectory: directory,
     root,
+    platform,
     requireSourceFreshness: true,
   });
   requireValue(
     verification?.verified === true &&
       verification.edition === "online" &&
       verification.applicationVersion === version &&
-      verification.platform === COMPONENT_PLATFORM &&
-      verification.channel === CHANNEL &&
+      verification.platform === platform &&
+      verification.channel === channel &&
       verification.publishManifestVerified === true &&
       verification.sourceFreshnessVerified === true &&
       SHA256.test(verification.sourceFingerprint) &&
       verification.executable?.compiledPinsVerified === true &&
-      Number.isSafeInteger(verification.nsisResourceCount) &&
-      verification.nsisResourceCount > 0 &&
+      (isMac
+        ? Number.isSafeInteger(verification.bundleResourceCount) &&
+          verification.bundleResourceCount > 0 &&
+          verification.macos?.codeSignatureVerified === true &&
+          verification.macos.architectureVerified === true &&
+          verification.macos.updateArchiveBytesVerified === true &&
+          verification.macos.dmg?.dmgVerified === true &&
+          verification.macos.dmg.applicationBytesVerified === true &&
+          verification.macos.dmg.codeSignatureVerified === true &&
+          SHA256.test(verification.macos.dmg.sha256)
+        : Number.isSafeInteger(verification.nsisResourceCount) &&
+          verification.nsisResourceCount > 0) &&
       verification.componentArchiveCount === RUNTIME_COMPONENTS.length &&
       verification.installer?.updaterSignatureVerified === true,
     "Publication requires successful full online release verification",
@@ -180,8 +202,8 @@ export async function prepareOnlinePublication({
     manifest.schemaVersion === 1 &&
       manifest.edition === "online" &&
       manifest.applicationVersion === version &&
-      manifest.platform === COMPONENT_PLATFORM &&
-      manifest.channel === CHANNEL &&
+      manifest.platform === platform &&
+      manifest.channel === channel &&
       SHA256.test(manifest.catalogSha256) &&
       manifest.catalogSha256 === verification.catalogSha256,
     "Publish manifest identity changed or does not match the verified catalog",
@@ -189,16 +211,16 @@ export async function prepareOnlinePublication({
   exactKeys(manifest.feed, ["localPath", "objectKey", "url"], "Publish feed");
   requireValue(
     manifest.feed.localPath === path.join(directory, "latest.json") &&
-      manifest.feed.objectKey === tosUpdatesObjectKey(`${CHANNEL}/latest.json`) &&
+      manifest.feed.objectKey === tosUpdatesObjectKey(`${channel}/latest.json`) &&
       manifest.feed.url === urlForKey(manifest.feed.objectKey),
     "Feed path escapes the dedicated online channel",
   );
   requireValue(
     Array.isArray(manifest.artifacts) &&
-      manifest.artifacts.length === 2 &&
+      manifest.artifacts.length === (isMac ? 4 : 2) &&
       Array.isArray(manifest.componentArchives) &&
       manifest.componentArchives.length === RUNTIME_COMPONENTS.length,
-    "Publish exactly the NSIS installer/signature and seven ZIP components",
+    "Publish exactly the native edition artifacts and seven ZIP components",
   );
   const objects = [];
   const ids = new Set();
@@ -219,16 +241,27 @@ export async function prepareOnlinePublication({
         archive.localPath ===
           path.join(root, ".cache/runtime-components/packages", `${archive.sha256}.zip`) &&
         archive.url ===
-          runtimeComponentArchiveUrl(archive.id, archive.sha256, { applicationVersion: version }),
+          runtimeComponentArchiveUrl(archive.id, archive.sha256, {
+            applicationVersion: version,
+            platform,
+          }),
       "Component upload is outside the trusted catalog/cache contract",
     );
     ids.add(archive.id);
     const objectKey = tosUpdatesObjectKey(
-      `components/${COMPONENT_PLATFORM}/${version}/${archive.id}-${archive.sha256}.zip`,
+      `components/${platform}/${version}/${archive.id}-${archive.sha256}.zip`,
     );
     objects.push({ ...archive, objectKey, contentType: "application/zip" });
   }
-  const installerName = `无限画布_${version}_x64-online-setup.exe`;
+  const installerName = updaterName(version, platform);
+  const artifactPaths = isMac
+    ? [
+        `macos/${installerName}`,
+        `macos/${installerName}.sig`,
+        `dmg/无限画布_${version}_${platform === "darwin-aarch64" ? "aarch64" : "x64"}-online.dmg`,
+        "helper/install-macos.sh",
+      ]
+    : [`nsis/${installerName}`, `nsis/${installerName}.sig`];
   for (const artifact of manifest.artifacts) {
     exactKeys(
       artifact,
@@ -237,10 +270,9 @@ export async function prepareOnlinePublication({
     );
     const expectedName = path.basename(artifact.path);
     requireValue(
-      [installerName, `${installerName}.sig`].includes(expectedName) &&
-        artifact.path === `nsis/${expectedName}` &&
+      artifactPaths.includes(artifact.path) &&
         artifact.localPath === path.join(directory, artifact.path) &&
-        artifact.objectKey === tosUpdatesObjectKey(`${CHANNEL}/${expectedName}`) &&
+        artifact.objectKey === tosUpdatesObjectKey(`${channel}/${expectedName}`) &&
         artifact.url === urlForKey(artifact.objectKey) &&
         SHA256.test(artifact.sha256) &&
         Number.isSafeInteger(artifact.size) &&
@@ -249,7 +281,7 @@ export async function prepareOnlinePublication({
     );
     objects.push({
       ...artifact,
-      contentType: expectedName.endsWith(".sig") ? "text/plain" : "application/octet-stream",
+      contentType: /\.(sig|sh)$/.test(expectedName) ? "text/plain" : "application/octet-stream",
     });
   }
   requireValue(
@@ -260,12 +292,17 @@ export async function prepareOnlinePublication({
   );
   const feedBody = await regularBytes(manifest.feed.localPath, root);
   const feed = JSON.parse(feedBody);
-  assertFeed(feed, version);
-  const signature = (await regularBytes(path.join(directory, `nsis/${installerName}.sig`), root))
+  assertFeed(feed, version, platform);
+  const signature = (
+    await regularBytes(
+      path.join(directory, `${isMac ? "macos" : "nsis"}/${installerName}.sig`),
+      root,
+    )
+  )
     .toString("utf8")
     .trim();
   requireValue(
-    feed.platforms[COMPONENT_PLATFORM].signature === signature,
+    feed.platforms[platform].signature === signature,
     "Feed signature changed after verification",
   );
   for (const entry of objects) await assertLocalObject(entry, root);
@@ -273,8 +310,8 @@ export async function prepareOnlinePublication({
     schemaVersion: 1,
     edition: "online",
     applicationVersion: version,
-    platform: COMPONENT_PLATFORM,
-    channel: CHANNEL,
+    platform,
+    channel,
     catalogSha256: manifest.catalogSha256,
     directory,
     root,
@@ -290,7 +327,7 @@ async function defaultTransportFactory(options) {
   return createOnlineUpdateTransport(options);
 }
 
-function assertRemoteFeed(remote) {
+function assertRemoteFeed(remote, platform) {
   if (!remote) return;
   requireValue(
     Buffer.isBuffer(remote.body) &&
@@ -300,7 +337,7 @@ function assertRemoteFeed(remote) {
       remote.etag.length > 0,
     "Existing online feed lacks a bounded body or concurrency ETag",
   );
-  assertFeed(JSON.parse(remote.body));
+  assertFeed(JSON.parse(remote.body), undefined, platform);
 }
 
 function sameRemoteFeed(a, b) {
@@ -359,12 +396,18 @@ async function publishImmutable(transport, entry, onProgress) {
 export async function publishOnlineEdition({
   distributionDirectory,
   root = COMPONENT_REPO_ROOT,
+  platform = COMPONENT_PLATFORM,
   transportFactory = defaultTransportFactory,
   verifyRelease = verifyEditionRelease,
   dryRun = false,
   onProgress = () => {},
 }) {
-  const plan = await prepareOnlinePublication({ distributionDirectory, root, verifyRelease });
+  const plan = await prepareOnlinePublication({
+    distributionDirectory,
+    root,
+    platform,
+    verifyRelease,
+  });
   const report = {
     schemaVersion: 1,
     edition: plan.edition,
@@ -394,7 +437,7 @@ export async function publishOnlineEdition({
     objectKey: plan.feed.objectKey,
     maxBytes: JSON_BUDGET,
   });
-  assertRemoteFeed(previous);
+  assertRemoteFeed(previous, plan.platform);
   if (previous) {
     const comparison = compareVersions(plan.applicationVersion, JSON.parse(previous.body).version);
     requireValue(comparison >= 0, "Refusing to downgrade the online update channel");
@@ -413,12 +456,23 @@ export async function publishOnlineEdition({
   const finalVerification = await verifyRelease({
     distributionDirectory: plan.directory,
     root: plan.root,
+    platform: plan.platform,
     requireSourceFreshness: true,
   });
   requireValue(
     finalVerification?.verified === true &&
       finalVerification.edition === "online" &&
       finalVerification.applicationVersion === plan.applicationVersion &&
+      finalVerification.platform === plan.platform &&
+      (plan.platform === "windows-x86_64" ||
+        (finalVerification.bundleResourceCount === plan.verification.bundleResourceCount &&
+          finalVerification.macos?.codeSignatureVerified === true &&
+          finalVerification.macos.architectureVerified === true &&
+          finalVerification.macos.updateArchiveBytesVerified === true &&
+          finalVerification.macos.dmg?.dmgVerified === true &&
+          finalVerification.macos.dmg.applicationBytesVerified === true &&
+          finalVerification.macos.dmg.codeSignatureVerified === true &&
+          finalVerification.macos.dmg.sha256 === plan.verification.macos.dmg.sha256)) &&
       finalVerification.catalogSha256 === plan.catalogSha256 &&
       finalVerification.installer?.sha256 === plan.verification.installer.sha256 &&
       finalVerification.installer?.updaterSignatureVerified === true &&
@@ -437,7 +491,7 @@ export async function publishOnlineEdition({
     objectKey: plan.feed.objectKey,
     maxBytes: JSON_BUDGET,
   });
-  assertRemoteFeed(current);
+  assertRemoteFeed(current, plan.platform);
   requireValue(
     sameRemoteFeed(previous, current),
     "Online feed changed concurrently; payloads are safe but the channel was not modified",
@@ -456,7 +510,7 @@ export async function publishOnlineEdition({
   let backup = null;
   if (previous) {
     const sha256 = componentBytesSha256(previous.body);
-    const objectKey = tosUpdatesObjectKey(`${CHANNEL}/backups/${sha256}.json`);
+    const objectKey = tosUpdatesObjectKey(`${plan.channel}/backups/${sha256}.json`);
     backup = {
       objectKey,
       url: urlForKey(objectKey),
@@ -483,7 +537,7 @@ export async function publishOnlineEdition({
       objectKey: plan.feed.objectKey,
       maxBytes: JSON_BUDGET,
     });
-    assertRemoteFeed(confirmed);
+    assertRemoteFeed(confirmed, plan.platform);
     requireValue(
       confirmed && confirmed.body.equals(plan.feedBody),
       "Online feed origin read-back does not match the committed release",

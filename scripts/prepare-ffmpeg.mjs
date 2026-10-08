@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { ensureWindowsFfmpegLicense } from "./ffmpeg-runtime-license.mjs";
 import { assertComponentRoot } from "./runtime-component-catalog.mjs";
+import { ensureMacExecutableSignature } from "./macos-runtime-signature.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const destination = path.join(root, "src-tauri", "resources", "ffmpeg");
@@ -165,6 +166,7 @@ async function fetchDarwinFFprobe(ffprobePath) {
     }
     cpSync(candidate, ffprobePath);
     chmodSync(ffprobePath, 0o755);
+    ensureMacExecutableSignature(ffprobePath);
     console.log(
       `[ffmpeg:prepare] macOS ffprobe 就绪：${probeBinary(ffprobePath, "ffprobe version")}`,
     );
@@ -310,6 +312,18 @@ async function prepare() {
     (!existsSync(ffprobePath) ||
       (!lstatSync(ffprobePath).isSymbolicLink() && sha256(ffprobePath) === existing.ffprobeSha256));
   if (ready) {
+    if (isDarwin) {
+      ensureMacExecutableSignature(ffmpegPath);
+      if (existsSync(ffprobePath)) ensureMacExecutableSignature(ffprobePath);
+      existing = {
+        ...existing,
+        platform: process.platform,
+        arch: process.arch,
+        ffmpegSha256: sha256(ffmpegPath),
+        ffprobeSha256: existsSync(ffprobePath) ? sha256(ffprobePath) : null,
+      };
+      writeFileSync(manifestPath, JSON.stringify(existing, null, 2) + "\n");
+    }
     if (process.platform === "win32") {
       const licensed = ensureWindowsFfmpegLicense(destination, existing);
       if (JSON.stringify(existing) !== JSON.stringify(licensed))
@@ -362,6 +376,7 @@ async function prepare() {
       }
     }
 
+    if (isDarwin) ensureMacExecutableSignature(ffmpegPath);
     const { version, firstLine } = probeVersion(ffmpegPath);
     console.log(`[ffmpeg:prepare] 引擎就绪：${firstLine}`);
 
@@ -369,6 +384,7 @@ async function prepare() {
     if (isDarwin && !existsSync(ffprobePath)) {
       await fetchDarwinFFprobe(ffprobePath);
     }
+    if (isDarwin && existsSync(ffprobePath)) ensureMacExecutableSignature(ffprobePath);
 
     let preparedManifest = {
       schemaVersion: 1,
@@ -379,6 +395,8 @@ async function prepare() {
       ffprobeUnavailable: !existsSync(ffprobePath),
       preparedAt: new Date().toISOString(),
     };
+    if (isDarwin)
+      preparedManifest = { ...preparedManifest, platform: process.platform, arch: process.arch };
     if (process.platform === "win32")
       preparedManifest = ensureWindowsFfmpegLicense(destination, preparedManifest);
     writeFileSync(manifestPath, JSON.stringify(preparedManifest, null, 2) + "\n");

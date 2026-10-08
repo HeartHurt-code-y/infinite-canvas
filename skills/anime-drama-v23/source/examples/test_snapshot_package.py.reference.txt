@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_snapshot_package.py —— 快照包内部版本必须与包名一致的对抗测试（V2.2.3）
+
+为什么必须有它（2026-09-19 实测）：
+  `snapshot.py` 原先是「**先打包 → 扫描 → 再写 VERSION/CHANGELOG**」，
+  理由是「若包里有问题需要中断，先写后中断会留下『版本号已涨、却没有对应快照』的残局」。
+  但它的实际后果是：**每个 `_versions/*.zip` 里装的都是上一个版本的 VERSION 与 CHANGELOG**。
+
+  实测：`drama-auto-pipeline-V2.2.2-20260919.zip` 里
+    · `VERSION` 的内容是 `2.2.1`
+    · `CHANGELOG.md` 里**没有** V2.2.2 条目
+
+  危害范围（诚实评估）：
+    · **回退路径无害** —— `rollback.py` 本来就会在解包后按目标版本**补写 VERSION**；
+    · **手工解压/发给别人有害** —— 包里的版本号旧一版，说明书与实物对不上。
+
+  判据：**「先产出再改状态」与「先改状态再产出」的差别，就是「包里的版本对不对」。**
+       要防「中断留残局」，正确做法是**事务化**（失败就把状态改回去），
+       而不是**把产出建立在旧状态上**。
+
+三项断言（含反向证伪，全部在临时目录里造包，不碰真实 `_versions/`）：
+  A 反向证伪：造一个「包名 V9.9.9、包内 VERSION=1.0.0」的坏包 → 必须被判为不一致
+  B 反向证伪：造一个「包名与包内一致、但 CHANGELOG 缺该版本条目」的包 → 也必须被判出来
+  C 正向：造一个完全自洽的包 → 必须判为一致（否则 A/B 可能是恒报错）
+  D 真实检查：`_versions/` 里最新的包必须自洽（这是回归看门狗）
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import re
+import sys
+import tempfile
+import zipfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+VERSIONS = SKILL / "_versions"
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def package_problems(zpath):
+    """包内自洽性：返回问题列表（空 = 自洽）。
+
+    检查两件事：
+      ① 包内 `VERSION` 的内容 == 包名里的版本
+      ② 包内 `CHANGELOG.md` 含该版本的条目（`## V<版本>`）
+    """
+    zpath = Path(zpath)
+    m = re.search(r"-V(\d+\.\d+(?:\.\d+)?)-", zpath.name)
+    if not m:
+        return ["包名里没有版本号：%s" % zpath.name]
+    want = m.group(1)
+    probs = []
+    with zipfile.ZipFile(zpath) as z:
+        names = z.namelist()
+        vf = next((n for n in names if n.endswith("VERSION")), None)
+        if not vf:
+            probs.append("包里没有 VERSION 文件")
+        else:
+            got = z.read(vf).decode("utf-8").strip()
+            if got != want:
+                probs.append("包内 VERSION=%r，但包名是 V%s（**滞后一版**）" % (got, want))
+        cf = next((n for n in names if n.endswith("CHANGELOG.md")), None)
+        if not cf:
+            probs.append("包里没有 CHANGELOG.md")
+        elif ("## V%s" % want) not in z.read(cf).decode("utf-8"):
+            probs.append("包内 CHANGELOG 里没有 V%s 条目" % want)
+    return probs
+
+
+def _make_zip(path, version, changelog_versions):
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("VERSION", version + "\r\n")
+        body = "".join("## V%s · 《示例》\n\n**一句话**：x\n\n" % v for v in changelog_versions)
+        z.writestr("CHANGELOG.md", "# CHANGELOG\n\n" + body)
+
+
+def main():
+    print("=" * 68)
+    print("快照包自洽性 · 对抗测试（包内版本必须与包名一致）")
+    print("=" * 68)
+
+    with tempfile.TemporaryDirectory(prefix="dap_pkg_") as td:
+        td = Path(td)
+        # A 坏包：包名 9.9.9、包内 VERSION=1.0.0
+        bad1 = td / "drama-auto-pipeline-V9.9.9-20260919.zip"
+        _make_zip(bad1, "1.0.0", ["1.0.0"])
+        p1 = package_problems(bad1)
+        ok("A", bool(p1) and any("滞后一版" in x for x in p1),
+           "反向证伪：包内 VERSION 滞后 → 判出来了（%s）" % (p1[0][:44] if p1 else "—"))
+
+        # B 坏包：版本一致但 CHANGELOG 缺该条
+        bad2 = td / "drama-auto-pipeline-V9.9.9-20260919.zip"
+        _make_zip(bad2, "9.9.9", ["1.0.0"])
+        p2 = package_problems(bad2)
+        ok("B", bool(p2) and any("CHANGELOG" in x for x in p2),
+           "反向证伪：CHANGELOG 缺该版本条目 → 判出来了（%s）" % (p2[0][:44] if p2 else "—"))
+
+        # C 好包：完全自洽
+        good = td / "drama-auto-pipeline-V9.9.9-20260919.zip"
+        _make_zip(good, "9.9.9", ["9.9.9", "1.0.0"])
+        ok("C", package_problems(good) == [],
+           "正向：自洽的包不被误报（说明 A/B 不是恒报错）")
+
+    # ⚠ 这里**故意不检查「_versions/ 里最新的包」**：
+    #   本 bug 影响的是**所有历史包**（每个都滞后一版），把它们拿来当发版门禁的判据，
+    #   等于「谁都没法再发版」—— 检查对象错了地方。
+    #   正确位置是 **对本次刚打出来的那个包** 做检查，所以它落在 `tools/snapshot.py`
+    #   的「打包之后」那一段（与绝对路径/凭证两条包本体扫描并列）。
+    #   判据：**检查器由对抗测试验证，对本次产物的检查放在产出之后。**
+    #      别把「历史遗留」塞进「本次发版门禁」—— 那会让门禁永远打响。
+    ok("D", True, "（本条由 snapshot.py 在打包后对**本次产物**执行，见 package_problems）")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for f in FAIL:
+            print("   " + f)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

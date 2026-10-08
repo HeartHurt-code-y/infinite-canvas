@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""离线单测：**双池并行调度**（V1.0.4）—— 零算力、零网络、零真钱。
+
+为什么必须单独测：`examples/smoke_test.py` 跑的是离线全链，**永远碰不到**
+「两条车道同时抢一个队列」这条路径；而这条路径上有两个错法**都不会报错**，
+只会在交付物里留下一个残缺的成片：
+
+  ① 真钱封顶被绕过 —— 用户设了「最多 3 段走企业级」，结果悄悄跑了 20 段 = 账单爆表
+  ② 队列静默丢活 —— 企业级车道退役时把段留在队列里，既没跑也没记 failed，
+     成片凭空短一截，而账面上一切正常（这是双池并行**最阴**的一种错）
+
+另外把「池满」的语义钉死：池满 = **没烧钱** → 放回队列重试，绝不能记成 failed。
+
+用法：python examples/test_parallel_lanes.py
+"""
+import contextlib
+import csv
+import io
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REF = os.path.join(os.path.dirname(HERE), "references")
+sys.path.insert(0, REF)
+import batch_run_mv as bm  # noqa: E402
+import rh_client as rh  # noqa: E402
+
+FAIL = [0]
+PASS = [0]
+
+
+def ok(name, got, want=True):
+    if got == want:
+        PASS[0] += 1
+        print(f"  ✅ {name}")
+    else:
+        FAIL[0] += 1
+        print(f"  ❌ {name}：期望 {want!r}，实得 {got!r}")
+
+
+def raises(name, fn, exc=Exception):
+    try:
+        fn()
+    except exc as e:
+        PASS[0] += 1
+        print(f"  ✅ {name}（{type(e).__name__}: {str(e)[:60]}）")
+        return True
+    except Exception as e:  # noqa: BLE001
+        FAIL[0] += 1
+        print(f"  ❌ {name}：抛了 {type(e).__name__} 而不是 {exc.__name__}")
+        return False
+    FAIL[0] += 1
+    print(f"  ❌ {name}：本该抛 {exc.__name__} 却放行了")
+    return False
+
+
+class Args:
+    """只带 run_one / run_parallel 真正会读的字段。"""
+
+    def __init__(self, **kw):
+        self.instance_type = "plus"
+        self.interval = 1
+        self.timeout = 60
+        self.workers = 3
+        self.workers_e = 3
+        self.enterprise_parallel_max = 0
+        self.dry_run = False
+        self.new_seed = False
+        self.skip_gate = True
+        self._key_e = "EK"
+        self.allow_enterprise = False
+        self._degrade_bad = 0
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def make_project(root, n=6):
+    """造一个最小项目骨架：分镜脚本 + 状态 + 每段目录。"""
+    os.makedirs(os.path.join(root, "分镜脚本"), exist_ok=True)
+    os.makedirs(os.path.join(root, "状态"), exist_ok=True)
+    segs = []
+    for i in range(1, n + 1):
+        d = os.path.join(root, "视频", f"shot_{i:02d}_k")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "prompt.txt"), "w", encoding="utf-8") as f:
+            f.write("p")
+        segs.append({"seq": i, "kw": "k", "dur": 10.0,
+                     "music_window": {"start": (i - 1) * 10.0, "end": i * 10.0, "dur": 10.0},
+                     "sing_mode": "off", "shot_size": "MS", "_dir": d})
+    return {"song": {"duration": n * 10.0}, "segments": segs}
+
+
+def stub_rh(delay=0.0, ent_busy_seqs=()):
+    """把「提交 → 轮询 → 下载 → 贴合」全链打成桩，只留调度逻辑是真的。"""
+    calls = []
+    lock = threading.Lock()
+
+    def submit(key, **kw):
+        with lock:
+            calls.append(key)
+        if key == "EK" and kw.get("_probe_seq") in ent_busy_seqs:
+            raise RuntimeError('{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}')
+        return f"T-{key}-{len(calls)}"
+
+    def poll(key, tid, **kw):
+        if delay:
+            time.sleep(delay)
+        return [{"url": "[项目内资源]" + tid, "coins": 0 if key == "EK" else 7,
+                 "money": 1.5 if key == "EK" else 0, "cost_s": 30}]
+
+    rh.submit_task = submit
+    rh.poll_task = poll
+    rh.pick_video = lambda r: r[0]
+    rh.download = lambda url, p: open(p, "wb").write(b"v")
+    bm.conform = lambda src, dst, target, frames=None: open(dst, "wb").write(b"v")
+    bm.ffprobe_dur = lambda p: 10.0
+    bm.build_injection = lambda *a, **k: ([], None, {})
+    bm.plan_image_uploads = lambda *a, **k: []
+    bm.bake_workflow = lambda *a, **k: (None, [])
+    bm.upload_cached = lambda *a, **k: "u"
+    return calls
+
+
+REAL = {}
+
+
+def save_real():
+    for n in ("submit_task", "poll_task", "pick_video", "download"):
+        REAL[n] = getattr(rh, n)
+    for n in ("conform", "ffprobe_dur", "build_injection", "plan_image_uploads",
+              "bake_workflow", "upload_cached", "run_one", "BUSY_BACKOFF_BASE",
+              "BUSY_GIVE_UP_SEC", "SUPERVISE_TICK"):
+        REAL[n] = getattr(bm, n)
+
+
+def restore_real():
+    for n, v in REAL.items():
+        setattr(rh if hasattr(rh, n) else bm, n, v)
+
+
+def main():
+    save_real()
+    bm.BUSY_BACKOFF_BASE = 0.02                   # 退避压到 20ms，否则池满重试测试太慢
+    bm.BUSY_GIVE_UP_SEC = 0.25                    # 池满等 0.25s 就退役（真是 30 分钟）
+    bm.SUPERVISE_TICK = 0.05                      # 巡检压到 50ms，否则并行测试墙钟下限是 5s
+    root = tempfile.mkdtemp(prefix="mvpar_")
+    sb = make_project(root, 6)
+
+    # ================= ① 池满的语义：没烧钱 → 不许算失败 =================
+    print("① 「池满」= 没烧钱：必须是可重试的 SubmitBusy，不能是普通异常")
+    rh.submit_task = lambda k, **kw: (_ for _ in ()).throw(
+        RuntimeError('{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}'))
+    raises("QUEUE_FULL → SubmitBusy",
+           lambda: bm.submit_to_lane({"id": "1"}, [], None, Args(), "EK"),
+           bm.SubmitBusy)
+    stub_rh()
+
+    for msg, label in [
+        ('{"code":803,"msg":"APIKEY_INVALID"}', "key 无效 → 照常抛（重试一万次也一样）"),
+        ('{"code":805,"msg":"余额不足"}', "余额不足 → 照常抛（不是瞬时错误）"),
+    ]:
+        def f(m=msg):
+            rh.submit_task = lambda k, **kw: (_ for _ in ()).throw(RuntimeError(m))
+            try:
+                return bm.submit_to_lane({"id": "1"}, [], None, Args(), "EK")
+            finally:
+                stub_rh()
+        try:
+            f()
+            FAIL[0] += 1
+            print(f"  ❌ {label}：本该抛异常却放行了")
+        except bm.SubmitBusy:
+            FAIL[0] += 1
+            print(f"  ❌ {label}：误判成可重试的池满 → 会无限重试")
+        except Exception:
+            PASS[0] += 1
+            print(f"  ✅ {label}")
+    ok("TRANSIENT_PAT 吃 QUEUE_FULL",
+       bool(bm.TRANSIENT_PAT.search("APIKEY_TASK_QUEUE_FULL")))
+    ok("TRANSIENT_PAT 不吃 APIKEY_INVALID",
+       bool(bm.TRANSIENT_PAT.search("APIKEY_INVALID")), False)
+    ok("TRANSIENT_PAT 不吃 余额不足",
+       bool(bm.TRANSIENT_PAT.search("余额不足")), False)
+
+    # ================= ② run_one 三态：池满返回 None，不写 failed =================
+    print("② run_one 三态：池满 → (None, msg)，且**不**把段写成 failed")
+    stub_rh()
+    seg = sb["segments"][0]
+    st = {}
+    rh.submit_task = lambda k, **kw: (_ for _ in ()).throw(
+        RuntimeError('{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}'))
+    got = bm.run_one(root, sb, seg, {"id": "1"}, "CK", Args(), st, {},
+                     lane={"name": "consumer", "key": "CK"})
+    ok("池满返回 None（可重试）", got[0], None)
+    ok("状态**没有**被写成 failed", (st.get("1") or {}).get("status") != "failed")
+
+    # ================= ③ 真钱封顶不被绕过 =================
+    print("③ 真钱封顶：cap=2 时企业级取件 ≤ 2，且所有段都要被跑完")
+    stub_rh(delay=0.05)
+    root3 = tempfile.mkdtemp(prefix="mvcap_")
+    sb3 = make_project(root3, 8)
+    a3 = Args(enterprise_parallel_max=2, workers=3, workers_e=3)
+    taken = []
+    lock = threading.Lock()
+
+    def fake_run_one(root_, sb_, seg_, cfg_, key_, args_, st_, df_, lane=None):
+        with lock:
+            taken.append(lane["name"] if lane else "none")
+        time.sleep(0.05)
+        with lock:
+            df_[seg_["seq"]] = True
+        return True, None
+
+    bm.run_one = fake_run_one
+    fails3 = bm.run_parallel(root3, sb3, {"id": "1"}, a3, {}, {}, "CK", "EK",
+                             sb3["segments"])
+    n_ent = taken.count("enterprise")
+    ok(f"企业级取件数 {n_ent} ≤ 封顶 2", n_ent <= 2)
+    ok(f"8 段全部跑完（实得 {len(taken)}）", len(taken), 8)
+    ok("没有失败段", len(fails3), 0)
+
+    # ================= ④ 不许静默丢活 + 不许把进程挂死 =================
+    print("④ 池满退役后的兜底：队列里剩的段必须有人跑（最阴的那类错）")
+    stub_rh(delay=0.05)
+    root4 = tempfile.mkdtemp(prefix="mvdrain_")
+    sb4 = make_project(root4, 5)
+    a4 = Args(enterprise_parallel_max=0)
+    ent_tries = [0]
+    ran = []
+    lock4 = threading.Lock()
+
+    def fake_run_one_busy(root_, sb_, seg_, cfg_, key_, args_, st_, df_, lane=None):
+        """企业级车道**每次都池满** → 等够 BUSY_GIVE_UP_SEC 必退役；剩下的必须回落消费级。"""
+        nm = lane["name"] if lane else "none"
+        if nm == "enterprise":
+            with lock4:
+                ent_tries[0] += 1
+            return None, "APIKEY_TASK_QUEUE_FULL"
+        with lock4:
+            ran.append(seg_["seq"])
+            df_[seg_["seq"]] = True
+        time.sleep(0.02)
+        return True, None
+
+    bm.run_one = fake_run_one_busy
+    with contextlib.redirect_stdout(io.StringIO()):
+        bm.run_parallel(root4, sb4, {"id": "1"}, a4, {}, {}, "CK", "EK", sb4["segments"])
+    ok(f"企业级车道确实退役了（试了 {ent_tries[0]} 次）", ent_tries[0] >= 2)
+    ok(f"5 段全部被跑完（实得 {len(ran)}）", sorted(ran), [1, 2, 3, 4, 5])
+
+    # ④b — 两条车道**全都**池满：必须仍然收敛，不能变成转不停的死循环
+    print("④b 池子全满时也不许挂死：两条车道都退役 → 队列兜底把活干完")
+    root4b = tempfile.mkdtemp(prefix="mvdead_")
+    sb4b = make_project(root4b, 4)
+    ran_b = []
+    lock4b = threading.Lock()
+
+    def fake_run_one_allbusy(root_, sb_, seg_, cfg_, key_, args_, st_, df_, lane=None):
+        if lane is not None:                       # 两条车道都池满
+            return None, "APIKEY_TASK_QUEUE_FULL"
+        with lock4b:                               # 兜底路径（lane=None）能干活
+            ran_b.append(seg_["seq"])
+            df_[seg_["seq"]] = True
+        return True, None
+
+    bm.run_one = fake_run_one_allbusy
+    t_dead = time.time()
+    with contextlib.redirect_stdout(io.StringIO()):
+        bm.run_parallel(root4b, sb4b, {"id": "1"}, a4, {}, {}, "CK", "EK", sb4b["segments"])
+    used = time.time() - t_dead
+    ok(f"没有挂死（{used:.1f}s 内收敛）", used < 30)
+    ok(f"4 段最终全部被兜底跑完（实得 {len(ran_b)}）", sorted(ran_b), [1, 2, 3, 4])
+
+    # ================= ⑤ 两条车道真的同时在跑 =================
+    print("⑤ 并行性：两条车道必须**同时**有段在跑（不是先后接力）")
+    stub_rh(delay=0.6)
+    root5 = tempfile.mkdtemp(prefix="mvpar2_")
+    sb5 = make_project(root5, 6)
+    a5 = Args(workers=3, workers_e=3)
+    inflight = [0]
+    peak = [0]
+    lock5 = threading.Lock()
+
+    def fake_run_one5(root_, sb_, seg_, cfg_, key_, args_, st_, df_, lane=None):
+        with lock5:
+            inflight[0] += 1
+            peak[0] = max(peak[0], inflight[0])
+        time.sleep(0.3)
+        with lock5:
+            inflight[0] -= 1
+            df_[seg_["seq"]] = True
+        return True, None
+
+    bm.run_one = fake_run_one5
+    t0 = time.time()
+    bm.run_parallel(root5, sb5, {"id": "1"}, a5, {}, {}, "CK", "EK", sb5["segments"])
+    wall = time.time() - t0
+    ok(f"峰值并发 {peak[0]} ≥ 2（两车道同时在跑）", peak[0] >= 2)
+    print(f"     （6 段 × 0.3s 串行应 ≥1.8s，实测墙钟 {wall:.2f}s → "
+          f"并行度 ≈ {1.8/max(wall,1e-6):.1f}x）")
+
+    # ================= ⑥ 台账加列不许让老项目崩 =================
+    print("⑥ append_csv：给台账加列时老行必须保住（否则老项目再跑一次就崩）")
+    p = os.path.join(tempfile.mkdtemp(prefix="mvcsv_"), "台账.csv")
+    bm.append_csv(p, {"seq": 1, "供应商报告费用": 7}, ["seq", "供应商报告费用"])
+    bm.append_csv(p, {"seq": 2, "供应商报告费用": 8, "钱包元": "1.5000"},
+                  ["seq", "供应商报告费用", "钱包元"])
+    with open(p, encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    ok("老行保住", [r["seq"] for r in rows], ["1", "2"])
+    ok("新列可用", rows[1].get("钱包元"), "1.5000")
+    ok("老行新列为空", rows[0].get("钱包元"), "")
+
+    # ================= ⑦ 留痕 =================
+    print("⑦ 留痕：调度日志必须记下「授权并行」「车道退役」")
+    sp = os.path.join(root4, "状态", "调度日志.csv")
+    txt = open(sp, encoding="utf-8-sig").read() if os.path.isfile(sp) else ""
+    ok("有「双池并行启用」", "双池并行启用" in txt)
+    ok("有「车道退役」留痕", "车道退役" in txt)
+    ok("有「计费口径」列", "计费口径" in txt)
+
+    # ================= ⑧ 开跑前的真钱预检（这段静默失效＝用户看不到账单警告）=================
+    print("⑧ main() 真钱预检：必须把「并行」和「封顶」明说给用户看（零提交）")
+    root8 = tempfile.mkdtemp(prefix="mvpre_")
+    sb8 = make_project(root8, 3)
+    with open(os.path.join(root8, "分镜脚本", "storyboard.json"),
+              "w", encoding="utf-8") as f:
+        json.dump(sb8, f, ensure_ascii=False)
+    st8 = {}
+    for s in sb8["segments"]:                      # 全部标 done → todo 为空 → 绝不提交
+        with open(os.path.join(s["_dir"], "output.mp4"), "wb") as f:
+            f.write(b"v")
+        st8[str(s["seq"])] = {"status": "done"}
+    with open(os.path.join(root8, "状态", "rh_state.json"), "w", encoding="utf-8") as f:
+        json.dump(st8, f, ensure_ascii=False)
+
+    argv = ["batch_run_mv.py", "--project-root", root8, "--api-key", "CK",
+            "--api-key-e", "EK", "--enterprise-parallel",
+            "--enterprise-parallel-max", "3", "--skip-gate", "--no-compose"]
+    buf = io.StringIO()
+    old_argv = sys.argv
+    sys.argv = argv
+    try:
+        with contextlib.redirect_stdout(buf):
+            bm.main()
+    finally:
+        sys.argv = old_argv
+    pout = buf.getvalue()
+    ok("预检报了「双池并行」", "双池并行" in pout)
+    ok("预检报了「真钱封顶 最多 3 段」", "真钱封顶" in pout and "最多 3 段" in pout)
+    ok("预检说清是「按秒扣钱包真钱」（不是还在走币）", "按秒扣钱包真钱" in pout)
+    ok("已完成的段被跳过、没有被重跑", "已完成，跳过" in pout)
+    ok("授权动作已写进调度日志", os.path.isfile(os.path.join(root8, "状态", "调度日志.csv")))
+
+    restore_real()
+    print(f"\n单测结果：{PASS[0]} 通过 / {FAIL[0]} 失败")
+    print("（本测试不联网、不花钱、不写项目目录，全部在临时目录里）")
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit(1 if FAIL[0] else 0)

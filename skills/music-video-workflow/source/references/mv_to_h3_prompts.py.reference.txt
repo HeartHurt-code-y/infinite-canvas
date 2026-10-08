@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""MV 分镜 → 项目视频模型 六段式提示词（mv-auto-pipeline · 铁律 C2/C3）
+
+口径基线 = 项目视频模型-ref2va-optimizer V2.4（铁律 1~41）。与短剧 skill 的三个关键差异：
+
+  ① **是唱歌，不是说台词** —— 发声行用官方框架 `人物 (S1) sings: <d>[中文]歌词</d>`
+     （铁律 35 官方 `base-en §4.4` 逐字依据）。严禁写成 `says:` 或「角色说"…"」。
+  ② **MV 不带 `<Audio N>`** —— 声音全部来自歌曲母带（工作流切窗注入），
+     提示词里出现 `<Audio N>` 会 `LBL-UNDEF`（没有上传对应音频）。
+  ③ **口型是分段开关，不是每句都开** ——
+     · `sing_mode=sync`：写 sings 行 + 声明口型严格跟随音乐人声
+     · `sing_mode=no_sync`：**不得出现 sings/says**，必须声明「嘴唇不跟随歌词开合」
+       并在 Negative 里压掉自动对口型
+
+其它强制项：六段齐全 / 图片上传顺序块 / 逐图去污染 / R34 表演指导行（唱歌专用模板）/
+R36 外语四层语言控制 / R39 17 帧对齐后的实际时长 / 收势 + 下段切点 / Negative ≤10 词。
+
+用法：
+  python mv_to_h3_prompts.py --project-root "<项目根>" --dump-prompts
+  python mv_to_h3_prompts.py --project-root "<项目根>" --dump-prompts --no-validate
+"""
+import argparse
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+
+H3_SKILL = os.path.join(os.path.expanduser("~"), ".project_provider", "skills", "项目视频模型-ref2va-optimizer")
+LANG_MARK = {"zh": "Chinese", "ja": "Japanese", "en": "English"}
+LANG_ZH = {"zh": "中文", "ja": "日语", "en": "英语"}
+BGM = "N/A"
+
+# ---- R34 活人感表演指导行（唱歌专用，英文模板；`detailed_description` 的 [Shot 1] 之前）----
+ACTING = {
+    "intro": (
+        "Acting direction for the whole sequence: she is not performing for an audience — "
+        "she is telling one person something true. Keep the eyes alive and moving between "
+        "the listener and the middle distance, let the breath shape the line before the "
+        "mouth opens, and let one small unplanned gesture (a swallowed pause, a hand that "
+        "almost reaches out and doesn't) land between phrases. The jaw stays relaxed and "
+        "the mouth follows the vocal naturally — no lip-sync exaggeration, no posing for "
+        "the lens."
+    ),
+    "chorus": (
+        "Acting direction for the whole sequence: the feeling breaks through here. Weight "
+        "shifts forward, the chin lifts on the first word, one gesture carries the phrase "
+        "instead of decorating it. Keep the micro-expressions real — a blink landing on "
+        "the phrase change, eyes wet but not crying, the breath visible just before the "
+        "high note. Sing to a person, never to a music-video camera; the mouth tracks the "
+        "vocal naturally and the jaw never locks."
+    ),
+    "bridge": (
+        "Acting direction for the whole sequence: she has stopped explaining and started "
+        "confessing. Stillness reads as strength here — a held gaze, a slow exhale, one "
+        "hand closing around nothing. Let the phrase end before the reaction lands, and "
+        "let the mouth stay soft so the vocal stays legible."
+    ),
+    "outro": (
+        "Acting direction for the whole sequence: the energy drains out of the body as "
+        "the line ends. Shoulders drop a beat late, the gaze drifts off the lens, the "
+        "last word is barely voiced. Do not resolve into a pose — let the frame catch "
+        "her still holding on."
+    ),
+    "ambient": (
+        "Acting direction for the whole sequence: this is an observational passage — the "
+        "people in frame are living their own moment, unaware of the song. Natural "
+        "unhurried behavior, no eye contact with the lens, mouths closed or moving only "
+        "with ordinary speech-less activity."
+    ),
+}
+
+NO_SYNC_DECL = ("本段人物**不对口型**：嘴唇保持自然闭合，或只做与歌词无关的日常动作"
+                "（呼吸、吞咽、微笑、说话前吸气），不得跟随音乐人声开合。")
+# V1.0.2：拆成**独立术语**。原来是一个整串，拼进 Negative 后按逗号还算 3 个词，
+# 但生成器的 `neg[:10]` 只按列表元素数截断 → 实际术语数会到 11，被官方校验器判 NEG-LONG。
+NO_SYNC_NEG = ["no lip sync", "no mouthing lyrics", "no extra vocals"]
+NO_HERO_DECL = ("本片为**无主角音乐 MV**：全部画面由场景、环境、光影、人群与道具承载，"
+                "全片不出现固定主角面孔，任何镜头都不对口型。")
+
+
+# ------------------------------------------------------------------ 读取资产
+def read_profile(p):
+    txt = open(p, encoding="utf-8").read() if os.path.isfile(p) else ""
+    get = lambda k: (re.search(rf"\*\*{k}\*\*[：:]\s*(.+)", txt) or [None, ""])[1].strip()
+    costume_zh, costume_en = "", ""
+    for line in txt.splitlines():
+        s = line.lstrip("-* ").strip()
+        if s.startswith("中文："):
+            costume_zh = s.split("：", 1)[1].strip()
+        elif s.startswith("英文："):
+            costume_en = s.split("：", 1)[1].strip()
+    return {
+        "name": get("中文名") or get("角色名") or os.path.basename(os.path.dirname(os.path.dirname(p))),
+        "name_en": get("英文名"),
+        "age": get("年龄"),
+        "gender": get("性别"),
+        "job": get("职业"),
+        "identity": get("身份一句话"),
+        "costume_zh": costume_zh or get("服装"),
+        "costume_en": costume_en,
+    }
+
+
+def collect_assets(root):
+    chars = {}
+    cdir = os.path.join(root, "人物资产")
+    if os.path.isdir(cdir):
+        for d in sorted(os.listdir(cdir)):
+            full = os.path.join(cdir, d)
+            if not os.path.isdir(full):
+                continue
+            cid = d.split("_")[0] + "_" + (d.split("_")[1] if len(d.split("_")) > 1 else "01")
+            img = os.path.join(full, "images", "front.png")
+            chars[cid] = read_profile(os.path.join(full, "profile.md"))
+            chars[cid]["dir"] = full
+            chars[cid]["image"] = img if os.path.isfile(img) else ""
+    scenes, props = {}, {}
+    for kind, base in (("scene", "场景资产"), ("prop", "道具资产")):
+        d0 = os.path.join(root, base)
+        if not os.path.isdir(d0):
+            continue
+        for d in sorted(os.listdir(d0)):
+            full = os.path.join(d0, d)
+            if not os.path.isdir(full):
+                continue
+            key = d.split("_")[0] + "_" + (d.split("_")[1] if len(d.split("_")) > 1 else "01")
+            name = d.split("_", 2)[2] if d.count("_") >= 2 else d
+            img = os.path.join(full, "main.png")
+            (scenes if kind == "scene" else props)[key] = {
+                "name": name, "dir": full, "image": img if os.path.isfile(img) else "",
+                "image_mode": "ref" if os.path.isfile(img) else "text_only"}
+    return chars, scenes, props
+
+
+# ------------------------------------------------------------------ 槽位计划
+def plan_slots(seg, chars, scenes, props, hero_on, max_imgs=9):
+    """图槽顺序 = <Picture N> 编号顺序：主角 → 场景 → 道具。无图/无主角自然降级。"""
+    slots = []
+    if hero_on:
+        for cid in sorted(seg.get("on_screen_char_ids") or []):
+            c = chars.get(cid)
+            if c and c.get("image"):
+                slots.append({"kind": "char", "id": cid, "name": c["name"], "path": c["image"]})
+    sc = scenes.get(seg.get("scene_id") or "")
+    if sc and sc.get("image"):
+        slots.append({"kind": "scene", "id": seg.get("scene_id"), "name": sc["name"],
+                      "path": sc["image"]})
+    for pid in (seg.get("prop_ids") or []):
+        pr = props.get(pid)
+        if pr and pr.get("image"):
+            slots.append({"kind": "prop", "id": pid, "name": pr["name"], "path": pr["image"]})
+    return slots[:max_imgs]
+
+
+def pic_ref(n):
+    return f"<Picture {n}>"
+
+
+# ------------------------------------------------------------------ 提示词主体
+def style_line(sb):
+    sp = sb.get("style_prompt") or {}
+    return sp.get("prompt_zh") or sp.get("label") or "电影感音乐 MV 质感，浅景深，真实皮肤质感，实拍颗粒感"
+
+
+def build_shots(seg):
+    """段内镜头表。Agent 可在 storyboard 里给 shots；没给就按歌词行自动切（≤3 镜）。"""
+    explicit = seg.get("shots") or []
+    win = seg["music_window"]
+    dur = seg["dur"]
+    if explicit:
+        out = []
+        for i, s in enumerate(explicit):
+            out.append({"t": round(float(s.get("t", 0)), 3),
+                        "size": s.get("size") or seg["shot_size"],
+                        "zh": s.get("zh") or s.get("desc") or ""})
+        return out
+    lines = [l for l in seg["lyric_lines"] if l["kind"] == "lyric"]
+    if seg["sing_mode"] == "sync" and len(lines) >= 2:
+        n = min(len(lines), 3)
+        cuts = [(lines[i]["start"] - win["start"]) for i in range(1, n)]
+    elif seg["sing_mode"] == "no_sync" and dur >= 9:
+        cuts = [dur / 2]
+    else:
+        cuts = []
+    t = 0.0
+    out = [{"t": 0.0, "size": seg["shot_size"], "zh": ""}]
+    for c in cuts:
+        c = round(max(0.8, min(dur - 0.8, c)), 3)
+        if c - t >= 0.9:
+            out.append({"t": c, "size": seg["shot_size"], "zh": ""})
+            t = c
+    return out
+
+
+def render_beat_line(t, zh):
+    """切点时间戳统一写 `At 00:03.000`（英文 At，中文叙述也保留）——
+    写成「在 00:03.000」校验器解析不出切点，会报 SHOT-NOEND。"""
+    return f"At 00:{t:06.3f}，{zh}"
+
+
+# V1.0.2：官方 §4.3 要求运镜写全「类型 + 幅度 + 速度」三维度（幅度用
+# with small/large amplitude，速度用 at slow/fast speed）。MV 的画面描述是中文叙述，
+# 只写「镜头缓慢横移」这类中文运镜词 → 官方校验器对这类段一律报 CAM-VAGUE。
+# 这里按画面描述里的运镜词补一句**独立英文运镜句**：补齐三维度的同时，
+# 因含 `camera` 被 CAM_RUN_RE 整句豁免 LANG-MIX（即铁律 11 的官方运镜英文句写法）。
+CAM_ZH_MAP = [
+    (r"推近|贴近|推近到", "pushes in"),
+    (r"后拉|拉远|向后拉|后上方升起|升起|上升", "pulls out"),
+    (r"横移|平移|侧移", "trucks sideways"),
+    (r"上摇|下摇|下压|俯仰|摇镜|缓摇", "tilts"),
+    (r"环绕|绕行", "arcs around"),
+    (r"跟拍|跟着她|跟她|贴着她|贴近侧面", "tracks her"),
+    (r"变焦|焦点切换", "racks focus"),
+]
+# 注意措辞：**不写冠词 The**（写 `The camera …` 会命中本地线校验器的
+# `\b(the target video|a medium shot|the camera)\b` → 本地线报 LANG-MIX；
+# 主线 V2.0 已把含 camera 的运镜句整句豁免，本地线是旧分叉、还没同步这条豁免）。
+# 去掉 The 后：主线 CAM_RUN_RE 仍命中 `camera` → 豁免；本地线不再命中 → 两边都干净。
+CAM_FALLBACK = "Camera holds the framing with small amplitude, at slow speed."
+
+
+def cam_clause(brief):
+    """按画面描述里的中文运镜词生成官方英文运镜句；认不出运镜就返回空串。"""
+    for pat, verb in CAM_ZH_MAP:
+        if re.search(pat, brief or ""):
+            return f"Camera {verb} with small amplitude, at slow speed."
+    return ""
+
+
+def build_h3_prompt(sb, seg, slots, chars, scenes, props, lang="zh", image_mode="ref",
+                    acting_mode="auto"):
+    win, dur = seg["music_window"], seg["dur"]
+    lm = LANG_MARK.get(lang, "Chinese")
+    sync = seg["sing_mode"] == "sync"
+    hero_on = bool(seg.get("on_screen_char_ids"))
+    multi = len(build_shots(seg)) > 1
+    L = []
+
+    # ---- 参考素材声明 / 无图声明 ----
+    # ⚠️ 三种情况要分清（V1.0.2 修）：
+    #   ① slots 非空 + image_mode=ref  → 正常参考图模式
+    #   ② image_mode=text_only        → **全片**无图模式（无主角 MV / 用户没给图）
+    #   ③ slots 空但 image_mode=ref    → **本段**不出现人物（EMPTY 空镜/纯环境）。
+    #      这不是无图模式！MV 仍在用参考图，只是这一段画面里没有人。
+    #      早期版本把 ③ 也当成 ②，导致空镜段被写成「本片为无主角音乐MV」——
+    #      语义污染整段（模型会以为全片都不要主角面孔）。
+    if slots and image_mode == "ref":
+        L.append("[reference generation]")
+        for i, s in enumerate(slots, 1):
+            # V1.0.2：原来按 root 的**父目录**取相对路径（`dirname(dirname(_root))`），
+            # 结果提示词里写成「野心家\MV\人物资产\…」这种带上一层目录的怪路径。
+            # 相对路径的基准就是项目根，一行修掉。
+            rel = os.path.relpath(s["path"], sb.get("_root") or ".")
+            L.append(f"@图片{i}：{rel}  → {'主角正脸锚定' if s['kind']=='char' else s['kind']=='scene' and '场景锚定' or '道具锚定'}（{s['name']}）")
+        L.append("【图片上传顺序】按上述 @图片N 的先后顺序上传参考图，提示词中的 "
+                 "<Picture N> 与上传顺序一一对应。项目视频模型 只按上传先后认图，顺序错了就会对不上号。")
+    elif image_mode == "text_only":
+        L.append("【无图模式（已确认）】本段不使用任何参考图，一切外观由文字定义；上线前需补图的清单见交付文档。")
+    else:
+        # ③ 本段没有任何参考素材（空镜 / 纯环境 / 道具细节）。
+        # V1.0.2：必须写成**强声明**（含「无图模式」字样）——官方校验器只在
+        # `subject_definitions` 之前的前置块里认强声明；写成弱标注会落进
+        # IMG-DECL 警告分支（"全文没有 <Picture N>，也没有声明「无图模式」"）。
+        # 同时给一句补图清单，符合 06-output-template 的「无图模式三条硬要求」。
+        L.append("【无图模式（已确认）· 本段无人物出场】本段不上传任何参考图：画面为纯环境 / "
+                 "空镜 / 道具细节，场景、材质、光线与色彩全部由文字定义，并与全片其他段落"
+                 "在同一世界观下保持一致。上线前补图清单：本段建议补 1 张场景定妆图"
+                 "（可选；补图后需重生成本段）。")
+    L.append("")
+
+    # ---- subject_definitions ----
+    L.append("subject_definitions:")
+    pid = 0
+    for s in slots:
+        pid += 1
+        if s["kind"] == "char":
+            c = chars.get(s["id"], {})
+            bits = [c.get("name") or s["name"]]
+            if c.get("name_en"):
+                bits[0] += f"（{c['name_en']}）"
+            desc = "，".join(x for x in [c.get("age"), c.get("gender"), c.get("job")] if x)
+            head = bits[0] + ("，" + desc if desc else "")
+            if c.get("identity"):
+                head += f"。{c['identity']}"
+            cos = f"。服装为{c['costume_zh']}" if c.get("costume_zh") else ""
+            if seg.get("costume_notes", {}).get(s["id"]):
+                cos += f"（本段变化：{seg['costume_notes'][s['id']]}）"
+            if lang != "zh":
+                head += f"。该角色说{LANG_ZH[lang]}。"
+            mark = "fully_preserved" if image_mode == "ref" else "weak_reference"
+            anchor = (f"完全参照 {pic_ref(pid)} 外观，保留其面部特征、发型与整体形象。"
+                      f"{pic_ref(pid)} 不得展示参考图自带的棚拍纯色背景，替换为"
+                      f"{(scenes.get(seg.get('scene_id') or '', {}) or {}).get('name', '实际场景')}的实际场景环境。")
+            if image_mode != "ref":
+                anchor = "无参考图，由文字描述定义。"
+            L.append(f"<Subject {pid}>：{head}{cos}。{anchor}")
+        else:
+            nm = s["name"]
+            tail = "锁定空间布局、色彩与光线方向。"
+            anchor = (f"完全参照 {pic_ref(pid)} 外观，" if image_mode == "ref"
+                      else "无参考图，由文字描述定义，")
+            L.append(f"<Subject {pid}>：{nm}（场景）。{anchor}{tail}")
+    if not slots:
+        pid += 1
+        scene_nm = (scenes.get(seg.get("scene_id") or "", {}) or {}).get("name") or seg.get("scene_name") or "场景"
+        L.append(f"<Subject {pid}>：{scene_nm}（场景）。无参考图，由文字描述定义，"
+                 f"锁定空间布局、色彩与光线方向。")
+    L.append("")
+
+    # ---- summary ----
+    structure = seg.get("structure") or ""
+    who = "、".join(chars[c]["name"] for c in (seg.get("on_screen_char_ids") or []) if c in chars)
+    doing = seg.get("visual_brief") or (f"画面围绕「{seg.get('lyric_text','').splitlines()[0][:16]}」展开"
+                                        if seg.get("lyric_text") else "沉浸在音乐里的环境与人物状态")
+    # V1.0.2：画面构想与「XX在画面中」之间必须有句号，否则会粘成
+    # 「…物证式表达沈鸾音在画面中。」这种病句（视觉构想多由 Agent 手写、结尾标点不保证）。
+    if doing and doing[-1] not in "。！？…":
+        doing += "。"
+    lip = ("本段人物**跟随音乐母带对口型演唱**，口型必须与音乐人声严格同步，"
+           "每一句歌词的起止都与母带人声一致。" if sync else NO_SYNC_DECL)
+    # NO_HERO_DECL 只能用在**全片无主角**模式；「本段恰好没有人物在画」(EMPTY 空镜)
+    # ≠ 全片无主角。早期版本用 `if not hero_on` 一刀切，把空镜段写成了
+    # 「本片为无主角音乐MV…任何镜头都不对口型」，语义污染整段（V1.0.2 修）。
+    if sb["meta"].get("no_hero"):
+        lip = NO_HERO_DECL
+    elif not hero_on:
+        lip = NO_SYNC_DECL + "本段画面中不出现人物，不涉及任何口型动作。"
+    L.append("summary:")
+    scene_nm = (scenes.get(seg.get("scene_id") or "", {}) or {}).get("name") or seg.get("scene_name") or ""
+    L.append(f"{dur} 秒，{'一段多镜头' if multi else '一镜到底'}的音乐 MV 段落（原曲第 "
+             f"{win['start']:.2f}s–{win['end']:.2f}s）"
+             + (f"，场景在{scene_nm}" if scene_nm else "")
+             + f"。{doing}"
+             + (f"{who}在画面中。" if who else "")
+             + lip
+             + (f"全片对白与歌词一律为{LANG_ZH.get(lang, '中文')}。" if lang != "zh" else ""))
+    L.append("")
+
+    # ---- retention_analysis ----
+    # V1.0.2：保留标记必须跟着「有没有参考图」走。
+    # 官方口径（references/06-output-template.md「无图模式三条硬要求」第 1 条）：
+    # **保留标记一律用 weak_reference**——没有参考图就谈不上 fully_preserved。
+    mark_ref = "fully_preserved" if image_mode == "ref" else "weak_reference"
+    note_noref = "" if image_mode == "ref" else "（无参考图，外观以本次文字定义为唯一标准）"
+    L.append("retention_analysis:")
+    for i, s in enumerate(slots, 1):
+        if s["kind"] == "char":
+            c = chars.get(s["id"], {})
+            L.append(f"<Subject {i}>：{mark_ref} —— 保留{c.get('name','')}的面部特征、发型、"
+                     f"服装（{c.get('costume_zh') or '见参考图'}）与体态{note_noref}；"
+                     f"动作：注视 → 呼吸起落 → 开口演唱。")
+        else:
+            L.append(f"<Subject {i}>：{mark_ref} —— 保留{s['name']}的空间布局、材质、"
+                     f"色彩关系与光线方向{note_noref}。")
+    if not slots:
+        # 本段一个参考素材都没有（空镜 / 纯环境）→ 场景由文字定义。
+        # V1.0.2：**必须**补这一行 `<Subject N>：weak_reference`。少了它会同时踩三个检查码：
+        #   RET-NOMARK（retention_analysis 无任何保留标记）
+        #   RET-MISS  （<Subject 1> 未在 retention_analysis 声明保留方式）
+        #   LBL-UNUSED（<Subject 1> 已定义但正文未引用）
+        # 三种都只靠这一行解决——空镜段最容易漏，因为它没有任何 slot 可循环。
+        snm = (scenes.get(seg.get("scene_id") or "", {}) or {}).get("name") \
+            or seg.get("scene_name") or "场景"
+        L.append(f"<Subject {len(slots) + 1}>：weak_reference —— 保留{snm}的空间布局、材质、"
+                 f"色彩关系与光线方向（无参考图，空间与光线以本次文字定义为唯一标准）。")
+    L.append("全片镜头几何锁定：机位与人物朝向一经确立不再漂移；人物在画面中的左右位置保持一致。")
+    if seg.get("crowd"):
+        L.append("背景人群全程虚化、无清晰面部、不开口说话，服装统一，不抢主体。")
+    elif not hero_on and sb["meta"].get("no_hero"):
+        L.append("画面中的人物均为远景/背影/剪影，不出现清晰可辨的主角面孔。")
+    elif not hero_on:
+        L.append("本段无人物出场，画面由环境、光线与材质承载，保持与全片一致的世界观。")
+    L.append("")
+
+    # ---- detailed_description ----
+    L.append("detailed_description:")
+    am = acting_mode
+    if am == "auto":
+        s = structure or ""
+        am = ("chorus" if ("副歌" in s or seg.get("in_chorus_block")) else
+              "intro" if seg["seq"] <= 2 else
+              "outro" if seg["seq"] >= sb["meta"]["segments"] else
+              "ambient" if not hero_on else "intro")
+    # V1.0.2：dd 内的「分块顺序」有两个硬约束，顺序不能随意调：
+    #   ① 风格句必须**最靠前**——官方只允许 `电影感 / cinematic` 作首句整体风格标签，
+    #      出现在第 120 字符之后就会被判 VAGUE-CINE（校验器按字符位置判，不是按行）。
+    #   ② 表演指导行必须**独立成行**——校验器的 ACT_DIR_LINE_RE 要求整行以
+    #      `Acting direction…:` 开头才整行豁免 LANG-MIX。旧写法把它接在中文风格句
+    #      后面，合规写法反被判「中英混写」。
+    # 两者兼顾 → 风格句第 1 行、表演指导行第 2 行、`[Shot 1]` 第 3 行；
+    # 表演指导行仍在 [Shot 1] 之前、紧贴风格句（符合 R34 的落点要求）。
+    # 空镜段（subject_in_frame=False）里没有人物，就不该给「活人感表演指导」——
+    # 原来会写出「画面里的人在过自己的时刻、不与镜头对视」，与「画面中没有人」冲突。
+    has_people = bool(hero_on) or bool(seg.get("subject_in_frame", True))
+    L.append(f"{style_line(sb)}。")
+    if has_people and (hero_on or am == "ambient"):
+        L.append(ACTING.get(am, ACTING["intro"]))
+    shots = build_shots(seg)
+    lines = [l for l in seg["lyric_lines"] if l["kind"] == "lyric"]
+    duet = bool(seg.get("duet")) and len(who.split("、")) >= 2
+    li = 0
+    cam_added = False
+    for k, sh in enumerate(shots):
+        brief = sh["zh"] or seg.get("visual_brief") or ""
+        cc = cam_clause(brief)
+        if cc:
+            cam_added = True
+        if k == 0:
+            line = (f"[{'Shot 1' if multi else '一镜到底'}] 0–{dur}s，"
+                    f"机位与构图：{brief}。")
+        else:
+            line = render_beat_line(sh["t"], f"镜头切至{'新机位' if not brief else brief}。")
+        L.append(f"{line} {cc}".strip() if cc else line)
+        # 本镜覆盖的歌词行
+        nxt = shots[k + 1]["t"] if k + 1 < len(shots) else dur
+        while li < len(lines) and (lines[li]["start"] - win["start"]) < nxt - 1e-6:
+            ln = lines[li]
+            if sync:
+                if duet:
+                    L.append(f"→{'、'.join(who.split('、'))} (S1,S2) sings: "
+                             f"<d>[{lm}]{ln['text']}</d>")
+                else:
+                    L.append(f"→{who.split('、')[0] if who else '演唱者'} (S1) sings: "
+                             f"<d>[{lm}]{ln['text']}</d>")
+            li += 1
+    if not cam_added:
+        # 全段都没识别出运镜词（或只有静态机位）：仍补一句三维度运镜句，
+        # 因为表演指导行里的英文（如 `the mouth follows the vocal`）会被校验器
+        # 误认成 Tracking Shot，导致 CAM-VAGUE。这句同时把幅度/速度写死，双保险。
+        L.append(CAM_FALLBACK)
+    if not sync:
+        # V1.0.2：原来这里会把整段 visual_brief 再复制一遍（上面 [Shot 1] 已经写过），
+        # 提示词里同一段画面描述出现两次 → 模型容易当成两个不同的画面。改成固定短句。
+        L.append("→画面中的一切照常进行，没有人对镜头唱歌。")
+        L.append(f"→{NO_SYNC_DECL}")
+    L.append(f"【本段尾帧】{seg.get('ending_zh') or '停留在本段最后一个动作的自然收势上，人物姿态稳定。'}")
+    nxt_seg = seg.get("next_cut_zh") or "切到下一个场景/景别，视点转移。"
+    L.append(f"【下段切点】{nxt_seg}")
+    L.append("")
+
+    L.append("overall_soundscape:")
+    L.append(f"以歌曲母带为准：本段使用原曲第 {win['start']:.2f}s–{win['end']:.2f}s 的音乐片段，"
+             f"人声与伴奏均取自母带。画面内不出现额外人声、不出现对白、不出现第二层人声。"
+             f"环境声极轻，不得压过母带人声。")
+    L.append("")
+    L.append("non_diegetic_music:")
+    L.append(BGM)
+    L.append("")
+    L.append("Negative:")
+    # V1.0.2：旧实现把 NO_SYNC_NEG 当成**一个**列表元素，再用 `neg[:10]` 按元素数截断——
+    # 而这一串里含 3 个逗号分隔术语，加上「no identifiable lead face」后实际是 11 个词，
+    # 官方校验器按逗号拆 → 判 NEG-LONG（超 10 上限）。改为「必留项 + 可选项」两级拼装：
+    #   必留项 = 画面卫生 + 本段发声纪律 + 无主角护栏（绝不因截断丢掉）；
+    #   可选项 = 人体解剖类（有人物时）/ 场景完整性类（无人时），填到 10 个为止。
+    must = ["no watermark", "no text overlay", "no logo"]
+    must.append(NO_SYNC_NEG[2])             # no extra vocals —— MV 全片禁第二层人声
+    if not sync:
+        must += NO_SYNC_NEG[:2]             # no lip sync / no mouthing lyrics
+    if not hero_on:
+        must.append("no identifiable lead face")
+    if lang != "zh":
+        must.append(f"no {LANG_ZH_LOWER.get(lang, 'chinese')} dialogue")
+    if has_people:
+        soft = ["no extra limbs", "no deformed hands", "no cross-eyed", "no plastic skin"]
+    else:
+        # 画面里没有人：解剖类负向词无意义，换成场景完整性约束
+        soft = ["no distorted architecture", "no doubled objects", "no plastic texture",
+                "no text on walls"]
+    neg = list(must)
+    for w in soft:
+        if len(neg) >= 10:
+            break
+        neg.append(w)
+    L.append(", ".join(neg[:10]))
+    return "\n".join(x for x in L if x is not None)
+
+
+LANG_ZH_LOWER = {"zh": "chinese", "ja": "japanese", "en": "english"}
+
+
+# ------------------------------------------------------------------ 机检
+def audit_machine(txt, seg, lang="zh"):
+    """机检（关 5）。返回 (checks, errors, warns)。"""
+    ck = []
+
+    def add(name, ok, note="", hard=True):
+        ck.append({"name": name, "ok": bool(ok), "note": note, "hard": hard})
+
+    fields = ["subject_definitions:", "summary:", "retention_analysis:",
+              "detailed_description:", "overall_soundscape:", "non_diegetic_music:"]
+    missing = [f for f in fields if f not in txt]
+    add("S1 六段式字段齐全", not missing, f"缺 {missing}" if missing else "")
+
+    pics = sorted({int(x) for x in re.findall(r"<Picture (\d+)>", txt)})
+    add("S2 参考编号连续", not pics or pics == list(range(1, len(pics) + 1)),
+        f"实际 {pics}")
+
+    add("S3 无 <Audio N>（MV 用母带）", "<Audio" not in txt,
+        "MV 提示词里不得出现音色参考标签" if "<Audio" in txt else "")
+
+    d_mark = re.findall(r"<d>\[(\w+)\]", txt)
+    if d_mark or seg["sing_mode"] == "sync":
+        add("S4 发声行带 <d>[语言]", all(m in LANG_MARK.values() for m in d_mark) and bool(d_mark),
+            f"实际 {sorted(set(d_mark))}")
+    else:
+        add("S4 发声行带 <d>[语言]", True, "本段无发声行（不对口型）")
+
+    sync = seg["sing_mode"] == "sync"
+    has_sing = bool(re.search(r"\(S\d+(?:,S\d+)*\)\s*sings:", txt))
+    has_say = bool(re.search(r"\(S\d+(?:,S\d+)*\)\s*(says|shouts)", txt))
+    add("M1 口型开关一致（sync 有 sings / no_sync 无 sings）",
+        (has_sing and not has_say) if sync else (not has_sing and not has_say),
+        f"sync={sync} sings={has_sing} says={has_say}")
+
+    add("M2 口型段的景别是中近景", (not sync) or seg["shot_size"] in ("ECU", "CU", "MCU", "MS"),
+        f"景别 {seg['shot_size']}")
+
+    add("M3 声明了音乐窗口", bool(re.search(r"原曲第\s*[\d.]+s", txt)),
+        "必须写明本段取自原曲的哪一段")
+
+    if seg.get("on_screen_char_ids"):
+        add("S5 R34 表演指导行存在", "Acting direction for the whole sequence:" in txt,
+            "段内有角色却缺表演指导 → LIVE-MISS")
+    else:
+        add("S5 R34 表演指导行存在", True, "本段无主角，豁免")
+
+    sung = re.findall(r"<d>\[\w+\](.*?)</d>", txt)
+    total_chars = sum(len(re.sub(r"\W", "", s)) for s in sung)
+    base = 4.5 if lang == "zh" else (7.0 if lang == "ja" else 2.5)
+    budget = total_chars / base
+    add("S6 声乐预算不超段长", budget <= seg["dur"],
+        f"约需 {budget:.2f}s / 段长 {seg['dur']}s")
+
+    lines_in_txt = [l for l in txt.splitlines() if re.search(r"\(S\d+(?:,S\d+)*\)\s*sings:", l)]
+    buried = [l for l in lines_in_txt if l.strip() and not l.strip().startswith("→")]
+    add("S7 发声行独立成行", not buried, f"{len(buried)} 行未以 → 开头")
+
+    add("M4 引用了对齐后的实际时长", str(seg["dur"]) in txt,
+        f"段长应写 {seg['dur']}s（17 帧对齐后的值）")
+
+    hard_fail = [c for c in ck if c["hard"] and not c["ok"]]
+    return ck, hard_fail
+
+
+def run_validators(prompt_path, dur):
+    """跑主线 + 本地线校验器（有就跑，没有就跳过并提示）。"""
+    out = {}
+    for tag, script in (("main", "validate_ref2va.py"), ("local", "validate_ref2va_local.py")):
+        p = os.path.join(H3_SKILL, "scripts", script)
+        if not os.path.isfile(p):
+            out[tag] = {"skipped": True, "reason": f"找不到 {p}"}
+            continue
+        cmd = [sys.executable, p, prompt_path, "--duration", str(dur)]
+        if tag == "local":
+            cmd.append("--cross-shot")
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+            txt = (r.stdout or "") + (r.stderr or "")
+            # ⚠️ V1.0.2 修真 bug：老写法是 `len(re.findall(r"❌|错误", txt))`，
+            # 而校验器的**汇总行**「错误 0 · 警告 2 · 提示 13」里含「错误」二字 →
+            # 哪怕 0 错误也会被数成 1 个 → **每段恒判失败**，关 5 硬门禁 100% 拦死。
+            # 正确做法：优先解析汇总行里的数字；没有汇总行时才退回去数标记符号。
+            me = re.search(r"错误\s*(\d+)", txt)
+            mw = re.search(r"警告\s*(\d+)", txt)
+            err = int(me.group(1)) if me else len(re.findall(r"❌", txt))
+            warn = int(mw.group(1)) if mw else len(re.findall(r"⚠(?=\s*\S)", txt))
+            tail = [l for l in txt.splitlines() if l.strip()][-6:]
+            out[tag] = {"rc": r.returncode, "errors": err, "warns": warn,
+                        "tail": "\n".join(tail)}
+        except Exception as e:  # noqa: BLE001
+            out[tag] = {"error": f"{type(e).__name__}: {e}"}
+    return out
+
+
+# ------------------------------------------------------------------ main
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--storyboard", help="默认 <项目根>/分镜脚本/storyboard.json")
+    ap.add_argument("--lang", default="zh", choices=["zh", "ja", "en"])
+    ap.add_argument("--acting-mode", default="auto",
+                    choices=["auto", "intro", "chorus", "bridge", "outro", "ambient"])
+    ap.add_argument("--dump-prompts", action="store_true",
+                    help="全量生成 prompt.txt + 机检 + prompt_review.json（零 API 成本）")
+    ap.add_argument("--only", help="只处理指定段（逗号分隔）—— ⚠️ 会破坏关 5 整体状态，除排障外别用")
+    ap.add_argument("--no-validate", action="store_true", help="跳过 项目视频模型 官方校验器")
+    ap.add_argument("--approve-prompts", action="store_true",
+                    help="全部段机检通过后，把关 5 状态置为 approved（需 --confirmed-resolution）")
+    ap.add_argument("--confirmed-resolution", default="",
+                    help="与用户复核过的分辨率描述（approve 时必填）")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.project_root)
+    sb_path = args.storyboard or os.path.join(root, "分镜脚本", "storyboard.json")
+    sb = json.load(open(sb_path, encoding="utf-8"))
+    sb["_root"] = root
+    st = {}
+    try:
+        st = json.load(open(os.path.join(root, "状态", "pipeline_state.json"), encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    cfg = st.get("config") or {}
+    no_hero = bool(cfg.get("no_hero")) or (st.get("hero") or {}).get("source") == "none"
+    image_mode = "text_only" if no_hero or cfg.get("gen_mode") == "text_only" else "ref"
+    chars, scenes, props = collect_assets(root)
+
+    if args.approve_prompts:
+        pj = os.path.join(root, "状态", "prompt_review.json")
+        rv = json.load(open(pj, encoding="utf-8")) if os.path.isfile(pj) else {}
+        if not args.confirmed_resolution:
+            sys.exit("❌ --approve-prompts 必须带 --confirmed-resolution \"<与用户复核过的描述>\"")
+        stale = []
+        for s in rv.get("segments", []):
+            sp = os.path.join(root, "视频", s["dir"], "prompt.txt")
+            if not os.path.isfile(sp) or sha1_of(sp) != s.get("sha1"):
+                stale.append(s["seq"])
+        if stale:
+            sys.exit(f"⛔ 段 {stale} 的提示词在审核后被改动 —— 拒绝放行、不做静默改写。\n"
+                     f"   请重跑 --dump-prompts 让用户重新审。")
+        bad = [s["seq"] for s in rv.get("segments", []) if s.get("status") != "reviewed_ok"]
+        if bad:
+            sys.exit(f"⛔ 段 {bad} 机检未通过，不能 approve。")
+        rv["status"] = "approved"
+        rv["resolution_confirmed"] = True
+        rv["confirmed_resolution"] = args.confirmed_resolution
+        rv["approved_at"] = datetime.now().isoformat(timespec="seconds")
+        json.dump(rv, open(pj, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        print(f"✅ 关 5 已通过（{len(rv['segments'])} 段）· 分辨率已复核：{args.confirmed_resolution}")
+        return
+
+    only = {int(x) for x in args.only.split(",")} if args.only else None
+    if only:
+        print("⚠ --only 会让 prompt_review.json 只剩被选中的段（关 5 整体状态会回落）。"
+              "全量 dump 零成本，除排障外请勿使用。")
+
+    video_dir = os.path.join(root, "视频")
+    os.makedirs(video_dir, exist_ok=True)
+    reviews, prompts = [], {}
+    for seg in sb["segments"]:
+        if only and seg["seq"] not in only:
+            continue
+        slots = plan_slots(seg, chars, scenes, props, hero_on=bool(seg.get("on_screen_char_ids")))
+        # 主角未声明 → 默认把 char_01 放进来（有图时）
+        # ⚠️ V1.0.2 修：这个兜底会**覆盖** Agent 有意留空的空镜段（EMPTY /
+        # subject_in_frame=False），把主角硬塞回画面 —— 实测后果是空镜段被写成
+        # 「沈鸾音在画面中」并多带一张人物参考图，与「纯环境空镜」自相矛盾。
+        # 兜底只该救「忘了声明」，不该推翻「明确声明了本段没有人」。判据用
+        # subject_in_frame / shot_size，两者都由分镜规划器产出，是权威口径。
+        wants_hero = bool(seg.get("subject_in_frame", True)) and seg.get("shot_size") != "EMPTY"
+        if not slots and not no_hero and chars and wants_hero:
+            cid = sorted(chars)[0]
+            if chars[cid].get("image"):
+                seg["on_screen_char_ids"] = [cid]
+                slots = plan_slots(seg, chars, scenes, props, hero_on=True)
+        txt = build_h3_prompt(sb, seg, slots, chars, scenes, props,
+                              lang=args.lang, image_mode=image_mode,
+                              acting_mode=args.acting_mode)
+        kw = re.sub(r"[\s/\\:*?\"<>|]", "", seg.get("kw") or "seg")
+        d = os.path.join(video_dir, f"shot_{seg['seq']:02d}_{kw[:10]}")
+        os.makedirs(d, exist_ok=True)
+        pp = os.path.join(d, "prompt.txt")
+        with open(pp, "w", encoding="utf-8") as f:
+            f.write(txt)
+        ck, fails = audit_machine(txt, seg, args.lang)
+        val = {} if args.no_validate else run_validators(pp, seg["dur"])
+        v_fail = any((v.get("errors") or 0) > 0 for v in val.values() if isinstance(v, dict))
+        status = "reviewed_ok" if (not fails and not v_fail) else "machine_failed"
+        rec = {"seq": seg["seq"], "dir": os.path.basename(d), "kw": seg.get("kw"),
+               "dur": seg["dur"], "music_window": seg["music_window"],
+               "sing_mode": seg["sing_mode"], "shot_size": seg["shot_size"],
+               "sha1": sha1_of(pp), "status": status, "checks": ck,
+               "machine_fail": [c["name"] + ("：" + c["note"] if c["note"] else "") for c in fails],
+               "validators": val, "slots": [{"kind": s["kind"], "name": s["name"],
+                                             "path": rel(root, s["path"])} for s in slots],
+               "lyric_text": seg.get("lyric_text", "")}
+        reviews.append(rec)
+        prompts[seg["seq"]] = txt
+        flag = "✅" if status == "reviewed_ok" else "⛔"
+        print(f"{flag} 段 {seg['seq']:>2} {seg['sing_mode']:<7} {seg['shot_size']:<5} "
+              f"{seg['music_window']['start']:>7.2f}s {seg['dur']:>5.2f}s"
+              + ("  " + "；".join(rec["machine_fail"]) if rec["machine_fail"] else ""))
+
+    if not args.dump_prompts:
+        print("\n（未加 --dump-prompts：只打印预演结果，未写 state）")
+        return
+
+    ok = sum(1 for r in reviews if r["status"] == "reviewed_ok")
+    prev_path = os.path.join(root, "状态", "prompt_review.json")
+    prev = json.load(open(prev_path, encoding="utf-8")) if os.path.isfile(prev_path) else {}
+    if only and prev.get("segments"):
+        merged = {s["seq"]: s for s in prev["segments"]}
+        for r in reviews:
+            merged[r["seq"]] = r
+        reviews = [merged[k] for k in sorted(merged)]
+    rv = {"kind": "mv", "lang": args.lang, "image_mode": image_mode,
+          "aspect": (sb.get("meta") or {}).get("aspect") or cfg.get("aspect_ratio"),
+          "resolution_desc": (sb.get("meta") or {}).get("resolution_desc") or cfg.get("resolution_desc", ""),
+          "resolution_default": default_resolution_value(),
+          "resolution_confirmed": False,
+          "status": "approved" if ok == len(reviews) and reviews else ("partial" if ok else "pending"),
+          "generated_at": datetime.now().isoformat(timespec="seconds"),
+          "segments": reviews}
+    json.dump(rv, open(prev_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(f"\n关 5 机检：{ok}/{len(reviews)} 段通过 → {prev_path}")
+    print("产物：", os.path.join(video_dir, "shot_NN_*/prompt.txt"))
+    if ok < len(reviews):
+        print("\n⛔ 有段机检不过 —— 关 5 门禁会拦下所有生成请求。先修提示词再重跑。")
+    else:
+        print("\n✅ 全段机检通过。用户看 审核/05_提示词审核.html 后：")
+        print("   python mv_to_h3_prompts.py --project-root \"%s\" --approve-prompts "
+              "--confirmed-resolution \"<描述>\"" % root)
+
+
+def sha1_of(p):
+    return hashlib.sha1(open(p, "rb").read()).hexdigest()[:16]
+
+
+def default_resolution_value():
+    """从工作流注册表读「分辨率默认值」（用户指定 = 2）。"""
+    try:
+        reg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "mv_workflows.json"), encoding="utf-8"))
+        wf = (reg.get("workflows") or {}).get(reg.get("default")) or {}
+        return wf.get("resolution_default", 2)
+    except (OSError, ValueError):
+        return 2
+
+
+def rel(root, p):
+    try:
+        return os.path.relpath(p, root)
+    except ValueError:
+        return p
+
+
+if __name__ == "__main__":
+    main()

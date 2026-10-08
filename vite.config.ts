@@ -65,6 +65,12 @@ export default defineConfig(() => ({
   // code via `import.meta.env`, next to the default VITE_* prefix.
   envPrefix: ["VITE_", "TAURI_ENV_"],
 
+  // 组件资源和 Rust 构建目录也有 HTML；依赖扫描独立于 watch.ignored，
+  // 只从应用入口发现依赖，避免把这些产物当成开发页面。
+  optimizeDeps: {
+    entries: ["index.html"],
+  },
+
   build: {
     // Tauri runs on the evergreen Chromium WebView2 on Windows and on WebKit
     // (WKWebView / WebKitGTK) on macOS and Linux; the lower WebKit floor keeps
@@ -102,11 +108,22 @@ export default defineConfig(() => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
+      // Rust 源码由 Tauri 监听；构建缓存与组件生成目录不参与前端热更新。
+      // .cache/tauri-editions 下有大量 Rust 产物，逐文件注册 watcher 会
+      // 阻塞事件循环，导致已监听的端口连首页和心跳都无法响应。
       //    同时忽略「原子写」临时产物：不少编辑器与工具保存文件时先写
       //    `.<名称>.<pid>.<uuid>.tmpdir/<名称>.tmp` 再改名。Vite 会在这些临时
       //    文件被改名或删除的瞬间拿到 EBUSY，并让整个 dev server 退出。
-      ignored: ["**/src-tauri/**", "**/*.tmpdir/**", "**/*.tmp", "**/.*.tmp*"],
+      ignored: [
+        "**/src-tauri/**",
+        "**/.cache/**",
+        "**/tools/remotion-runtime/.remotion/**",
+        "**/tools/remotion-runtime/.smoke/**",
+        "**/tools/remotion-runtime/.build-node/**",
+        "**/*.tmpdir/**",
+        "**/*.tmp",
+        "**/.*.tmp*",
+      ],
     },
     // 注意：不要加 server.warmup。本仓库实测（2026-10-08）：warmup 会在页面
     // 加载前爬取全部源码，一是拖慢/饿死真实页面请求（单线程事件循环被占满，

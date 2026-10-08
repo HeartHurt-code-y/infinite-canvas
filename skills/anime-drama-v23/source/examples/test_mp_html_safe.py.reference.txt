@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_mp_html_safe.py —— 项目说明页面安全校验的对抗测试（铁律 D2-q）
+
+为什么必须有它（2026-09-19 用户实测反馈）：
+  我出的项目说明介绍页在浏览器里很好看，**粘进项目说明编辑器就塌了** ——
+  发布编辑器会主动剥掉 flex / grid / float / position / 渐变 / 阴影 / <style> / class。
+  我那页用了大量 flex（门禁表、成绩单 2×2、适合谁）→ 全塌成竖排。
+
+  判据：**「在浏览器里好看」与「粘进目标平台还好看」是两件事。**
+    交付物要在**它真正要被使用的地方**验收。
+
+四项断言（含双向证伪）：
+  A 当前项目说明页必须通过
+  B 反向证伪：含 display:flex 的页必须被拦（否则检查器是摆设）
+  C 反向证伪：含 linear-gradient / <style> 的页必须被拦
+  D 反向证伪：**注释里**提到 flex 不许误报（判别器：只查会被渲染的内容）
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import importlib.util
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+TOOLS = SKILL / "tools"
+ARTICLES = sorted(SKILL.glob("*项目说明*.html"))
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def _load_checker():
+    spec = importlib.util.spec_from_file_location("_mp", TOOLS / "check_mp_html.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def main():
+    print("=" * 68)
+    print("项目说明页面安全校验 · 对抗测试（粘贴即排版）")
+    print("=" * 68)
+    mp = _load_checker()
+    ok("A0", bool(ARTICLES), "找到 %d 个项目说明页面" % len(ARTICLES))
+
+    for f in ARTICLES:
+        hard, _w = mp.check(f)
+        ok("A", not hard, "%s 通过（无硬违规）" % f.name if not hard
+           else "%s 有 %d 处硬违规：%s" % (f.name, len(hard), hard[0][2]))
+
+    with tempfile.TemporaryDirectory(prefix="dap_mp_") as td:
+        td = Path(td)
+        # B：flex 必须被拦
+        bad = td / "bad_flex.html"
+        bad.write_text('<section style="display:flex;gap:8px;"><p style="font-size:15px;">x</p></section>',
+                       encoding="utf-8")
+        hard, _ = mp.check(bad)
+        ok("B", any("flex" in w for _l, _t, w in hard),
+           "反向证伪：含 display:flex 的页被拦下（否则检查器是摆设）")
+
+        # C：渐变 + style 块必须被拦
+        bad2 = td / "bad_grad.html"
+        bad2.write_text('<style>p{color:red}</style><section style="background:linear-gradient(#fff,#000);">'
+                        '<p>y</p></section>', encoding="utf-8")
+        hard2, _ = mp.check(bad2)
+        ok("C", any("渐变" in w for _l, _t, w in hard2) and any("style" in w for _l, _t, w in hard2),
+           "反向证伪：渐变与 <style> 块都被拦下")
+
+        # D：注释里的 flex 不许误报（判别器）
+        note = td / "note_only.html"
+        note.write_text('<!-- 注意：不要用 display:flex，也不要用 linear-gradient -->'
+                        '<section><p style="font-size:15px;">z</p></section>', encoding="utf-8")
+        hard3, _ = mp.check(note)
+        ok("D", not hard3,
+           "反向证伪：**注释里**提到 flex/渐变不被误报（判别器：只查会被渲染的内容）")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for f in FAIL:
+            print("   " + f)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

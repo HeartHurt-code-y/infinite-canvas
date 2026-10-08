@@ -1,0 +1,1183 @@
+# 回归自检清单（skill 的「不变式」）
+#
+# 格式：<相对路径>|<必须出现的关键字>
+# 每次 snapshot 都会逐条 grep，缺任何一条 = 这次进化把老修复弄丢了 → 拒绝发版。
+# 新增修复时**必须**在这里加一行，这样这条修复以后就再也丢不掉了。
+#
+# 用法（由 tools/snapshot.py 自动执行，也可手动跑）：
+#   python tools/snapshot.py --check-only
+
+# ---- V1.3.1 · final.mp4 路径对齐（铁律 D20）----
+references/batch_run_drama.py|视频
+references/batch_run_drama.py|os.replace
+references/audit_html_builder.py|更新时间
+
+# ---- V1.3.1 · 重抽前自动备份旧片 ----
+references/batch_run_drama.py|backup_existing_video
+
+# ---- V1.3.1 · 一致性审核按「在场角色」而非「配音角色」（铁律 D4 补充）----
+references/consistency_auditor.py|audit_faces_onscreen
+references/consistency_auditor.py|on_screen_char_ids
+
+# ---- V1.3.1 · 审核页徽章读真实状态、「不适用」与「未审」区分（铁律 D22）----
+references/audit_html_builder.py|applicable
+references/audit_html_builder.py|未审
+references/audit_html_builder.py|build_style_review
+
+# ---- V1.3.1 · 重跑单段的正确姿势（铁律 C4-b）----
+SKILL.md|C4-b
+
+# ---- V1.3.1 · 审核页齐全 + 最新（铁律 D22）----
+SKILL.md|D22
+SKILL.md|风格审核
+
+# ---- V1.3.1 · 版本进化与回退机制 ----
+SKILL.md|回退
+tools/snapshot.py|checks.txt
+tools/rollback.py|--to
+tools/rollback.py|extractall
+
+# ---- V1.5 · 文生视频（无图）通道也必须走 H3 六段式（铁律 D23）----
+SKILL.md|D23
+references/drama_to_h3_prompts.py|image_mode
+references/drama_to_h3_prompts.py|text_only
+references/drama_to_h3_prompts.py|weak_reference
+references/drama_to_h3_prompts.py|无图模式（已确认）
+references/drama_to_h3_prompts.py|--char-desc
+
+# ---- V1.5 · 一段 = 一个场景（铁律 D24）----
+SKILL.md|D24
+SKILL.md|一段 = 一个场景
+
+# ---- V1.5 · 版本号三处同步（VERSION 文件 / SKILL.md 标题行 / frontmatter）----
+# 教训：V1.5 发版后 VERSION 已是 1.5、git tag 有 V1.5、CHANGELOG 有 V1.5 条目，
+# 但 SKILL.md 标题行还停在 V1.3、frontmatter 停在 V1.4 —— 用户一问才发现。
+# 升级版本号时必须同时改这三处 + 本文件，否则自检直接拒绝发版。
+SKILL.md|# 短剧自动生成 SOP V2.0
+SKILL.md|description: 短剧自动生成 SOP V2.0
+
+# ---- V1.6 · 外语版分镜 + 可变时长（铁律 D25）----
+# 教训：《世界要毁灭了·日本版》写完 16 段才发现校验器只认汉字说话人（假名角色名判 BEAT-FMT），
+# 以及「节奏太慢」的真因是工作流时长节点被写死。这两项必须留不变式，防止老修复丢失。
+SKILL.md|D25
+SKILL.md|DLG_CN
+SKILL.md|nodeId=259
+SKILL.md|可变时长
+references/drama_to_h3_prompts.py|--chars-per-sec
+references/drama_to_h3_prompts.py|--lang
+
+# ---- V1.6 补丁 · key 计费口径：企业级 ≠ 省钱（铁律 D26）----
+# 教训：旧文档与脚本注释把「企业级 key」写成省钱通道（"不消耗 RH 币（走包月额度）"），
+# 还把 --key 默认值设成 enterprise。实际企业级共享「不费币但按秒扣钱包真钱」（Plus ¥6/h）。
+# 用户明确：一律优先消费级 key。此条不变式防止这个反向结论再回来。
+SKILL.md|D26
+SKILL.md|扣钱包
+references/batch_run_drama.py|扣钱包真钱
+
+# ---- V1.6 补丁 · 成本必须可核算（铁律 D27）----
+# 教训：以前只知道「跑了多少段」，不知道花了多少币/多少钱。实测发现
+#   /task/openapi/outputs 返回 consumeCoins / consumeMoney / taskCostTime，
+#   且计费按 taskCostTime（含排队的墙钟秒），不看视频时长。
+#   用户要求「以后的消耗的 RH 币和钱包金额都要做统计」。
+SKILL.md|D27
+SKILL.md|consumeMoney
+SKILL.md|accountStatus
+SKILL.md|taskCostTime
+
+# ---- V1.6 补丁 · 消费级被占用时自动降级 + 留痕（铁律 D28）----
+# 教训：消费级账号的 apiType=NORMAL，其他项目也在用同一个 key，
+#   实测提交前预检 currentTaskCounts 就是 1（非本项目的任务）。
+#   用户要求「跑不了的自己记录、自行调度」——降级必须落 状态/调度日志.csv，
+#   否则事后分不清某段烧的是 RH 币还是钱包真钱。
+SKILL.md|D28
+SKILL.md|调度日志
+SKILL.md|自动改走
+
+# ---- V1.8 · 首问八件套：生成模式 + 工作流选择（铁律 D29 / D30 / D31）----
+# 教训：用户 2026-09-15 明确要求「首次询问时增加多参模式/文生视频模式，再增加工作流选择，
+#   本次这个作默认、以前那个作备选」。同时实测发现 W-A 是平台共享模板，
+#   节点 265 上残留上一位使用者的参考图/音频直连 → 人脸服装污染。
+#   这一节把「首问八件套 + 两套工作流 + 去参考化」钉成不变式。
+SKILL.md|首问八件套
+SKILL.md|生成模式 / 比例 / 资产来源 / 视频通道 / B2 工作流 / 算力档位 / 审核模式 / 音色方案
+SKILL.md|D29
+SKILL.md|D30
+SKILL.md|D31
+SKILL.md|多参模式
+SKILL.md|文生视频模式
+SKILL.md|爆款二创
+SKILL.md|PROJECT_MODEL_BINDING
+SKILL.md|PROJECT_MODEL_BINDING
+SKILL.md|workflows.json
+SKILL.md|make_noref_workflow.py
+SKILL.md|workflow_wa_noref.json
+SKILL.md|共享模板
+references/workflows.json|"default": "W-A"
+references/workflows.json|PROJECT_MODEL_BINDING
+references/workflows.json|PROJECT_MODEL_BINDING
+references/workflows.json|noref_default
+references/batch_run_drama.py|WORKFLOW_W_A = "PROJECT_MODEL_BINDING"
+references/batch_run_drama.py|WORKFLOW_W_B = "PROJECT_MODEL_BINDING"
+references/batch_run_drama.py|def resolve_workflow
+references/batch_run_drama.py|def wf_ref_path
+references/batch_run_drama.py|choices=["W-A", "W-B"]
+references/batch_run_drama.py|去参考化工作流仍残留参考连线
+references/batch_run_drama.py|cfg.get("noref_json")
+references/make_noref_workflow.py|去参考化
+references/make_noref_workflow.py|ref_images.
+references/make_noref_workflow.py|os.replace
+references/workflow_wa_noref.json|MiniMaxH3ReferenceToVideo
+references/workflow_wa_api.json|MiniMaxH3ReferenceToVideo
+
+# ---- V1.8.1 · 关 2 保留 + 图槽同步扩到 9 + 交付四件套（铁律 D32）----
+# 用户 2026-09-15 五点拍板：① 文生视频模式关 2 保留；② 旧项目不回填 W-A；
+#   ③ B1 通道不动；④ 两套工作流图槽同步扩到 9（5 张是建议不是限制）；⑤ 补全链总览页。
+# 教训：槽位只开到 5 时，段 7「双宇宙镜像 4 人同框」被硬砍到 3 人；
+#   交付只给审核页 + 成片报告，用户追问才知道缺一张全局链路页。
+SKILL.md|D32
+SKILL.md|全链总览页
+SKILL.md|交付四件套
+SKILL.md|make_chain_overview.py
+SKILL.md|chain_overview_template.html
+SKILL.md|关 2「风格锁定」保留
+SKILL.md|槽位数：9
+SKILL.md|5 张是使用建议
+SKILL.md|9 图 + 3 音色，43 节点
+SKILL.md|9 图 + 3 音色，41 节点
+SKILL.md|旧项目不回填
+references/make_chain_overview.py|__TOKEN__
+references/make_chain_overview.py|sd-skip
+references/make_chain_overview.py|别命名成 fh
+references/make_chain_overview.py|os.replace
+references/chain_overview_template.html|__CHAIN__
+references/chain_overview_template.html|.step.skip
+references/chain_overview_template.html|sd-skip
+references/workflows.json|img_slots_available
+references/workflows.json|img_recommended_max
+references/workflow_wa_api.json|ref_images.ref_image_8
+references/workflow_b2_multi_ref.json|ref_images.ref_image_8
+references/batch_run_drama.py|"1333"
+references/build_multi_ref_workflow.py|num_images=9
+
+# ---- V1.8.2 · 逐段生成耗时列 + 成本依据交叉验证框 ----
+# 用户 2026-09-15 两句追问：「每个视频的消耗时长你没有记录吗？」
+#   「1106 RH 币（≈¥0.92），你是用什么依据来测算的？」
+# 教训：耗时与币一直都在 状态/成本台账.csv（列含 实际耗时s = taskCostTime），
+#   但派生页没渲染 = 用户看不到；成本只甩总数 = 用户只能选择信或不信。
+# 判据：花销/耗时类派生页必须「数值 + 出处 + 可复核算式」三件齐全。
+SKILL.md|生成耗时s
+SKILL.md|成本依据
+SKILL.md|数值 + 出处 + 可复核算式
+SKILL.md|CNY_PER_COIN
+SKILL.md|taskCostTime
+references/chain_overview_template.html|生成耗时s
+references/chain_overview_template.html|依据是什么
+references/chain_overview_template.html|__CONSC__
+references/chain_overview_template.html|__WALLH__
+references/chain_overview_template.html|__ENTTS__
+references/chain_overview_template.html|__TOTM_E__
+references/chain_overview_template.html|__PERCNY__
+references/make_chain_overview.py|__COINRATE__
+references/make_chain_overview.py|__TOTM_E__
+references/make_chain_overview.py|__PERCNY__
+references/make_chain_overview.py|__CONSC__
+references/make_chain_overview.py|def read_rows
+references/make_chain_overview.py|实际耗时s
+
+# ---- V1.8.2 附 · 版本历史必须跟上 VERSION 文件（V1.5.1 漂移教训的重演）----
+# 本次发现：VERSION/tag/CHANGELOG 都到 1.8.2 了，但 SKILL.md「版本历史」章节最大只到 1.6，
+#   1.7 / 1.8 / 1.8.1 / 1.8.2 四条全缺 —— 和 V1.5.1 抓到的「版本历史最大只到 1.3」是同一个病。
+# 所以把版本历史条目也纳入自检：每发一版，必须同步加一条，否则自检拒绝发版。
+# ⚠️ 下面这三条是「会过期的守护项」：每次发版把最后一条换成新版本条目，
+# 保证「版本历史必须跟上 VERSION」这条纪律永远有人在盯。
+SKILL.md|**1.9（2026-09-16 H3 V2.4 台词框架升级版）**
+SKILL.md|**1.8.2（2026-09-15 逐段耗时列 + 成本依据版）**
+SKILL.md|**1.8.1（2026-09-15 用户五点拍板落地版）**
+
+# ---- V1.8.3 · 全链总览页升为收尾硬阶段 + 总消耗时长进片子全貌 ----
+# 用户 2026-09-15 拍板：「以后所有的项目完成后，都做一个全链总览网页。」
+#   「全链总揽这个网页非常好，固化下来，把总消耗时长也放在最前面的片子的全貌里」
+# 教训：铁律 ≠ 流程。D32 只是一条规则，容易被当成「可选项」；
+#   写进主流程的「阶段十二」才算真正固化。
+#   判断「某件事是否已固化」的标准：它出现在**阶段清单**里，而不是只出现在**铁律清单**里。
+SKILL.md|阶段十二：项目收尾 → 交付四件套
+SKILL.md|以后所有的项目完成后，都做一个全链总览网页
+SKILL.md|12.2 「总消耗时长」必须在最前面的「片子全貌」里
+SKILL.md|进阶段十二（收尾交付四件套
+references/chain_overview_template.html|card hl
+references/chain_overview_template.html|总消耗时长
+references/chain_overview_template.html|__WALLH__
+references/chain_overview_template.html|__NROUNDS__
+references/make_chain_overview.py|__NROUNDS__
+SKILL.md|阶段十二·收尾四件套
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|**1.8.3（2026-09-15 全链总览页固化为收尾硬阶段版）**
+
+# ---- V1.9 · H3 V2.4 台词框架升级（用户要求「按照最新的 h3-ref2va-optimizer，
+#      把本 skill 中视频提示词生成部分进行升级」）----
+# 教训：本 skill 的台词一直停在「混合版」旧写法（→(S1)角色名用 <Audio 1> 的音色说"…"），
+#   而 h3-ref2va-optimizer V2.2 起已经把**官方英文框架**（角色 (S1) says: <d>[语言]台词</d>）
+#   定为默认，V2.3 加旁白三码、V2.4 加 R36~R41。两条生成路径（batch_run_drama /
+#   drama_to_h3_prompts）必须同口径，否则用户在两个阶段拿到两种写法。
+SKILL.md|官方英文框架
+SKILL.md|R34
+SKILL.md|R36
+SKILL.md|R37
+SKILL.md|R39
+SKILL.md|六类有声源
+SKILL.md|while nobody on screen is speaking
+SKILL.md|while his lips remain completely closed
+SKILL.md|<scenetrans>
+SKILL.md|<cutoff>
+SKILL.md|双校验器
+SKILL.md|validate_ref2va_local.py
+SKILL.md|机检 12 项
+SKILL.md|S4
+SKILL.md|S5
+SKILL.md|S6
+SKILL.md|S7
+SKILL.md|Acting direction for the whole sequence
+SKILL.md|该角色说日语（関東標準語）
+SKILL.md|17 帧对齐
+SKILL.md|12.25s
+SKILL.md|语言感知
+SKILL.md|**1.9（2026-09-16 H3 V2.4 台词框架升级版）**
+references/batch_run_drama.py|DEFAULT_ACTING_DIRECTION
+references/batch_run_drama.py|def line_beat
+references/batch_run_drama.py|says in an off-screen voiceover as
+references/batch_run_drama.py|while nobody on screen is speaking
+references/batch_run_drama.py|shout together
+references/batch_run_drama.py|<scenetrans>
+references/batch_run_drama.py|<cutoff>
+# （V2.0.10：`def align_duration` 已搬到 references/drama_schema.py，
+#   本文件的守护项改为「它确实是从共享模块取的」。知识搬家，守护点跟着搬。）
+references/batch_run_drama.py|from drama_schema import align_duration
+references/batch_run_drama.py|speaking_ids
+references/batch_run_drama.py|narrator_sid
+references/batch_run_drama.py|def seg_is_cross_shot
+references/batch_run_drama.py|def is_living_segment
+references/batch_run_drama.py|def run_h3_validator
+references/batch_run_drama.py|validate_ref2va_local.py
+references/batch_run_drama.py|validator_cross_shot
+references/batch_run_drama.py|no Chinese dialogue
+references/drama_to_h3_prompts.py|DEFAULT_ACTING_DIRECTION
+references/drama_to_h3_prompts.py|from drama_schema import align_duration
+references/drama_to_h3_prompts.py|def seg_line_cap
+references/drama_to_h3_prompts.py|def lang_code_of
+references/drama_to_h3_prompts.py|def lang_zh_of
+references/drama_to_h3_prompts.py|def h3_line_beat
+references/drama_to_h3_prompts.py|use_audio
+references/drama_to_h3_prompts.py|def strip_dialogue
+references/drama_to_h3_prompts.py|def _poss_from
+references/drama_to_h3_prompts.py|says in an off-screen voiceover as
+references/drama_to_h3_prompts.py|while nobody on screen is speaking
+references/drama_to_h3_prompts.py|shout together
+references/drama_to_h3_prompts.py|图片上传顺序
+references/drama_to_h3_prompts.py|--cross-shot
+references/drama_to_h3_prompts.py|--acting-direction
+references/drama_to_h3_prompts.py|--narrator-voice-zh
+references/drama_to_h3_prompts.py|--dialect-zh
+references/drama_to_h3_prompts.py|dialogue_language
+references/drama_to_h3_prompts.py|DEFAULT_STYLE_ZH
+references/README.md|官方英文框架（V1.9）
+
+# ---- V1.9 · 修 4 个真 bug 的守护项 ----
+# ① 无图模式（text_only）台词行不能引用 <Audio N> —— 铁律 D23 第 2 条：
+#   没上传音频，写 <Audio N> 既 LBL-UNDEF（错误）又 IMG-CONFLICT。
+#   → drama_to_h3_prompts 里靠 h3_line_beat(use_audio=False) 兜住。
+# ② 无图模式不能写「图片上传顺序」块（与「没有任何参考图」自相矛盾）。
+# ③ 空名 /「旁白」伪说话人不能进 speakers —— 否则生成 `<Subject 2>：。`、
+#   未被引用的 <Audio 2>（LBL-UNUSED）、summary「A与与B同框」重字。
+# ④ --lang en 时 Negative **不能**写 no English dialogue（目标语言就是英语，自相矛盾）：
+#   两条路径都必须做语言感知（日语版禁中英 / 英语版只禁中文）。两个生成器同源 bug。
+references/drama_to_h3_prompts.py|use_audio=not text_only
+references/drama_to_h3_prompts.py|and not text_only
+references/drama_to_h3_prompts.py|d.get("kind") or "").lower() == "narrator"
+references/drama_to_h3_prompts.py|lang_code == "English"
+references/batch_run_drama.py|d_lang == "英语"
+
+# ==== V2.0 · 自包含分发（铁律 G 组）====
+# 教训（2026-09-18 用户实测反馈）：跨 skill 引用写死了本机绝对路径
+#   `[项目工作目录]`，
+#   压缩包分享给别人 / 解压到新电脑 → 校验器定位失败。
+# 更坏的后果不是「崩」而是**静默降级成「不校验」**（关 5 看起来跑过了，其实一次都没跑）。
+# 判据（通用，见 ~/.项目模型/MEMORY.md）：
+#   ①「碰巧没事」≠「不会出事」—— 这次包里干净只是恰好那几行被改掉，不是有东西在拦；
+#     所以防护必须由**工具**拦，且必须用**对抗测试**验证（只跑一次「现在干净」等于没测）。
+#   ② 打包有两条出口，不能互相替代：_versions/*.zip 靠 scan_paths.py；git 版本库靠 .gitignore。
+#   ③「用户说过一次、以后不该再问」的东西必须落成**代码能读到的文件**，只写记忆 = 下次一定还会再问。
+# 下列每一条都是「丢了就退回旧毛病」的守护项。
+
+# -- G1 跨 skill 依赖一律「内置副本 + 定位器」，禁止硬编码本机绝对路径 --
+SKILL.md|铁律 G · 分发与自包含
+SKILL.md|G1
+references/deps.py|def resolve_h3_validator
+references/deps.py|def resolve_项目模型_runner
+references/deps.py|VENDOR_DIR
+references/deps.py|项目模型_SKILLS_DIR
+references/batch_run_drama.py|deps.resolve_h3_validator
+references/voice_designer.py|deps.load_项目模型_runner
+
+# -- 内置 vendor 副本必须随包走，且能被 sha256 验完整 --
+vendor/MANIFEST.json|sha256
+vendor/MANIFEST.json|source_skill
+references/deps.py|def vendor_integrity
+references/deps.py|def sync_vendor
+
+# -- G2 默认「内置副本优先」；切外部必须显式开启；依赖缺失不许静默降级 --
+SKILL.md|G2
+SKILL.md|DRAMA_USE_EXTERNAL
+references/deps.py|DRAMA_USE_EXTERNAL
+references/deps.py|def use_external
+references/deps.py|class DependencyMissing
+references/deps.py|def h3_validator_hint
+
+# -- G3 凭证必须落成「代码能读到的文件」；五级读取链；只出现掩码 --
+SKILL.md|G3
+references/deps.py|SHARED_CRED_FILE
+references/deps.py|CRED_FILE
+references/deps.py|def resolve_project_provider_setting
+references/deps.py|def candidate_env_files
+references/deps.py|def mask
+references/deps.py|def migrate_credentials
+references/deps.py|chmod
+# 判据：只写记忆不算修好，代码能读到才算修好 —— 缺 key 时给出的必须是「怎么配」而不是「请提供」
+references/deps.py|def missing_key_hint
+
+# -- G4 打包前必须过绝对路径门禁；防护要由工具拦 + 对抗测试验证 --
+SKILL.md|G4
+tools/scan_paths.py|def scan_tree
+tools/scan_paths.py|def scan_zip
+tools/scan_paths.py|PLACEHOLDER_CHARS
+tools/scan_paths.py|SYSTEM_DIRS
+tools/scan_paths.py|def _user_names
+# 误报修复（「误报也是故障」）：省略号模板 + 路径段字符类必须用正向白名单。
+# 教训：只把 `...` 加进占位符名单**没修好** —— 旧的负向字符类会把中文标点一起吞掉
+#      （`...）不报（硬拦与…`），占位符判定看不到纯 `...` 段 → 照样误报硬拦。
+# 同时白名单里**不能有 `+`**：本文件有字面量 `"/Users/+("`，允许 `+` 会让扫描器命中自己。
+tools/scan_paths.py|PLACEHOLDER_ELLIPSIS
+tools/scan_paths.py|def _is_placeholder
+tools/scan_paths.py|def _name_class
+# 防削弱反向断言：加了「省略号算占位符」后，真用户名仍必须硬拦
+examples/test_scan_paths.py|防削弱
+tools/snapshot.py|--force-paths
+examples/test_scan_paths.py|自指
+# 两条出口都要堵：zip 走扫描器，git 走 .gitignore（互相不能替代）
+.gitignore|keys.env
+
+# -- G5 新电脑必须能「照着念」建环境（统一用 项目模型 安装）--
+SKILL.md|G5
+SKILL.md|阶段 -1：环境自检
+tools/doctor.py|把这句话发给 项目模型
+tools/doctor.py|def check_vendor
+tools/doctor.py|def check_cli_tools
+references/00-新电脑部署.md|解压即可用
+references/00-新电脑部署.md|keys.env
+
+# -- 机制自检入口（发版前必跑；deps.selftest 9 项）--
+references/deps.py|def selftest
+references/deps.py|--sync-vendor
+references/deps.py|--migrate-credentials
+
+# ==== V2.0 · 凭证门禁：凭证是「第三条出口」（铁律 G4）====
+# 判据：路径靠 scan_paths.py + .gitignore 各堵一条；密钥则在 `_versions/*.zip` 与 git
+#   **两条出口都可能漏** → 必须另设一个方向相反的扫描器。
+tools/scan_secrets.py|def real_secrets
+tools/scan_secrets.py|def _looks_like_url
+tools/scan_secrets.py|def _obvious_placeholder
+tools/scan_secrets.py|def _looks_like_code_value
+tools/scan_secrets.py|def _redact
+tools/scan_secrets.py|CRED_FILENAMES
+tools/scan_secrets.py|KNOWN_PREFIX
+tools/scan_secrets.py|KEYISH_FIELD_Q
+tools/scan_secrets.py|def mask
+tools/scan_secrets.py|def scan_zip
+tools/scan_secrets.py|--all-zips
+# 自指坑：指纹必须运行时读，绝不硬编码（否则扫描器自己成了泄漏源）
+tools/scan_secrets.py|Path.home()
+# ★ 踩过的三个真 bug 的守护项 —— 每一条都对应一次实测误报/漏报：
+#   ① 用「纯 hex = 哈希」过滤**本机凭证** → 项目模型 密钥本身是 32 位 hex，
+#      等于不比对真密钥（实测只比对到 1 个值）。所以凭证指纹用 _obvious_placeholder。
+tools/scan_secrets.py|_obvious_placeholder
+#   ② `project_provider_setting = get_project_provider_setting(args.project_provider_setting)` 被报成「疑似密钥字段」→ 加代码形状判定
+tools/scan_secrets.py|属性路径 args.project_provider_setting
+#   ③ `certs/server.pem` 实得 0 —— _iter_files 那一层就把非 SCAN_EXT 的凭证文件 continue 了
+tools/scan_secrets.py|def _is_cred_file
+tools/scan_secrets.py|凭证文件本体（不该进包）
+# 端点 URL 是公开地址不是密钥（实测踩到：项目模型_API_BASE 被当密钥 → 代码里合法写端点的行被误报）
+tools/scan_secrets.py|端点/URL 是公开地址
+# 报告本身也会被转发 → 命中值只打码，永不回显本体
+tools/scan_secrets.py|报告可能被转发给第三方看
+
+# snapshot 门禁 3：两道都要（工作区 / 包本体），且必须能逃生门 + 不留残局
+tools/snapshot.py|def _scan_secrets
+tools/snapshot.py|--force-secrets
+tools/snapshot.py|SNAP_IGNORE_CRED_SUFFIX
+tools/snapshot.py|SNAP_IGNORE_NAMES
+tools/snapshot.py|凭证泄漏扫描（包本体）
+# 门禁自己的对抗测试（21 项）
+examples/test_scan_secrets.py|防削弱
+examples/test_scan_secrets.py|运行时确实比对了本机凭证
+examples/test_scan_secrets.py|报告里不回显密钥本体
+
+# ==== V2.0.1 · 内置副本下载 bug 修复（铁律 G6）====
+# 来源：《橘子汽水味的夏天》第二集 资产生成。音色设计能力 产物 .flac 取回失败，
+#   报「下载失败: <url>」而 URL 明明可访问 —— 一次「错误信息里没有原因」的经典事故。
+# 教训一：短 UA 会被 CDN 判为爬虫（403）→ 必须用完整浏览器 UA + URL 转义 + 退避重试。
+# 教训二（更重要）：raise 不许丢掉底层原因。异常文案要能回答「为什么」，不只是「哪里」。
+vendor/knowledge-video-director/references/项目模型_runner.py|DOWNLOADS_UA
+vendor/knowledge-video-director/references/项目模型_runner.py|Chrome/120
+vendor/knowledge-video-director/references/项目模型_runner.py|def download
+vendor/knowledge-video-director/references/项目模型_runner.py|last_err
+vendor/knowledge-video-director/references/项目模型_runner.py|最后一次错误
+vendor/knowledge-video-director/references/项目模型_runner.py|quote
+# G6-a 双副本同步：vendor 那份是「默认被执行的那份」（G2 内置优先），
+#   只改外部 skill 不改 vendor = 白改；只改 vendor 不改外部 = 上游继续带病。
+#   本机无法在 checks.txt 里直接校验 skill 目录之外的路径，所以此处只固定「vendor 必须有修复」，
+#   外部副本的一致性由 deps.py --sync-vendor + MANIFEST 的 sha256 记账兜住。
+# G6-b 改完必须刷新 MANIFEST（sha256 + bytes），否则以后没法判断包里是哪一版
+vendor/MANIFEST.json|项目模型_runner.py
+vendor/MANIFEST.json|sha256
+references/deps.py|--sync-vendor
+# G6 铁律 + 子判据
+SKILL.md|G6
+SKILL.md|双副本必须同步
+SKILL.md|错误信息里没有原因
+SKILL.md|刷新 MANIFEST
+
+# ---- V2.0.1 · 版本号是【四处】同步，不是三处 ----
+# 教训：V2.0 发版时 VERSION / CHANGELOG / 标题 / frontmatter 都改了，
+#   但 SKILL.md「## 版本历史」章节**漏了 2.0 条目** —— 用户一问才发现。
+#   原来只写了三处，本节把「版本历史」补成第四处。
+SKILL.md|## 版本历史
+SKILL.md|2.0（2026-09-18
+SKILL.md|2.0.1（2026-09-18
+
+# ==== V2.0.2 · 资产「主体完整性」检查 + 裁切包含性断言（铁律 A7-b / A7-c）====
+# 来源：《橘子汽水味的夏天》第二集。用户自带 班主任.png 是 3840x2160 的四视图排版图，
+#   裁切宽度取 1100 而头部右侧实际到 1265 → **人脸被切掉一半**。
+#   用户原话：「班主任人脸都少了一半，怎么审核的」。
+# 两条根因，第二条更重要：
+#   ① 裁切边界**凭估计**没实测
+#   ② A7 自检只查「有没有人」，**没查「人像自己完不完整」**，而且触点图压到 700px（5张并排每张脸约140px）
+#      → **肉眼也判读不了**
+# 关键判断：**事后检测这条路走不通，不能发**——
+#   边界余量查不出来（切完补了白边，主体左右余量各 16%）；
+#   边界直线度也分不开（错误版 34.2% / 正常的 char_01 23.9% / 修复版 24.6%，中间没有阈值）。
+#   → **分不开「缺陷」与「正常」的检查只会给假信心，比没有更坏** → 防护前置到裁切层。
+references/asset_frame_check.py|def margins
+references/asset_frame_check.py|def is_white_bg
+references/asset_frame_check.py|def head_band_touch
+references/asset_frame_check.py|def build_grid
+references/asset_frame_check.py|def head_preview
+# 白底判定必须用**整体**白占比，不能用四边框条 —— 白底人像主体本身常触边，
+# 按边框判会把全部角色图误判成满幅照片（实测踩过）
+references/asset_frame_check.py|WHITE_BG_RATIO
+references/asset_frame_check.py|整体
+# 主体用严格阈值，滤掉投影/柔光（否则 prop_03/04 的投影会被误报成「被裁」）
+references/asset_frame_check.py|TH_SUBJ
+# 触点图单元不得小于 400：小到看不清人脸 = 等于没做检查（本项目事故根因之一）
+references/asset_frame_check.py|--cell 不得小于 400
+# **脚本不许下「通过」结论**
+references/asset_frame_check.py|本脚本不下
+references/asset_frame_check.py|必须由人眼
+# 主体完整性必须同时给「余量表」与「可判读触点图 + 头部特写」
+references/asset_frame_check.py|_framecheck.md
+references/asset_frame_check.py|_contact_%s_big.png
+references/asset_frame_check.py|_head_%s.png
+
+# ---- A7-c 裁切包含性断言（本项目缺陷的**结构性**防护）----
+references/crop_from_sheet.py|def components
+references/crop_from_sheet.py|def roi_of_label
+references/crop_from_sheet.py|包含性断言
+references/crop_from_sheet.py|-min-margin
+references/crop_from_sheet.py|不写任何文件
+references/crop_from_sheet.py|sys.exit(3)
+# 按连通域标签取 ROI：否则邻图边缘会被圈进来（实测：视图#1 的 ROI 被撑到 1616px，
+# 窗口超过原图高度，白白判成「放不下」）
+references/crop_from_sheet.py|只取指定连通域
+# 防削弱：断言不得永远通过 —— 放宽下限后必须能通过（证明拒绝确实来自这条断言）
+examples/test_crop_from_sheet.py|防削弱
+examples/test_crop_from_sheet.py|没有写出任何文件
+examples/test_crop_from_sheet.py|主体宽度与源一致
+
+# ---- SKILL.md 侧的判据 ----
+SKILL.md|A7-b
+SKILL.md|A7-c
+SKILL.md|主体完整性
+SKILL.md|可判读尺寸
+SKILL.md|包含性断言
+SKILL.md|宁可不产出
+SKILL.md|不许只修那一张
+references/audit_html_builder.py|def _load_style_prompt_dict
+references/audit_html_builder.py|def _seg_mood
+references/audit_html_builder.py|budget_estimate
+references/audit_html_builder.py|分镜总表
+references/audit_html_builder.py|【节拍】有序展开
+SKILL.md|D1-a. 审核页不许硬编码上一个项目的内容
+references/check_storyboard.py|def check(
+references/check_storyboard.py|DUR_MIN, DUR_MAX = 4, 15
+references/check_storyboard.py|dialogue 与 beats 里的台词不一致
+references/check_storyboard.py|CROWD_HINTS
+references/check_storyboard.py|crowd_note
+references/check_storyboard.py|铁律 D24
+references/audit_html_builder.py|crowd_note
+SKILL.md|D1-b. 「双关审」的 Agent 那一半必须有工具
+SKILL.md|D2-a. 「导出 → 合并」两端都必须是受校验的
+references/apply_seg_edit.py|def coerce_acting
+references/apply_seg_edit.py|PAGE_ONLY
+references/apply_seg_edit.py|不认识的字段
+references/apply_seg_edit.py|旧版导出痕迹
+references/audit_html_builder.py|payload._changed = changed
+references/audit_html_builder.py|acting_json
+references/audit_html_builder.py|没有任何修改，无需导出
+
+# ==== V2.0.6 · 派生字段不许开放编辑（铁律 D2-b）====
+# 来源：《橘子汽水味的夏天》第二集 · 关 4。上一版修好导出格式后，用户立刻又交回一份**干净 diff**：
+#   {"seq": 1, "narration": "好烫！你发烧了！／我没事的……", "_changed": ["narration"]}
+# 格式无可挑剔，但**等于没改** ——
+#   `narration` 是 `dialogue` 的**派生摘要**（= 各句用 ／ 连接），阶段六派生只读 dialogue 与 beats，
+#   narration 仅在「本段没有 dialogue」时作单角色兜底。只改 narration → 生成出来还是旧台词。
+# 这是最阴的一类缺陷：**改动被静默忽略**，用户以为自己已经改好了。
+# 判据：
+#   ① 派生字段不许出现在编辑区（审核页里 narration 降级为只读展示）；
+#   ② 改了源头（dialogue）就必须**同向更新**三处：dialogue / beats(line) / narration；
+#   ③ 兼容旧 payload：只收到 narration 时按 ／ 切分，句数对得上是台词修改、对不上**直接拒绝**。
+SKILL.md|D2-b. 派生字段不许开放编辑
+references/audit_html_builder.py|台词（每行一句
+references/audit_html_builder.py|句数不要变
+references/audit_html_builder.py|台词摘要（只读，由上面自动生成）
+references/audit_html_builder.py|dialogue_edit
+references/audit_html_builder.py|function syncBeats
+# （V2.0.8：原 `references/audit_html_builder.py|const NARR_SEP` 已随知识搬家 ——
+#   narration 的分隔符知识现在只在 references/apply_seg_edit.py，见文件末尾 V2.0.8 段）
+references/apply_seg_edit.py|def _sync_beats
+references/apply_seg_edit.py|NARR_SEP
+# （V2.0.9：原守护项 `LINE_TYPES = (` 已随知识搬家 —— 枚举现在只在
+#   references/drama_schema.py 定义，本文件改为守护「它确实是从共享模块取的」。）
+references/apply_seg_edit.py|from drama_schema import LINE_TYPES
+references/apply_seg_edit.py|数量必须一致才能自动同步
+references/apply_seg_edit.py|已判定为台词修改
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.6（2026-09-18 派生字段不许开放编辑
+
+# ==== V2.0.7 · 发版门禁必须「静态 + 动态」两条出口（铁律 D2-c）====
+# 来源：《橘子汽水味的夏天》第二集。用新的逐行台词编辑器重建 04 页时，
+#   审核页**一个文件都产不出** —— 模板的 JS 注释里写了裸花括号 `{char_id, text}`，
+#   而那段模板是 Python f-string，被当成插值表达式求值 → NameError。
+# ★ 关键事实：这一版是**带着 349 条不变式全绿**发出去的。
+#   「所有检查都通过」与「核心产物完全不可用」可以同时成立 —— 因为
+#   checks.txt 只做「关键字还在不在文件里」的 grep，**它证明不了代码能跑**。
+# 判据：
+#   ① 内容检查与可执行性检查是两条不能互相替代的出口（同 G4 的 zip/git、A7-b 的机械/人眼）；
+#   ② 门禁自己没有执行体就只是安慰剂：「写了检查脚本」≠「发版时真的会跑它」；
+#   ③ 冒烟必须跑**真实调用路径**：compile() 抓不到 f-string 运行期求值错误。
+SKILL.md|D2-c. 发版门禁必须「静态 + 动态」两条出口
+SKILL.md|它证明不了代码能跑
+SKILL.md|门禁自己没有执行体，就只是安慰剂
+tools/smoke_pages.py|def check_syntax
+tools/smoke_pages.py|def check_builders
+tools/smoke_pages.py|def check_page
+tools/smoke_pages.py|REQUIRED_IN_PAGE
+tools/smoke_pages.py|一律不许抛异常
+tools/snapshot.py|def _run_smoke
+tools/snapshot.py|--no-smoke
+tools/snapshot.py|端到端冒烟未通过
+# 对抗测试：证明它真的会拦（「只跑一次现在干净」等于没测）
+examples/test_smoke_pages.py|接线对抗
+examples/test_smoke_pages.py|门禁脚本存在却没接进流程
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.7（2026-09-18 发版门禁加动态冒烟
+# F2 从「三处同步」升为「四处」：改了会被调用的东西就必须让冒烟真的跑一遍
+SKILL.md|可执行性（V2.0.7 新增第四处）
+SKILL.md|跑起来就炸也拒绝发版
+
+# ==== V2.0.8 · 派生值只能有一个产出点（铁律 D2-d）====
+# 来源：《橘子汽水味的夏天》第二集。用户第三次交回导出（这次结构完全正确），
+#   反而看出结构性问题：04 页把自己**自算的** beats + narration 一起塞进 payload
+#   → 同一套派生逻辑有了两份实现（页面 JS + 合并器 Python）。
+#   合并器「先写 dialogue、再逐字段合并」的顺序意味着：两边算得不一样时，
+#   **页面算的派生值会覆盖合并器的结果 —— 源头反而说了不算**。
+#   本次两份恰好一致，但那是运气不是设计（「碰巧一致」≠「不会不一致」）。
+# 判据：
+#   ① 派生值只允许一个产出点（页面只导出 dialogue；连分隔符知识都不留页面）；
+#   ② 收到派生值要忽略，但不能把用户意图一起吞掉（只有派生值 → 拒绝，不猜、不静默）；
+#   ③ 这条防护必须由对抗测试盯住 —— 它失效时是**静的**。
+SKILL.md|D2-d. 派生值只能有一个产出点
+SKILL.md|派生值只允许一个产出点
+SKILL.md|碰巧一致」和「不会不一致」是两件事
+SKILL.md|门禁 1.6 对抗测试
+# 页面：只导出源头。原守护项 `const NARR_SEP` 随知识搬家 → 合并器（见下）。
+# 不变式要跟着**知识所在的位置**走，不是跟着「它曾经在哪个文件」走。
+references/audit_html_builder.py|派生值由合并器单点派生
+references/audit_html_builder.py|只导出源头
+# 合并器：单点派生 + 派生值归口 + 防削弱（只有派生值就拒绝）
+references/apply_seg_edit.py|DERIVED = {"beats", "narration"}
+references/apply_seg_edit.py|已忽略导出里的派生字段
+references/apply_seg_edit.py|只有 beats
+# 对抗测试：真实写入 + 读回文件断言（不看退出码，看文件里到底写了什么）
+examples/test_apply_seg_edit.py|假动作没有进文件
+examples/test_apply_seg_edit.py|一个字节都没写
+examples/test_apply_seg_edit.py|读回验证
+# 门禁 1.6：对抗测试接进发版流程（环境变量熔断防递归）
+tools/snapshot.py|def _run_adversarial
+tools/snapshot.py|--no-adversarial
+tools/snapshot.py|DAP_IN_ADVERSARIAL
+tools/snapshot.py|对抗测试未通过
+# 夹具公开复用：各测试各造一份夹具迟早漂移，让结果没法解释
+tools/smoke_pages.py|def make_fixture
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.8（2026-09-18 派生值单点产出
+
+# ==== V2.0.9 · 同一套业务枚举只能有一份定义（铁律 D2-e）====
+# 来源：《橘子汽水味的夏天》第二集 · 阶段六。全片台词被当动作输出 —— 人物不会说话。
+#   「哪些 beat type 算台词」在**四个地方各写一份**：
+#     check_storyboard.py / apply_seg_edit.py / audit_html_builder.py 页面 JS / batch_run_drama.py
+#   前三份都含 "line"，**唯独 batch_run_drama 的 LINE_KIND 漏了它** ——
+#   而它恰好是最终生成视频提示词的那一份。三处一致说明不了任何问题。
+# 后果是一条**每一环都让上一环的报警哑掉**的失效链：
+#   ① 台词行没有 (SN) says: <d>[中文]…</d>，也没有 <Audio N> 引用
+#   ② 校验器因缺 <d> 整块跳过逐镜台词预算 → 「0 错误 0 警告」= 假安全
+#   ③ S3 用「prompt 里识别到几行台词」反推「本段有没有台词」→ 识别失败被当成
+#      「本段无台词」→ S4 直接豁免（19/19 全绿）
+#   ④ 只有段 5 因台词里恰好含「说"」二字才偶然揭开盖子
+# 判据：
+#   ① 同一套业务枚举只能有一份定义，其余一律派生；
+#   ② **识别失败 ≠ 不存在** ——「有没有台词」必须问源数据（beats/dialogue），
+#      不能问「我识别到了几行」（后者把「我没看懂」误报成「本来就没有」）。
+SKILL.md|D2-e. 同一套业务枚举只能有一份定义
+SKILL.md|四份里的三份一致，说明不了任何问题
+SKILL.md|识别失败 ≠ 不存在
+# 共享模块 = 唯一来源
+references/drama_schema.py|单一事实来源
+references/drama_schema.py|LINE_TYPES = ("line", "line_offscreen", "inner", "together", "sing")
+references/drama_schema.py|"line": "line",
+references/drama_schema.py|def count_line_beats
+# 四个消费方一律 import，禁止再抄一份
+references/batch_run_drama.py|from drama_schema import LINE_KIND as _LINE_KIND
+references/batch_run_drama.py|LINE_KIND = _LINE_KIND
+references/batch_run_drama.py|from drama_schema import count_line_beats as _count_line_beats
+references/check_storyboard.py|from drama_schema import LINE_TYPES
+references/apply_seg_edit.py|from drama_schema import LINE_TYPES
+references/audit_html_builder.py|from drama_schema import LINE_TYPES
+# 页面 JS 的枚举由 Python 侧注入（页面里不许再硬编码一份）
+references/audit_html_builder.py|const LINE_TYPES = {json.dumps(list(LINE_TYPES))};
+references/audit_html_builder.py|由 Python 侧注入
+# S3/S4 改用**源数据**判定，识别失败必须报硬错
+references/batch_run_drama.py|n_src_lines
+references/batch_run_drama.py|一行台词都没生成
+references/batch_run_drama.py|本段无台词，按豁免处理
+# 对抗测试：表完整性 + 端到端 + **反向证伪**（把表改坏，断言真的会挂）
+examples/test_drama_schema.py|反向证伪
+examples/test_drama_schema.py|判据确实有分辨力
+examples/test_drama_schema.py|假安全回来了
+examples/test_drama_schema.py|识别失败 ≠ 不存在
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.9（2026-09-18 台词枚举单一来源
+
+# ==== V2.0.10 · 下游是硬门禁的约束，上游不许降级成软提示（铁律 D2-f）====
+# 来源：《橘子汽水味的夏天》第二集 · 关 5。修好 V2.0.9 后，关 5 立刻报出 4 段
+#   「台词超容」（段 8/11/12/18）—— 而**关 4 刚刚判它们全绿**。回头看根因：
+#   同一条「一段能装多少字」的约束，三个地方写了**三个不同版本**、给出**三种判定**：
+#     · SKILL.md 铁律   `dur ≥ 字数/4.5 + 1.2s`（15s 段 → ≈62 字）
+#     · drama_to_h3 的  `SEG_LINE_CAP = 62`（同一套算法的第三份副本）
+#     · 关 5 机检 S6     `占比 ≤85%`（15s 段 → ≈57 字，**比上面严 5 字**）
+#   而关 4 的 check_storyboard 把「占比 >85%」当**软提示**，还只算**全片平均** ——
+#   单段塞爆被平均值抹平。于是「上游说合格、下游说超标」不是意外，是必然：
+#   **上游一定会放行一批下游必拒的产物**，返工只是被推后。
+# 判据：
+#   ① 下游是硬门禁的约束，上游不许降级成软提示；同一条约束的松紧必须上下游一致；
+#   ② 校验器发现的约束必须**回流**成生成器（切段）的约束；
+#   ③ 两条铁律并存时，取**更严**的那条（只留 1.2s 会放过 15s 段塞 62 字＝占比 91%；
+#      只看 85% 会放过 5s 段塞 19 字＝只剩 0.77s 反应余量）。
+SKILL.md|D2-f. 下游是硬门禁的约束，上游不许降级成软提示
+SKILL.md|上游一定会放行一批下游必拒的产物
+SKILL.md|校验器发现的约束必须回流
+# 共享的时长/语速/容量规则（唯一来源，三个消费方 import）
+references/drama_schema.py|FRAME_ALIGN = {5: 5.17, 8: 8.00, 9: 9.42, 10: 10.13, 12: 12.25}
+references/drama_schema.py|def align_duration
+references/drama_schema.py|def max_chars
+references/drama_schema.py|def occupy_pct
+references/drama_schema.py|def over_capacity
+references/drama_schema.py|REACT_RESERVE_SEC
+references/drama_schema.py|OCCUPY_MAX = 0.85
+# 关 4 新增**逐段硬**容量检查（与关 5 的 S6 同一公式）
+references/check_storyboard.py|from drama_schema import align_duration, cps_of, max_chars, occupy_pct
+references/check_storyboard.py|台词容量（逐段硬检查 · V2.0.10）
+references/check_storyboard.py|容量上限
+references/check_storyboard.py|这里不拦等于把返工推后
+# 关 4 的全片占比降级为纯观感提示，不再兼作容量门禁
+references/check_storyboard.py|不是容量门禁
+references/check_storyboard.py|单段塞爆被平均值抹平
+# 关 5 的 S6 改判共享容量上限；D5-4 只管「物理上说不说完」
+references/batch_run_drama.py|def line_beat
+references/batch_run_drama.py|段内台词 ≤ 容量上限（R37 · 占比≤85% 且留 ≥1.2s 反应）
+references/batch_run_drama.py|_over_capacity
+references/batch_run_drama.py|说不完，必然被截断
+references/batch_run_drama.py|不要靠加速
+# 第三条副本（drama_to_h3）改为调用同一函数
+references/drama_to_h3_prompts.py|def seg_line_cap
+references/drama_to_h3_prompts.py|同一公式
+examples/test_drama_schema.py|容量
+# 撤销冻结：会阻断下游的状态位必须有「设置」+「撤销」两个执行体
+# （只修好设置端 = 旧的 approved 会一直合法地挡在那里，逼人手工改 JSON）
+references/approve_storyboard.py|--revoke
+references/approve_storyboard.py|通过也要有执行体
+references/approve_storyboard.py|approval_revoked
+references/approve_storyboard.py|通行资格
+examples/test_approve_revoke.py|留痕不能匿名撤回
+examples/test_approve_revoke.py|零写入
+examples/test_approve_revoke.py|抹掉历史
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.10（2026-09-18 约束松紧上下游一致
+
+# ==== V2.0.11 · 写盘前自查 + 派生聚合字段由代码维护（铁律 D2-g）====
+# 来源：《橘子汽水味的夏天》第二集 · 按 D2-f 真去修那 4 段超容时。
+#   三个同源缺陷：
+#     ① 合并器明知「段长可能非法/改完可能仍超容」，却**先写盘再靠项目级机检事后发现**
+#        → 违反 2026-09-13 已固化的「门禁必须排在改状态之前」；写错了要拿备份回滚。
+#     ② 分批修多段时，中间几次必然看到「**别的段**还没修」的硬错误，
+#        工具却一律打印「不通过 + 可回滚」→ **诱导操作者回滚一次完全正确的写入**。
+#     ③ `total_duration_sec` / `segment_count` 是 `segments` 的**派生**聚合值，
+#        既不在白名单、也没人重算 → **改段长必然把它们改错**，靠机检报
+#        「206 与逐段求和 219 不符」等人手工修数字。
+# 判据：
+#   ① 门禁必须排在「改状态」之前；
+#   ② **失败信息必须指明到底是谁的问题**（项目级机检 vs 段级编辑要分清口径）；
+#   ③ **必然会错的字段就该由代码维护**，不能靠人记得。
+SKILL.md|D2-g. 改段长/台词要在**写盘前**自查容量
+SKILL.md|必然会错的字段就该由代码维护
+SKILL.md|失败信息必须指明到底是谁的问题
+references/apply_seg_edit.py|写盘前自查
+references/apply_seg_edit.py|仍然超容
+references/apply_seg_edit.py|不要指望靠加速
+references/apply_seg_edit.py|def _sync_derived
+references/apply_seg_edit.py|--sync-derived
+references/apply_seg_edit.py|不属于本段
+references/apply_seg_edit.py|操作者会去回滚一次
+# 对抗测试 [D] 四组（含反向证伪：压进限额后必须放行）
+examples/test_apply_seg_edit.py|超出硬区间
+examples/test_apply_seg_edit.py|整数秒
+examples/test_apply_seg_edit.py|仍然超容
+examples/test_apply_seg_edit.py|证明 D3 不是恒报错
+examples/test_apply_seg_edit.py|是**测试错了**，不是工具错
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.0.11（2026-09-18 写盘前自查
+
+# ==== V2.0.12 · 文案不许断言事实不支持的东西（铁律 D2-h）====
+# 来源：《橘子汽水味的夏天》第二集 · 关 5 第一道独立语义审**一次报出 13 段在撒谎**：
+#   summary 写「直接承接 <Picture 1> 中的姿势」，而 <Picture 1> 永远是排在最前的
+#   **人物参考图**；`link=dualref` 的段**根本没有尾帧参考图槽位** ——
+#   而 SKILL.md 自己写着 dualref 是「尾帧 + 角色图双锚定」。
+#   **文档声明了能力，实现只给了一半**；更冤的是 dualref 段本就 deps_ok 等前段跑完
+#   （**成本已经付了**），等的却是一张永远用不到的尾帧。
+# 同源文案缺陷（全是「断言了事实不支持的东西」）：
+#   · 群演锚点取 people_zh[-1] → 取到陆星野，而他设定是「**不穿**校服外套」
+#     （「校服」二字恰在**否定句**里 → 直接 substring 必错）
+#   · 单人段写「同框」；段 19 写「两人同框」而同段机位是「对切，两人始终不同框」
+#   · Negative 全局写 `no dark blazers on students`，而主角就是「深藏青**西装**校服外套」
+#   · 9 段无条件写「一镜到底」而同段机位要求正反打对切
+# 判据：
+#   ① 文案不许断言事实不支持的东西；
+#   ② **「作者才知道的内容事实」必须显式声明，不能靠关键词反推**
+#      （关键词判据实测漏了 4 段：段 9 用「→」箭头、段 12「切她的近景」…）；
+#   ③ 全局 Negative 不能表达「只针对某一类对象」的约束（没有主语，只会误伤）；
+#   ④ 缓存必须跟着源数据一起失效（「不存在才重建」不是缓存策略）。
+SKILL.md|D2-h. 文案不许断言事实不支持的东西
+SKILL.md|文案不许断言事实不支持的东西
+SKILL.md|必须显式声明，不能靠关键词反推
+SKILL.md|全局 Negative 不能表达
+SKILL.md|缓存必须跟着源数据一起失效
+SKILL.md|凡是「自动生成的描述句」，都要有一条断言盯着它「说的是不是真的」
+# 尾帧槽：dualref 也算，且排在道具之前（额度 5：角色→场景→尾帧→道具）
+references/batch_run_drama.py|mode in ("tailframe", "dualref")
+references/batch_run_drama.py|尾帧让 5 张额度刚好用满
+references/batch_run_drama.py|不进参考图（仍由节拍文字描述）
+references/batch_run_drama.py|_PROP_DROPPED_NOTED
+# 承接句引用真实槽位编号（不再硬编码 <Picture 1>）
+references/batch_run_drama.py|中的姿势与同一场景
+references/batch_run_drama.py|<Picture 1> 永远是角色设计图
+# 群演服装锚点：判别器（先剔否定句，再优先运动校服）
+references/batch_run_drama.py|def _uniform_anchor
+references/batch_run_drama.py|它就不能用来区分对象类别
+references/batch_run_drama.py|先判否定、再判肯定
+# 「同框」取消；「一镜到底」跟随显式声明 single_take
+references/batch_run_drama.py|均在本段出场
+references/batch_run_drama.py|「这是几个镜头」是作者才知道的内容事实
+references/batch_run_drama.py|不是一个连续镜头
+# Negative 去全局否定（无主语的否定只会误伤）
+references/batch_run_drama.py|全局 Negative 不能用来表达
+references/batch_run_drama.py|它没有主语，只会误伤
+# 尾帧缓存失效
+references/batch_run_drama.py|def invalidate_tailframe
+references/batch_run_drama.py|不是缓存策略，是忘了失效
+# 对抗测试 14 项（每项带反向证伪）
+examples/test_prompt_continuity.py|dualref 段真的有尾帧槽位
+examples/test_prompt_continuity.py|的承接句已消失
+examples/test_prompt_continuity.py|不硬套某人当锚点
+examples/test_prompt_continuity.py|只作废 seg_1 的尾帧缓存
+examples/test_prompt_continuity.py|文案不许断言事实不支持的东西
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.0.13 · 门禁自己也会坏：覆盖范围 / 唯一实现 / 命名极性（铁律 D2-i）====
+# 来源：《橘子汽水味的夏天》第二集。给「会被改到的产物」补冒烟覆盖时，连发现三个
+#   **门禁自己**的缺陷 —— 这比业务缺陷更该警惕，因为门禁坏了没人替你发现：
+#   ① 覆盖范围：夹具里没有 状态/prompt_review.json → 05 页每次以「数据不足」被跳过
+#      → **05 页渲染零覆盖**，而这一版恰好改了 05 页。补上夹具数据后新加的 05 页自检
+#      **立刻**报出「找不到『多镜（段内有剪辑）』」（夹具只有单镜段，那条路径从没被跑到）。
+#   ② 唯一实现：snapshot.py 自己又写了一遍「解包 check_builders() + check_page + 拼报错」，
+#      返回值一改就**静默错位** → 8 项全报缺失 = **看起来很严重的假消息**（比没门禁更坏）。
+#   ③ 命名极性：修 ② 时把 `failed, lines = run_checks()` 写成 `ok, lines = ...`，
+#      于是**全绿时 _run_smoke() 返回 False** → 全绿也拒绝发版。
+# 判据：
+#   ① 冒烟要覆盖「会被改到的产物」，不是只覆盖最容易造夹具的那个；
+#   ② 同一条逻辑只能有一处实现（同 D2-d/D2-f），门禁尤其如此；
+#   ③ **布尔值的名字必须和它的极性一致**（反着用一定会有人踩）；
+#   ④ **门禁坏了会表现成「一切正常时也报错」** → 每道门禁都要有「正常输入必须放行」的基线断言。
+SKILL.md|D2-i. 门禁自己也会坏
+SKILL.md|冒烟要覆盖「会被改到的产物」
+SKILL.md|布尔值的名字必须和它的极性一致
+SKILL.md|「真的拦住了坏东西」和「门禁自己坏了」
+# 05 页纳入冒烟 + 唯一实现
+tools/smoke_pages.py|REQUIRED_IN_PROMPT_PAGE
+tools/smoke_pages.py|def check_prompt_page
+tools/smoke_pages.py|def run_checks
+tools/smoke_pages.py|05 页的渲染完全没有门禁覆盖
+tools/smoke_pages.py|两种镜数各来一段
+tools/snapshot.py|failed, lines = smoke_pages.run_checks()
+tools/snapshot.py|命名必须跟着语义走
+# single_take 进 review 并渲染徽章（D1-a：字段写了、页面没渲染 = 用户审不到）
+references/batch_run_drama.py|"single_take": s.get("single_take")
+references/audit_html_builder.py|单镜（一镜到底）
+references/audit_html_builder.py|多镜（段内有剪辑）
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.0.14 · 「选了什么档位」≠「实际出多少像素」（铁律 D2-j）====
+# 来源：《橘子汽水味的夏天》第二集 · 关 5 分辨率复核。
+#   首问选的是「16:9 横屏 1080P」，关 5 也要用户「复核分辨率」——
+#   但真正输出多少像素取决于 ResolutionSelector(megapixels=0.7, multiple=32)
+#   与二采倍数（easy float = 1.5）：一采 1120×640 → 二采 ×1.5 → 1680×960 = 1.61 MP，
+#   而 1080P 是 1920×1080 = 2.07 MP ⇒ **交付标 1080P 等于拉伸 12.5% 的假 1080P**。
+#   危险之处：三个数字都在配置里、都能确定性算出来，却没有一步把它们乘起来给用户看 ——
+#   于是「复核分辨率」复核的是一个**词**，不是一个**尺寸**。
+# 判据：
+#   ① 手上有确定性的算式就把它算出来给人看，别让人自己在脑子里乘；
+#   ② 确认值必须落成**真实数字**，不能只写首问选的那个词；
+#   ③ **推算值 ≠ 实测值**，必须标明并回填（实测以首镜试产 ffprobe 为准）；
+#   ④ 用户拍板改档也要把算式与理由留在配置里，否则下一个人会「整理」回去。
+SKILL.md|D2-j. 「选了什么档位」≠「实际出多少像素」
+SKILL.md|手上有确定性的算式，就要把它算出来给人看
+SKILL.md|确认值必须落成真实数字
+SKILL.md|推算值 ≠ 实测值
+references/batch_run_drama.py|def resolution_pixel_estimate
+references/batch_run_drama.py|低于 1920×1080（2.07 MP）
+references/batch_run_drama.py|推算值，未经实测
+references/batch_run_drama.py|"resolution_estimate": wf_est
+references/audit_html_builder.py|推算输出像素
+references/workflow_b2_multi_ref.json|用户 2026-09-18 拍板：一采 0.7 MP、二采 ×1.5
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.0.15 · 花钱开关不许有歧义（铁律 D2-k）====
+# 来源：《橘子汽水味的夏天》第二集 · 准备开批量时核实「双 Key 并行会不会打乱依赖队列」。
+#   顺带发现：--workers-e 的 help 写着「默认别用（不费 RH 币但按秒扣钱包真钱，Plus ¥6/h）」，
+#   默认值也是 0 —— 但调度里 `n_slots_e = len(pending) if args.workers_e == 0 else ...`
+#   **把 0 解释成「用满」**。读 help 的人以为关着，实际全开，而且它花真钱。
+#   本次试产敲 `--workers 3` 后日志立刻显示「消费级x3 · 企业级x3」。
+# 判据：
+#   ① 涉及花钱的开关，默认值 / help 文案 / 代码行为三者必须完全一致；`0` 就是 `0`，
+#      别用「0 = 无限」这种双关（要用满就写 -1 / all）；
+#   ② 只要花钱通道被启用，就打一行醒目警告写清计费口径 **以及怎么关**；
+#   ③ 凡「默认会花钱」的通道都要有显式逃生门（--no-enterprise）；
+#   ④ **文档与代码不一致时，先按最贵的那个方向去想** —— 文案歧义在别处只是难看，这里是账单。
+SKILL.md|D2-k. 「默认别用」写进了 help 而代码把 0 当成「用满」
+SKILL.md|涉及花钱的开关不许有歧义
+SKILL.md|沉默地花钱比多花点钱严重得多
+SKILL.md|先按最贵的那个方向去想
+references/batch_run_drama.py|--no-enterprise
+references/batch_run_drama.py|不消耗 RH 币，但按秒扣真实钱包
+references/batch_run_drama.py|只想用 RH 币请加
+# 依赖排队（用户点名风险）的核实结论：单一共享调度循环 + 提交前逐个查 deps_ok → 跨池也安全
+references/batch_run_drama.py|if deps_ok(s):
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.0.16 · 「命令跑成功了」≠「东西做对了」（铁律 D2-l）====
+# 来源：《橘子汽水味的夏天》第二集 · 今天最贵的一次。
+#   批量报「成功 20/20 · 3259 RH 币 · 成片已拼」，产出却**不可交付**：
+#   逐段 log.json = `noref=true / ref_count=0 / audio_count=0`
+#   ⇒ 整批 20 段以**零参考素材**提交（用户自带角色图没用上、尾帧锚点没生效、音色没上传）
+#   ⇒ 人脸/发型逐段漂（6 段首帧触点图肉眼可见）、段间无锚点、台词用模型自带音色。
+# 根因（两个 bug 叠加，全程零报警）：
+#   ① 显式参数被默认值静默遮蔽：resolve_workflow() 只看 --workflow/--workflow-id，
+#      **完全不看 --multi-ref-workflow** → 按 default(W-A) 解析 → W-A 的 noref_default=true
+#      → 提交分支里「去参考化」把「多参考图」整个遮蔽（显式传的文件一次都没生效）。
+#   ② 修好 ① 才暴露：文件是 W-B 的（节点 339/326…）、映射是 W-A 的（263/51…）
+#      → RuntimeError: 工作流中不存在节点 263。
+# 判据：
+#   ① 显式参数必须战胜默认值（盖掉它至少要喊一声）；
+#   ② 两个互斥的显式参数必须**报错**，不许静默二选一；
+#   ③ 「用哪份文件」与「用哪套节点映射」必须同源（D30 的推论）；
+#   ④ 启动预检要早于提交 —— 启动即失败，一分钱不花；
+#   ⑤ **能大声说出来的事实，不要留给事后查**（逐段打印素材计数）；
+#   ⑥ **批量跑完必须抽检产出物**：素材计数 + 抽帧触点图 + 与参考素材对照。
+#      **汇总行只说明「提交了 20 次」，不说明「提交对了」。**
+#   ⑦ 日志文案必须落在**它所描述的那个分支内**（第一版 [noref] 写在分支外，
+#      带参考的跑里也照打 → 又成了「文案与事实不符」）。
+SKILL.md|D2-l. 「命令跑成功了」≠「东西做对了」
+SKILL.md|显式参数必须战胜默认值
+SKILL.md|两个互斥的显式参数必须报错
+SKILL.md|用哪份文件」与「用哪套节点映射」必须同源
+SKILL.md|启动预检要比「提交」更早
+SKILL.md|能大声说出来的事实，不要留给事后查
+SKILL.md|批量跑完必须做「产出物抽检」
+SKILL.md|日志文案必须落在它所描述的那个分支内
+references/batch_run_drama.py|def preflight_workflow
+references/batch_run_drama.py|必须参与解析
+references/batch_run_drama.py|已忽略该工作流的 noref_default
+references/batch_run_drama.py|与 --noref 互斥
+references/batch_run_drama.py|不带任何参考素材
+references/batch_run_drama.py|[refs] 段
+# 对抗测试：五项断言全部走 --dry-run（不花钱）—— 证明这些防护真的会拦
+examples/test_workflow_resolution.py|显式参数战胜默认值
+examples/test_workflow_resolution.py|没有静默二选一
+examples/test_workflow_resolution.py|不同源
+examples/test_workflow_resolution.py|断言要盯结果，不要盯某一句文案
+examples/test_workflow_resolution.py|不要让**其它**门禁的报错混进断言里
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2 · 一致性第一位：默认必须多参（铁律 D2-m）====
+# 来源：2026-09-19 用户拍板 ——
+#   「修复 W-A 的默认设置，全部改为多参模式，**一致性是第一位的**，
+#     除非用户指定使用文生视频，否则必须使用多参。」
+# 根因：W-A.noref_default=true —— 而 W-A 的默认 api_json（workflow_wa_api.json，
+#   9 图槽 + 3 音色槽且全部接线）**本来就是多参版本**。
+#   **默认值与它自己指向的文件互相矛盾**：SOP 写着「W-A（默认）= 多参」，实际默认去参考化。
+#   叠加「命令示例长期传 --multi-ref-workflow workflow_b2_multi_ref.json（W-B 的文件）」，
+#   于是「按示例敲命令」等于把首问选定的 W-A 悄悄换成 W-B —— **示例就是事实上的默认**。
+# 判据：
+#   ① 默认必须是「一致的那条路」；文生视频只能**显式**进入（--noref）且必须大声警告；
+#   ② 默认值必须与它指向的资源自洽（默认文件是多参版，noref_default 就不能是 true）；
+#   ③ SOP 的命令示例不许把默认值偷偷换掉；
+#   ④ 拿不准时选「更贵但更稳」的那条（多参只多一次上传，却是一致性的唯一抓手）。
+SKILL.md|D2-m. 一致性第一位：默认必须多参
+SKILL.md|一致性是第一位的
+SKILL.md|默认必须是「一致的那条路」
+SKILL.md|默认值必须与它指向的资源自洽
+SKILL.md|SOP 的命令示例不许把默认值偷偷换掉
+SKILL.md|默认值就是产品决策
+SKILL.md|V2.2 默认即多参
+references/workflows.json|_policy
+references/workflows.json|"gen_mode_default": "multi_ref"
+references/batch_run_drama.py|一致性第一位】（2026-09-19 用户拍板，V2.2）
+references/batch_run_drama.py|这与「一致性第一位」
+references/batch_run_drama.py|允许的明确例外
+# 对抗测试：默认即多参 + 文生视频须显式且被警告（全部 --dry-run 不花钱）
+examples/test_workflow_resolution.py|默认就是带参考
+examples/test_workflow_resolution.py|警告「一致性无锚点」
+examples/test_workflow_resolution.py|默认即多参
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.1 · 会被比对的字符串不许带实现细节；运行时参数优先于文件静态值（铁律 D2-n）====
+#   ① 浮点裸 repr 混进门槛比对：W-A 读出 0.PROJECT_MODEL_BINDING / 1.PROJECT_MODEL_BINDING，
+#      拼进档位字符串后「同一个 0.7MP/×1.5」被判成**档位变了** → 白触发一次重审。
+#   ② 推算像素用文件静态比例、而实跑用 --aspect：W-A 模板存竖屏 → 算出 640×1120，
+#      与实跑横屏正好反过来。**方向说反的数字比没有数字更坏。**
+# 判据：
+#   ① 会被机器比对的字符串必须格式化到「语义等价即字符串相等」（浮点/对象 repr/时间戳都不许混入）；
+#   ② 推算必须用**运行时参数**，文件值只作兜底；
+#   ③ **「谁说了算」要在代码里明确一次**（同族：显式参数>默认值 D2-l、源数据>识别结果 D2-e）。
+SKILL.md|D2-n. 会被拿去比对的字符串，不许带实现细节
+SKILL.md|语义等价即字符串相等
+SKILL.md|一个方向说反了的数字比没有数字更坏
+SKILL.md|「谁说了算」要在代码里明确一次
+references/batch_run_drama.py|都不许带实现细节
+references/batch_run_drama.py|比例要用**运行时传入的
+references/batch_run_drama.py|aspect_used
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.2 · 交付三件套 + 数字不许手抄（铁律 D2-o）====
+# 出三件套（zip / standalone / 项目说明页）时踩到两次方向相反的坑：
+#   ① 「铁律 N 条 / 不变式 M 条」这类数字手抄必漂 → 单文件版的铁律清单改为**从 SKILL.md 抽取**（88 条）。
+#   ② 但「判据」这类要说完整语义的句子，正则抽取会**断在半句**（第 1/4/8 条实测都断了尾）
+#      —— **一句不完整的判据比没有更坏：它看起来像结论，实际缺了成立条件。** → 改为手工精编 16 条。
+# 判据：能自动生成的用自动生成；要表达完整语义的，就得人写。
+# 另：交付物本身也要被门禁守着，否则下次重构会把它们悄悄弄丢或弄旧。
+SKILL.md|D2-o. 交付文档里的数字必须从实现里取
+SKILL.md|能自动生成的用自动生成
+SKILL.md|一句不完整的判据比没有更坏
+SKILL.md|交付物本身也要**被门禁守着**
+# 交付物存在性 + 关键结构（防止重构时丢失/变旧）
+drama-auto-pipeline-standalone.md|# drama-auto-pipeline · 单文件版
+drama-auto-pipeline-standalone.md|铁律速查
+drama-auto-pipeline-standalone.md|通用判据
+drama-auto-pipeline-standalone.md|全部铁律（按族分）
+drama-auto-pipeline-standalone.md|四个最容易踩的坑
+drama-auto-pipeline-项目说明介绍页.html|一致性第一位：默认就是多参
+drama-auto-pipeline-项目说明介绍页.html|特点一 · 七道关卡
+drama-auto-pipeline-项目说明介绍页.html|特点三 · 四道发版门禁
+drama-auto-pipeline-项目说明介绍页.html|特点五 · 敢给成绩单
+drama-auto-pipeline-项目说明介绍页.html|版本历史
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.3 · 交付物与实现必须同源（D2-o 的实证）====
+# V2.2.2 的包自相矛盾：两个交付物里印的是 V2.2.1（先写交付物、后升版本号），而包已是新的
+#   —— 等于「发出去的说明书上写着上一个版本」。这正是 D2-o 要防的事。
+# 修复：交付物版本号一律从 VERSION 取；**不再写「N 文件 / M KB」这类打包后才知道的数字**。
+# 新增 examples/test_deliverables.py（21 项断言）盯着：版本一致 / 版本历史首条=最新 /
+#   铁律条数与 SKILL.md 同源 / 版本历史在最末尾。
+# ⚠ 这条测试第一版自己误报了：拿整篇找 V<数字> → 把版本历史表与回退示例里的旧版本号全报错。
+#   判据：**判据本身要有判别器** —— 先划作用域（只查「当前版本位」），再单独查「首条=最新」。
+SKILL.md|交付物与实现必须同源
+SKILL.md|判据本身要有判别器
+SKILL.md|证伪断言的价值
+examples/test_deliverables.py|版本历史的第一条就是当前版本
+examples/test_deliverables.py|同源，不是手抄
+examples/test_deliverables.py|版本历史」在项目说明页最末尾
+examples/test_deliverables.py|判别器生效
+examples/test_deliverables.py|判据本身要有判别器
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.2.3（2026-09-19 交付物与实现必须同源
+# ==== V2.2.3 · 先改状态再产出 + 事务回滚（铁律 D2-p）====
+# 修「交付物印旧版本」时挖出更深一层：snapshot.py 是「先打包 → 扫描 → 再写 VERSION/CHANGELOG」，
+#   导致**每个 _versions/*.zip 里装的都是上一个版本的 VERSION 与 CHANGELOG**
+#   （实测 -V2.2.2-*.zip 里 VERSION=2.2.1、CHANGELOG 无 V2.2.2 条目）。
+#   危害评估：rollback.py 本就会按目标版本补写 VERSION → 回退路径无害；
+#   暴露的是「手工解压/发给别人」这条路。
+# 判据：
+#   ① 状态必须先落地，产出物才能反映它；
+#   ② 防「中断留残局」靠**事务回滚**，不是靠「把产出建立在旧状态上」；
+#   ③ **别把「历史遗留」塞进「本次发版门禁」** —— 查历史遗物只会得到永远红的门禁，而它会被人绕过。
+#   ④ 检查器由对抗测试验证；对**本次产物**的检查放在产出之后。
+SKILL.md|D2-p. 「先改状态再产出」
+SKILL.md|产出物要反映某个状态
+SKILL.md|正确做法是事务化
+SKILL.md|别把「历史遗留」塞进「本次发版门禁」
+SKILL.md|门禁检查的对象必须是「本次的产物」
+tools/snapshot.py|def _abort_and_rollback
+tools/snapshot.py|门禁 1.7：包内版本必须与包名一致
+tools/snapshot.py|make_deliverables.py
+tools/make_deliverables.py|交付物不是「发版前手写的文档」
+tools/make_deliverables.py|def gen_standalone
+tools/make_deliverables.py|def gen_history
+tools/make_deliverables.py|--check
+examples/test_deliverables.py|版本历史的第一条就是当前版本
+examples/test_snapshot_package.py|def package_problems
+examples/test_snapshot_package.py|滞后一版
+examples/test_snapshot_package.py|检查器由对抗测试验证
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.4 · 生成器必须幂等（一次性占位符不是模板，是坑）====
+# 独立复核三件套时抓到：介绍页版本徽章仍是 V2.2.2，而单文件版已是 V2.2.3 ——
+#   因为 fill_article() 用一次性占位符（replace 之后 token 就没了，第二次运行无处可填）。
+# 判据：生成器的输出必须可重复生成（幂等）；一次性占位符不是模板，是坑。
+# 附带：test_deliverables 的 B1/B2 正是为这条而写 —— 自检的价值不在于「这一刻绿」，
+#   在于「下一次红」。
+SKILL.md|生成器必须幂等
+SKILL.md|一次性占位符不是模板，是坑
+SKILL.md|自检的价值不在于「这一刻绿」
+tools/make_deliverables.py|必须是**幂等**的
+tools/make_deliverables.py|一次性占位符不是模板，是坑
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.5 · 项目说明页面必须「粘贴即排版」（铁律 D2-q）====
+# 来源：2026-09-19 用户实测反馈 —— 介绍页在浏览器里好看，**粘进项目说明就塌了排版**。
+#   发布编辑器编辑器会主动剥掉：display:flex / grid / float / position /
+#   linear-gradient / box-shadow / text-shadow / ::before|::after / <style> / class / id / 外链 CSS。
+#   我那页用了大量 flex（门禁表 / 成绩单 2×2 / 适合谁）→ 全塌成竖排。
+# 判据：
+#   ① **交付物要在它真正要被使用的地方验收**（「浏览器里好看」≠「粘进平台还好看」）；
+#   ② 平台限制要写成「禁止清单 + 检查器」，不能靠记住；
+#   ③ 项目说明安全版四条写法：行内 style / 表格并排 / 纯色背景 / 显式字号行高颜色。
+#   ④ 判据本身要有判别器：先剥 HTML 注释再检查（第一版误报 4 处，全在注释里）。
+SKILL.md|D2-q. 项目说明页面必须「粘贴即排版」
+SKILL.md|交付物要在它真正被使用的地方验收
+SKILL.md|平台限制要写成「禁止清单 + 检查器」
+SKILL.md|每个文字元素显式写
+tools/check_mp_html.py|def check
+tools/check_mp_html.py|先剥掉 HTML 注释再检查
+tools/check_mp_html.py|并排内容改用 <table>
+tools/make_deliverables.py|项目说明安全校验（铁律 D2-q）
+tools/make_deliverables.py|拒绝交付
+examples/test_mp_html_safe.py|注释里**提到 flex/渐变不被误报
+examples/test_mp_html_safe.py|否则检查器是摆设
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.8 · 全链总览页必须自动产出 + 交付四件套要能自查（铁律 D2-r）====
+# 来源：2026-09-19 用户追问「跑完的视频怎么没有出总览？」
+#   ① 没有任何东西检查四件套是否齐全 —— D32 写着「缺任何一件都算没交付」，
+#      而本集从头到尾没出过全链总览页（用户自己发现的）。
+#   ② 就算记得跑也跑不出来 —— make_chain_overview.py 只认 V1.x 目录结构
+#      （分镜_H3提示词_*.md / 视频/segNN.mp4 / 成本 csv），V2 用的是
+#      storyboard.json / 视频/shot_NN_* / rh_state.json → 一开口就要不存在的文件。
+# 判据：
+#   ① **「必须交付的东西」要有一条命令能查**，而不是一句要求；
+#   ② **能自动产出的交付物就必须自动产出** —— 靠人记得的那一件一定会缺；
+#   ③ 目录结构演进后，消费它的工具要么跟着改、要么**显式报错**，不许静默失配；
+#   ④ 模板里不许有项目相关的硬编码数字（D32 早就要求「数字必须实时解析」）。
+SKILL.md|D2-r. 「必须交付的东西」要有一条命令能查
+SKILL.md|靠人记得的那一件，一定会缺
+SKILL.md|不许静默失配
+SKILL.md|模板里不许有项目相关的硬编码数字
+references/make_chain_overview_v2.py|def main
+references/make_chain_overview_v2.py|零硬编码
+references/make_chain_overview_v2.py|align_frames
+references/batch_run_drama.py|全链总览页已生成
+references/batch_run_drama.py|交付四件套会缺第 4 件
+references/chain_overview_template.html|__NSEG__ 段
+references/chain_overview_template.html|__NENT__ 段
+tools/check_delivery_set.py|def check
+tools/check_delivery_set.py|def _self_test
+tools/check_delivery_set.py|缺任何一件都算没交付
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.2.9 · 非台词字段会「渗漏」（铁律 D2-s）====
+# 来源：2026-09-19 用户看完成片逐条报 12 类问题。定位后发现两类同源：
+#   **非台词字段（overall_soundscape / 动作行 / action_zh / camera_lock_zh）里的内容，
+#     H3 会当成「要生成的内容」，而不是「元信息」。**
+#   机制一 语音性的会被**念**：多出来的台词全部命中非台词字段 ——
+#     段2 soundscape 里引号内的「让一下」；段6/14/18/19 的动作行
+#     （不说话 / 声音是抖的 / 后话被堵回去 / 那句话是她自己说的）。
+#   机制二 物件会被**画**：段7「拿瓶盖喝水」← soundscape 里写着「瓶盖拧开的脆响」。
+#   机制三 关键关系缺排除会被**并**：段3「坐在病床上」← 分镜写的是「床边的小凳」。
+# 判据：
+#   ① 非台词字段只写「看得见的」，不写「听得见的」（声音抖→下唇抖了一下）；
+#   ② overall_soundscape 只写音色与音源类别，不写画面里不该出现的具体物件细节；
+#   ③ 关键接触关系要「正向 + 排除」双写（坐在床边的小凳上（不是床上））；
+#   ④ 三层判别且每层都要有判别器：拟声不算泄漏 / 台词原文重复引用=警告 / 新增人声=硬拦；
+#   ⑤ 检查对象必须与实际生效的那份一致（中文项目不查英文 soundscape）；
+#   ⑥ **字段的「语义」和模型的「理解」是两件事** —— 交给生成模型的文本，
+#      都要问一句「它会不会把这段当成要生成的东西」。
+#   ⑦ 机检抓不全（段15「停了一拍，没有收回来」无高置信词）→ **机检替代不了关 6 人眼复核**。
+SKILL.md|D2-s. 非台词字段会「渗漏」
+SKILL.md|只写"看得见的东西"，不写"听得见的东西"
+SKILL.md|字段的"语义"和模型的"理解"是两件事
+SKILL.md|机检替代不了人眼
+references/batch_run_drama.py|def speech_leak
+references/batch_run_drama.py|def _sl_is_onomatopoeia
+references/batch_run_drama.py|def report_speech_leaks
+references/batch_run_drama.py|会被念出来的人声
+references/batch_run_drama.py|本段画面的起点
+references/batch_run_drama.py|背景必须原样延续、不得重绘
+examples/test_speech_leak.py|拟声词（咔/砰/啪）不算泄漏
+examples/test_speech_leak.py|警告而非硬拦
+examples/test_speech_leak.py|不查英文 soundscape
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+# ==== V2.3 · 嘴唇闭合标记 + 模板硬编码项目名（铁律 D2-t / D2-u）====
+# 来源：2026-09-19 用户看完成片报三个问题：
+#   ① 总览页标题还是上一个项目的 ← 模板硬编码项目名
+#   ② 部分台词把动作说了一遍 ← 台词行缺嘴唇闭合标记
+#   ③ 尾帧衔接基本没问题了 ← 上一轮首帧锁定修复生效 ✅
+# 判据：
+#   ① 每句台词 </d> 后必须紧跟嘴唇闭合标记（说完嘴唇合上/说完双唇闭合/说完抿住嘴）
+#      —— 告诉模型到哪里结束与从哪里开始同样重要；
+#   ② 模板里不许有任何项目的硬编码名称/数字/标题 —— 只许用占位符。
+SKILL.md|D2-t. 每句台词的 `</d>` 后面必须紧跟嘴唇闭合标记
+SKILL.md|告诉模型到哪里结束与从哪里开始同样重要
+SKILL.md|D2-u. 模板里不许有任何项目的硬编码名称
+SKILL.md|模板里只许用占位符
+references/batch_run_drama.py|_LIP_CLOSURES
+references/batch_run_drama.py|def _next_lip_closure
+references/batch_run_drama.py|说完嘴唇合上
+references/chain_overview_template.html|__PROJECT__
+# 版本历史守护项（滚动更新：每发一版必须同步加一条，否则自检拒绝发版）
+SKILL.md|2.3（2026-09-20 嘴唇闭合标记
+SKILL.md|2.2.9（2026-09-19 非台词字段会「渗漏」
+SKILL.md|2.2.8（2026-09-19 全链总览页必须自动产出
+SKILL.md|2.2.5（2026-09-19 项目说明页面必须「粘贴即排版」
+SKILL.md|2.2.4（2026-09-19 生成器必须幂等
+SKILL.md|2.2.3（2026-09-19 先改状态再产出
+SKILL.md|2.2.2（2026-09-19 交付三件套
+SKILL.md|2.2.1（2026-09-19 会被比对的字符串不许带实现细节
+SKILL.md|2.2（2026-09-19 一致性第一位
+SKILL.md|2.0.16（2026-09-18 显式参数不许被默认值遮蔽
+SKILL.md|2.0.15（2026-09-18 花钱开关不许有歧义
+SKILL.md|2.0.14（2026-09-18 分辨率确认值必须是真实数字
+SKILL.md|2.0.13（2026-09-18 门禁自身的三个缺陷
+SKILL.md|2.0.12（2026-09-18 段间衔接与文案自洽

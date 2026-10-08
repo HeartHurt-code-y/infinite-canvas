@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+资产「主体完整性」机械筛查（铁律 A7-b）
+
+为什么有这个脚本
+----------------
+《橘子汽水味的夏天》第二集：班主任的角色图**人脸右侧被裁掉一半**，
+但当时的 A7 自查只查了「画面里有没有人 / 是不是白底」——
+**「人像自己完不完整」这一条根本没查**，而且触点图压到 700px 高（5 张并排，
+每张脸只有约 140px），肉眼也没法判读。用户一句话点破：「人脸都少了一半，怎么审核的」。
+
+所以这个脚本只做两件事，且**只做机械的那部分**：
+  1) 算出每张图**主体（非白像素）到四条边的余量**，把「贴边」的挑出来；
+  2) 生成**可判读尺寸**的触点图 + 角色图头部特写，供人眼过一遍。
+
+判据（重要）
+------------
+**「贴边」不等于「缺陷」，本脚本也永远不下「通过」的结论。**
+  - 主体是**照片满幅**（场景图）→ 四边都贴边是正常的
+  - 主体是**投影/阴影**触边 → 正常
+  - 人像**肩/胸被画面边缘裁切** → 正常构图（用户自带的 char_01 连下巴都在框外，是既有风格）
+  - 人像**头顶贴边** → **高风险**，极可能是「脸被裁」这一类事故
+脚本的价值在于**把该看的挑出来、把图放大到看得清**；
+「这张脸到底完整吗」必须由人眼在触点图上看，**不许用脚本的输出冒充审核结论**。
+
+用法
+----
+  python references/asset_frame_check.py --project-root <项目根>
+  python references/asset_frame_check.py --project-root <项目根> --cell 640 --cols 3
+  python references/asset_frame_check.py --project-root <项目根> --json   # 只出 JSON
+
+产出（都落在 <项目根>/审核/ 下）
+  _framecheck.json            每张图的四边余量与风险标记
+  _framecheck.md              同一份数据的人类可读表
+  _contact_<组>_big.png       可判读触点图（单元 --cell 见方，白底）
+  _head_<资产名>.png          角色图的头部特写（取上部 52%）
+"""
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# 非白阈值（宽松：只要有内容就算，含投影/极浅灰）
+TH = 238
+# 严格阈值（主体：真正的主体像素，滤掉投影与柔光边缘）
+TH_SUBJ = 200
+# 白底抠图判定：**整体**白像素占比 ≥ 此值 → 白底抠图资产（做余量判定）；
+# 否则视为满幅照片（如场景图，四边贴边正常，跳过余量判定）。
+# 阈值依据实测（2026-09-18 本项目 13 张资产）：
+#   白底资产 28.2% ~ 90.8%（最低的是班主任 28.2%）；满幅照片 0.0% ~ 9.5% → 取 20% 有充足余量。
+# ⚠️ 不要用「四边框条白度」判：白底人像的主体常常本身触边，
+#    按边框判会把所有角色图误判成满幅照片（实测踩过）。
+WHITE_BG_RATIO = 0.20
+
+# 风险判定阈值（占该边尺寸的比例）
+TOP_RISK = 0.005      # 头顶贴边 → 需目视（可能人脸被裁）
+SIDE_INFO = 0.004     # 侧边贴边 → 人像属构图；白底道具则需目视
+BOT_INFO = 0.004      # 底边贴边 → 人像属构图；白底道具则需目视
+
+GROUPS = [
+    ("char", "角色资产", "images/front.png", True),
+    ("scene", "场景资产", "main.png", False),
+    ("prop", "道具资产", "main.png", False),
+]
+
+
+def _run(cmd):
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError("命令失败：%s\n%s" % (" ".join(cmd), r.stderr[:600]))
+    return r.stdout
+
+
+def have_ffmpeg():
+    return bool(shutil.which("ffmpeg")) and bool(shutil.which("ffprobe"))
+
+
+def probe(path):
+    out = _run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path)])
+    w, h = out.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+def gray_thumb(path, long_side=700):
+    """把图缩到长边 long_side 的灰度像素矩阵（纯标准库处理，避免依赖 Pillow/numpy）"""
+    w, h = probe(path)
+    s = long_side / max(w, h)
+    W, H = max(2, int(round(w * s))), max(2, int(round(h * s)))
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path),
+                          "-vf", "scale=%d:%d" % (W, H),
+                          "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+                         capture_output=True).stdout
+    if len(raw) != W * H:
+        raise RuntimeError("raw 长度不符：%s（拿到 %d，期望 %d）" % (path, len(raw), W * H))
+    return raw, W, H
+
+
+def margins(path, th=TH):
+    """返回主体（非白像素包围盒）到四边的余量，单位 = 占该边尺寸的比例"""
+    raw, W, H = gray_thumb(path)
+    x0, x1, y0, y1 = W, -1, H, -1
+    for y in range(H):
+        row = y * W
+        for x in range(W):
+            if raw[row + x] < th:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+    if x1 < 0:
+        return None                                   # 整张纯白 = 空图
+    return {"left": x0 / W, "right": (W - 1 - x1) / W,
+            "top": y0 / H, "bottom": (H - 1 - y1) / H,
+            "bbox": [x0, y0, x1, y1], "thumb": [W, H]}
+
+
+def is_white_bg(path):
+    """整张图的白像素占比是否足够高 → 判定「白底抠图资产」还是「满幅照片」。
+
+    判据：满幅照片（场景图）四边贴边是正常的，用余量去判它只会产出噪声；
+    而噪声会让报告被整体跳过（本 skill 的老教训：「误报也是故障」）。
+    **必须用整体占比，不能用边框条** —— 白底人像的主体常常本身触边，
+    按边框判会把全部角色图误判成满幅照片（实测踩过）。
+    """
+    raw, W, H = gray_thumb(path, long_side=300)
+    white = sum(1 for v in raw if v > TH)
+    return (white / (W * H)) >= WHITE_BG_RATIO
+
+
+def head_band_touch(path):
+    """人像专用：在**头部所在的行段**内，主体是否触到左/右边缘。
+
+    这是「人脸被裁」这一类事故的机械指纹 —— 班主任首版就是把脸切在右边缘上。
+    头部行段的近似定义：主体包围盒上部 45% 的行（3:4 半身像里头部约占上部一半）。
+    """
+    raw, W, H = gray_thumb(path)
+    m = margins(path, TH_SUBJ)
+    if m is None:
+        return False
+    y0, y1 = m["bbox"][1], m["bbox"][3]
+    yend = y0 + max(1, int((y1 - y0 + 1) * 0.45))
+    for y in range(y0, min(yend, H)):
+        row = y * W
+        if raw[row] < TH_SUBJ or raw[row + W - 1] < TH_SUBJ:
+            return True
+    return False
+
+
+def verdict(name, m, m_strict, is_char, white_bg, head_touch):
+    """返回 (needs_eyes, expected_notes)。**只做分类，不下通过结论。**"""
+    eyes, notes = [], []
+    if m_strict is None:
+        return (["❌ 整张纯白（空图？）"] if m is None else []), notes
+
+    if not white_bg:
+        notes.append("满幅照片（非白底）→ 四边贴边正常，跳过余量判定")
+        return eyes, notes
+
+    if is_char:
+        if m_strict["top"] < TOP_RISK:
+            eyes.append("头顶贴边 → 看头部特写确认人脸是否被裁")
+        else:
+            notes.append("头顶有余量")
+        if head_touch:
+            eyes.append("**头部行段内触到左/右边缘** → 高风险，脸可能被裁")
+        if m_strict["left"] < SIDE_INFO or m_strict["right"] < SIDE_INFO:
+            notes.append("肩/侧触边（人像常见构图）")
+        if m_strict["bottom"] < BOT_INFO:
+            notes.append("躯干触底（人像常见构图）")
+    else:
+        if m_strict is not None:
+            hit = [k for k in ("left", "right", "top", "bottom") if m_strict[k] < SIDE_INFO]
+            soft_only = [k for k in hit if m is not None and m[k] >= SIDE_INFO]
+            if hit:
+                if len(soft_only) == len(hit):
+                    notes.append("仅投影/柔光触边（严格阈值下主体未触边）")
+                else:
+                    eyes.append("%s 触边 —— 白底道具不该被裁，须目视确认" % "/".join(
+                        [k for k in hit if k not in soft_only]))
+    return eyes, notes
+
+
+# ---------- 触点图 ----------
+
+def _cell(img, out, cell):
+    _run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(img), "-vf",
+          "scale=%d:%d:force_original_aspect_ratio=decrease,"
+          "pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=white" % (cell, cell, cell, cell),
+          "-frames:v", "1", str(out)])
+
+
+def build_grid(images, out, cell, cols, tmpdir):
+    """规整成 cell 见方白底单元 → 每 cols 个横排 → 所有横排纵堆。
+    先补齐成完整网格（白单元占位），避免最后一行列数不足时对齐错位。"""
+    if not images:
+        return None
+    blank = tmpdir / "_blank.png"
+    _run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+          "-i", "color=c=white:s=%dx%d" % (cell, cell), "-frames:v", "1", str(blank)])
+
+    cells = []
+    for i, (nm, img) in enumerate(images):
+        c = tmpdir / ("_cell%03d.png" % i)
+        _cell(img, c, cell)
+        cells.append(c)
+
+    nrows = (len(cells) + cols - 1) // cols
+    rows = []
+    for r in range(nrows):
+        grp = cells[r * cols:(r + 1) * cols]
+        grp = grp + [blank] * (cols - len(grp))
+        ro = tmpdir / ("_row%d.png" % r)
+        cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+        for g in grp:
+            cmd += ["-i", str(g)]
+        cmd += ["-filter_complex",
+                "".join("[%d:v]" % i for i in range(len(grp))) + "hstack=inputs=%d" % len(grp),
+                "-frames:v", "1", str(ro)]
+        _run(cmd)
+        rows.append(ro)
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for f in rows:
+        cmd += ["-i", str(f)]
+    cmd += ["-filter_complex",
+            "".join("[%d:v]" % i for i in range(len(rows))) + "vstack=inputs=%d" % len(rows),
+            "-frames:v", "1", str(out)]
+    _run(cmd)
+
+    for f in cells + rows + [blank]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    w, h = probe(out)
+    return {"path": str(out), "size": [w, h], "count": len(images),
+            "cell": cell, "cols": cols, "rows": nrows}
+
+
+def head_preview(img, out, frac=0.52, h=620):
+    w, hh = probe(img)
+    _run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(img), "-vf",
+          "crop=%d:%d:0:0,scale=-2:%d" % (w, max(2, int(hh * frac)), h),
+          "-frames:v", "1", str(out)])
+    return str(out)
+
+
+# ---------- 主流程 ----------
+
+def main():
+    ap = argparse.ArgumentParser(description="资产主体完整性机械筛查（铁律 A7-b）")
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--cell", type=int, default=640,
+                    help="触点图单元边长（默认 640；低于 400 就无法判读人脸，会被拒绝）")
+    ap.add_argument("--cols", type=int, default=3)
+    ap.add_argument("--json", action="store_true", help="只写 JSON，不生成触点图")
+    args = ap.parse_args()
+
+    if not have_ffmpeg():
+        sys.exit("❌ 需要 ffmpeg / ffprobe（跑 python tools/doctor.py 拿一键安装话术）")
+    if args.cell < 400:
+        sys.exit("❌ --cell 不得小于 400：触点图小到看不清人脸时，这套检查等于没做"
+                 "（本项目事故就是这么漏掉的）")
+
+    root = Path(args.project_root)
+    audit = root / "审核"
+    audit.mkdir(parents=True, exist_ok=True)
+    tmpdir = audit / "_framecheck_tmp"
+    tmpdir.mkdir(exist_ok=True)
+
+    report, sheets, heads = [], {}, {}
+    for key, sub, rel, is_char in GROUPS:
+        d = root / sub
+        if not d.is_dir():
+            continue
+        imgs = []
+        for item in sorted(d.iterdir()):
+            if not item.is_dir():
+                continue
+            p = item / rel
+            if p.exists():
+                imgs.append((item.name, p))
+
+        for name, p in imgs:
+            m = margins(p, TH)
+            m_strict = margins(p, TH_SUBJ)
+            wbg = is_white_bg(p)
+            ht = head_band_touch(p) if (is_char and wbg) else False
+            eyes, notes = verdict(name, m, m_strict, is_char, wbg, ht)
+            size = probe(p)
+            report.append({
+                "asset": name, "group": key, "path": str(p), "size": list(size),
+                "aspect": round(size[0] / size[1], 4),
+                "white_bg": wbg,
+                "head_band_touch": ht,
+                "margins_pct": None if m_strict is None else {
+                    k: round(m_strict[k] * 100, 2) for k in ("left", "right", "top", "bottom")},
+                "margins_pct_soft": None if m is None else {
+                    k: round(m[k] * 100, 2) for k in ("left", "right", "top", "bottom")},
+                "needs_eyes": eyes, "expected": notes,
+            })
+
+        if not args.json and imgs:
+            cols = 2 if (key == "char" and len(imgs) <= 4) else args.cols
+            g = build_grid(imgs, audit / ("_contact_%s_big.png" % key), args.cell, cols, tmpdir)
+            if g:
+                sheets[key] = g
+            if is_char:
+                for name, p in imgs:
+                    o = audit / ("_head_%s.png" % name)
+                    heads[name] = head_preview(p, o)
+
+    try:
+        tmpdir.rmdir()
+    except OSError:
+        pass
+
+    risky = [r for r in report if r["needs_eyes"]]
+    out = {
+        "generated_by": "references/asset_frame_check.py",
+        "note": "机械筛查结果；**「触边」不等于「缺陷」，本文件不下通过结论** —— "
+                "必须由人眼在 _contact_*_big.png 上确认主体完整",
+        "thresholds": {"top_risk": TOP_RISK, "side_info": SIDE_INFO, "bottom_info": BOT_INFO,
+                       "nonwhite_th": TH, "subject_th": TH_SUBJ, "white_ratio": WHITE_BG_RATIO},
+        "assets": report,
+        "needs_eyes_count": len(risky),
+        "contact_sheets": sheets,
+        "head_previews": heads,
+    }
+    (audit / "_framecheck.json").write_text(
+        json.dumps(out, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    lines = ["# 资产主体完整性机械筛查（铁律 A7-b）", "",
+             "> **本表不下「通过」结论。** 「触边」≠「缺陷」——人像肩/躯干触边是正常构图。",
+             "> 白底判定：**整体**白像素占比 ≥ %.0f%% 才做余量判定；满幅照片（场景图）跳过余量判定。"
+             % (WHITE_BG_RATIO * 100),
+             "> 主体用严格阈值 %d 判定（滤掉投影），宽松阈值 %d 仅作参考。" % (TH_SUBJ, TH), "",
+             "| 资产 | 组 | 尺寸 | 比例 | 白底 | 左 | 右 | 上 | 下 | 判读 |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in report:
+        mp = r["margins_pct"]
+        cells = ["—"] * 4 if mp is None else ["%.1f%%" % mp[k] for k in ("left", "right", "top", "bottom")]
+        if r["needs_eyes"]:
+            v = "**需目视：** " + "；".join(r["needs_eyes"])
+        elif r["expected"]:
+            v = "· " + "；".join(r["expected"])
+        else:
+            v = "✅ 无标记"
+        lines.append("| %s | %s | %dx%d | %.4f | %s | %s | %s | %s | %s | %s |" % (
+            r["asset"], r["group"], r["size"][0], r["size"][1], r["aspect"],
+            "是" if r["white_bg"] else "否(满幅)", *cells, v))
+    lines += ["", "## 触点图（单元 %dpx，可判读尺寸）" % args.cell]
+    for k, g in sheets.items():
+        lines.append("- `%s`（%s，%d 张）" % (Path(g["path"]).name,
+                                             "x".join(map(str, g["size"])), g["count"]))
+    if heads:
+        lines += ["", "## 角色头部特写（必须逐张看人脸是否完整）"]
+        for k, v in heads.items():
+            lines.append("- `%s`" % Path(v).name)
+    lines += ["", "## 需目视 %d 处" % len(risky)]
+    for r in risky:
+        lines.append("- **%s**：%s" % (r["asset"], "；".join(r["needs_eyes"])))
+    if not risky:
+        lines.append("- 无（**但这不等于资产合格** —— 仍需人眼过图）")
+    (audit / "_framecheck.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    print("🔍 机械筛查：%d 张资产，需目视 %d 处" % (len(report), len(risky)))
+    for r in risky:
+        print("   👁 %s：%s" % (r["asset"], "；".join(r["needs_eyes"])))
+    skipped = [r["asset"] for r in report if not r["white_bg"]]
+    if skipped:
+        print("   （%d 张满幅照片已跳过余量判定：%s）" % (len(skipped), "、".join(skipped)))
+    if sheets:
+        print("🖼 触点图：")
+        for k, g in sheets.items():
+            print("   %s  %s  %d 张" % (Path(g["path"]).name,
+                                        "x".join(map(str, g["size"])), g["count"]))
+    if heads:
+        print("🧑 头部特写 %d 张（必须逐张看）" % len(heads))
+    print("📄 报告：%s" % (audit / "_framecheck.md").relative_to(root))
+    print("")
+    print("⚠️ 本脚本不下「通过」结论 —— 请打开触点图，逐张确认主体完整（尤其人脸）。")
+
+
+if __name__ == "__main__":
+    main()

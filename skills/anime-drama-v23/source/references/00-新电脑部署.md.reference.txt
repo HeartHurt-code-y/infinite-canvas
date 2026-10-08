@@ -1,0 +1,214 @@
+# 00 · 新电脑部署（解压即可用）
+
+> **一句话**：这个压缩包是**自包含**的 —— 跨 skill 依赖（H3 校验器、项目模型 执行器）
+> 已经内置在 `vendor/` 里随包分发，**不需要先安装任何别的 skill**。
+> 新电脑上要做的只有三件事：**放对位置 → 跑自检 → 按话术补环境**。
+
+---
+
+## 步骤 1 · 把 skill 放到 skills 目录
+
+`<你的用户名>` 换成你自己电脑上的用户名（Windows 看 `%USERNAME%`，macOS/Linux 看 `whoami`）。
+
+```
+Windows :  [项目工作目录]
+macOS   :  /Users/<你的用户名>/.项目模型/skills/drama-auto-pipeline/
+Linux   :  /home/<你的用户名>/.项目模型/skills/drama-auto-pipeline/
+```
+
+目录名必须叫 `drama-auto-pipeline`（脚本靠它推导 `SKILL_ROOT`）。
+解压后根目录应该能直接看到 `SKILL.md`、`references/`、`vendor/`、`tools/`。
+
+> **不想手动放？** 把这句话发给 项目模型（见下「统一用 项目模型 安装」）：
+> 「请把这个 zip 解压安装到 ~/.项目模型/skills/drama-auto-pipeline/」
+
+---
+
+## 步骤 2 · 跑环境自检（**新电脑第一步，别跳**）
+
+```bash
+cd <SKILL>
+python tools/doctor.py
+```
+
+它会按 **必需 / 推荐 / 可选** 三档报一遍体检结果，并且——
+**每个缺失项都附一句可以原样复制给 项目模型 的话**。照抄即可。
+
+```bash
+python tools/doctor.py --quiet            # 只看问题
+python tools/doctor.py --json             # 机器可读（Agent 自己解析时用）
+python tools/doctor.py --project-root "D:/项目/《XX》"   # 顺带查项目目录与磁盘
+```
+
+退出码：`0` 必需项全过 / `2` 有必需项缺失（跑不起来）/ `4` 缺推荐项（能跑，部分降级）。
+
+---
+
+## 统一用 项目模型 安装
+
+**不要自己去官网下 exe、自己配 PATH、自己 export 环境变量。**
+一律把下面的话发给 项目模型，让它装 —— 这是本 skill 定的规范：
+
+| 缺什么 | 复制这句话发给 项目模型 |
+|---|---|
+| ffmpeg / ffprobe | 请帮我安装 ffmpeg（含 ffprobe）并加入 PATH，装完用 `ffmpeg -version` 验证 |
+| 中文字体 | 请帮我安装中文字体（Noto Sans CJK 或思源黑体） |
+| 可选 Python 包 | 请在 项目模型 的托管 Python 环境里安装 Pillow、numpy、scikit-image、insightface、resemblyzer |
+| 项目模型 凭证 | 请把 项目模型 的 key 存到 `~/.项目模型/credentials/keys.env`，键名 `项目模型_project_provider_setting` |
+| 放 skill 本身 | 请把这个 zip 解压安装到 `~/.项目模型/skills/drama-auto-pipeline/` |
+| Python 版本不对 | 请用你托管的 Python 3.13 运行这个 skill 的脚本 |
+
+> **为什么强调「统一用 项目模型」**：手工装的东西没有记录，换台机器就再来一遍，
+> 而且每台机器路径/版本都可能不同 —— 这正是「本机跑通、别人跑炸」的温床。
+
+---
+
+## 步骤 3 · 配凭证（**一次配好，所有 skill 通用**）
+
+凭证读取是**五级链**，命中任一级即可（真实环境变量**永不被文件改写**）：
+
+| 优先级 | 位置 | 适用场景 |
+|---|---|---|
+| ① | 命令行 `--project_provider_setting` | 临时覆盖、调试 |
+| ② | 环境变量 `项目模型_project_provider_setting` | CI / 脚本临时用 |
+| ③ | `<项目根>/.env`（含当前目录 `.env`） | 单个项目的专用 key |
+| ④ | `~/.项目模型/credentials/drama-auto-pipeline/keys.env` | 本 skill 专属 |
+| ⑤ | **`~/.项目模型/credentials/keys.env`** | **跨 skill 共享，推荐放这里** |
+
+**推荐做法**（新电脑只需做一次）：
+
+> 把这句话发给 项目模型：
+> 「请把 项目模型 的 key 存到 `~/.项目模型/credentials/keys.env`，键名 `项目模型_project_provider_setting`，
+> 另外企业级 key 存成 `项目模型_project_provider_setting_E`」
+
+**本机别的 skill 里已经存过 key？** 不用重新输入，一条命令合并过来：
+
+```bash
+cd <SKILL>
+python references/deps.py --migrate-credentials --dry-run   # 先预览
+python references/deps.py --migrate-credentials             # 再执行（已有值不覆盖）
+```
+
+**核对当前在用什么 key（只显示掩码，不回显本体）**：
+
+```bash
+python references/deps.py
+```
+
+---
+
+## 步骤 4 · 冒烟验证（三条命令）
+
+```bash
+cd <SKILL>
+
+# ① 依赖定位器机制自检（内置副本 sha256、校验器可定位、凭证链）
+python references/deps.py --selftest
+
+# ② 依赖来源总表（看「现在用的到底是哪一份」）
+python references/deps.py
+
+# ③ 拿一段真提示词跑双校验器（把 prompt.txt 换成你手上的文件）
+python vendor/h3-ref2va-optimizer/scripts/validate_ref2va.py prompt.txt --duration 15
+python vendor/h3-ref2va-optimizer/scripts/validate_ref2va_local.py prompt.txt --duration 15 --cross-shot
+```
+
+到这里应该看到：`--selftest` 全 PASS；两个校验器输出「错误 0」。
+
+---
+
+## 步骤 5 · 开工
+
+对着 项目模型 说「用 drama-auto-pipeline 做一部短剧，素材是……」即可。
+主 Agent 会走首问八件套 → 剧本 → 风格 → 资产 → 分镜 → 提示词 → 审核关 → 生成 → 拼接 → 收尾四件套。
+
+---
+
+## 目录地图（哪些是给你的，哪些是本机生成的）
+
+| 路径 | 是什么 | 能不能删 |
+|---|---|---|
+| `SKILL.md` | 主文档（铁律 + 全流程） | ❌ |
+| `references/*.py` | 生成器与驱动器 | ❌ |
+| `references/deps.py` | **依赖定位器**（跨 skill 依赖唯一入口） | ❌ |
+| `vendor/` | **内置的跨 skill 依赖副本**（自包含的关键） | ❌ |
+| `vendor/MANIFEST.json` | 内置副本的来源 skill / 版本 / sha256 | ❌ |
+| `tools/doctor.py` | 环境自检 + 安装话术 | ❌ |
+| `tools/scan_paths.py` | 打包前绝对路径扫描（发版门禁） | ❌ |
+| `tools/snapshot.py` / `rollback.py` | 发版 / 回退 | 不用可留 |
+| `tools/checks.txt` | 回归自检清单（不变式） | ❌ |
+| `_versions/` | 历史快照 zip（本机生成） | 可删（丢了就不能离线回退） |
+| `.env` / `*.key` / `keys.env` | **凭证，已在 .gitignore 里** | 别提交、别分享 |
+
+> 压缩包里**不会有** `_versions/`、`__pycache__`、`*.bak_*`、凭证文件 —— 见
+> `tools/snapshot.py` 的排除规则与 `tools/scan_paths.py` 的门禁。
+
+---
+
+## 常见问题
+
+**Q：报 `ModuleNotFoundError: 项目模型_runner`？**
+A：包不完整（`vendor/` 丢了）。重新解压完整包；确认 `vendor/knowledge-video-director/references/项目模型_runner.py` 存在。
+作者机可 `python references/deps.py --sync-vendor` 重建。
+
+**Q：审核关 5 说「找不到 H3 校验器」？**
+A：同上，`vendor/h3-ref2va-optimizer/scripts/` 缺文件。
+**注意**：这里**不会**静默跳过校验，而是明确报错 —— 静默跳过等于「审核关假装跑过了」，比报错危险得多。
+
+**Q：我想用本机已安装的、更新版的 h3 校验器，可以吗？**
+A：可以，但要**显式开启**（默认用内置副本，保证「本机跑 == 别人跑」）：
+```bash
+# 一次性
+DRAMA_USE_EXTERNAL=1 python references/deps.py
+# 或在代码/环境里
+set DRAMA_USE_EXTERNAL=1      # Windows
+export DRAMA_USE_EXTERNAL=1   # macOS/Linux
+```
+开启后 `python references/deps.py` 会显示「外部 skill 优先」，不会静默切换。
+
+**Q：改了 vendor 里的内置副本会怎样？**
+A：`python tools/doctor.py` 与 `python references/deps.py --selftest` 会报 sha256 不匹配。
+**内置副本不要手改** —— 要更新就改**源 skill**，然后在作者机跑 `--sync-vendor` 重新内置。
+
+**Q：怎么把包发给别人？**
+A：用 `_versions/` 里由 `tools/snapshot.py` 产出的 zip（发版时会自动跑**三道门禁**：
+不变式自检 + 绝对路径扫描 + 凭证泄漏扫描，工作区与包本体各扫一遍）。打包前也可手动复检：
+```bash
+python tools/scan_paths.py                  # 绝对路径：扫本目录
+python tools/scan_paths.py --all-zips       # 绝对路径：复检全部历史包
+python tools/scan_secrets.py                # 凭证泄漏：扫本目录
+python tools/scan_secrets.py --all-zips     # 凭证泄漏：复检全部历史包
+```
+> 命中的密钥**只以掩码显示**（报告本身也可能被转发，不能在里面印真密钥）。
+
+---
+
+## 作者机维护（转发包的人看）
+
+```bash
+python references/deps.py --sync-vendor     # 从外部 skill 刷新内置副本 + 重写 MANIFEST
+python references/deps.py --selftest        # 机制自检
+python tools/doctor.py                      # 环境自检
+python examples/test_scan_paths.py          # 扫描器对抗测试（**必跑**，见下）
+python examples/test_scan_secrets.py         # 凭证扫描器对抗测试（**必跑**，见下）
+python tools/snapshot.py --kind minor --project "《XX》" --summary "..." --verify "..."
+                                            # 发版：自检 + 绝对路径门禁 + 凭证门禁 + CHANGELOG + zip + git tag
+python tools/rollback.py --list / --to V1.9 # 回退
+```
+
+**判据：只跑一次「现在扫出来是干净的」等于没测防护。**
+它只能证明「此刻恰好没有」，证明不了「以后出现了会被拦住」。
+所以两个对抗测试会**主动伪造泄漏样本**，同时断言**不该报的绝不报**：
+
+| 测试 | 主动伪造 | 反向断言（防误报） |
+|---|---|---|
+| `test_scan_paths.py`（16 项） | 本机用户目录 / 别家 Users 目录 / POSIX 家目录 / 裸用户名 / 含泄漏的 zip | 占位符模板、系统目录、相对路径、**部署文档里那条必须给出的三平台模板**、省略号写法 |
+| `test_scan_secrets.py`（21 项） | 明文密钥（运行时生成）/ `sk-`·`rh-`·Bearer / 私钥块 / `{"project_provider_setting": …}` / 凭证文件本体 / 含密钥的 zip | 端点 URL、`sk-xxxx` 占位、环境变量名、`project_provider_setting = get_project_provider_setting(...)` 代码行、sha256 与内容哈希文件名 |
+
+两者都会断言**扫描器不报自己**（脚本就在 skill 目录里，字面量写着样本就会自指命中 ——
+解法是样本**运行时生成**，不是给扫描器加白名单）。
+
+**这两道门禁本身也要验证。** 想确认「真脏了会被拦住」，在作者机做一次对抗演练：
+往 `references/` 里种一个含假密钥的文件 → 跑 `snapshot.py` → 应当 `exit 3`、
+`VERSION` 不动、`_versions/` 不多包、`CHANGELOG` 不被写；然后删掉那个文件。
+（`--force-paths` / `--force-secrets` 是逃生门，正常流程不要用。）

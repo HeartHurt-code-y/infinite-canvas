@@ -36,6 +36,8 @@ const OPTIONAL_FILES = [
   "scripts/tauri-build.mjs",
   "scripts/tauri-build-edition.mjs",
   "scripts/edition-source-fingerprint.mjs",
+  "scripts/install-macos.sh",
+  "scripts/unlock-installed-macos-app.sh",
 ];
 const OPTIONAL_TREES = [
   "public",
@@ -263,11 +265,32 @@ export async function assertEditionBuildSourceFreshness(
   );
   exactKeys(record.nativeExecutable, ["path", "size", "sha256"], "Build native executable");
   const relative = relativeSourcePath(executablePath, path.resolve(root));
+  let macPath = false;
+  if (
+    /^\.cache\/tauri-editions\/(online|offline)\/target\/(?:aarch64-apple-darwin\/|x86_64-apple-darwin\/)?release\/bundle\/macos\/[^/]+\.app\/Contents\/MacOS\/infinite-canvas$/.test(
+      relative,
+    )
+  ) {
+    const tauriConfig = JSON.parse(
+      await stableFile(path.join(root, "src-tauri/tauri.conf.json"), path.resolve(root)),
+    );
+    const appName = `${tauriConfig.productName}.app`;
+    macPath =
+      typeof tauriConfig.productName === "string" &&
+      !tauriConfig.productName.includes("/") &&
+      componentPathIsValid(appName) &&
+      ["", "aarch64-apple-darwin/", "x86_64-apple-darwin/"].some(
+        (target) =>
+          relative ===
+          `.cache/tauri-editions/${edition}/target/${target}release/bundle/macos/${appName}/Contents/MacOS/infinite-canvas`,
+      );
+  }
   requireValue(
     record.nativeExecutable.path === relative &&
-      /^\.cache\/tauri-editions\/(online|offline)\/target\/(?:x86_64-pc-windows-(?:msvc|gnu)\/)?release\/infinite-canvas\.exe$/.test(
-        relative,
-      ) &&
+      (macPath ||
+        /^\.cache\/tauri-editions\/(online|offline)\/target\/(?:x86_64-pc-windows-(?:msvc|gnu)\/)?release\/infinite-canvas\.exe$/.test(
+          relative,
+        )) &&
       relative.startsWith(`.cache/tauri-editions/${edition}/target/`) &&
       Number.isSafeInteger(record.nativeExecutable.size) &&
       record.nativeExecutable.size > 0 &&

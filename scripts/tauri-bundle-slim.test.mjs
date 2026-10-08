@@ -240,7 +240,7 @@ async function poseUpdateFixture(t, { catalogPinned = true } = {}) {
   writeFileSync(path.join(poseRoot, "runtime-manifest.json"), manifest);
   const pose = await describeRuntimeComponent(
     RUNTIME_COMPONENTS.find(({ id }) => id === "pose-runtime"),
-    { root },
+    { root, platform: "win32", arch: "x64" },
   );
   const components = RUNTIME_COMPONENTS.map((definition) => {
     const data = Buffer.from(`manifest ${definition.id}`);
@@ -272,11 +272,18 @@ async function poseUpdateFixture(t, { catalogPinned = true } = {}) {
         format: "zip",
         size: 100,
         sha256,
-        url: runtimeComponentArchiveUrl(definition.id, sha256, { applicationVersion: "0.2.1" }),
+        url: runtimeComponentArchiveUrl(definition.id, sha256, {
+          applicationVersion: "0.2.1",
+          platform: "windows-x86_64",
+        }),
       },
     };
   });
-  const catalog = buildRuntimeComponentCatalog({ applicationVersion: "0.2.1", components });
+  const catalog = buildRuntimeComponentCatalog({
+    applicationVersion: "0.2.1",
+    components,
+    platform: "windows-x86_64",
+  });
   const catalogBytes = Buffer.from(JSON.stringify(catalog));
   const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
   writeFileSync(catalogPath, catalogBytes);

@@ -1,0 +1,140 @@
+{
+  "_doc": [
+    "drama-auto-pipeline 工作流注册表（铁律 D30：换工作流必须成对换整套节点映射）。",
+    "batch_run_drama.py 读本文件解析节点 id；新增工作流 = 往这里加一条 + 放一份 API 格式 JSON，不改代码。",
+    "default = 首问第 5 问的默认项（用户 2026-09-15 拍板：W-A 默认、W-B 备选）。"
+  ],
+  "default": "W-A",
+  "workflows": {
+    "W-A": {
+      "id": "PROJECT_MODEL_BINDING",
+      "label": "项目制作方案 + 项目制作方案（MiniMax H3）",
+      "role": "default",
+      "note": "2026-09-15 起为默认。⚠️ 平台共享模板：265 上会残留上一位使用者的参考图/音频直连，提交前必须先去参考化（见 make_noref_workflow.py + 铁律 D31）。 ｜ V2.2：noref_default 由 true 改为 **false** —— 本工作流的 api_json（workflow_wa_api.json，9 图槽 + 3 音色槽且全部接线）本就是**多参**版本；把它默认设成去参考化与「一致性第一位」相悖（铁律 D2-m）。要纯文生视频请显式加 --noref（走 workflow_wa_noref.json）。",
+      "api_json": "workflow_wa_api.json",
+      "noref_json": "workflow_wa_noref.json",
+      "noref_default": false,
+      "nodes": {
+        "prompt": "263",
+        "duration": "259",
+        "resolution": "252",
+        "align": "250",
+        "seed": "256",
+        "core": "265",
+        "img_slots": [
+          "51",
+          "49",
+          "50",
+          "52",
+          "53",
+          "54",
+          "55",
+          "56",
+          "57"
+        ],
+        "aud_slots": [
+          "48",
+          "14",
+          "15"
+        ]
+      },
+      "fields": {
+        "prompt": "text",
+        "duration": "value",
+        "resolution": "aspect_ratio",
+        "seed": "noise_seed"
+      },
+      "ref_entry": "265 MiniMaxH3ReferenceToVideo.ref_images.ref_image_N / ref_audios.ref_audio_N",
+      "align_formula": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "resolution_defaults": {
+        "megapixels": 0.7,
+        "multiple": 32
+      },
+      "measured": {
+        "12s": 294,
+        "10s": 243,
+        "9s": 226,
+        "8s": 192,
+        "6s": 158,
+        "5s": 124,
+        "_unit": "帧 @24fps"
+      },
+      "instance_type": "plus",
+      "submit": "workflow 参数直传完整 JSON（平台忽略 workflowId）；不向平台上传任何参考素材",
+      "ref_limits": {
+        "img_slots_available": 9,
+        "img_recommended_max": 5,
+        "img_model_hard_max": 9,
+        "aud_slots_available": 3,
+        "note": "槽位开到模型硬上限 9；**建议**每段 ≤5 张（参考图过多模型处理不了，会互相干扰）。5 是建议不是限制。"
+      },
+      "gen_mode_default": "multi_ref"
+    },
+    "W-B": {
+      "id": "PROJECT_MODEL_BINDING",
+      "label": "项目制作方案（混合模型 + 结构 lora + 二采潜空间放大）",
+      "role": "backup",
+      "note": "2026-09-15 之前的默认，现降为备选。首跑成本比 W-A 高的场景（长视频、需要二采放大）可切回。",
+      "api_json": "workflow_b2_multi_ref.json",
+      "noref_json": null,
+      "noref_default": false,
+      "nodes": {
+        "prompt": "339",
+        "duration": "336",
+        "resolution": "337",
+        "align": "332",
+        "seed": "256",
+        "core": "265",
+        "img_slots": [
+          "326",
+          "1326",
+          "1327",
+          "1328",
+          "1329",
+          "1330",
+          "1331",
+          "1332",
+          "1333"
+        ],
+        "aud_slots": [
+          "340",
+          "1340",
+          "1341"
+        ]
+      },
+      "fields": {
+        "prompt": "text",
+        "duration": "value",
+        "resolution": "aspect_ratio",
+        "seed": "noise_seed"
+      },
+      "ref_entry": "265 MiniMaxH3ReferenceToVideo.ref_images.ref_image_N / ref_audios.ref_audio_N",
+      "align_formula": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "resolution_defaults": {
+        "megapixels": 0.7,
+        "multiple": 32
+      },
+      "instance_type": "plus",
+      "submit": "原生 workflowId 模式（平台自取工作流）",
+      "ref_limits": {
+        "img_slots_available": 9,
+        "img_recommended_max": 5,
+        "img_model_hard_max": 9,
+        "aud_slots_available": 3,
+        "note": "槽位开到模型硬上限 9；**建议**每段 ≤5 张（参考图过多模型处理不了，会互相干扰）。5 是建议不是限制。"
+      },
+      "gen_mode_default": "multi_ref"
+    }
+  },
+  "gotcha": {
+    "id_confusion": "PROJECT_MODEL_BINDING 是 B2 工作流 ID；PROJECT_MODEL_BINDING 是 B1「AI 应用」webappId。两者不可混用 —— 拿 webappId 走 B2 接口会报 380 WORKFLOW_NOT_EXISTS。"
+  },
+  "_policy": [
+    "【铁律 D2-m · 一致性第一位（2026-09-19 用户拍板，V2.2）】",
+    "默认**必须多参**（带参考图 + 尾帧 + 角色音色）—— 除非用户**显式**指定文生视频（--noref）。",
+    "理由：整片由 20 段独立生成拼成，一致性只能靠「每段都拿到同一套参考素材」来保证。",
+    "2026-09-18 实测事故：W-A 的 noref_default=true 让整批 20 段以**零参考素材**提交，",
+    "用户自带角色图没用上、尾帧锚点没生效、音色没上传 → 同一角色逐段换脸换发型。",
+    "⇒ 文生视频（--noref）只是**明确的例外**，不是默认；用它就等于接受「一致性无锚点」。"
+  ]
+}

@@ -1,0 +1,1095 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""MV 批量生成驱动器（mv-auto-pipeline · 铁律 D1~D8 + E3/E4）
+
+三段式：
+  ① 门禁：读 状态/prompt_review.json + 状态/music_plan.json，任一段不过就直接 sys.exit（零算力）
+  ② 生成：逐段注入 （提示词→87）＋（音乐窗口→85）＋（分辨率→61）＋（图→42），
+         并发跑，断点续跑，在途任务走 rescue（不重复烧币），消费级被占自动降级到企业级并留痕
+         ★ V1.0.4 新增「双池并行」：消费级与企业级**两条车道同时抢一个队列**
+           （--enterprise-parallel 需显式授权，因为企业级按秒扣钱包真钱；
+             可用 --enterprise-parallel-max 给真钱封顶）
+  ③ 贴合：把每段视频**裁/补到恰好等于它的音乐窗口长度** —— 这是「口型-画面-音乐对齐」的工程保证：
+         Σ各段 = 全曲长；不裁的话 项目视频模型 每段多出 0.1~0.4s，几十段下来画面就会漂到音乐后面去。
+
+产物：
+  视频/shot_NN_<kw>/{output.mp4, output_raw.mp4, prompt.txt, refs/, log.json}
+  视频/final/final.mp4          逐段内嵌音乐直接拼（首尾相接即对齐）
+  视频/final/final_master.mp4   视频轨 + 原曲母带重贴（绝对对齐，交付首选）
+  状态/成本台账.csv · 状态/调度日志.csv · 状态/rh_state.json
+
+用法：
+  python batch_run_mv.py --project-root "<项目根>" --dry-run            # 只看注入计划
+  python batch_run_mv.py --project-root "<项目根>" --api-key <KEY> \\
+      --workers 5 --instance-type plus
+  python batch_run_mv.py --project-root "<项目根>" --api-key <KEY> --only 3,7 --new-seed
+"""
+import argparse
+import csv
+import hashlib
+import json
+import os
+import queue
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import rh_client as rh  # noqa: E402
+
+FFMPEG = next((p for p in ("ffmpeg", r"D:\AIxiufu\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe")
+               if (os.path.isfile(p) or shutil.which(p))), "ffmpeg")
+FFPROBE = next((p for p in ("ffprobe", r"D:\AIxiufu\ffprobe.exe", r"C:\ffmpeg\bin\ffprobe.exe")
+                if (os.path.isfile(p) or shutil.which(p))), "ffprobe")
+_LOCK = threading.Lock()
+FPS = 24
+# 单段机器耗时经验值（秒）——《野心家》22 段实测均值 15,992s / 22 ≈ 727s。
+# 只用来在双池并行开跑前**折算真钱上限**，不参与任何调度决策。
+ENT_SEC_PER_SEG = 727
+# 池满后的退避基数（秒）：第 n 次踩到池满就等 n×这个数（上限 120s）。
+# 提成模块常量是为了让离线单测能打桩成 0 —— 否则测「连续 3 次池满退役」要真等 2 分钟。
+BUSY_BACKOFF_BASE = 20
+# 池满**连续多久**就放弃这条车道（秒）。0 = 永不放弃。
+# ★ V1.0.4：判据从「几次」改成「多久」—— 次数上限对消费级太狠
+#   （3 次 ≈ 2 分钟就退役，池子只是有点挤而已，退役反而把活推给兜底路径直接判死），
+#   而对「池子真的挂了」又太宽容。时间上限才对：挤就等着，等够了才交棒。
+BUSY_GIVE_UP_SEC = 1800
+# 双池并行时主线程的巡检间隔（秒）—— 顺带承担「每 10 分钟主动汇报」的计时。
+# 提成模块常量同样是为了单测能压到 0.05s，否则任何并行测试的墙钟下限都是 5s。
+SUPERVISE_TICK = 5
+
+
+# ------------------------------------------------------------------ 通用
+def read_json(p, d=None):
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError):
+        return d
+
+
+def write_json(p, obj):
+    os.makedirs(os.path.dirname(os.path.abspath(p)) or ".", exist_ok=True)
+    tmp = p + ".tmp"
+    json.dump(obj, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    os.replace(tmp, p)
+
+
+def append_csv(path, row, header):
+    """追加一行 CSV；**表头不一致时自动升级表头**（老行补空白），不丢老数据。
+
+    ★ V1.0.4：原来只要文件已存在就直接 `writerow`，而 `DictWriter` 对
+      「row 里有、fieldnames 里没有」的键会直接 raise ValueError。
+      也就是说**给台账加一列，等于让已经跑过的项目再跑一次就崩**。
+      台账是要跨版本累积的（《野心家》的 csv 已经跑过 22 行），加列必须能平滑升级：
+      保留老列顺序在前，新列补到末尾，缺的填空。
+    """
+    hdr = list(header)
+    new = not os.path.isfile(path)
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    eff = hdr
+    if not new:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            old = next(csv.reader(f), [])
+        if old and old != hdr:
+            eff = old + [c for c in hdr if c not in old]
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                rows = list(csv.DictReader(f))
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.DictWriter(f, fieldnames=eff)
+                w.writeheader()
+                for r in rows:
+                    w.writerow({k: (r.get(k) or "") for k in eff})
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=eff)
+        if new:
+            w.writeheader()
+        w.writerow({k: row.get(k, "") for k in eff})
+
+
+def ffprobe_dur(p):
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-show_entries", "format=duration",
+                            "-of", "default=nw=1:nk=1", p],
+                           capture_output=True, text=True, timeout=120)
+        return round(float((r.stdout or "0").strip() or 0), 3)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ------------------------------------------------------------------ 素材上传缓存
+_UPLOAD_CACHE = {}
+_UPLOAD_LOCK = threading.Lock()
+SONG_PLACEHOLDER = "<母带原样上传>"
+
+
+def file_key(p):
+    """内容指纹（sha1 前 16 位 + 字节数）—— 用来判断「这个文件传过没有」。"""
+    h = hashlib.sha1()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return f"{h.hexdigest()[:16]}_{os.path.getsize(p)}"
+
+
+def upload_cached(key, path, root=None):
+    """同一文件**全片只上传一次**，并把结果落 `状态/素材上传台账.json`。
+
+    为什么必须缓存：母带 6.5MB，22 段各传一遍纯属浪费额度与时间；
+    参考图虽然小，重跑时也没必要重传。
+    """
+    tab_p = os.path.join(root, "状态", "素材上传台账.json") if root else None
+    tab = read_json(tab_p, {}) or {}
+    ck = file_key(path)
+    with _UPLOAD_LOCK:
+        if ck in _UPLOAD_CACHE:
+            return _UPLOAD_CACHE[ck]
+        cached_fn = (tab.get(ck) or {}).get("fileName") or ""
+        # ★ V1.0.2 修（《野心家》首镜实测血泪）：
+        #   台账里可能是**占位串**（形如 `<上传:song.mp3>`）—— 那是「还没真传」的标记，
+        #   不是 RH 的 fileName。原样注进节点 = ComfyUI `Invalid audio file: <上传:song.mp3>`
+        #   → 任务当场 FAILED，而且 status 只回 `code=0 msg=success`，原因全被吞掉。
+        #   判据：RH 的 fileName 永远长这样 `api/<hash>.<ext>`，**绝不以 `<` 开头**。
+        if cached_fn and not cached_fn.startswith("<"):
+            _UPLOAD_CACHE[ck] = cached_fn
+            return cached_fn
+        if cached_fn:
+            print(f"[upload] 台账里是占位串 {cached_fn!r} → 判定为未上传，重新上传")
+    fn = rh.upload_media(key, path)
+    with _UPLOAD_LOCK:
+        _UPLOAD_CACHE[ck] = fn
+        if tab_p:
+            tab[ck] = {"fileName": fn, "file": os.path.relpath(path, root),
+                       "uploaded_at": datetime.now().isoformat(timespec="seconds")}
+            write_json(tab_p, tab)
+    return fn
+
+
+def song_path(root, sb):
+    """定位母带 mp3。**母带必须原样进工作流**（铁律 A6），找不到就报错，不许静默跳过。"""
+    st = read_json(os.path.join(root, "状态", "pipeline_state.json"), {}) or {}
+    for c in ((sb.get("meta") or {}).get("song_file"),
+              ((st.get("song") or {}).get("file")),
+              os.path.join("音乐", "song.mp3")):
+        if c and os.path.isfile(os.path.join(root, c)):
+            return os.path.join(root, c)
+    raise FileNotFoundError(
+        "找不到母带 mp3（默认 音乐/song.mp3）—— 铁律 A6：声音只来自母带，"
+        "工作流里 node 34 自带的是示例 mp3，不替换就是整片配错歌。")
+
+
+def bake_workflow(cfg, ni, drop_image_links=True, out_path=None):
+    """把 nodeInfoList **烧进**工作流 JSON，并按需摘掉参考图连线，整包直传。
+
+    ★ V1.0.2 新增（本项目实测暴露）：原工作流的 node 36 LoadImage 里挂着**一张示例人物图**。
+      段内本来就不需要参考图时（空镜 / 纯环境段），如果不管它，那张示例图会被当成本段参考
+      —— **空镜画面里冒出一张别人的脸**。所以这类段必须：
+        ① 摘掉「指向图槽节点」的所有连线；
+        ② 不用 nodeInfoList 而走 `workflow` 直传（rh_client 在给了 workflow 时
+           **根本不发 nodeInfoList**，注入只有烧进 JSON 才生效）。
+    """
+    src = os.path.join(HERE, cfg.get("api_json") or "mv_workflow_api.json")
+    wf = read_json(src)
+    if not wf:
+        raise FileNotFoundError(f"读不到工作流 JSON：{src}")
+    # ★ V1.0.2：本地 API JSON 为了可读性带 `_meta`（节点标题）—— **真 API 格式没有这个键**。
+    #   整包直传时带着它，平台可能判非法字段。这里统一剥掉，保证烧进 JSON 的就是纯 API 格式。
+    for nd in wf.values():
+        if isinstance(nd, dict):
+            nd.pop("_meta", None)
+    nodes = cfg.get("nodes") or {}
+    img_nid = str(nodes.get("image") or "")
+    for x in ni:
+        nid = str(x["nodeId"])
+        if img_nid and nid == img_nid:
+            continue                       # 图槽节点本身不注（已无人引用它）
+        nxt = wf.setdefault(nid, {}).setdefault("inputs", {})
+        nxt[x["fieldName"]] = x["fieldValue"]
+    dropped = []
+    if drop_image_links and img_nid:
+        for nid, nd in wf.items():
+            ins = nd.get("inputs") or {}
+            for k in [k for k, v in list(ins.items())
+                      if isinstance(v, list) and len(v) == 2 and str(v[0]) == img_nid]:
+                ins.pop(k)
+                dropped.append(f"{nid}.{k}")
+    if out_path:
+        write_json(out_path, wf)
+    return wf, dropped
+
+
+def align_frames(sec):
+    x = max(5, round(sec * FPS))
+    return x + (5 - (x % 17)) % 17
+
+
+def align_sec(sec):
+    return round(align_frames(sec) / FPS, 3)
+
+
+def cjk_safe(s):
+    return re.sub(r"[\s/\\:*?\"<>|]", "", s or "")[:10] or "seg"
+
+
+# ------------------------------------------------------------------ 注册表
+def load_reg():
+    return read_json(os.path.join(HERE, "mv_workflows.json"), {}) or {}
+
+
+def resolve_wf(reg, key=None, wid=None):
+    wfs = reg.get("workflows") or {}
+    k = key or reg.get("default")
+    cfg = dict(wfs.get(k) or {})
+    if wid and str(cfg.get("id")) != str(wid):
+        for kk, vv in wfs.items():
+            if str(vv.get("id")) == str(wid):
+                return kk, dict(vv)
+        cfg["id"] = wid
+        cfg["_unknown"] = True
+    return k, cfg
+
+
+# ------------------------------------------------------------------ 门禁
+def gate(root, sb, args):
+    """关 5 + 关 6 双门禁。任何一项不满足 → 拒绝生成（零算力）。"""
+    problems = []
+    pr = read_json(os.path.join(root, "状态", "prompt_review.json"))
+    if not pr:
+        problems.append("状态/prompt_review.json 不存在 → 先跑 mv_to_h3_prompts.py --dump-prompts")
+    else:
+        if pr.get("status") not in ("approved", "partial"):
+            problems.append(f"关 5 整体状态 = {pr.get('status')}（需 approved/partial）")
+        if not pr.get("resolution_confirmed"):
+            problems.append("分辨率尚未与用户复核（需 --approve-prompts --confirmed-resolution）")
+        by_seq = {s["seq"]: s for s in pr.get("segments", [])}
+        for seg in sb["segments"]:
+            if args.only and seg["seq"] not in args.only:
+                continue
+            r = by_seq.get(seg["seq"])
+            if not r:
+                problems.append(f"段 {seg['seq']} 不在关 5 记录里")
+                continue
+            if r.get("status") != "reviewed_ok":
+                problems.append(f"段 {seg['seq']} 关 5 未通过（{r.get('status')}）")
+            pp = os.path.join(root, "视频", r.get("dir", ""), "prompt.txt")
+            if not os.path.isfile(pp):
+                problems.append(f"段 {seg['seq']} 的 prompt.txt 不见了")
+            else:
+                import hashlib
+                now = hashlib.sha1(open(pp, "rb").read()).hexdigest()[:16]
+                if now != r.get("sha1"):
+                    problems.append(f"段 {seg['seq']} 提示词在审核后被改动（sha1 不符）→ 必须重审")
+    mp = read_json(os.path.join(root, "状态", "music_plan.json"))
+    if not mp:
+        problems.append("状态/music_plan.json 不存在 → 先跑 check_alignment.py --plan")
+    else:
+        if not mp.get("ok"):
+            problems.append(f"音乐窗口计划未通过核对（{mp.get('problems')}）")
+        for seg in sb["segments"]:
+            m = (mp.get("windows") or {}).get(str(seg["seq"]))
+            if not m:
+                problems.append(f"段 {seg['seq']} 不在音乐窗口计划里")
+            elif abs(m["start"] - seg["music_window"]["start"]) > 0.02:
+                problems.append(f"段 {seg['seq']} 音乐窗口与计划不一致（{m['start']} vs "
+                                f"{seg['music_window']['start']}）")
+    return problems
+
+
+# ------------------------------------------------------------------ 注入
+def music_segment_file(root, seg, mode):
+    """music_mode=upload 时，先切好本段音频。"""
+    src = os.path.join(root, "音乐", "song.mp3")
+    if not os.path.isfile(src):
+        alt = [f for f in os.listdir(os.path.join(root, "音乐"))
+               if f.lower().endswith((".mp3", ".wav", ".flac", ".m4a", ".aac"))]
+        if not alt:
+            raise FileNotFoundError(f"找不到歌曲文件（{os.path.join(root, '音乐')}）")
+        src = os.path.join(root, "音乐", alt[0])
+    out = os.path.join(root, "音乐", "cuts", f"cut_{seg['seq']:02d}_"
+                                             f"{seg['music_window']['start']:.2f}s.wav")
+    if os.path.isfile(out) and abs((ffprobe_dur(out) or 0) - seg["music_window"]["dur"]) < 0.06:
+        return out
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-ss", f"{seg['music_window']['start']:.3f}",
+                    "-t", f"{seg['music_window']['dur']:.3f}", "-i", src,
+                    "-ac", "2", "-ar", "44100", out],
+                   capture_output=True, text=True, timeout=300, check=True)
+    return out
+
+
+def build_injection(root, sb, seg, cfg, prompt_text, img_uploads, key, args):
+    """返回 (node_info_list, workflow_json_or_None, extra_log)。"""
+    nodes = cfg.get("nodes") or {}
+    fields = cfg.get("fields") or {}
+    ni = []
+    extra = {"music_mode": cfg.get("music_mode") or "offset"}
+
+    def put(role, value, field=None):
+        nid = nodes.get(role)
+        fld = field or fields.get(role)
+        if not nid or not fld or fld == "TBD":
+            raise RuntimeError(f"注册表缺 nodes.{role} / fields.{role}（先在 build_mv_workflow.py "
+                               f"--write-registry 回写实测字段名）")
+        ni.append({"nodeId": str(nid), "fieldName": fld, "fieldValue": value})
+
+    put("prompt", prompt_text)
+
+    # 分辨率：node 61 ResolutionSelector 有两个入参 ——
+    #   aspect_ratio（**枚举字符串**，如 "16:9 (Widescreen)"）+ megapixels（数字档位）。
+    # ★ V1.0.2 修（本项目 fetch 真实 JSON 时暴露）：旧实现把「分辨率档 2」这个**数字**
+    #   直接注进 aspect_ratio —— 平台收到非法枚举，任务当场失败或落到错误比例。
+    #   「档 2」其实是 megapixels 的值，两个入参必须分开注。
+    aspect = ((sb.get("meta") or {}).get("aspect")
+              or (read_json(os.path.join(root, "状态", "pipeline_state.json"), {}) or {})
+              .get("config", {}).get("aspect_ratio")
+              or cfg.get("aspect_ratio") or "16:9")
+    amap = cfg.get("resolution_map") or {}
+    if amap and aspect not in amap:
+        raise RuntimeError(
+            f"注册表 MV-1.resolution_map 里没有「{aspect}」—— 枚举字符串**不许猜**，"
+            f"先 --inspect --node {nodes.get('resolution')} 看清值域再补 map。"
+            f"（当前 map：{list(amap)}）")
+    put("resolution", amap.get(aspect, aspect) if amap else aspect)
+    if fields.get("resolution_mp") and fields["resolution_mp"] != "TBD":
+        ni.append({"nodeId": str(nodes["resolution"]), "fieldName": fields["resolution_mp"],
+                   "fieldValue": cfg.get("resolution_default", 2)})
+    extra["aspect_ratio"] = aspect
+    extra["aspect_ratio_value"] = amap.get(aspect, aspect)
+
+    # 音乐窗口：优先「起点+时长」直注；没有起点入参就切好音频上传
+    dry = bool(getattr(args, "dry_run", False))
+    mm = cfg.get("music_mode") or "offset"
+    win = seg["music_window"]
+    src_nid, src_fld = nodes.get("music_source"), fields.get("music_source")
+    if mm == "offset" and src_nid and src_fld and src_fld != "TBD":
+        # ★ V1.0.2 修（本项目实测暴露的大坑）：
+        #   offset 模式原来只注 node 85 的「起点 + 时长」，**从不替换 node 34 LoadAudio 里的
+        #   示例 mp3** —— 结果就是「窗口取对了、歌是别人的」。母带必须原样进工作流（铁律 A6），
+        #   而且全片只上传一次（upload_cached）。
+        fname = SONG_PLACEHOLDER if dry else upload_cached(key, song_path(root, sb), root)
+        ni.append({"nodeId": str(src_nid), "fieldName": src_fld, "fieldValue": fname})
+        extra["song_fileName"] = fname
+    if mm == "offset" and fields.get("music_start") and fields["music_start"] != "TBD":
+        put("music", round(win["start"], 3), fields["music_start"])
+        put("music", round(win["dur"], 3), fields["music_dur"])
+    else:
+        mm = "upload"
+        cut = music_segment_file(root, seg, mm)
+        fname = os.path.basename(cut) if dry else rh.upload_media(key, cut)
+        extra["cut_file"] = os.path.relpath(cut, root)
+        fld = fields.get("music_dur")
+        if fld and fld != "TBD":
+            ni.append({"nodeId": str(nodes["music"]), "fieldName": fld, "fieldValue": round(win["dur"], 3)})
+        # 上传模式要注入的是**音频加载节点**，不是截取节点（V1.0.2）
+        a_nid = src_nid or nodes["music"]
+        a_fld = fields.get("music_source") or fields.get("music_audio")
+        if a_fld and a_fld != "TBD":
+            ni.append({"nodeId": str(a_nid), "fieldName": a_fld, "fieldValue": fname})
+        else:
+            extra["audio_fileName"] = fname
+            extra["audio_note"] = ("片已切好并上传，但注册表里没有「音频入参」字段名 → "
+                                   "请 --inspect --node %s 看清后补 fields.music_audio" % a_nid)
+    extra["music_mode"] = mm
+
+    # 图片：传本段需要的张数（顺序 = <Picture N>）
+    img_field = fields.get("image")
+    img_nid = nodes.get("image")
+    if img_uploads and img_nid and img_field and img_field != "TBD":
+        for i, fn in enumerate(img_uploads):
+            nid = (nodes.get("img_slots") or [img_nid])[i] if i < len(nodes.get("img_slots") or []) else img_nid
+            ni.append({"nodeId": str(nid), "fieldName": img_field, "fieldValue": fn})
+    ni.append({"nodeId": str(nodes.get("seed") or (nodes.get("core") or "0")),
+               "fieldName": fields.get("seed") or "noise_seed",
+               "fieldValue": rh.rand_seed()})
+    return ni, None, extra
+
+
+# ------------------------------------------------------------------ 单段执行
+def plan_image_uploads(root, seg, pr_rec, key, args, dry=False):
+    out = []
+    refs_dir = None
+    for s in (pr_rec.get("slots") or []):
+        p = os.path.join(root, s["path"])
+        if not os.path.isfile(p):
+            raise FileNotFoundError(f"段 {seg['seq']} 的参考图缺失：{p}")
+        out.append(p)
+    return out
+
+
+# ------------------------------------------------------------------ 账号降级 + 收尾出口
+# ★ V1.0.3 新增：把「文档承诺过但代码里根本没有」的两件事补实 ——
+#   ① 消费级被占 → 降级企业级（**必须显式授权花钱**）
+#   ② 在途任务 rescue（**不重复提交、不重复烧币**）
+#   实测来源：《野心家》首镜 FAILED 后，靠人工拿 taskId 回挖才把币救回来 ——
+#   说明「在途任务不该被当新任务重提」这条必须是代码，不能靠人记得。
+
+DEGRADE_PAT = re.compile(
+    r"QUEUE|BUSY|LIMIT|TOO_MANY|RATE|OVERLOAD|WORKER|APIKEY_|"
+    r"并发|占用|排队|余额|超出|繁忙",
+    re.I)
+
+# ★ V1.0.4：「池子被占」里还要再分一层 —— 才敢把段**放回队列重试**。
+#   DEGRADE_PAT 故意含 `余额|超出|APIKEY_`（那些确实该改走企业级），
+#   但它们**不是瞬时错误**：余额不足、key 无效，重试一万次也一样。
+#   判据：能重试的只有「等一会儿就好」的那类。`APIKEY_` 整个前缀**不进**这里
+#   （它太宽，`APIKEY_INVALID` 也会被误判成可重试），
+#   靠 `QUEUE` 一词精确吃下 `APIKEY_TASK_QUEUE_FULL`。
+TRANSIENT_PAT = re.compile(
+    r"QUEUE|BUSY|TOO_MANY|RATE_LIMIT|OVERLOAD|WORKER|"
+    r"并发|占用|排队|繁忙",
+    re.I)
+
+
+class SubmitBusy(Exception):
+    """提交被平台拒绝（池子被占 / 排队已满）—— **一分钱都没烧**。
+
+    所以它**不是失败**：段应当放回队列重试（双池并行时另一条车道会接走），
+    绝不能记成 `failed` —— 那会让「重跑一次就能成」的段需要人工介入。
+    实测来源（V1.0.3）：`{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}`。
+    """
+
+
+def log_schedule(root, seq, event, why, billing="企业级＝按秒扣钱包真钱（不走 供应商报告费用）"):
+    """写 状态/调度日志.csv —— 不留痕就事后算不清「这段烧的是币还是钱」。"""
+    append_csv(os.path.join(root, "状态", "调度日志.csv"),
+               {"时间": datetime.now().isoformat(timespec="seconds"), "段": seq,
+                "事件": event, "原因": (why or "")[:300], "计费口径": billing},
+               ["时间", "段", "事件", "原因", "计费口径"])
+
+
+def submit_with_fallback(cfg, ni, wfj, args, seq, root, key):
+    """提交任务；消费级失败且**已授权**时降级企业级。
+
+    ⚠️ 企业级 = **按秒扣钱包真钱**（不走 供应商报告费用）。所以降级必须**显式授权**
+    （`--allow-enterprise-fallback`）：**「提供凭证」和「授权花钱」是两件事**，
+    给了 `--api-key-e` 不等于同意烧真钱 —— 不能由前者推定后者。
+    另外加熔断：连续 3 次「降级也失败」→ 说明问题不在池子被占，停手别白花钱。
+    """
+    kwargs = dict(workflow_id=cfg["id"], node_info_list=ni,
+                  instance_type=args.instance_type, workflow_json=wfj)
+    try:
+        return rh.submit_task(key, **kwargs), "consumer"
+    except Exception as e:  # noqa: BLE001
+        why = f"{type(e).__name__}: {e}"
+        if not (getattr(args, "allow_enterprise", False) and getattr(args, "_key_e", "")):
+            raise
+        if not DEGRADE_PAT.search(why):
+            raise
+        with _LOCK:
+            if args._degrade_bad >= 3:
+                print("⛔ 降级已熔断（连续 3 次降级仍失败）→ 之后不再尝试企业级，避免白花真钱")
+                raise
+        print(f"↘ 段 {seq} 消费级提交失败 → **降级企业级**（⚠️ 按秒扣钱包真钱）")
+        print(f"    原因：{why[:200]}")
+        log_schedule(root, seq, "消费级提交失败 → 降级企业级", why)
+        try:
+            tid = rh.submit_task(args._key_e, **kwargs)
+        except Exception as e2:  # noqa: BLE001
+            with _LOCK:
+                args._degrade_bad += 1
+            log_schedule(root, seq, "降级企业级仍失败", f"{type(e2).__name__}: {e2}")
+            raise RuntimeError(f"降级企业级也失败（{args._degrade_bad}/3）：{e2}") from e2
+        with _LOCK:
+            args._degrade_bad = 0
+        return tid, "enterprise"
+
+
+def submit_to_lane(cfg, ni, wfj, args, lane_key):
+    """双池并行模式下的提交：**只用本车道的 key 提交**，池满就抛 `SubmitBusy`。
+
+    ★ V1.0.4 关键判据：池满 ≠ 失败也 ≠ 该降级。
+      单池模式里「消费级被占 → 降级企业级」是对的（没别的路）；
+      但双池模式里两条车道**同时在跑**，消费级被占时正确动作是
+      **把段放回队列**（企业级车道自然会接走），而不是本车道自己改走真钱 ——
+      否则消费级一旦被占，5 个 worker 会把整片同时甩给企业级 = **全片烧真钱**。
+    """
+    try:
+        return rh.submit_task(lane_key, workflow_id=cfg["id"], node_info_list=ni,
+                              instance_type=args.instance_type, workflow_json=wfj)
+    except Exception as e:  # noqa: BLE001
+        why = f"{type(e).__name__}: {e}"
+        if TRANSIENT_PAT.search(why):
+            raise SubmitBusy(why) from e
+        raise                      # 自己的 bug / key 无效 / 余额不足 → 照常失败，别重试
+
+
+def run_parallel(root, sb, cfg, args, st, done_flags, key_c, key_e, todo):
+    """★ V1.0.4 双池并行：**一个共享任务队列 + 两条车道同时抢**。
+
+    为什么是「共享队列」而不是「对半切开」：
+      段与段的机器耗时差得很远（实测 600~900s），静态对半切必然一条车道先空转；
+      谁先空出手谁接着取，墙钟才真的减半。
+
+    ⚠️ 计费现实：企业级车道**每一秒都在扣钱包真钱**（¥6/小时），
+      所以这个模式必须**显式授权**（`--enterprise-parallel`），
+      并且提供 `--enterprise-parallel-max` 给真钱封顶（最多多少段走企业级）。
+    """
+    q = queue.Queue()
+    for s in todo:
+        q.put(s)
+    lanes = [{"name": "consumer", "key": key_c, "width": max(1, args.workers),
+              "strikes": 0, "busy_since": None, "alive": True}]
+    if key_e:
+        lanes.append({"name": "enterprise", "key": key_e,
+                      "width": max(1, args.workers_e),
+                      "strikes": 0, "busy_since": None, "alive": True})
+    ent_used = [0]
+    cap = int(getattr(args, "enterprise_parallel_max", 0) or 0)   # 0 = 不限
+    fails = []
+    stat = {"taken": {ln["name"]: 0 for ln in lanes},
+            "busy": {ln["name"]: 0 for ln in lanes}}
+
+    print(f"\n开始生成 {len(todo)} 段 · **双池并行** · "
+          f"消费级×{lanes[0]['width']}"
+          + (f" + 企业级×{lanes[1]['width']}" if len(lanes) > 1 else ""))
+    if len(lanes) > 1:
+        print("⚠️  企业级**按秒扣钱包真钱**（¥6/小时）—— 本模式的账单不走 供应商报告费用")
+        print(f"    真钱封顶：{'不限（全部段都可能落到企业级）' if not cap else f'最多 {cap} 段'}")
+    for ln in lanes[1:]:
+        log_schedule(root, "-", "双池并行启用",
+                     f"车道 {ln['name']} 宽度 {ln['width']}，真钱封顶 {cap or '不限'}",
+                     billing="双池并行：企业级＝按秒扣钱包真钱")
+
+    def take(lane):
+        """取一段；企业级车道还要先过真钱封顶这道闸。"""
+        with _LOCK:
+            if (lane["name"] == "enterprise" and cap and ent_used[0] >= cap):
+                return None                                     # 额度用满 → 退役
+            try:
+                seg = q.get_nowait()
+            except queue.Empty:
+                return None
+            if lane["name"] == "enterprise":
+                ent_used[0] += 1
+            stat["taken"][lane["name"]] += 1
+            return seg
+
+    def lane_worker(lane):
+        while lane["alive"]:
+            if lane["name"] == "enterprise" and cap and ent_used[0] >= cap:
+                print(f"⏹ 企业级车道真钱额度用满（{cap} 段）→ 退役，剩下的段回消费级")
+                log_schedule(root, "-", "企业级车道退役", f"真钱封顶 {cap} 段已用满")
+                return
+            seg = take(lane)
+            if seg is None:
+                return                                          # 队列空 → 本车道收工
+            seq = seg["seq"]
+            try:
+                ok, msg = run_one(root, sb, seg, cfg, lane["key"], args, st,
+                                  done_flags, lane=lane)
+            except Exception as e:  # noqa: BLE001
+                ok, msg = False, f"{type(e).__name__}: {e}"
+            if ok is None:
+                # ---- 池满：**没烧钱**，放回队列（另一条车道会接走）----
+                lane["strikes"] += 1
+                stat["busy"][lane["name"]] += 1
+                if lane["busy_since"] is None:
+                    lane["busy_since"] = time.time()
+                if lane["name"] == "enterprise" and cap:
+                    with _LOCK:
+                        ent_used[0] = max(0, ent_used[0] - 1)    # 没真提交成功，退额度
+                back = min(BUSY_BACKOFF_BASE * lane["strikes"], 120)
+                print(f"↩ 段 {seq} 被 {lane['name']} 池拒绝（未烧钱）→ 放回队列，"
+                      f"{back}s 后重试（本车道连续第 {lane['strikes']} 次）")
+                log_schedule(root, seq, "池满 → 放回队列", msg,
+                             billing="未提交成功＝未计费")
+                time.sleep(back)
+                q.put(seg)
+                # ★ 判据是「等了多久」而不是「错了几次」（见 BUSY_GIVE_UP_SEC 注释）
+                waited = time.time() - lane["busy_since"]
+                if BUSY_GIVE_UP_SEC and waited > BUSY_GIVE_UP_SEC:
+                    print(f"⛔ {lane['name']} 车道池满已持续 {int(waited)}s "
+                          f"（>{BUSY_GIVE_UP_SEC}s）→ 该车道退役；"
+                          f"队列里的段交给兜底路径（单池 + 显式授权才降级）")
+                    log_schedule(root, "-", f"{lane['name']} 车道退役",
+                                 f"池满持续 {int(waited)}s 超过 {BUSY_GIVE_UP_SEC}s")
+                    return
+            elif ok:
+                lane["strikes"] = 0
+                lane["busy_since"] = None
+            else:
+                fails.append((seq, msg))
+
+    threads = []
+    for ln in lanes:
+        th = threading.Thread(target=lane_worker, args=(ln,),
+                              name=f"lane-{ln['name']}", daemon=True)
+        th.start()
+        threads.append(th)
+    t0 = time.time()
+    last = time.time()
+    while any(th.is_alive() for th in threads):
+        time.sleep(SUPERVISE_TICK)
+        if time.time() - last > 600:                            # 每 10 分钟主动汇报
+            print(f"[进度] {len(done_flags)}/{len(todo)} 完成 · "
+                  f"已用 {int(time.time()-t0)//60} 分钟 · "
+                  f"队列剩 {q.qsize()} · 在跑 "
+                  f"{sum(1 for th in threads if th.is_alive())} 条车道")
+            last = time.time()
+    for th in threads:
+        th.join(timeout=30)
+
+    # ---- ★ 队列兜底：车道全停后队列里若还有段，一律回落消费级单池跑完 ----
+    # 为什么必须有：企业级车道会因两件事**主动退役** —— ① 真钱封顶用满；
+    # ② 连续 3 次池满。退役那一刻它可能刚把一段 `put` 回队列（还没人取），
+    # 而消费级车道可能早已因为「当时队列空」退出了。
+    # 少了这块兜底，那几段就**既没跑也没记 failed = 静默丢活**，
+    # 成片会凭空短一截，而账面上看不出任何异常。这是双池并行最阴的一种错。
+    left = []
+    while True:
+        try:
+            left.append(q.get_nowait())
+        except queue.Empty:
+            break
+    if left:
+        print(f"\n⏭ 车道已停 · 队列还剩 {len(left)} 段 → 回落消费级单池跑完"
+              f"（{args.workers} 并发）")
+        log_schedule(root, "-", "队列兜底",
+                     f"{len(left)} 段回落消费级单池（企业级车道已退役）",
+                     billing="兜底一律走消费级＝供应商报告费用")
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            lf = {ex.submit(run_one, root, sb, s, cfg, key_c, args, st,
+                            done_flags, None): s for s in left}
+            while lf:
+                done, _ = wait(list(lf), timeout=60, return_when=FIRST_COMPLETED)
+                for f in done:
+                    ok, msg = f.result()
+                    if not ok:
+                        fails.append((lf[f]["seq"], msg))
+                    lf.pop(f)
+
+    print(f"\n生成结束：成功 {len(done_flags)}/{len(todo)} · 用时 {int(time.time()-t0)//60} 分钟")
+    print(f"  车道取件数：{stat['taken']}" +
+          (f" · 池满放回：{stat['busy']}" if any(stat["busy"].values()) else ""))
+    if stat["taken"].get("enterprise"):
+        print(f"  ⚠️ 其中 {stat['taken']['enterprise']} 段走企业级 = 真钱消费，"
+              f"明细见 状态/调度日志.csv 与 状态/成本台账.csv「钱包元」列")
+    for seq, msg in fails:
+        print(f"  ⛔ 段 {seq}: {msg}")
+    return fails
+
+
+def finish_from_results(root, sb, seg, results, task_id, pool, args, st, done_flags,
+                        d, log):
+    """下载产物 → 按帧贴合 → 落 log / 成本台账 / rh_state。
+
+    **这是「从产物到交付」的唯一出口**：新提交与 rescue 两条路径共用，
+    口径（贴合公式、记账字段、状态机）就不会分叉。
+    """
+    seq = seg["seq"]
+    pick = rh.pick_video(results)
+    if not pick or not pick.get("url"):
+        raise RuntimeError(f"段 {seq} 产物里没有视频：{results}")
+    raw_p = os.path.join(d, "output_raw.mp4")
+    rh.download(pick["url"], raw_p)
+
+    # ★ 贴合到音乐窗口长度 —— 对齐的工程保证
+    #   V1.0.2：按**帧**贴合（段 i 目标帧数 = round(end*24) - round(start*24)），
+    #   逐段求和望远镜相消 → Σ = round(曲长*24)，不随段数累积偏移。
+    w0 = seg["music_window"]
+    tgt_frames = max(1, round(w0["end"] * FPS) - round(w0["start"] * FPS))
+    target = round(tgt_frames / float(FPS), 3)
+    out_p = os.path.join(d, "output.mp4")
+    conform(raw_p, out_p, target, frames=tgt_frames)
+    actual = ffprobe_dur(out_p)
+    coins = sum(int(r.get("coins") or 0) for r in results)
+    money = sum(float(r.get("money") or 0) for r in results)
+    cost_s = sum(int(r.get("cost_s") or 0) for r in results)
+    log.update({"taskId": task_id, "pool": pool, "seed_ok": True, "coins": coins,
+                "money": money, "cost_s": cost_s,
+                "dur_actual": actual, "dur_target": target, "target_frames": tgt_frames,
+                "conform": "ok" if actual and abs(actual - target) < 0.08 else "偏差偏大",
+                "status": "done", "finished": datetime.now().isoformat(timespec="seconds")})
+    with _LOCK:
+        st[seq] = {"status": "done", "taskId": task_id, "pool": pool,
+                   "coins": coins, "money": money, "cost_s": cost_s, "dur": actual}
+        write_json(os.path.join(root, "状态", "rh_state.json"), st)
+        write_json(os.path.join(d, "log.json"), log)
+        append_csv(os.path.join(root, "状态", "成本台账.csv"),
+                   {"seq": seq, "kw": seg.get("kw"), "账号": pool,
+                    "视频s": actual, "生成耗时s": cost_s, "供应商报告费用": coins,
+                    "钱包元": f"{money:.4f}" if money else "",
+                    "音乐窗口": f"{w0['start']:.2f}-{w0['end']:.2f}",
+                    "口型": seg["sing_mode"], "taskId": task_id},
+                   ["seq", "kw", "账号", "视频s", "生成耗时s", "供应商报告费用", "钱包元",
+                    "音乐窗口", "口型", "taskId"])
+    done_flags[seq] = True
+    extra_money = f" · 钱包 {money:.4f} 元" if money else ""
+    print(f"✅ 段 {seq} 完成 {actual}s / 目标 {target}s · {cost_s}s · {coins} 币"
+          f"{extra_money} · {pool}")
+    return True, None
+
+
+def run_one(root, sb, seg, cfg, key, args, st, done_flags, lane=None):
+    """跑一段。
+
+    返回值三态（★ V1.0.4 起）：
+      `(True, None)`  → 成
+      `(False, msg)`  → 败（已写 failed 状态）
+      `(None, msg)`   → **池满被拒、一分钱没烧**，交回调度器放回队列重试
+    第三态是双池并行能安全跑起来的前提：池满若被记成 failed，
+    「重跑一次就能成」的段就变成需要人工介入了。
+    """
+    seq = seg["seq"]
+    d = seg["_dir"]
+    log = {"seq": seq, "kw": seg.get("kw"), "dur": seg["dur"],
+           "music_window": seg["music_window"], "sing_mode": seg["sing_mode"],
+           "started": datetime.now().isoformat(timespec="seconds")}
+    pool = lane["name"] if lane else "consumer"
+    try:
+        prev = st.get(str(seq)) or {}
+        rescue_id = (prev.get("taskId")
+                     if prev.get("status") == "submitted" and prev.get("taskId") else None)
+
+        # ---------- ① 在途任务 rescue：**绝不重复提交**（不重复烧币）----------
+        # ★ V1.0.3：旧版对 status=submitted 的段会**直接重新提交** → 双倍烧币。
+        #   实测来源：《野心家》首镜失败后，是靠人工拿 taskId 回挖才把币救回来的，
+        #   说明这条必须是代码，不能靠人记得。
+        if rescue_id and not args.new_seed:
+            pool = prev.get("pool") or "consumer"
+            use_key = args._key_e if (pool == "enterprise" and args._key_e) else key
+            print(f"♻ 段 {seq} 发现在途任务 {rescue_id}（{pool}）→ rescue"
+                  f"（**不重新提交、不重复烧币**）")
+            log.update({"rescue": True, "taskId": rescue_id, "pool": pool})
+            results = rh.poll_task(use_key, rescue_id, interval=args.interval,
+                                  timeout=args.timeout)
+            return finish_from_results(root, sb, seg, results, rescue_id, pool,
+                                       args, st, done_flags, d, log)
+
+        # ---------- ② 正常路径：提示词 → 注入 → 提交 ----------
+        pr = read_json(os.path.join(root, "状态", "prompt_review.json"), {}) or {}
+        rec = next((x for x in pr.get("segments", []) if x["seq"] == seq), {})
+        prompt_text = open(os.path.join(d, "prompt.txt"), encoding="utf-8").read().strip()
+        imgs = plan_image_uploads(root, seg, rec, key, args)
+        # V1.0.2：参考图也走上传缓存 —— 同一个主角图 21 段各传一遍既慢又浪费额度
+        uploads = [(os.path.basename(p) if args.dry_run else upload_cached(key, p, root))
+                   for p in imgs]
+        ni, wfj, extra = build_injection(root, sb, seg, cfg, prompt_text, uploads, key, args)
+        if not imgs:
+            # ★ V1.0.2：段内不需要参考图 → 摘掉图槽连线 + 整包直传带注入
+            #   （否则 node 36 里工作流自带的示例人物图会被当成本段参考）
+            wfj, dropped = bake_workflow(
+                cfg, ni, out_path=os.path.join(d, "workflow_noref.json"))
+            ni = []
+            extra["noref_workflow"] = True
+            extra["dropped_links"] = dropped
+        log.update(extra)
+        if args.dry_run:
+            print(f"[dry] 段 {seq} → {json.dumps(ni, ensure_ascii=False)[:300]}")
+            return True, None
+        # 上传图快照
+        refs = os.path.join(d, "refs")
+        os.makedirs(refs, exist_ok=True)
+        for p in imgs:
+            shutil.copy2(p, os.path.join(refs, os.path.basename(p)))
+
+        if lane is not None:
+            # ★ V1.0.4 双池并行：只用本车道的 key 提交；池满抛 SubmitBusy（没烧钱）
+            task_id = submit_to_lane(cfg, ni, wfj, args, lane["key"])
+            pool = lane["name"]
+        else:
+            task_id, pool = submit_with_fallback(cfg, ni, wfj, args, seq, root, key)
+        log["pool"] = pool
+        with _LOCK:
+            st[seq] = {"status": "submitted", "taskId": task_id, "pool": pool,
+                       "submitted_at": datetime.now().isoformat(timespec="seconds")}
+            write_json(os.path.join(root, "状态", "rh_state.json"), st)
+        if lane is not None:
+            use_key = lane["key"]
+        else:
+            use_key = args._key_e if (pool == "enterprise" and args._key_e) else key
+        results = rh.poll_task(use_key, task_id, interval=args.interval,
+                              timeout=args.timeout)
+        return finish_from_results(root, sb, seg, results, task_id, pool,
+                                   args, st, done_flags, d, log)
+    except SubmitBusy as e:
+        # ---- 池满：**一分钱没烧** → 交回调度器放回队列，绝不记成 failed ----
+        log.update({"status": "requeued", "pool": pool, "busy": str(e)[:300]})
+        with _LOCK:
+            write_json(os.path.join(d, "log.json"), log)
+        return None, str(e)
+    except Exception as e:  # noqa: BLE001
+        msg = f"{type(e).__name__}: {e}"
+        log.update({"status": "failed", "pool": pool, "error": msg})
+        with _LOCK:
+            # 超时 / 产物未就绪 → 任务**还在平台上跑**，保留 submitted + taskId，
+            # 下次跑走 rescue（不重复烧币，见 V1.0.3）；真失败才置 failed。
+            inflight = ("TimeoutError" in type(e).__name__
+                        or "outputs 始终未返回" in msg)
+            st[seq] = {"status": "submitted" if inflight else "failed",
+                       "taskId": (st.get(seq) or {}).get("taskId"), "pool": pool,
+                       "error": msg}
+            write_json(os.path.join(root, "状态", "rh_state.json"), st)
+            write_json(os.path.join(d, "log.json"), log)
+        print(f"⛔ 段 {seq} 失败：{msg}")
+        return False, msg
+
+
+def conform(src, dst, target, frames=None):
+    """把视频裁/补到恰好等于它的音乐窗口长度（铁律 D7）。
+
+    ★ V1.0.2：优先按**帧**精确裁/补（`-frames:v N`）。
+    ⚠️ 为什么不能用 `-t 秒数` 就完事：《野心家》实跑发现 `-t 14.93` 出来的实际是
+       **14.958s**（ffmpeg 把输出**上取整到帧边界**），22 段各多 1 帧 → Σ 比曲长
+       **多 0.42s**，正好把「Σ各段 = 全曲长」这条判据顶破（容差 0.4s）。
+    按帧对齐时，段 i 的目标帧数 = `round(end_i*24) - round(start_i*24)`；由于
+    `start_i == end_{i-1}` 且 `start_0 == 0`，逐段求和**天然望远镜相消** →
+    Σ = `round(曲长*24)` 帧，误差 ≤ 1 帧（0.04s），而不是随段数线性累积。
+    """
+    cur = ffprobe_dur(src) or target
+    os.makedirs(os.path.dirname(os.path.abspath(dst)) or ".", exist_ok=True)
+    tmp = dst + ".tmp.mp4"
+    vf_common = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                 "-c:a", "aac", "-b:a", "192k"]
+    if frames:
+        cmd = [FFMPEG, "-y", "-v", "error", "-i", src]
+        if cur < target - 0.02:
+            # 素材比目标短 → 先克隆尾帧补够，再按帧截断
+            pad = round(target - cur + 0.5, 3)
+            cmd += ["-vf", f"tpad=stop_mode=clone:stop_duration={pad}"]
+        cmd += ["-frames:v", str(int(frames))] + vf_common + [tmp]
+    elif cur > target + 0.02:
+        cmd = [FFMPEG, "-y", "-v", "error", "-i", src, "-t", f"{target:.3f}"] + vf_common + [tmp]
+    elif cur < target - 0.02:
+        pad = round(target - cur, 3)
+        cmd = [FFMPEG, "-y", "-v", "error", "-i", src,
+               "-vf", f"tpad=stop_mode=clone:stop_duration={pad}"] + vf_common + [tmp]
+    else:
+        shutil.copy2(src, tmp)
+    subprocess.run(cmd, capture_output=True, text=True, timeout=1800, check=True)
+    os.replace(tmp, dst)
+    return dst
+
+
+# ------------------------------------------------------------------ 拼接
+def compose(root, sb):
+    vids = []
+    for seg in sb["segments"]:
+        p = os.path.join(seg["_dir"], "output.mp4")
+        if not os.path.isfile(p):
+            print(f"⚠ 段 {seg['seq']} 还没有 output.mp4")
+            return None, None
+        vids.append(p)
+    final_dir = os.path.join(root, "视频", "final")
+    os.makedirs(final_dir, exist_ok=True)
+    lst = os.path.join(final_dir, "_concat.txt")
+    with open(lst, "w", encoding="utf-8") as f:
+        for v in vids:
+            f.write("file '%s'\n" % os.path.abspath(v).replace("\\", "/").replace("'", "'\\''"))
+    plain = os.path.join(final_dir, "final.mp4")
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", lst,
+                    "-c", "copy", plain + ".tmp.mp4"], capture_output=True, text=True, timeout=1800)
+    os.replace(plain + ".tmp.mp4", plain)
+
+    # 重贴母带版：视频轨 + 原曲，裁到曲长 → 绝对对齐
+    song = None
+    md = os.path.join(root, "音乐")
+    for f in ("song.mp3", "song.wav", "song.flac", "song.m4a"):
+        if os.path.isfile(os.path.join(md, f)):
+            song = os.path.join(md, f)
+            break
+    master = None
+    if song and sb.get("song", {}).get("duration"):
+        master = os.path.join(final_dir, "final_master.mp4")
+        subprocess.run([FFMPEG, "-y", "-v", "error", "-i", plain, "-i", song,
+                        "-map", "0:v:0", "-map", "1:a:0",
+                        "-t", f"{sb['song']['duration']:.3f}",
+                        "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
+                        "-shortest", master + ".tmp.mp4"],
+                       capture_output=True, text=True, timeout=1800)
+        os.replace(master + ".tmp.mp4", master)
+    return plain, master
+
+
+# ------------------------------------------------------------------ main
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--api-key", default="")
+    ap.add_argument("--api-key-e", default="", help="企业级 key（按秒扣钱包真钱，默认别用）")
+    ap.add_argument("--allow-enterprise-fallback", action="store_true",
+                    help="⚠️ 授权「消费级提交失败 → 自动改用企业级」= **拿真钱换速度**。"
+                         "只给 --api-key-e 不等于授权花钱，必须显式加这个开关")
+    ap.add_argument("--enterprise-parallel", action="store_true",
+                    help="⚠️⚠️ 授权「消费级 + 企业级**双池同时并行**」= 两把 key 同时开跑，"
+                         "墙钟约减半，但企业级那条车道**每一秒都在扣钱包真钱**（¥6/小时）。"
+                         "这是与 --allow-enterprise-fallback 并列的**第三个独立开关**，"
+                         "二者互不推定。建议配合 --enterprise-parallel-max 封顶")
+    ap.add_argument("--workers-e", type=int, default=0,
+                    help="企业级车道宽度（默认 = --workers）。企业级是 SHARED 池，"
+                         "额度未知时给 3~5 更稳；池满只会「放回队列」，不会烧钱")
+    ap.add_argument("--enterprise-parallel-max", type=int, default=0,
+                    help="真钱封顶：双池并行时**最多多少段走企业级**（0 = 不限）。"
+                         "设了它就等于给账单上一道闸，超出部分自动回到消费级")
+    ap.add_argument("--workflow", default=None, help="注册表 key（默认取 default）")
+    ap.add_argument("--workflow-id", default=None)
+    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--instance-type", default=None, help="default/plus/ultra")
+    ap.add_argument("--only", default="", help="只跑指定段，逗号分隔")
+    ap.add_argument("--new-seed", action="store_true")
+    ap.add_argument("--interval", type=int, default=10)
+    ap.add_argument("--timeout", type=int, default=2700)
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--skip-gate", action="store_true", help="⚠️ 仅排障：跳过关 5/关 6 门禁")
+    ap.add_argument("--no-compose", action="store_true")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.project_root)
+    # ★ V1.0.6：凭证三级加载 —— 用户级（~/.project_provider/credentials/mv-auto-pipeline/keys.env）
+    #   → 项目级 <root>/.env（可覆盖）→ 真实环境变量（永不被改写）。
+    #   用户级就位后，**新项目里不传任何 key 也能直接跑**，不再问用户要。
+    rh.load_dotenv(root)
+    args.only = {int(x) for x in args.only.split(",") if x.strip()} if args.only else None
+    sb = read_json(os.path.join(root, "分镜脚本", "storyboard.json"))
+    if not sb:
+        sys.exit(f"❌ 读不到 {os.path.join(root, '分镜脚本', 'storyboard.json')}")
+
+    reg = load_reg()
+    wkey, cfg = resolve_wf(reg, args.workflow, args.workflow_id)
+    if not cfg.get("contract_verified"):
+        print(f"⚠ 工作流 {wkey} 的节点契约尚未核实（contract_verified=false）——"
+              f"先跑 build_mv_workflow.py --fetch --inspect --write-registry")
+
+    # 每段目录
+    for seg in sb["segments"]:
+        seg["_dir"] = os.path.join(root, "视频", f"shot_{seg['seq']:02d}_{cjk_safe(seg.get('kw'))}")
+
+    probs = []
+    if not args.skip_gate:
+        probs = gate(root, sb, args)
+        if probs:
+            if args.dry_run:
+                print("⚠ --dry-run 模式下门禁问题只提示不拦截（真跑时会直接拒绝）：")
+                for p in probs:
+                    print("   ·", p)
+            else:
+                print("⛔ 门禁拒绝生成（零算力），问题清单：")
+                for p in probs:
+                    print("   ·", p)
+                sys.exit(1)
+        else:
+            print("[gate] 关 5 + 关 6 通过 · 分辨率已复核 · 逐段 sha1 一致")
+
+    if args.dry_run:
+        for seg in sb["segments"]:
+            if args.only and seg["seq"] not in args.only:
+                continue
+            print(f"[dry] 段 {seg['seq']:>2} 窗口 {seg['music_window']['start']:.2f}-"
+                  f"{seg['music_window']['end']:.2f}s（{seg['music_window']['dur']:.2f}s）"
+                  f" 请求 {align_sec(seg['music_window']['dur'])}s · {seg['sing_mode']} · "
+                  f"{seg['shot_size']}")
+        print(f"\n工作流 {wkey}（{cfg.get('id')}）· music_mode={cfg.get('music_mode')} · "
+              f"分辨率默认 {cfg.get('resolution_default')}")
+        print("（--dry-run：未提交任何任务）")
+        return
+
+    key = rh.resolve_key(args.api_key, project_root=root)      # ★ V1.0.6：带 self_heal
+    st = read_json(os.path.join(root, "状态", "rh_state.json"), {}) or {}
+    st = {str(k): v for k, v in st.items()}
+    # ★ V1.0.3：账号不再用全局 args._pool_name（多线程会互相污染），改为**每段各自记账**；
+    #   企业级 key 与「是否授权花钱」是两个独立开关。
+    # ★ V1.0.6：企业级 key 也走凭证三级加载（用户级 keys.env → 项目 .env → 环境变量），
+    #   不再只认 os.environ —— 否则用户级文件里的企业级 key 形同虚设。
+    args._key_e = rh.enterprise_key(args.api_key_e, project_root=root)
+    args.allow_enterprise = bool(args.allow_enterprise_fallback)
+    args._degrade_bad = 0
+    if args._key_e and not args.allow_enterprise:
+        print("ℹ 已提供企业级 key，但**未授权自动降级**（加 --allow-enterprise-fallback 才启用）。")
+    if args.allow_enterprise:
+        if not args._key_e:
+            sys.exit("❌ 加了 --allow-enterprise-fallback 但没给企业级 key"
+                     "（--api-key-e，或 .env / 用户级 keys.env 的 project_provider_API_KEY_E）")
+        print("⚠️  已授权自动降级：消费级提交失败时会改用**企业级** —— "
+              "**企业级不走 供应商报告费用，按秒扣钱包真钱（¥6/小时）**，每次降级写 状态/调度日志.csv。")
+
+    # ★ V1.0.4 双池并行：第三个独立开关（与「提供凭证」「授权降级」并列，三者互不推定）。
+    #   预检要报「本次待跑几段 → 真钱上限多少」，所以挪到下面 todo 算完再打印。
+    args.parallel = bool(args.enterprise_parallel)
+
+    todo = []
+    for seg in sb["segments"]:
+        seq = seg["seq"]
+        if args.only and seq not in args.only:
+            continue
+        cur = st.get(str(seq)) or {}
+        if cur.get("status") == "done" and os.path.isfile(os.path.join(seg["_dir"], "output.mp4")) \
+                and not args.new_seed:
+            print(f"⏭ 段 {seq} 已完成，跳过（要重跑加 --only {seq} --new-seed）")
+            continue
+        if args.new_seed:
+            st.pop(str(seq), None)
+        todo.append(seg)
+    if not todo:
+        print("没有待跑段。")
+    write_json(os.path.join(root, "状态", "rh_state.json"), st)
+
+    # ★ V1.0.4 双池并行预检：把「真钱上限」在开跑前算给用户看
+    if args.parallel:
+        if not args._key_e:
+            sys.exit("❌ 加了 --enterprise-parallel 但没给企业级 key"
+                     "（--api-key-e，或 .env / 用户级 keys.env 的 project_provider_API_KEY_E）")
+        args.workers_e = args.workers_e or args.workers
+        n_est = len(todo)
+        per = ENT_SEC_PER_SEG * 6.0 / 3600.0
+        cap = args.enterprise_parallel_max or 0
+        print(f"\n⚠️⚠️ 已授权【双池并行】：消费级 ×{args.workers} ∥ "
+              f"企业级 ×{args.workers_e} —— 两条车道**同时**抢同一个任务队列，"
+              f"谁先空出手谁接着取。")
+        print("     企业级**不走 供应商报告费用**，按秒扣钱包真钱（¥6/小时）——"
+              "这支 MV 的账单里会多出真钱那一份。")
+        if cap:
+            print(f"     真钱封顶：最多 {cap} 段走企业级 → "
+                  f"预估上限 ¥{per*min(cap, n_est):.2f}")
+        else:
+            print(f"     真钱预估（按《野心家》实测单段机器耗时 {ENT_SEC_PER_SEG}s 折算 "
+                  f"≈ ¥{per:.2f}/段）：")
+            print(f"       最坏（{n_est} 段全落企业级）≈ ¥{per*n_est:.2f} · "
+                  f"对半 ≈ ¥{per*n_est/2:.2f}")
+            print("     ⚠️ 不设 --enterprise-parallel-max 就是**不限**；想给账单上闸就设它。")
+        log_schedule(root, "-", "双池并行授权",
+                     f"{n_est} 段待跑 · 消费级×{args.workers} ∥ 企业级×{args.workers_e}"
+                     f" · 封顶 {cap or '不限'}")
+
+    done_flags, fails = {}, []
+    if todo and args.parallel:
+        fails = run_parallel(root, sb, cfg, args, st, done_flags, key,
+                             args._key_e, todo)      # ★ V1.0.4 双池并行
+    elif todo:
+        print(f"\n开始生成 {len(todo)} 段 · 并发 {args.workers} · 机型 {args.instance_type or 'default'}")
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            futs = {ex.submit(run_one, root, sb, s, cfg, key, args, st, done_flags): s for s in todo}
+            last_report = time.time()
+            while futs:
+                done, _ = wait(list(futs), timeout=60, return_when=FIRST_COMPLETED)
+                for f in done:
+                    ok, msg = f.result()
+                    if not ok:
+                        fails.append((futs[f]["seq"], msg))
+                    futs.pop(f)
+                if time.time() - last_report > 600:      # 每 10 分钟主动汇报（drama 铁律 D21）
+                    n_ok = len(done_flags)
+                    print(f"[进度] {n_ok}/{len(todo)} 完成 · 已用 {int(time.time()-t0)//60} 分钟 · "
+                          f"在跑 {len(futs)} 段")
+                    last_report = time.time()
+        print(f"\n生成结束：成功 {len(done_flags)}/{len(todo)} · 用时 {int(time.time()-t0)//60} 分钟")
+        for seq, msg in fails:
+            print(f"  ⛔ 段 {seq}: {msg}")
+
+    if not args.no_compose:
+        plain, master = compose(root, sb)
+        if plain:
+            print(f"\n成片：\n  {plain}（逐段内嵌音乐直接拼）")
+            if master:
+                print(f"  {master}（视频轨 + 原曲母带重贴 · 交付首选）")
+        else:
+            print("\n（还有段没跑完，未拼接）")
+
+
+if __name__ == "__main__":
+    main()

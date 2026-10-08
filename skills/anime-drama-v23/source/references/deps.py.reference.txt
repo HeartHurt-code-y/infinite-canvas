@@ -1,0 +1,650 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""drama-auto-pipeline 依赖定位器 —— 「自包含分发」机制的唯一入口（V2.0）
+
+================================================================================
+为什么要有这个文件
+================================================================================
+V1.9 及之前，本 skill 有两处**硬编码本机绝对路径**的跨 skill 依赖：
+
+  1) references/batch_run_drama.py、references/voice_designer.py
+       sys.path.insert(0, r"[项目工作目录]")
+       import 项目模型_runner
+  2) references/batch_run_drama.py
+       H3_VALIDATOR = Path(r"[项目工作目录]")
+
+后果：把压缩包分享给别人、或在另一台电脑上解压 → 路径不存在 →
+要么直接崩（`import 项目模型_runner` 失败），要么**静默降级成「不校验」**（后者更危险：
+审核关 5 看起来跑过了，其实一次都没校验）。
+
+================================================================================
+解法：三条判据
+================================================================================
+① **内置副本永远在，且默认优先。**
+   跨 skill 依赖全部复制进 `vendor/`（随包分发），别人不需要装任何别的 skill。
+   默认「内置优先」而不是「外部优先」，是为了让**本机跑 == 别人跑**：
+   若外部优先，我这边用新版校验器通过、你那边用旧版报错（或反之），
+   就变成一个新的漂移源——而这正是本 skill 反复栽过的坑。
+
+② **要用外部（更新的）版本，必须显式开启**：
+   `DRAMA_USE_EXTERNAL=1` 或 `deps.use_external(True)`。
+   开启后**必须打印来源**，不许静默切换。
+
+③ **任何情况下都能回答「现在用的到底是哪一份」**：
+   每个 resolve 都返回 `(路径, 来源标签)`，`describe()` 汇总成人话。
+   「不知道在跑哪份」= 下一个漂移源。
+
+================================================================================
+凭证四级读取链（与 mv-auto-pipeline 同口径）
+================================================================================
+    --project_provider_setting 参数  >  真实环境变量  >  <项目根>/.env  >  ~/.项目模型/credentials/drama-auto-pipeline/keys.env
+
+判据：**「用户说过一次、以后不该再问」的东西，必须落成「代码能读到的文件」。**
+只写在记忆 / 文档里 = 下次换个新项目一定还会再问一遍。
+
+================================================================================
+用法
+================================================================================
+    import deps
+    rh = deps.load_项目模型_runner()                  # 模块对象，缺依赖时报错带指引
+    path, src = deps.resolve_h3_validator("main")       # ("main"|"local")
+    key, src = deps.resolve_project_provider_setting("项目模型_project_provider_setting", cli=args.project_provider_setting,
+                                    project_root=args.project_root)
+
+命令行（排查用）：
+    python references/deps.py                    # 打印当前依赖来源总表
+    python references/deps.py --selftest         # 自检（不联网、不花钱）
+    python references/deps.py --sync-vendor      # ⚠️ 作者机专用：从外部 skill 刷新 vendor 副本
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+try:                                    # Windows 控制台中文
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                       # noqa: BLE001
+    pass
+
+# ---------------------------------------------------------------- 目录常量
+SKILL_NAME = "drama-auto-pipeline"
+SKILL_ROOT = Path(__file__).resolve().parent.parent
+VENDOR_DIR = SKILL_ROOT / "vendor"
+MANIFEST_FILE = VENDOR_DIR / "MANIFEST.json"
+
+# 内置副本在 vendor/ 下**镜像源 skill 的相对路径**，一眼能看出这份是谁的、放在源里的哪个位置
+VENDOR_LAYOUT = {
+    "h3-ref2va-optimizer": ["scripts/validate_ref2va.py",
+                            "scripts/validate_ref2va_local.py"],
+    "knowledge-video-director": ["references/项目模型_runner.py"],
+}
+
+# 用户级凭证文件（跨项目、换电脑后只需重建这一个文件）
+CRED_DIR = Path.home() / ".项目模型" / "credentials" / SKILL_NAME
+CRED_FILE = CRED_DIR / "keys.env"
+# 跨 skill **共享**的用户级凭证文件 —— 同一个平台账号没必要在每个 skill 里各存一份
+# （存两份 = 两处要改 = 迟早漂移；本 skill 已在 mv-auto-pipeline 上栽过一次「代码不读文件」）
+SHARED_CRED_FILE = Path.home() / ".项目模型" / "credentials" / "keys.env"
+# 迁移助手会去看的兄弟 skill 凭证（只用于 --migrate-credentials，运行时不偷偷读）
+SIBLING_CRED_GLOB = "*/keys.env"
+
+EXTERNAL_ENV = "DRAMA_USE_EXTERNAL"
+SKILLS_DIR_ENV = "项目模型_SKILLS_DIR"
+
+_OVERRIDE = {"external": None}          # 进程内显式覆盖（优先级高于环境变量）
+
+
+class DependencyMissing(SystemExit):
+    """缺依赖时抛这个 —— 继承 SystemExit 让 CLI 干净退出，且带安装指引。"""
+
+
+# ---------------------------------------------------------------- 开关
+def skills_root() -> Path:
+    """外部 skill 的安装根目录（作者机默认为 ~/.项目模型/skills）。"""
+    env = os.environ.get(SKILLS_DIR_ENV, "").strip()
+    return Path(env) if env else (Path.home() / ".项目模型" / "skills")
+
+
+def use_external(flag=None):
+    """开启/关闭「外部 skill 优先」。flag=None 表示只查询当前状态。"""
+    if flag is not None:
+        _OVERRIDE["external"] = bool(flag)
+    return external_enabled()
+
+
+def external_enabled() -> bool:
+    if _OVERRIDE["external"] is not None:
+        return _OVERRIDE["external"]
+    return os.environ.get(EXTERNAL_ENV, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _priority(candidates):
+    """按「内置优先 / 外部优先」排序候选列表。
+
+    每条候选是 (kind, path, label)，kind ∈ {"vendor","external"}。
+    """
+    if external_enabled():
+        order = {"external": 0, "vendor": 1}
+    else:
+        order = {"vendor": 0, "external": 1}
+    return sorted(candidates, key=lambda c: order[c[0]])
+
+
+# ---------------------------------------------------------------- 内置校验
+def read_manifest() -> dict:
+    if not MANIFEST_FILE.is_file():
+        return {}
+    try:
+        return json.loads(MANIFEST_FILE.read_text(encoding="utf-8"))
+    except Exception as e:                                # noqa: BLE001
+        return {"_error": f"{type(e).__name__}: {e}"}
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 16), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def vendor_integrity() -> list:
+    """内置副本 sha256 比对 —— 被打包/传输搞坏、或被手工改过要能查出来。
+
+    返回 [{"rel","ok","expect","actual","source_skill","source_version"}]
+    """
+    man = read_manifest()
+    entries = man.get("files") or {}
+    out = []
+    for rel, meta in sorted(entries.items()):
+        p = VENDOR_DIR / rel
+        actual = _sha256(p) if p.is_file() else None
+        out.append({
+            "rel": rel,
+            "ok": bool(actual) and actual == meta.get("sha256"),
+            "expect": meta.get("sha256"),
+            "actual": actual,
+            "source_skill": meta.get("source_skill", ""),
+            "source_version": meta.get("source_version", ""),
+        })
+    # 镜像里存在但 MANIFEST 没登记的文件（漏登记 = 下次校验看不到它）
+    for src, rels in VENDOR_LAYOUT.items():
+        for rel in rels:
+            full_rel = f"{src}/{rel}"
+            if full_rel not in entries:
+                out.append({"rel": full_rel, "ok": False, "expect": "(未登记)",
+                            "actual": "存在但 MANIFEST 缺登记"
+                            if (VENDOR_DIR / full_rel).is_file() else None,
+                            "source_skill": src, "source_version": ""})
+    return out
+
+
+# ---------------------------------------------------------------- 校验器定位
+VALIDATOR_FILES = {"main": "validate_ref2va.py",
+                   "local": "validate_ref2va_local.py"}
+_H3_SKILL = "h3-ref2va-optimizer"
+
+
+def _validator_candidates(which: str):
+    fname = VALIDATOR_FILES.get(which)
+    if not fname:
+        raise ValueError(f"未知校验器档位 {which!r}（应为 main / local）")
+    ext = skills_root() / _H3_SKILL / "scripts" / fname
+    ven = VENDOR_DIR / _H3_SKILL / "scripts" / fname
+    return [("vendor", ven, f"内置副本 vendor/{_H3_SKILL}/scripts/{fname}"),
+            ("external", ext, f"外部 skill {_H3_SKILL}（{skills_root()}）")]
+
+
+def resolve_h3_validator(which="main"):
+    """返回 (Path | None, 来源标签)。
+
+    内置优先是默认（保证「本机 == 别人」）；想用外部已安装的 h3 就
+    `DRAMA_USE_EXTERNAL=1`。两者都没有 → (None, "缺失")，调用方必须据此报错，
+    **不许静默跳过校验**（静默跳过 = 审核关 5 假装跑过了）。
+    """
+    cands = [c for c in _validator_candidates(which) if c[1].is_file()]
+    if not cands:
+        return None, "缺失"
+    kind, path, label = _priority(cands)[0]
+    tag = label
+    if kind == "vendor":
+        ver = (read_manifest().get("files", {})
+               .get(f"{_H3_SKILL}/scripts/{path.name}", {}).get("source_version"))
+        if ver:
+            tag += f" · 源版本 {ver}"
+    else:
+        tag += " · 外部优先已开启"
+    return path, tag
+
+
+def h3_validator_hint() -> str:
+    return ("   内置副本应随包分发：vendor/%s/scripts/ …\n"
+            "   若内置副本丢失，请重新解压完整包；\n"
+            "   作者机可手动刷新：python references/deps.py --sync-vendor\n"
+            "   环境自检：python tools/doctor.py" % _H3_SKILL)
+
+
+# ---------------------------------------------------------------- 项目模型_runner
+class _MissingDep:
+    """缺依赖时的替身：**不在 import 时报错，只在真正用到时报错**。
+
+    这样 `--help`、纯提示词生成、dry-run 等不碰网络的流程在没有该依赖时也能跑，
+    而一旦真要提交任务，报的是「怎么装」而不是 `ModuleNotFoundError`。
+    """
+
+    def __init__(self, what, hint):
+        object.__setattr__(self, "_what", what)
+        object.__setattr__(self, "_hint", hint)
+
+    def __getattr__(self, name):
+        raise DependencyMissing(
+            f"❌ 缺少依赖「{self._what}」（用到 {self._what}.{name} 时才暴露）\n"
+            f"{self._hint}")
+
+    def __bool__(self):
+        return False
+
+
+_RH_SKILL = "knowledge-video-director"
+_RH_REL = "references/项目模型_runner.py"
+_RH_CACHE = {}
+
+
+def _rh_candidates():
+    ext = skills_root() / _RH_SKILL / _RH_REL
+    ven = VENDOR_DIR / _RH_SKILL / _RH_REL
+    return [("vendor", ven, f"内置副本 vendor/{_RH_SKILL}/{_RH_REL}"),
+            ("external", ext, f"外部 skill {_RH_SKILL}")]
+
+
+def resolve_项目模型_runner():
+    """返回 (Path | None, 来源标签) —— 只定位，不加载。"""
+    cands = [c for c in _rh_candidates() if c[1].is_file()]
+    if not cands:
+        return None, "缺失"
+    return _priority(cands)[0][1], _priority(cands)[0][2]
+
+
+def load_项目模型_runner():
+    """加载 项目模型_runner 模块（带缓存）。
+
+    返回模块对象；缺失时返回 `_MissingDep` 替身 —— **调用方代码无需改动**，
+    只在真正调用它的时候才报错并给出安装指引。
+    """
+    if "mod" in _RH_CACHE:
+        return _RH_CACHE["mod"]
+    path, label = resolve_项目模型_runner()
+    if path is None:
+        mod = _MissingDep(
+            "项目模型_runner（项目模型 执行器）",
+            "   内置副本应随包分发：vendor/%s/%s\n"
+            "   若丢失请重新解压完整包；作者机可 `python references/deps.py --sync-vendor` 刷新。\n"
+            "   环境自检：python tools/doctor.py" % (_RH_SKILL, _RH_REL))
+        _RH_CACHE.update(mod=mod, path=None, label="缺失")
+        return mod
+    # 以固定模块名注册进 sys.modules：其它地方 `import 项目模型_runner` 也能命中同一份
+    spec = importlib.util.spec_from_file_location("项目模型_runner", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["项目模型_runner"] = mod
+    spec.loader.exec_module(mod)
+    _RH_CACHE.update(mod=mod, path=path, label=label)
+    return mod
+
+
+# ---------------------------------------------------------------- 凭证读取链
+def _parse_env_file(path: Path) -> dict:
+    out = {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k:
+            out[k] = v
+    return out
+
+
+def candidate_env_files(project_root=None):
+    """凭证候选文件，**按优先级从高到低**。
+
+    项目级覆盖用户级；本 skill 专属覆盖跨 skill 共享。
+    """
+    fs = []
+    if project_root:
+        fs.append(Path(project_root) / ".env")
+    fs.append(Path.cwd() / ".env")
+    fs.append(CRED_FILE)            # 本 skill 专属
+    fs.append(SHARED_CRED_FILE)     # 跨 skill 共享（推荐放这儿）
+    # 去重但保序
+    seen, out = set(), []
+    for f in fs:
+        rp = str(f.resolve()) if f.exists() else str(f)
+        if rp not in seen:
+            seen.add(rp)
+            out.append(f)
+    return out
+
+
+def _env_file_label(f: Path) -> str:
+    if f == CRED_FILE:
+        return "本 skill 凭证文件"
+    if f == SHARED_CRED_FILE:
+        return "共享凭证文件"
+    return "项目 .env"
+
+
+def resolve_project_provider_setting(name="项目模型_project_provider_setting", cli=None, project_root=None):
+    """五级读取链，返回 (值 | None, 来源说明)。
+
+    顺序（**真实环境变量永不被文件改写**）：
+      --project_provider_setting 参数
+        > 环境变量 <name>
+        > <项目根>/.env（含 cwd/.env）
+        > ~/.项目模型/credentials/drama-auto-pipeline/keys.env（本 skill 专属）
+        > ~/.项目模型/credentials/keys.env（跨 skill 共享，推荐）
+    """
+    if cli:
+        return cli, "命令行参数"
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val, f"环境变量 {name}"
+    for f in candidate_env_files(project_root):
+        got = _parse_env_file(f).get(name, "").strip()
+        if got:
+            return got, f"{_env_file_label(f)} {f}"
+    return None, "未找到"
+
+
+def mask(secret) -> str:
+    """日志/汇报里只出现掩码 —— 任何情况下都不回显 key 本体。"""
+    if not secret:
+        return "(空)"
+    s = str(secret)
+    if len(s) <= 10:
+        return s[:2] + "…" + s[-2:]
+    return s[:6] + "…" + s[-4:]
+
+
+def missing_key_hint(name="项目模型_project_provider_setting"):
+    return (
+        f"❌ 找不到 {name}。五级读取链都没命中：\n"
+        f"     ① --project_provider_setting  ② 环境变量  ③ 项目 .env\n"
+        f"     ④ {CRED_FILE}（本 skill 专属）\n"
+        f"     ⑤ {SHARED_CRED_FILE}（跨 skill 共享，推荐）\n"
+        f"   新电脑只需做一次 —— **把这句话发给 项目模型**：\n"
+        f"     「请把这个 {name} 存到 {SHARED_CRED_FILE}，键名 {name}，以后所有 skill 自动读它」\n"
+        f"   若本机别的 skill 里已经存过 key，可先合并：\n"
+        f"     python references/deps.py --migrate-credentials\n"
+        f"   复核：python tools/doctor.py")
+
+
+def migrate_credentials(keys=("项目模型_project_provider_setting", "项目模型_project_provider_setting_E"),
+                        dry_run=False):
+    """把散落在各兄弟 skill 凭证文件里的键**合并**进共享凭证文件。
+
+    一次性动作，**不是运行时魔法** —— 运行时不偷偷读别人的文件（那会变成隐式依赖）。
+    已有值不覆盖（共享文件里的值优先），避免把用户后来改过的 key 冲掉。
+    返回 {"moved": [(key, src, masked)], "kept": [...], "sources": [...]}
+    """
+    root = Path.home() / ".项目模型" / "credentials"
+    existing = _parse_env_file(SHARED_CRED_FILE)
+    found, kept, sources = [], [], []
+    for f in sorted(root.glob(SIBLING_CRED_GLOB)):
+        if f == SHARED_CRED_FILE or not f.is_file():
+            continue
+        data = _parse_env_file(f)
+        if not any(data.get(k) for k in keys):
+            continue
+        sources.append(str(f))
+        for k in keys:
+            v = (data.get(k) or "").strip()
+            if not v:
+                continue
+            if existing.get(k):
+                kept.append((k, str(f), "共享文件已有值，不覆盖"))
+            else:
+                existing[k] = v
+                found.append((k, str(f), mask(v)))
+    if not dry_run and found:
+        SHARED_CRED_FILE.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["# drama-auto-pipeline 跨 skill 共享凭证（由 deps.py --migrate-credentials 生成）",
+                 "# 权限建议 600；不要把本文件放进任何 skill 目录或压缩包",
+                 ""]
+        for k in sorted(existing):
+            lines.append(f"{k}={existing[k]}")
+        SHARED_CRED_FILE.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:                                    # 尽量收紧权限（POSIX；Windows 忽略）
+            os.chmod(SHARED_CRED_FILE, 0o600)
+        except OSError:
+            pass
+    return {"moved": found, "kept": kept, "sources": sources}
+
+
+# ---------------------------------------------------------------- 总览
+def describe():
+    """返回 [(项, 值, 来源)] —— doctor / 排查都用这一份口径。"""
+    rows = []
+    for which, label in (("main", "H3 校验器（主线）"), ("local", "H3 校验器（本地线）")):
+        p, src = resolve_h3_validator(which)
+        rows.append((label, str(p) if p else "❌ 缺失", src))
+    p, src = resolve_项目模型_runner()
+    rows.append(("项目模型 执行器", str(p) if p else "❌ 缺失", src))
+    for env in ("项目模型_project_provider_setting", "项目模型_project_provider_setting_E"):
+        v, src = resolve_project_provider_setting(env)
+        rows.append((f"凭证 {env}", mask(v) if v else "❌ 未配置", src))
+    rows.append(("依赖优先级模式",
+                 "外部 skill 优先" if external_enabled() else "内置副本优先（默认）",
+                 f"环境变量 {EXTERNAL_ENV}=1 可切换"))
+    rows.append(("外部 skill 搜索根", str(skills_root()), f"环境变量 {SKILLS_DIR_ENV} 可覆盖"))
+    rows.append(("本 skill 凭证文件", str(CRED_FILE),
+                 "存在" if CRED_FILE.is_file() else "不存在（可选）"))
+    rows.append(("共享凭证文件", str(SHARED_CRED_FILE),
+                 "存在" if SHARED_CRED_FILE.is_file() else "不存在（新电脑需创建，推荐）"))
+    return rows
+
+
+def print_describe():
+    print("=" * 78)
+    print("drama-auto-pipeline 依赖来源总表")
+    print("=" * 78)
+    for k, v, src in describe():
+        print(f"  {k}")
+        print(f"      {v}")
+        print(f"      ← {src}")
+    print("=" * 78)
+
+
+# ---------------------------------------------------------------- 作者机：刷新内置副本
+def sync_vendor(quiet=False):
+    """⚠️ 作者机专用：从**已安装的外部 skill** 复制一份进 vendor/ 并重写 MANIFEST。
+
+    这是「内置副本怎么更新」的唯一正规动作 —— 手工复制容易漏文件、漏 MANIFEST。
+    """
+    files_meta = {}
+    copied, missed = [], []
+    for src_skill, rels in VENDOR_LAYOUT.items():
+        src_ver = _source_version(src_skill)
+        for rel in rels:
+            src = skills_root() / src_skill / rel
+            dst = VENDOR_DIR / src_skill / rel
+            full_rel = f"{src_skill}/{rel}"
+            if not src.is_file():
+                missed.append(full_rel)
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+            files_meta[full_rel] = {
+                "source_skill": src_skill,
+                "source_version": src_ver,
+                "rel_in_source": rel,
+                "sha256": _sha256(dst),
+                "bytes": dst.stat().st_size,
+            }
+            copied.append(full_rel)
+    man = {
+        "generated_by": "references/deps.py --sync-vendor",
+        "generated_at": _now(),
+        "skill": SKILL_NAME,
+        "note": ("内置副本 = 让压缩包在新电脑上独立可用的关键。"
+                 "默认**内置优先**，避免「本机跑通、别人跑炸」。"),
+        "files": files_meta,
+    }
+    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MANIFEST_FILE.write_text(json.dumps(man, ensure_ascii=False, indent=2) + "\n",
+                             encoding="utf-8")
+    if not quiet:
+        for f in copied:
+            print(f"  ✅ 已内置 {f}  ← {files_meta[f]['source_version'] or '（版本未知）'}")
+        for f in missed:
+            print(f"  ⚠️ 源文件不存在，跳过：{f}")
+        print(f"  📄 MANIFEST → {MANIFEST_FILE}")
+    return copied, missed
+
+
+def _source_version(src_skill: str) -> str:
+    """尽力读出源 skill 的版本号。
+
+    三种载体都试（本机两个源 skill 用的不是同一种，别只认一种就报「版本未知」）：
+      ① `VERSION` 文件           （drama-auto-pipeline / mv-auto-pipeline 用这种）
+      ② `SKILL.md` 的「当前精确版本：`Vx.y.z`」版本块   （h3-ref2va-optimizer 用这种）
+      ③ `SKILL.md` frontmatter 的 `version: 2.4`        （knowledge-video-director 用这种）
+    """
+    root = skills_root() / src_skill
+    vf = root / "VERSION"
+    if vf.is_file():
+        try:
+            v = vf.read_text(encoding="utf-8").strip()
+            if v:
+                return v if v.lower().startswith("v") else "V" + v
+        except OSError:
+            pass
+    sk = root / "SKILL.md"
+    if sk.is_file():
+        try:
+            import re
+            t = sk.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"当前精确版本[：:]\s*`?(V?[\d.]+)`?", t)
+            if m:
+                v = m.group(1)
+                return v if v.lower().startswith("v") else "V" + v
+            m = re.search(r"^version\s*[：:]\s*[\"']?([\d.]+)", t, re.M)
+            if m:
+                return "V" + m.group(1)
+        except OSError:
+            pass
+    return ""
+
+
+def _now():
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------------------------------------------------------------- 自检
+def selftest(verbose=True):
+    """不联网、不花钱的机制自检：定位器本身是否正常。"""
+    bad = []
+    checks = []
+
+    def chk(name, ok, detail=""):
+        checks.append((name, ok, detail))
+        if not ok:
+            bad.append(name)
+
+    # 1) 内置副本完整性
+    integ = vendor_integrity()
+    chk("内置副本 sha256 全部匹配", all(i["ok"] for i in integ) and bool(integ),
+        f"{sum(1 for i in integ if i['ok'])}/{len(integ)} 项")
+    # 2) 两个校验器都能定位
+    for which in ("main", "local"):
+        p, src = resolve_h3_validator(which)
+        chk(f"H3 校验器可定位（{which}）", p is not None, src)
+    # 3) 项目模型_runner 可定位 + 可加载（含关键符号）
+    p, src = resolve_项目模型_runner()
+    chk("项目模型_runner 可定位", p is not None, src)
+    if p is not None:
+        try:
+            mod = load_项目模型_runner()
+            need = ["submit_task", "poll_task", "upload_media", "N_PROMPT", "N_DUR"]
+            have = [n for n in need if hasattr(mod, n)]
+            chk("项目模型_runner 关键符号齐全", len(have) == len(need),
+                f"缺 {sorted(set(need) - set(have))}" if len(have) != len(need) else "5/5")
+        except Exception as e:                            # noqa: BLE001
+            chk("项目模型_runner 可加载", False, f"{type(e).__name__}: {e}")
+    # 4) 默认必须是「内置优先」（判据①）
+    chk("默认内置优先", not external_enabled(), f"{EXTERNAL_ENV}={os.environ.get(EXTERNAL_ENV, '')!r}")
+    # 5) 顺序假设：内置候选排在外部之前
+    if not external_enabled():
+        cands = _validator_candidates("main")
+        chk("候选排序：vendor 在 external 之前", cands[0][0] == "vendor", cands[0][2])
+    # 6) 任何 resolve 都不回显 key 本体
+    fake = "sk-" + "x" * 40
+    chk("mask() 不回显完整值", len(mask(fake)) < len(fake), mask(fake))
+    # 7) 技能根目录推导正确（deps.py 在 references/ 下）
+    chk("SKILL_ROOT 推导正确", (SKILL_ROOT / "SKILL.md").is_file(), str(SKILL_ROOT))
+
+    if verbose:
+        print("=" * 78)
+        print("deps.py 机制自检")
+        print("=" * 78)
+        for name, ok, detail in checks:
+            print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  · {detail}" if detail else ""))
+        print("-" * 78)
+        print(f"结果：{len(checks) - len(bad)} 通过 / {len(bad)} 失败")
+        if bad:
+            print("  ✗ " + "；".join(bad))
+    return len(bad) == 0
+
+
+def main():
+    ap = argparse.ArgumentParser(description="drama-auto-pipeline 依赖定位器")
+    ap.add_argument("--describe", action="store_true", help="打印依赖来源总表（默认动作）")
+    ap.add_argument("--selftest", action="store_true", help="机制自检")
+    ap.add_argument("--sync-vendor", action="store_true",
+                    help="⚠️ 作者机专用：从外部 skill 刷新 vendor 内置副本")
+    ap.add_argument("--use-external", action="store_true",
+                    help="本次进程内切换为「外部 skill 优先」")
+    ap.add_argument("--migrate-credentials", action="store_true",
+                    help="把散落在兄弟 skill 的凭证合并进共享凭证文件（一次性）")
+    ap.add_argument("--dry-run", action="store_true", help="配合 --migrate-credentials 只预览")
+    args = ap.parse_args()
+
+    if args.use_external:
+        use_external(True)
+    if args.migrate_credentials:
+        r = migrate_credentials(dry_run=args.dry_run)
+        print("凭证迁移" + ("（预览，不落盘）" if args.dry_run else "") + "：")
+        print(f"  扫描到的含 key 文件：{len(r['sources'])}")
+        for s in r["sources"]:
+            print(f"    · {s}")
+        for k, src, m in r["moved"]:
+            print(f"  ✅ 合并 {k} = {m}  ← {src}")
+        for k, src, why in r["kept"]:
+            print(f"  ⏭️  跳过 {k}（{why}）  ← {src}")
+        if not r["moved"] and not r["kept"]:
+            print("  （没找到可迁移的凭证）")
+        print(f"  → 共享文件 {SHARED_CRED_FILE}")
+        return 0
+    if args.sync_vendor:
+        print("同步内置副本（从外部 skill 复制）：")
+        copied, missed = sync_vendor()
+        print(f"  完成：{len(copied)} 项复制，{len(missed)} 项源缺失")
+        return 0 if not missed else 4
+    if args.selftest:
+        return 0 if selftest() else 1
+    print_describe()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

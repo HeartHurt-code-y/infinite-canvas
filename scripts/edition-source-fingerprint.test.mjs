@@ -144,6 +144,46 @@ test("receipt rejects malformed, unsorted, duplicate, escaped paths and wrong ed
     await assert.rejects(assertEditionBuildSourceFreshness({ ...record, ...change }, options));
 });
 
+test("Mac provenance binds the signed app executable and configured product name for both target layouts", async (t) => {
+  for (const target of ["", "aarch64-apple-darwin/", "x86_64-apple-darwin/"]) {
+    const { root, put } = await fixture(t);
+    await put(
+      "src-tauri/tauri.conf.json",
+      JSON.stringify({ version: "0.2.1", productName: "无限画布" }),
+    );
+    const relative = `.cache/tauri-editions/online/target/${target}release/bundle/macos/无限画布.app/Contents/MacOS/infinite-canvas`;
+    await put(relative, "signed native Mac app fixture");
+    const executablePath = path.join(root, relative);
+    const snapshot = await collectEditionSourceFingerprint({ root, edition: "online" });
+    const record = await createEditionBuildSource({ snapshot, root, executablePath });
+    const options = { root, edition: "online", applicationVersion: "0.2.1", executablePath };
+    assert.equal(
+      (await assertEditionBuildSourceFreshness(record, options)).sourceFreshnessVerified,
+      true,
+    );
+    const wrongRelative = relative.replace("无限画布.app", "Other.app");
+    await put(wrongRelative, "signed native Mac app fixture");
+    const wrongExecutable = path.join(root, wrongRelative);
+    const wrongRecord = await createEditionBuildSource({
+      snapshot,
+      root,
+      executablePath: wrongExecutable,
+    });
+    await assert.rejects(
+      assertEditionBuildSourceFreshness(wrongRecord, {
+        ...options,
+        executablePath: wrongExecutable,
+      }),
+      /native executable path\/identity/,
+    );
+    await put(relative, "changed app signature/native bytes after the build");
+    await assert.rejects(
+      assertEditionBuildSourceFreshness(record, options),
+      /different native executable/,
+    );
+  }
+});
+
 test("collector fails closed for missing mandatory input, nonliteral or escaping Rust include and symlink sources", async (t) => {
   const { root, put } = await fixture(t);
   await rm(path.join(root, "pnpm-lock.yaml"));

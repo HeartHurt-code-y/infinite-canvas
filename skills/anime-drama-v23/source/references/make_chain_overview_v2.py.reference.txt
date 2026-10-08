@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""make_chain_overview_v2.py —— 全链总览页生成器（**V2 目录结构版**）
+
+为什么需要它（2026-09-19 用户追问「跑完的视频怎么没有出总览？」）：
+  铁律 D32 要求交付四件套，其中第 4 件是「全链总览页」，用户 2026-09-15 明确
+  「**以后所有的项目完成后，都做一个全链总览网页**」，本 skill 也把它固化成收尾阶段。
+  但原生成器 `make_chain_overview.py` 只认 **V1.x 目录结构**：
+    分镜脚本/分镜_H3提示词_<变体>.md ／ 视频/segNN.mp4 ／ 状态/成本台账*.csv
+  而 V2 流水线用的是：
+    分镜脚本/storyboard.json ／ 视频/shot_NN_<kw>/output.mp4 ／ 状态/rh_state.json
+  → 原生成器**一开口就要一个不存在的文件**，在新流水线下**根本跑不起来**。
+  于是这一件交付物长期缺失，而没人被拦住（收尾没有硬门禁自查四件是否齐全）。
+
+本脚本：**同一份模板、同一套占位符**，但数据全部来自 V2 产物，**逐项现场解析、零硬编码**。
+
+数据来源（全部实时解析）：
+  分镜脚本/storyboard.json          → 段表（段长/镜数/台词/Subject/场景）
+  视频/shot_NN_*/output.mp4         → ffprobe 实测帧/时长/体积/分辨率
+  视频/final/final.mp4              → 成片规格与帧守恒
+  状态/rh_state.json                → 逐段账单（RH 币 / 企业级墙钟秒）
+  状态/pipeline_state.json          → 配置、风格、阶段状态
+  剧本/分场剧本.md                   → 场景数与一句话故事（宽松解析）
+  状态/batch_*.log                  → 分轮消耗（首跑 / 重跑），用于「白烧」统计
+
+用法：
+  python references/make_chain_overview_v2.py --project-root "<项目根>" [--variant 中文版] [--out <html>]
+"""
+import argparse
+import datetime
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+
+FFPROBE = os.environ.get("FFPROBE", "ffprobe")
+TEMPLATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "chain_overview_template.html")
+# 消费级实测汇率（沿用原生成器的取值；页面里会写明来源与可复核方式）
+CNY_PER_COIN = 1199.039 / 1440207
+ENT_CNY_PER_HOUR = 6.0          # 企业级 Plus 实例：¥6/小时·路（按秒计）
+
+
+def probe(path):
+    """ffprobe → {dur, frames, w, h, fps, mb}；取不到返回 None。"""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        r = subprocess.run(
+            [FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height,r_frame_rate,nb_frames", "-show_entries",
+             "format=duration", "-of", "json", path],
+            capture_output=True, text=True)
+        j = json.loads(r.stdout or "{}")
+        st = (j.get("streams") or [{}])[0]
+        return {
+            "dur": float(j.get("format", {}).get("duration") or 0.0),
+            "frames": int(st.get("nb_frames") or 0),
+            "w": int(st.get("width") or 0), "h": int(st.get("height") or 0),
+            "fps": st.get("r_frame_rate") or "0/0",
+            "mb": os.path.getsize(path) / 1e6,
+        }
+    except Exception:                                         # noqa: BLE001
+        return None
+
+
+def align_frames(sec):
+    """17 帧对齐公式（与 batch_run_drama.align_duration 同源）。"""
+    f = max(5, round(float(sec) * 24))
+    return f + (5 - (f % 17)) % 17
+
+
+def esc(s):
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def log_total_coins(path):
+    """从批处理日志里取「总消耗：N RH 币」。"""
+    if not os.path.exists(path):
+        return None
+    t = io.open(path, encoding="utf-8", errors="replace").read()
+    m = re.search(r"总消耗：(\d+)\s*RH 币", t)
+    return int(m.group(1)) if m else None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--variant", default="中文版")
+    ap.add_argument("--out", default=None)
+    a = ap.parse_args()
+    R = os.path.abspath(a.project_root)
+    OUT = a.out or os.path.join(R, "全链总览_%s.html" % a.variant)
+    VDIR = os.path.join(R, "视频")
+
+    def rd(p, default=None):
+        p = os.path.join(R, p)
+        if not os.path.exists(p):
+            return default
+        try:
+            return json.load(io.open(p, encoding="utf-8"))
+        except Exception:                                     # noqa: BLE001
+            return default
+
+    sb = rd("分镜脚本/storyboard.json") or {}
+    segs_src = sb.get("segments") or []
+    rh = rd("状态/rh_state.json") or {}
+    ps = rd("状态/pipeline_state.json") or {}
+    cfg = ps.get("config") or {}
+    sty = ps.get("style_prompt") or {}
+
+    # ---------- 段表（V2：shot_NN_<kw>/output.mp4）----------
+    segs, specs = [], {}
+    tot_frames = 0
+    tot_dur = 0.0
+    for s in segs_src:
+        seq = s["seq"]
+        d = None
+        for cand in sorted(os.listdir(VDIR)) if os.path.isdir(VDIR) else []:
+            if cand.startswith("shot_%02d_" % seq):
+                d = os.path.join(VDIR, cand)
+                break
+        vp = os.path.join(d, "output.mp4") if d else None
+        sp = probe(vp)
+        nshot = 0
+        pf = os.path.join(d, "prompt.txt") if d else None
+        if pf and os.path.exists(pf):
+            nshot = max(1, len(re.findall(r"\[Shot\s+\d+\]", io.open(pf, encoding="utf-8",
+                                                                    errors="replace").read())))
+        segs.append({
+            "seq": seq, "title": s.get("kw") or ("段%d" % seq),
+            "sec": s.get("dur") or 0, "sec_txt": "%ss" % (s.get("dur") or 0),
+            "shots": nshot, "dialogue": len(s.get("dialogue") or []),
+            "subjects": len(s.get("on_screen_char_ids") or []),
+            "scene": s.get("scene_id") or "", "link": s.get("link") or "",
+        })
+        if sp:
+            specs[seq] = sp
+            tot_frames += sp["frames"]
+            tot_dur += sp["dur"]
+
+    fin = probe(os.path.join(VDIR, "final", "final.mp4"))
+    if fin is None:
+        raise SystemExit("❌ 还没拼片：找不到 视频/final/final.mp4")
+
+    # ---------- 账单（V2：rh_state.json 逐段 coins / secs）----------
+    rows_cost, cons_c, cons_s, ent_s = {}, 0, 0, 0
+    for seq_s, v in rh.items():
+        try:
+            seq = int(seq_s)
+        except ValueError:
+            continue
+        coins = int(v.get("coins") or 0)
+        secs = float(v.get("secs") or 0)
+        acct = "消费级" if coins > 0 else ("企业级" if secs > 0 else "—")
+        wallet = "" if acct != "企业级" else "%.3f" % (secs * ENT_CNY_PER_HOUR / 3600.0)
+        rows_cost[seq] = {"账号": acct, "RH币": (str(coins) if coins else ""),
+                          "钱包CNY": wallet, "实际耗时s": ("%.0f" % secs) if secs else "",
+                          "secs": secs, "coins": coins}
+        if acct == "消费级":
+            cons_c += coins
+            cons_s += secs
+        elif acct == "企业级":
+            ent_s += secs
+    ent_m = ent_s * ENT_CNY_PER_HOUR / 3600.0
+
+    # ---------- 分轮（首跑 / 重跑），从批处理日志现场解析 ----------
+    b1 = log_total_coins(os.path.join(R, "状态", "batch_full.log"))      # 作废那批
+    b2 = log_total_coins(os.path.join(R, "状态", "batch_refs.log"))      # 当前有效那批
+    R1C, RRC = (b1 or 0), (b2 or 0)
+    R1M, RRM = 0.0, ent_m                    # 企业级真钱只发生在有效那批
+    TOTC, TOTM = R1C + RRC, R1M + RRM
+    CURC, CURM = RRC, RRM
+    BURNED = R1C                             # 被后续重跑顶掉的（产物已不在交付里）
+    WALL = sum(v.get("secs", 0) for v in rows_cost.values())
+    COINRATE = (cons_c / cons_s) if cons_s else 0.0
+    NROUNDS = 1 + (1 if b1 else 0) + (1 if b2 and b1 else 0)
+
+    # ---------- 场景 / 一句话 ----------
+    nscene, logline = 0, ""
+    sp_ = os.path.join(R, "剧本", "分场剧本.md")
+    if os.path.exists(sp_):
+        t = io.open(sp_, encoding="utf-8", errors="replace").read()
+        nscene = len(re.findall(r"(?m)^#{2,4}\s*\**\s*场景", t)) or \
+            len(re.findall(r"(?m)^#{2,4}\s*\**\s*场[次景]", t))
+        m = re.search(r"一句话[^\n]*[：:]\s*(.+)", t)
+        logline = (m.group(1).strip() if m else "")[:120]
+
+    # ---------- 阶段时间轴（按真实产物判定 已通过/已执行/已跳过）----------
+    def has(*ps_):
+        return all(os.path.exists(os.path.join(R, p)) for p in ps_)
+
+    def cnt_glob(pat):
+        import glob as _g
+        return len(_g.glob(os.path.join(R, pat)))
+
+    STAGES = [
+        {"no": "01", "name": "🧭 概念锚定 · 首问八件套",
+         "state": "pass" if cfg else "done",
+         "prod": "比例 <b>%s</b> · 通道 <b>%s</b> · 生成模式 <b>%s</b>"
+                 % (esc(cfg.get("aspect") or "—"), esc(cfg.get("channel") or "—"),
+                    esc(cfg.get("gen_mode") or "—")),
+         "files": "状态/pipeline_state.json", "note": "用户一次答清，后续不再追问"},
+        {"no": "02", "name": "📖 剧本（改编 + 分集 + 分场）",
+         "state": "pass" if has("剧本/分场剧本.md") else "skip",
+         "prod": "分场 <b>%d</b> 场 · 一句话：%s" % (nscene, esc(logline) or "—"),
+         "files": "剧本/分场剧本.md ｜ 审核/01_剧本审核.html", "note": "关 1 已过"},
+        {"no": "03", "name": "🎨 风格锁定（三选一·全片统一）",
+         "state": "pass" if sty else "skip",
+         "prod": "风格 <b>%s</b>" % esc(sty.get("label") or "—"),
+         "files": "状态/style_options.json ｜ 审核/02_风格审核.html", "note": "关 2 已过"},
+        {"no": "04", "name": "🧩 资产（角色 / 场景 / 道具 / 音色）",
+         "state": "pass" if cnt_glob("角色资产/char_*") else "skip",
+         "prod": "角色 <b>%d</b> · 场景 <b>%d</b> · 道具 <b>%d</b>"
+                 % (cnt_glob("角色资产/char_*"), cnt_glob("场景资产/scene_*"),
+                    cnt_glob("道具资产/prop_*")),
+         "files": "角色资产/ ｜ 场景资产/ ｜ 道具资产/ ｜ 审核/03_资产审核.html",
+         "note": "角色 = 图 + 音色 + 档案，三件套绑死（铁律 A1）"},
+        {"no": "05", "name": "🎬 分镜（中文导演分镜 + 关 4 冻结）",
+         "state": "pass" if sb.get("status") == "approved" else "done",
+         "prod": "段 <b>%d</b> · 总长 <b>%ss</b> · 冻结状态 <b>%s</b>"
+                 % (len(segs), sum(s["sec"] for s in segs), esc(sb.get("status") or "—")),
+         "files": "分镜脚本/storyboard.json ｜ 审核/04_分镜审核.html",
+         "note": "双条件事务：机检 0 硬错误 + 人工已批"},
+        {"no": "06", "name": "✍️ 提示词（H3 六段式 + 关 5 通过）",
+         "state": "pass" if cnt_glob("视频/shot_*/prompt.txt") == len(segs) else "done",
+         "prod": "提示词 <b>%d</b> 份 · 参考图上限 <b>5</b> 张/段（角色→场景→尾帧→道具）"
+                 % cnt_glob("视频/shot_*/prompt.txt"),
+         "files": "视频/shot_*/prompt.txt ｜ 审核/05_提示词审核.html",
+         "note": "关 5：机检 + 独立语义审 + 分辨率复核，三重通过才放行"},
+        {"no": "07", "name": "🎥 视频生成（默认多参 · 一致性第一位）",
+         "state": "pass" if len(specs) == len(segs) else "done",
+         "prod": "成功 <b>%d/%d</b> 段 · 每段带参考图 <b>3–5</b> 张 + 音色 <b>1–3</b> 条"
+                 % (len(specs), len(segs)),
+         "files": "视频/shot_*/output.mp4 ｜ 审核/06_视频审核.html",
+         "note": "双池并行（消费级扣币 / 企业级按秒扣真钱）；需要衔接的段自动排队"},
+        {"no": "08", "name": "🧵 拼接成片（无损 concat）",
+         "state": "pass" if fin else "skip",
+         "prod": "成片 <b>%ss</b> / <b>%d</b> 帧 · 段帧和 <b>%d</b> ⇒ 守恒 <b>%s</b>"
+                 % ("%.3f" % fin["dur"], fin["frames"], tot_frames,
+                    "✓" if tot_frames == fin["frames"] else "✗"),
+         "files": "视频/final/final.mp4（唯一权威路径 · 铁律 D20）", "note": "-c copy 不重编码"},
+        {"no": "09", "name": "⛔ 审核关 1–7",
+         "state": "pass" if cnt_glob("审核/0*.html") else "done",
+         "prod": "审核页 <b>%d</b> 张（01 剧本 → 07 成片）" % cnt_glob("审核/0*.html"),
+         "files": "审核/01_剧本审核.html … 审核/07_成片审核.html",
+         "note": "每关都能停在用户手上，改完导出 diff 由 Agent 合并"},
+        {"no": "10", "name": "📦 收尾交付四件套（铁律 D32）",
+         "state": "pass" if cnt_glob("全链总览_*.html") else "done",
+         "prod": "分镜 md ｜ 审核页 ｜ 成片报告 ｜ <b>全链总览页</b>",
+         "files": "全链总览_%s.html" % a.variant,
+         "note": "四件缺一不算交付；本页即第 4 件"},
+    ]
+    SLABEL = {"done": ("已执行", "sd-done"), "pass": ("已通过", "sd-pass"),
+              "skip": ("已跳过", "sd-skip")}
+    chain = "\n".join(
+        '<div class="step %s"><div class="no"><i>%s</i></div><div class="body">'
+        '<div class="hd"><b>%s</b><span class="bdg %s">%s</span></div>'
+        '<div class="prod">%s</div><div class="fl">📄 %s</div>'
+        '<div class="fl note">↳ %s</div></div></div>'
+        % (s["state"], s["no"], esc(s["name"]), SLABEL[s["state"]][1], SLABEL[s["state"]][0],
+           s["prod"], esc(s["files"]), s["note"])
+        for s in STAGES)
+
+    # ---------- 逐段总表（15 列）----------
+    rows = []
+    for s in segs:
+        i, sp = s["seq"], specs.get(s["seq"])
+        if not sp:
+            continue
+        exp = align_frames(s["sec"])
+        ok = sp["frames"] == exp
+        c = rows_cost.get(i, {})
+        rows.append(
+            "<tr><td class=s>%02d</td><td>%s</td><td class=s>%s</td><td class=s>%d</td>"
+            "<td class=s>%d</td><td class=s>%d</td><td class=s>%d</td><td class=s>%d</td>"
+            "<td class=s>%.3f</td><td class=s>%.2fMB</td><td>%s</td>"
+            "<td class=s>%s</td><td class=s>%s</td><td class=s>%s</td>"
+            "<td class=\"%s\">%s</td></tr>" % (
+                i, esc(s["title"]), s["sec_txt"], s["shots"], s["dialogue"], s["subjects"],
+                sp["frames"], exp, sp["dur"], sp["mb"],
+                (c.get("账号") or "—"), (c.get("RH币") or "—"),
+                (c.get("钱包CNY") or "—"), (c.get("实际耗时s") or "—"),
+                "ok" if ok else "bad", "✅" if ok else "❌"))
+
+    # ---------- 分轮成本表（7 列）----------
+    costrows = []
+    if b1:
+        costrows.append('<tr class="first"><td>第 1 轮（首跑 %d 段 · **零参考，已作废**）</td>'
+                        '<td class=s>全部</td><td>消费级</td><td class=s>—</td>'
+                        '<td class=s>—</td><td class=s>%d</td><td class=s>—</td></tr>' % (len(segs), b1))
+    if b2:
+        costrows.append('<tr><td>第 %d 轮（重跑 %d 段 · 带参考，当前有效）</td>'
+                        '<td class=s>全部</td><td>消费级+企业级</td><td class=s>—</td>'
+                        '<td class=s>%.0f</td><td class=s>%d</td><td class=s>%.3f</td></tr>'
+                        % (2 if b1 else 1, len(segs), WALL, b2, ent_m))
+
+    tpl = io.open(TEMPLATE, encoding="utf-8").read()
+    tokens = {
+        "__VARIANT__": a.variant, "__PROJECT__": esc(ps.get("project", "")),
+        "__FDUR__": "%.3f" % fin["dur"], "__FINFRAMES__": str(fin["frames"]),
+        "__FINMB__": "%.1f" % fin["mb"], "__NSEG__": str(len(segs)),
+        "__NSHOT__": str(sum(s["shots"] for s in segs)),
+        "__AVGSHOT__": "%.2f" % (tot_dur / max(1, sum(s["shots"] for s in segs))),
+        "__FW__": str(fin["w"]), "__FH__": str(fin["h"]),
+        "__FPS__": fin["fps"].split("/")[0],
+        "__NDLG__": str(sum(s["dialogue"] for s in segs)),
+        "__NSCENE__": str(nscene), "__LOGLINE__": esc(logline),
+        "__CHAIN__": chain, "__SEGROWS__": "\n".join(rows),
+        "__COSTROWS__": "\n".join(costrows),
+        "__SEGFRAMES__": str(tot_frames), "__SEGDUR__": "%.2f" % tot_dur,
+        "__R1C__": "%.0f" % R1C, "__R1M__": "%.3f" % R1M, "__NRR__": str(len(segs)),
+        "__RRC__": "%.0f" % RRC, "__RRM__": "%.3f" % RRM,
+        "__TOTC__": "%.0f" % TOTC, "__TOTM__": "%.3f" % TOTM,
+        "__TOTCNY__": "%.2f" % (TOTM + TOTC * CNY_PER_COIN),
+        "__CURC__": "%.0f" % CURC, "__CURM__": "%.3f" % CURM,
+        "__CURCNY__": "%.2f" % (CURM + CURC * CNY_PER_COIN),
+        "__RATE__": "%.4f" % CNY_PER_COIN, "__BURNED__": "%.0f" % BURNED,
+        "__CONSC__": "%.0f" % cons_c, "__CONSS__": "%.0f" % cons_s,
+        "__COINRATE__": "%.5f" % COINRATE,
+        "__TOTM_E__": "%.3f" % ent_m, "__ENTTS__": "%.0f" % ent_s,
+        "__PERCNY__": "%.0f" % (1 / CNY_PER_COIN), "__WALL__": "%.0f" % WALL,
+        "__WALLH__": "%.2f" % (WALL / 3600.0),
+        "__NROUNDS__": str(NROUNDS), "__NENT__": str(sum(
+            1 for v in rows_cost.values() if v["账号"] == "企业级")),
+        "__NOW__": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }
+    out = tpl
+    for k, v in tokens.items():
+        out = out.replace(k, v)
+    left = sorted(set(re.findall(r"__[A-Z0-9_]+__", out)))
+    if left:
+        raise SystemExit("❌ 还有未替换的占位符：%s" % left)
+    tmp = OUT + ".tmp"
+    io.open(tmp, "w", encoding="utf-8", newline="\n").write(out)
+    os.replace(tmp, OUT)
+
+    print("✅ 全链总览页：%s  %.1f KB" % (OUT, os.path.getsize(OUT) / 1024))
+    print("   阶段 %d（跳过 %d）｜ 段 %d ｜ 镜 %d ｜ 台词 %d 句 ｜ 场 %d"
+          % (len(STAGES), sum(1 for s in STAGES if s["state"] == "skip"),
+             len(segs), sum(s["shots"] for s in segs),
+             sum(s["dialogue"] for s in segs), nscene))
+    print("   成片 %.3fs / %d 帧 ｜ 段帧和 %d ｜ 守恒 %s"
+          % (fin["dur"], fin["frames"], tot_frames,
+             "✓" if tot_frames == fin["frames"] else "✗"))
+    print("   消费级 %d 币 / %.0f s ⇒ %.5f 币/秒 ｜ 企业级 %.0f s ⇒ ¥%.3f"
+          % (cons_c, cons_s, COINRATE, ent_s, ent_m))
+    print("   总消耗时长 %.0f s（%.2f h）｜ 白烧 %.0f 币" % (WALL, WALL / 3600.0, BURNED))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

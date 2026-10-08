@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""MV 工作流改造器（mv-auto-pipeline · 铁律 D2/D4/D5/D8）
+
+做四件事：
+  ① --fetch    用 /api/openapi/getJsonApiFormat 拉真实工作流 JSON（不猜节点，不猜字段名）
+  ② --inspect  体检：87/85/61/42 四个契约节点是否存在、字段名叫什么、值域长什么样
+  ③ --build    改造：按需扩图槽（node 42 链路）、断开未用槽、去参考化残留
+  ④ --write-registry  把实测到的字段名回写 references/mv_workflows.json
+
+为什么必须先 fetch 再改（铁律 D4）：
+  「87 提示词 / 85 音乐时长 / 61 分辨率 / 42 图片」是用户口述的**语义**，
+  不是字段名。直接按猜测的 fieldName 提交 = 白烧币。
+
+用法：
+  # 1) 拉真 JSON + 体检 + 回写注册表（一条命令搞定）
+  python build_mv_workflow.py --fetch --inspect --write-registry
+  # 2) 改造（扩到 3 个图槽）
+  python build_mv_workflow.py --build --image-slots 3
+  # 3) 只看某个节点的全部输入
+  python build_mv_workflow.py --inspect --node 85
+"""
+import argparse
+import json
+import os
+import shutil
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REG_PATH = os.path.join(HERE, "mv_workflows.json")
+sys.path.insert(0, HERE)
+import rh_client as rh  # noqa: E402
+
+NEW_NODE_START = 9000
+
+
+def load_reg():
+    return json.load(open(REG_PATH, encoding="utf-8"))
+
+
+def save_reg(reg):
+    json.dump(reg, open(REG_PATH, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+
+def wf_of(reg, key):
+    return (reg.get("workflows") or {}).get(key) or {}
+
+
+def node_line(wf, nid):
+    nd = wf.get(str(nid)) or {}
+    inp = nd.get("inputs") or {}
+    scal = {k: v for k, v in inp.items()
+            if not (isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)))}
+    links = {k: v for k, v in inp.items() if k not in scal}
+    return (f"[{nid}] {nd.get('class_type', '?')}\n"
+            f"      widgets_values = {str(nd.get('widgets_values'))[:160]}\n"
+            f"      scalars = {json.dumps(scal, ensure_ascii=False)[:400]}\n"
+            f"      links   = {json.dumps(links, ensure_ascii=False)[:400]}")
+
+
+def consumers_of(wf, nid):
+    """找出所有「输入引用了 nid 输出」的节点。"""
+    out = []
+    for cid, nd in wf.items():
+        for k, v in (nd.get("inputs") or {}).items():
+            if isinstance(v, list) and len(v) == 2 and str(v[0]) == str(nid):
+                out.append((cid, k, nd.get("class_type", "?")))
+    return out
+
+
+def do_inspect(wf, cfg, only_node=None):
+    print("=" * 74)
+    print(f"工作流 {cfg.get('id')} · {cfg.get('label')}")
+    print(f"节点总数 {len(wf)}")
+    print("=" * 74)
+    if only_node:
+        print(node_line(wf, only_node))
+        print("\n下游消费者：")
+        for cid, k, ct in consumers_of(wf, only_node):
+            print(f"  [{cid}] {ct}  ← .{k}")
+        return
+    nodes = cfg.get("nodes") or {}
+    roles = [("prompt", "提示词"), ("music", "音乐时长截取"), ("resolution", "分辨率"),
+             ("image", "图片入口")]
+    ok_all = True
+    for role, zh in roles:
+        nid = str(nodes.get(role) or "")
+        if nid not in wf:
+            print(f"\n❌ {role}({zh}) 节点 {nid} 不存在 —— 节点契约对不上！")
+            ok_all = False
+            continue
+        print(f"\n■ {role}（{zh}）")
+        print(node_line(wf, nid))
+        cons = consumers_of(wf, nid)
+        if cons:
+            print("      下游 → " + "; ".join(f"[{c}]{t}.{k}" for c, k, t in cons))
+    print("\n■ 全部图片类节点（找图片入口的邻居用）")
+    for nid, nd in sorted(wf.items(), key=lambda x: (len(str(x[0])), str(x[0]))):
+        ct = (nd.get("class_type") or "").lower()
+        if "image" in ct or "loadimage" in ct or "audio" in ct:
+            print(f"  [{nid}] {nd.get('class_type')}  "
+                  f"{json.dumps({k: v for k, v in (nd.get('inputs') or {}).items() if not isinstance(v, list)}, ensure_ascii=False)[:150]}")
+    print("\n■ 疑似参考素材残留（去参考化要清的）")
+    for nid, nd in wf.items():
+        for k in (nd.get("inputs") or {}):
+            if k.startswith("ref_") or "ref_image" in k or "ref_audio" in k:
+                print(f"  [{nid}] {nd.get('class_type')} .{k}")
+    # 音频链路
+    print("\n■ 音频相关节点（确认音乐从哪里进）")
+    for nid, nd in sorted(wf.items(), key=lambda x: (len(str(x[0])), str(x[0]))):
+        ct = (nd.get("class_type") or "").lower()
+        if "audio" in ct or "music" in ct or "vocal" in ct:
+            print(f"  [{nid}] {nd.get('class_type')}  "
+                  f"{json.dumps({k: v for k, v in (nd.get('inputs') or {}).items() if not isinstance(v, list)}, ensure_ascii=False)[:150]}")
+    print("\n" + "=" * 74)
+    if ok_all:
+        print("✅ 四个契约节点全部存在。接着用 --write-registry 回写字段名。")
+    else:
+        print("❌ 契约节点缺失 —— 请把真实节点号告诉我，或先 --inspect --node <id> 看看它是什么。")
+
+
+def guess_fields(wf, cfg):
+    """从真实节点里猜出字段名（用于回写注册表）。"""
+    nodes = cfg.get("nodes") or {}
+    fields = dict(cfg.get("fields") or {})
+    for role, nid in nodes.items():
+        if role in ("img_slots",) or not nid:
+            continue
+        nd = wf.get(str(nid)) or {}
+        inp = nd.get("inputs") or {}
+        scalar_keys = [k for k, v in inp.items()
+                       if not (isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)))]
+        if role == "prompt":
+            for k in ("text", "prompt", "string", "value"):
+                if k in scalar_keys:
+                    fields["prompt"] = k
+                    break
+        elif role == "resolution":
+            for k in ("value", "resolution", "aspect_ratio", "size", "mode"):
+                if k in scalar_keys:
+                    fields["resolution"] = k
+                    break
+        elif role == "music":
+            start_k = next((k for k in scalar_keys
+                            if any(t in k.lower() for t in ("start", "begin", "offset", "from"))), None)
+            dur_k = next((k for k in scalar_keys
+                          if any(t in k.lower() for t in ("dur", "length", "second", "end", "to"))), None)
+            if start_k:
+                fields["music_start"] = start_k
+                cfg["music_mode"] = "offset"
+            if dur_k:
+                fields["music_dur"] = dur_k
+            if not dur_k:
+                cands = [k for k in scalar_keys if k not in ("text",)]
+                print(f"⚠ 节点 {nid}（music）没猜出时长字段名，字段候选 = {cands}")
+            if not start_k:
+                print(f"⚠ 节点 {nid}（music）没有「起点」入参 → 可能只能控时长，"
+                      f"走 music_mode=upload（由驱动脚本切好音频再传）")
+                cfg["music_mode"] = cfg.get("music_mode") or "upload"
+        elif role == "image":
+            for k in ("image", "value", "file", "filename", "image_path"):
+                if k in scalar_keys:
+                    fields["image"] = k
+                    break
+    cfg["fields"] = fields
+    return cfg
+
+
+def do_build(wf, cfg, image_slots, drop_refs=True, out_path=None):
+    """改造工作流 JSON：扩图槽 + 断未用槽 + 去参考化。返回 (wf, 报告)。"""
+    rep = []
+    nodes = cfg.get("nodes") or {}
+    img_nid = str(nodes.get("image") or "")
+    if img_nid not in wf:
+        print(f"❌ image 节点 {img_nid} 不存在，无法扩槽")
+        return wf, rep
+
+    base = wf[img_nid]
+    base_ct = base.get("class_type", "")
+    base_inputs = dict(base.get("inputs") or {})
+    base_field = (cfg.get("fields") or {}).get("image") or \
+        next((k for k, v in base_inputs.items() if not isinstance(v, list)), "image")
+
+    # 找下游消费者（把图吃进去的那个节点）
+    cons = consumers_of(wf, img_nid)
+    rep.append(f"图片入口 [{img_nid}] {base_ct}.{base_field} · 下游 {len(cons)} 个")
+
+    added = []
+    if image_slots <= 1:
+        rep.append("图槽数 = 1，无需扩槽")
+    else:
+        nxt = NEW_NODE_START
+        new_ids = []
+        for _ in range(image_slots - 1):
+            while str(nxt) in wf:
+                nxt += 1
+            wid = str(nxt)
+            new_ids.append(wid)
+            wf[wid] = json.loads(json.dumps(base))          # 深拷贝基底节点
+            added.append(wid)
+            nxt += 1
+        rep.append(f"新增 LoadImage 节点 {added}（克隆自 [{img_nid}]）")
+        # 尝试把下游节点的图输入扩成列表
+        ok_link = False
+        for cid, key, ct in cons:
+            cur = wf[cid]["inputs"].get(key)
+            if isinstance(cur, list) and len(cur) == 2 and str(cur[0]) == img_nid:
+                # 单值输入 → 试试有没有 list 形态的兄弟字段（如 ref_images）
+                sib = [k for k in wf[cid]["inputs"]
+                       if k == "ref_images" or k.startswith("ref_image") or k == "images"]
+                if sib:
+                    rep.append(f"下游 [{cid}] {ct} 有列表型字段 {sib}，"
+                               f"但需要手工把 {img_nid}/{added} 接成 ref_image_0..N")
+                else:
+                    rep.append(f"⚠ 下游 [{cid}] {ct}.{key} 是**单值**输入 —— "
+                               f"该工作流原生只吃 1 张图。已生成 {len(added)} 个备用 LoadImage 节点，"
+                               f"需要在 ComfyUI 里手工接到对应入口，或用 --link 指定接线")
+            else:
+                ok_link = True
+        if not ok_link:
+            rep.append("→ 接线上屏前请先在 ComfyUI 里确认（脚本只做安全的节点克隆，不乱改接线）")
+        cfg["nodes"]["img_slots"] = [img_nid] + added
+        cfg["ref_limits"]["img_slots_available"] = image_slots
+
+    if drop_refs:
+        dropped = []
+        for cid, nd in list(wf.items()):
+            inp = nd.get("inputs") or {}
+            for k in list(inp):
+                if k.startswith("ref_image") or k.startswith("ref_audio"):
+                    if isinstance(inp[k], list) and len(inp[k]) == 2:
+                        dropped.append(f"[{cid}].{k}")
+        if dropped:
+            # 只报告，不擅自动手 —— 断错线会直接把工作流搞坏
+            rep.append(f"⚠ 发现有 {len(dropped)} 条参考素材连线残留：{dropped[:8]}")
+            rep.append("  → 这是共享模板的常见坑（上一位使用者的素材直连）。"
+                       "确认后跑 --drop-refs 断开。")
+        else:
+            rep.append("✅ 无参考素材连线残留（模板干净）")
+
+    if out_path:
+        json.dump(wf, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        rep.append(f"已落盘 {out_path}")
+    return wf, rep
+
+
+def do_drop_refs(wf, cfg):
+    """断开核心节点上的 ref_images.*/ref_audios.* 连线，并摘掉失去引用的 LoadImage/LoadAudio。"""
+    core = str((cfg.get("nodes") or {}).get("core") or (cfg.get("nodes") or {}).get("image") or "")
+    if core not in wf:
+        print(f"⚠ 找不到核心节点 {core}，跳过去参考化")
+        return wf
+    inp = wf[core].get("inputs") or {}
+    removed_src = []
+    for k in list(inp):
+        if k.startswith("ref_image") or k.startswith("ref_audio"):
+            v = inp.pop(k)
+            if isinstance(v, list) and len(v) == 2:
+                removed_src.append(str(v[0]))
+    alive = set()
+    for nd in wf.values():
+        for v in (nd.get("inputs") or {}).values():
+            if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)):
+                alive.add(str(v[0]))
+    gone = []
+    for sid in removed_src:
+        if sid in alive or sid not in wf:
+            continue
+        ct = (wf[sid].get("class_type") or "").lower()
+        if "loadimage" in ct or "loadaudio" in ct or "image" in ct or "audio" in ct:
+            if not consumers_of(wf, sid):
+                del wf[sid]
+                gone.append(sid)
+    print(f"✅ 去参考化：断开 {len(removed_src)} 条连线，摘掉 {len(gone)} 个孤立素材节点 {gone}，"
+          f"节点数 → {len(wf)}")
+    return wf
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--workflow", default=None, help="注册表里的 key（默认取 default）")
+    ap.add_argument("--api-key", default="")
+    ap.add_argument("--fetch", action="store_true", help="从 project_provider 拉真实工作流 JSON")
+    ap.add_argument("--src", help="改用本地已导出的 API 格式 JSON（不走网络）")
+    ap.add_argument("--inspect", action="store_true")
+    ap.add_argument("--node", help="配合 --inspect：只看这一个节点")
+    ap.add_argument("--write-registry", action="store_true", help="把猜到的字段名回写注册表")
+    ap.add_argument("--build", action="store_true", help="改造并落盘 modified JSON")
+    ap.add_argument("--image-slots", type=int, default=None, help="目标图槽数")
+    ap.add_argument("--drop-refs", action="store_true", help="真的断开参考素材连线（危险，需确认）")
+    ap.add_argument("--out", help="改造后 JSON 落盘路径")
+    args = ap.parse_args()
+
+    reg = load_reg()
+    key = args.workflow or reg.get("default")
+    cfg = wf_of(reg, key)
+    if not cfg:
+        sys.exit(f"❌ 注册表里没有工作流 {key}")
+    print(f"[registry] {key} · {cfg.get('label')} · id={cfg.get('id')}")
+
+    raw_path = os.path.join(HERE, cfg.get("api_json") or "mv_workflow_api.json")
+    mod_path = args.out or os.path.join(HERE, cfg.get("api_json_modified") or "mv_workflow_api.modified.json")
+
+    if args.src:
+        wf = json.load(open(args.src, encoding="utf-8"))
+        json.dump(wf, open(raw_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        print(f"[src] 从本地读取 {args.src} → {raw_path}")
+    elif args.fetch:
+        # ★ V1.0.6：resolve_key 带 self_heal —— 本脚本没显式调 load_dotenv，
+        #   也要能从用户级凭证 keys.env 自愈读到 key（否则新项目里又会问用户要）。
+        k = rh.resolve_key(args.api_key, project_root=os.getcwd())
+        wf = rh.fetch_workflow_json(k, cfg["id"])
+        json.dump(wf, open(raw_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        print(f"[fetch] 节点数 {len(wf)} → {raw_path}")
+    elif os.path.isfile(raw_path):
+        wf = json.load(open(raw_path, encoding="utf-8"))
+        print(f"[cache] 读已缓存 {raw_path}（节点数 {len(wf)}）")
+    else:
+        sys.exit(f"❌ 没有工作流 JSON。先 --fetch（要 API key）或 --src <导出文件>\n"
+                 f"   也可以直接在 project_provider 上导出 API 格式 JSON 放到 {raw_path}")
+
+    if args.inspect or not (args.build or args.write_registry):
+        do_inspect(wf, cfg, args.node)
+        if not args.build and not args.write_registry:
+            return
+
+    if args.write_registry:
+        cfg2 = guess_fields(wf, cfg)
+        ok, problems = rh.audit_contract(wf, cfg2.get("nodes") or {}, cfg2.get("fields") or {})
+        cfg2["contract_verified"] = bool(ok)
+        cfg2["verified_at"] = __import__("datetime").datetime.now().isoformat(timespec="seconds")
+        reg["workflows"][key] = cfg2
+        save_reg(reg)
+        print(f"\n[registry] 已回写 {key}：fields={json.dumps(cfg2['fields'], ensure_ascii=False)}"
+              f" · music_mode={cfg2.get('music_mode')} · contract_verified={ok}")
+        if problems:
+            print("⚠ 契约自检仍有问题：")
+            for p in problems:
+                print("   ·", p)
+            print("   → 请 --inspect --node <id> 看清字段名后手工改 mv_workflows.json")
+        else:
+            print("✅ 契约自检通过：四个节点 + 字段名全部命中")
+        cfg = cfg2
+
+    if args.build:
+        slots = args.image_slots or cfg["ref_limits"].get("img_slots_available") or 1
+        if args.drop_refs:
+            wf = do_drop_refs(wf, cfg)
+        wf2, rep = do_build(wf, cfg, slots, drop_refs=True, out_path=mod_path)
+        print("\n".join("· " + r for r in rep))
+        if args.drop_refs:
+            json.dump(wf2, open(mod_path, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+        reg["workflows"][key] = cfg
+        save_reg(reg)
+        print(f"\n产物：{mod_path}（节点数 {len(wf2)}）")
+        print("下一步：把这张卡铺进 ComfyUI 里跑一次首镜试产，确认 87/85/61/42 真的被注入。")
+
+
+if __name__ == "__main__":
+    main()

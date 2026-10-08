@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+crop_from_sheet.py 的对抗测试（铁律 A7-c）
+
+为什么需要它
+------------
+本项目真实事故：班主任的角色图**人脸被切掉一半**，根因是裁切窗口（宽 1100）
+比主体（头部右侧到 1265）**还小**，切完又补了白边，所以看不出「触边」。
+用户一句话点破：「班主任人脸都少了一半，怎么审核的」。
+
+我试过「事后检测」这条路，**结论是不可靠**：
+  - 边界余量查不出来（补了白边，主体左右余量各 16%）
+  - 边界直线度也分不开：实测错误版 34.2%，而**正常**的 char_01 是 23.9%、
+    修复版是 24.6% —— 中间没有可用阈值
+一句话：**分不开缺陷与正常的检查，只会给假信心，比没有更坏。**
+
+所以防护改放在**裁切这一层**：窗口由实测的 ROI 反推，并且**写文件前先断言**。
+本文件就是这个断言的对抗测试 —— 用合成排版图（不依赖任何真实素材）证明：
+  1) 正常裁切：通过，且产出图中**确实完整包含**主体
+  2) 主体贴住图幅边缘：**exit 3 且不写任何文件**
+  3) 要求的窗口超过图幅：**exit 3 且不写任何文件**
+  4) --list 能正确识别各视图（按 x 排序）
+
+跑法：
+  python examples/test_crop_from_sheet.py
+"""
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+TOOL = SKILL / "references" / "crop_from_sheet.py"
+
+PASS, FAIL = [], []
+
+
+def check(name, ok, detail=""):
+    (PASS if ok else FAIL).append(name)
+    print("  [%s] %s%s" % ("PASS" if ok else "FAIL", name, ("  · " + detail) if detail else ""))
+
+
+def run(args, timeout=120):
+    return subprocess.run([sys.executable, str(TOOL)] + args,
+                          capture_output=True, text=True, timeout=timeout)
+
+
+def probe(p):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                          "-show_entries", "stream=width,height", "-of", "csv=p=0", str(p)],
+                         capture_output=True, text=True).stdout
+    w, h = out.strip().split(",")[:2]
+    return int(w), int(h)
+
+
+def nonwhite_bbox(p, th=200):
+    """非白包围盒（原图坐标）"""
+    w, h = probe(p)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(p),
+                          "-pix_fmt", "gray", "-f", "rawvideo", "-"],
+                         capture_output=True).stdout
+    x0, x1, y0, y1 = w, -1, h, -1
+    for y in range(h):
+        row = y * w
+        for x in range(w):
+            if raw[row + x] < th:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+    return None if x1 < 0 else [x0, y0, x1, y1]
+
+
+# ---- 合成一张「四视图排版图」：白底 + 几个深色矩形 ----
+# 视图 A: x 80..380, y 60..700      视图 B: x 700..1000, y 60..700
+SHEET_W, SHEET_H = 1200, 800
+VIEW_A = [80, 60, 380, 700]
+VIEW_B = [700, 60, 1000, 700]
+
+
+def make_sheet(path):
+    vf = (f"drawbox=x={VIEW_A[0]}:y={VIEW_A[1]}:w={VIEW_A[2]-VIEW_A[0]}:h={VIEW_A[3]-VIEW_A[1]}"
+          f":color=0x202020:t=fill,"
+          f"drawbox=x={VIEW_B[0]}:y={VIEW_B[1]}:w={VIEW_B[2]-VIEW_B[0]}:h={VIEW_B[3]-VIEW_B[1]}"
+          f":color=0x202020:t=fill")
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+                    "-i", f"color=c=white:s={SHEET_W}x{SHEET_H}",
+                    "-vf", vf, "-frames:v", "1", str(path)], check=True)
+
+
+def main():
+    if not TOOL.exists():
+        sys.exit("❌ 找不到 %s" % TOOL)
+
+    with tempfile.TemporaryDirectory(prefix="cropcheck_") as td:
+        td = Path(td)
+        sheet = td / "sheet.png"
+        make_sheet(sheet)
+
+        print("=" * 78)
+        print("crop_from_sheet.py 对抗测试")
+        print("合成排版图 %dx%d；视图A x%d..%d y%d..%d；视图B x%d..%d"
+              % (SHEET_W, SHEET_H, *VIEW_A[:2], VIEW_A[2], VIEW_A[3], VIEW_B[0], VIEW_B[2]))
+        print("=" * 78)
+
+        # ---- 1) --list 识别视图 ----
+        print("\n[1] --list 视图识别")
+        r = run(["--src", str(sheet), "--list"])
+        ok = r.returncode == 0 and "检测到 2 个视图" in r.stdout
+        check("识别出 2 个视图", ok, r.stdout.strip().splitlines()[0] if r.stdout else r.stderr[:120])
+        # 视图顺序按 x 从小到大 → #1 应是 A
+        line1 = next((l for l in r.stdout.splitlines() if l.strip().startswith("#1")), "")
+        check("视图按 x 升序（#1 = 左侧视图 A）", "x    80.." in line1 or "x    80.." in line1.replace("  ", " "),
+              line1.strip())
+
+        # ---- 2) 正常裁切：通过，且产出图完整含住主体 ----
+        print("\n[2] 正常裁切（--pick 1 --focus head --aspect 3:4）")
+        out = td / "front.png"
+        r = run(["--src", str(sheet), "--pick", "1", "--focus", "head",
+                 "--aspect", "3:4", "--out", str(out)])
+        check("返回码 0", r.returncode == 0, r.stderr[-160:] if r.returncode else "")
+        check("打印了「包含性断言通过」", "包含性断言通过" in r.stdout)
+        check("产出文件存在", out.exists())
+        if out.exists():
+            ow, oh = probe(out)
+            check("输出比例 ≈ 3:4", abs(ow / oh - 0.75) < 0.01, "%dx%d = %.4f" % (ow, oh, ow / oh))
+            bb = nonwhite_bbox(out)
+            check("产出图内主体非空", bb is not None)
+            # --focus head 取的是「头部区」，**身体本来就该被下边缘接续切掉** —— 所以
+            # 断言只要求 左/上/右 有留白（= 头没被裁），底边允许贴边。
+            # ⚠️ 最初写成「四边都要有留白」是**测试自己错了**，不是工具错。
+            if bb:
+                L, T = bb[0], bb[1]
+                R = ow - 1 - bb[2]
+                check("产出图内 左/上/右 都有留白（头没被裁）", min(L, T, R) > 0,
+                      "左%d 上%d 右%d" % (L, T, R))
+                # 主体宽度应与源视图宽度一致（= 完整搬运，没有截断）
+                check("主体宽度与源一致（未被截断）",
+                      abs((bb[2] - bb[0] + 1) - (VIEW_A[2] - VIEW_A[0])) <= 4,
+                      "产出 %d vs 源 %d" % (bb[2] - bb[0] + 1, VIEW_A[2] - VIEW_A[0]))
+
+        # ---- 3) 对抗：主体贴住图幅边缘 ----
+        print("\n[3] 对抗：ROI 贴住图幅左边缘（模拟「主体会被切」）")
+        out3 = td / "never_a.png"
+        r = run(["--src", str(sheet), "--roi", "0,60,300,600", "--aspect", "3:4", "--out", str(out3)])
+        check("返回码 = 3（拒绝裁切）", r.returncode == 3, "实际 %d" % r.returncode)
+        check("明确报「包含性断言失败」", "包含性断言失败" in r.stdout)
+        check("**没有写出任何文件**", not out3.exists())
+
+        # ---- 4) 对抗：需要的窗口超过图幅 ----
+        print("\n[4] 对抗：所需窗口超过图幅")
+        out4 = td / "never_b.png"
+        r = run(["--src", str(sheet), "--roi", "1100,0,1200,800", "--aspect", "3:4", "--out", str(out4)])
+        check("返回码 = 3（拒绝裁切）", r.returncode == 3, "实际 %d" % r.returncode)
+        check("**没有写出任何文件**", not out4.exists())
+
+        # ---- 5) 防削弱：正常用例不得被误拦（.gitignore 式反向断言）----
+        print("\n[5] 防削弱：合法裁切不得被误拦")
+        out5 = td / "ok_full.png"
+        r = run(["--src", str(sheet), "--pick", "2", "--focus", "full",
+                 "--aspect", "3:4", "--out", str(out5)])
+        check("视图 #2 全幅裁切通过", r.returncode == 0 and out5.exists(),
+              r.stderr[-160:] if r.returncode else "")
+        # --focus full 时整个视图都要在框内 → **四边都必须有留白**（此时底边不允许贴边）
+        if out5.exists():
+            ow5, oh5 = probe(out5)
+            bb5 = nonwhite_bbox(out5)
+            if bb5:
+                m = [bb5[0], bb5[1], ow5 - 1 - bb5[2], oh5 - 1 - bb5[3]]
+                check("--focus full：四边都有留白", min(m) > 0,
+                      "左%d 上%d 右%d 下%d" % tuple(m))
+
+        # ---- 6) 断言必须真的与「主体」挂钩，而不是永远通过 ----
+        print("\n[6] 断言有效性：同一 ROI，放宽 margin 后是否仍拒绝")
+        out6 = td / "never_c.png"
+        r = run(["--src", str(sheet), "--roi", "0,60,300,600", "--aspect", "3:4",
+                 "--min-margin", "0.0", "--out", str(out6)])
+        check("把下限降到 0 后允许通过（说明拒绝确实来自留白下限这条断言）",
+              r.returncode == 0 and out6.exists(),
+              "返回码 %d" % r.returncode)
+
+    print("\n" + "=" * 78)
+    print("结果：%d 通过 / %d 失败" % (len(PASS), len(FAIL)))
+    if FAIL:
+        for f in FAIL:
+            print("  ❌ %s" % f)
+        sys.exit(1)
+    print("✅ 全部通过")
+
+
+if __name__ == "__main__":
+    main()

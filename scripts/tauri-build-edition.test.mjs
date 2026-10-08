@@ -76,9 +76,16 @@ test("edition arguments use one generated merge patch with isolated Windows outp
   assert.equal(offlineConfig.bundle.resources["resources/ai-media-quality-runtime/"], undefined);
   assert.match(onlineConfig.plugins.updater.endpoints[0], /-online\/latest\.json$/);
   assert.equal(offlineConfig.plugins, undefined);
+  const mac = editionBuildPlan("online", [], {
+    platform: "darwin",
+    arch: "arm64",
+    environment: {},
+  });
+  assert.equal(mac.platform, "darwin-aarch64");
+  assert.deepEqual(mac.args.slice(-2), ["--bundles", "app,dmg"]);
   assert.throws(
-    () => editionBuildPlan("online", [], { platform: "darwin", arch: "arm64" }),
-    /only native Windows/,
+    () => editionBuildPlan("offline", [], { platform: "darwin", arch: "arm64", environment: {} }),
+    /existing full/,
   );
   assert.throws(
     () =>
@@ -86,7 +93,7 @@ test("edition arguments use one generated merge patch with isolated Windows outp
         platform: "win32",
         arch: "x64",
       }),
-    /only native Windows/,
+    /native/,
   );
   assert.throws(
     () =>
@@ -100,7 +107,7 @@ test("edition arguments use one generated merge patch with isolated Windows outp
         arch: "x64",
         environment: {},
       }),
-    /only native Windows/,
+    /native/,
   );
 });
 
@@ -203,6 +210,103 @@ test("edition names keep signed installer bytes and updater filename convention"
     editionArtifactBasename("无限画布_0.2.1_x64-setup.exe.sig", "offline"),
     "无限画布_0.2.1_x64-offline-setup.exe.sig",
   );
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+    assert.equal(
+      editionArtifactBasename("无限画布.app.tar.gz.sig", "online", {
+        platform,
+        applicationVersion: "0.2.2",
+      }),
+      `无限画布_0.2.2_${arch}-online.app.tar.gz.sig`,
+    );
+  }
+});
+
+test("Mac archive preserves signed updater bytes, excludes the app tree and records its signed executable", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ic-mac-online-staging-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await sourceFixture(root);
+  await mkdir(path.join(root, "scripts"), { recursive: true });
+  await writeFile(path.join(root, "scripts/install-macos.sh"), "first installation helper");
+  const plan = editionBuildPlan("online", [], {
+    root,
+    platform: "darwin",
+    arch: "arm64",
+    environment: {},
+  });
+  const bundle = path.join(plan.targetDirectory, "release/bundle");
+  const executablePath = path.join(bundle, "macos/无限画布.app/Contents/MacOS/infinite-canvas");
+  await mkdir(path.dirname(executablePath), { recursive: true });
+  await mkdir(path.join(bundle, "dmg"), { recursive: true });
+  await mkdir(path.join(root, "src-tauri/resources"), { recursive: true });
+  await writeFile(executablePath, "signed Mach-O application executable");
+  await writeFile(path.join(bundle, "macos/无限画布.app.tar.gz"), "signed updater archive bytes");
+  await writeFile(path.join(bundle, "macos/无限画布.app.tar.gz.sig"), "updater signature");
+  await writeFile(path.join(bundle, "dmg/无限画布_0.2.1_aarch64.dmg"), "disk image bytes");
+  await writeFile(path.join(bundle, "dmg/background.png"), "dmg auxiliary file");
+  await writeFile(
+    path.join(root, "src-tauri/resources/component-catalog.json"),
+    JSON.stringify({ platform: plan.platform, components: [] }),
+  );
+  const snapshot = await collectEditionSourceFingerprint({ root, edition: "online" });
+  const artifacts = await archiveEditionBundles(plan, {
+    root,
+    applicationVersion: "0.2.1",
+    sourceSnapshot: snapshot,
+  });
+  assert.deepEqual(artifacts.map(({ path: filename }) => filename).sort(), [
+    "dmg/无限画布_0.2.1_aarch64-online.dmg",
+    "helper/install-macos.sh",
+    "macos/无限画布_0.2.1_aarch64-online.app.tar.gz",
+    "macos/无限画布_0.2.1_aarch64-online.app.tar.gz.sig",
+  ]);
+  const output = path.join(root, ".cache/tauri-editions/online/artifacts/0.2.1");
+  const feed = JSON.parse(await readFile(path.join(output, "latest.json")));
+  assert.deepEqual(Object.keys(feed.platforms), ["darwin-aarch64"]);
+  assert.match(
+    feed.platforms["darwin-aarch64"].url,
+    /darwin-aarch64-online\/.*aarch64-online\.app\.tar\.gz$/,
+  );
+  assert.match(feed.notes, /Gatekeeper/);
+  assert.equal(
+    await componentFileSha256(path.join(output, "macos/无限画布_0.2.1_aarch64-online.app.tar.gz")),
+    await componentFileSha256(path.join(bundle, "macos/无限画布.app.tar.gz")),
+  );
+  const record = JSON.parse(await readFile(path.join(output, "build-source.json")));
+  assert.equal(record.nativeExecutable.sha256, await componentFileSha256(executablePath));
+  assert.match(
+    record.nativeExecutable.path,
+    /bundle\/macos\/无限画布\.app\/Contents\/MacOS\/infinite-canvas$/,
+  );
+  assert.equal(
+    JSON.parse(await readFile(path.join(output, "distribution.json"))).platform,
+    plan.platform,
+  );
+});
+
+test("Mac builds reject cross architecture and universal targets before preparing components", () => {
+  for (const target of [
+    "x86_64-apple-darwin",
+    "universal-apple-darwin",
+    "aarch64-pc-windows-msvc",
+  ]) {
+    assert.throws(
+      () =>
+        editionBuildPlan("online", ["--target", target], {
+          platform: "darwin",
+          arch: "arm64",
+          environment: {},
+        }),
+      /native/,
+    );
+  }
+  const intel = editionBuildPlan("online", [], {
+    platform: "darwin",
+    arch: "x64",
+    environment: { CARGO_BUILD_TARGET: "x86_64-apple-darwin" },
+  });
+  assert.equal(intel.platform, "darwin-x86_64");
+  assert.equal(intel.target, "x86_64-apple-darwin");
 });
 
 test("staging writes an online-only standard feed and local publish plan without v1 optional-resource directives", async (t) => {

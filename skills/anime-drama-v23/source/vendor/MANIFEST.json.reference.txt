@@ -1,0 +1,29 @@
+{
+  "generated_by": "references/deps.py --sync-vendor",
+  "generated_at": "2026-09-18 19:56:57",
+  "skill": "drama-auto-pipeline",
+  "note": "内置副本 = 让压缩包在新电脑上独立可用的关键。默认**内置优先**，避免「本机跑通、别人跑炸」。",
+  "files": {
+    "h3-ref2va-optimizer/scripts/validate_ref2va.py": {
+      "source_skill": "h3-ref2va-optimizer",
+      "source_version": "V2.4.1",
+      "rel_in_source": "scripts/validate_ref2va.py",
+      "sha256": "54c737e41eec29fb2a96e0967ea1c18267c821032a76d6df96618fe8f5423fc5",
+      "bytes": 54866
+    },
+    "h3-ref2va-optimizer/scripts/validate_ref2va_local.py": {
+      "source_skill": "h3-ref2va-optimizer",
+      "source_version": "V2.4.1",
+      "rel_in_source": "scripts/validate_ref2va_local.py",
+      "sha256": "b9a4da2b2fe1c8df05a482aa2758d702f1012edc6cee1ec9df5a4acaa74649dd",
+      "bytes": 50675
+    },
+    "knowledge-video-director/references/项目模型_runner.py": {
+      "source_skill": "knowledge-video-director",
+      "source_version": "V2.4",
+      "rel_in_source": "references/项目模型_runner.py",
+      "sha256": "4b83828c96cecae148cee32f3011ae469e2d3836cf04237d908e8995643c7f91",
+      "bytes": 20020
+    }
+  }
+}

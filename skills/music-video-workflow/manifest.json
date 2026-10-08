@@ -1,0 +1,254 @@
+{
+  "version": "1.0.6",
+  "sourceFileCount": 24,
+  "runtime": "native-project-workflow",
+  "sourceExecution": "disabled-inert-text-only",
+  "files": [
+    {
+      "source": ".gitignore",
+      "path": "source/.gitignore.reference.txt",
+      "sourceBytes": 76,
+      "sourceSha256": "473411839b5275efa7552974da1b50aeddeea90d3cf42219ed7415a1ded2015b",
+      "sha256": "473411839b5275efa7552974da1b50aeddeea90d3cf42219ed7415a1ded2015b",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "path": "source/CHANGELOG.md.reference.txt",
+      "sourceBytes": 26413,
+      "sourceSha256": "e835046f6e019e35ad5df0fb32fa0d326d92756f037a62faca196393c990db8b",
+      "sha256": "7b0505f393de4cbf4ebf6fb0e1e147d7ac7aad0e61598a8c3e2e26f7ec1b7819",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "SKILL.md",
+      "path": "source/SKILL.md.reference.txt",
+      "sourceBytes": 91490,
+      "sourceSha256": "f0ace262f022ec01870119af8094dfc60b6f069d0d01ba3062885268705ac18c",
+      "sha256": "eeb1ac233e90b85ffc4391b7debb8a92a54fe38e5afe639f157af9cde0c947dc",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "VERSION",
+      "path": "source/VERSION.reference.txt",
+      "sourceBytes": 7,
+      "sourceSha256": "3dd81e3d2bbe930a0c98531afa6c35bd862ee8a08458ec0d7d1b51138d7b3a3c",
+      "sha256": "51c18dc8694861beb47a67894e61044864214435389f6d3a274704d9566ff96c",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/smoke_test.py",
+      "path": "source/examples/smoke_test.py.reference.txt",
+      "sourceBytes": 6124,
+      "sourceSha256": "9e2da35d1ac4da6fbca4893697dd1acb9572c0358a544318abbcf201121c4e0d",
+      "sha256": "e317729d2efec6bd0b1cf3e5a9746098491bdd35a14907aaaca770c1834b3dd1",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_account_fallback.py",
+      "path": "source/examples/test_account_fallback.py.reference.txt",
+      "sourceBytes": 5010,
+      "sourceSha256": "f54fd48e9aa8f3f0315622599c2c08da833b939c5588ef638bb513737e59f0a4",
+      "sha256": "f54fd48e9aa8f3f0315622599c2c08da833b939c5588ef638bb513737e59f0a4",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_credentials.py",
+      "path": "source/examples/test_credentials.py.reference.txt",
+      "sourceBytes": 6555,
+      "sourceSha256": "d248e3845d9b761b7b6995c58e395ba93fb05ebefb04da17801f3ec33432c0ca",
+      "sha256": "2aca62d14cb11ebb103c27860b354133b67cd26d3af34e865f6752c1e6786b02",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_parallel_lanes.py",
+      "path": "source/examples/test_parallel_lanes.py.reference.txt",
+      "sourceBytes": 15261,
+      "sourceSha256": "ca919ed4934c9aac1571bf638023de0b6298ca20da5e41ebcc9432c0457db54c",
+      "sha256": "e68b4762f5593bd2fb93ea14c6115afafdc5fe91548690ff003a1f3f900bb00d",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/README.md",
+      "path": "source/references/README.md.reference.txt",
+      "sourceBytes": 19454,
+      "sourceSha256": "4caf6f0f44b9bb6d090926c964d9bc414a02e05cd82f47ee47d5dde81c44ef7b",
+      "sha256": "30aba4409b0182b5fdbb2012e76f47686b20ab52f4c552f2f92e155d0e80262c",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/align_lyrics.py",
+      "path": "source/references/align_lyrics.py.reference.txt",
+      "sourceBytes": 18636,
+      "sourceSha256": "91f91bd2097c3bdc774a9f11caca4f3abb611df5127c8720c154b0dd67a63027",
+      "sha256": "d43de9a8b96eb2ee0898f40a612c2b51a0a298cf1a0322c3b01d30b753de509f",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/audit_html_builder.py",
+      "path": "source/references/audit_html_builder.py.reference.txt",
+      "sourceBytes": 26516,
+      "sourceSha256": "69d8aecffce27e0458cfc3c02f33d4e9853265e128c64a663e8bf661ef88b154",
+      "sha256": "303a4f5cc920f383215f9b8c7c01bfd10a11dfb5ab442afd6ecf8cd8556d7c15",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/batch_run_mv.py",
+      "path": "source/references/batch_run_mv.py.reference.txt",
+      "sourceBytes": 57553,
+      "sourceSha256": "fe46c768720360920eb06e3eeeb5cb02899341baadd8967e46fbbc30e8326265",
+      "sha256": "6719dbd815cae8095e3dafda812f7a1b7e22e77d5569ae4da1c9b5e35fac59d9",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/build_mv_workflow.py",
+      "path": "source/references/build_mv_workflow.py.reference.txt",
+      "sourceBytes": 16684,
+      "sourceSha256": "c4f25245be5ce56ecd524c203f0816aaa4c5007d92ef52e2a5d17fb83abacfeb",
+      "sha256": "ac7beeff10508964d07c11efff29e25885b541008f1b5e9e8cf02c9859efca87",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/check_alignment.py",
+      "path": "source/references/check_alignment.py.reference.txt",
+      "sourceBytes": 14996,
+      "sourceSha256": "03bc48ec81914a93bd171b8ee9e4c7cb7d074726f7b1244e2ad86f7b2636222f",
+      "sha256": "03bc48ec81914a93bd171b8ee9e4c7cb7d074726f7b1244e2ad86f7b2636222f",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/extract_lyrics.py",
+      "path": "source/references/extract_lyrics.py.reference.txt",
+      "sourceBytes": 13577,
+      "sourceSha256": "11ae3b01a15409481c4aec9af8b3387df592902c967ad0b9040b4f06d554b17f",
+      "sha256": "e2cdfc81c271267d418e3c86aa50aec4dbc8826b61ea9e05dc5297c2a7a65b7b",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/mv_to_h3_prompts.py",
+      "path": "source/references/mv_to_h3_prompts.py.reference.txt",
+      "sourceBytes": 41005,
+      "sourceSha256": "ca6fd75e1edd0d3852336b1e3e9d03263bd305e52aea24071e7a5cd51d0fbc0c",
+      "sha256": "25b026b053ab3e091e8557cdfd43de628edcead39e3bb0f47d17f86380014acd",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/mv_workflow_api.json",
+      "path": "source/references/mv_workflow_api.json.reference.txt",
+      "sourceBytes": 7067,
+      "sourceSha256": "78ccda7a18992cc9d4850b6251a20d55ba06809933f2a72570611a2068c10a2b",
+      "sha256": "5d42a945f27ca7a6e595528c98af14bf2e0418e74b0e20e503e02e8dd08ad877",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/mv_workflows.json",
+      "path": "source/references/mv_workflows.json.reference.txt",
+      "sourceBytes": 8696,
+      "sourceSha256": "3d4c770ab488223f78fee8629e93d66d8e986f0e3bfdb4a3ef4de17bb0c7f63b",
+      "sha256": "777a0b0b85c50582cfd9d19ca1cde6af530b2d6328b4129acb378348130628d8",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/plan_mv_storyboard.py",
+      "path": "source/references/plan_mv_storyboard.py.reference.txt",
+      "sourceBytes": 23559,
+      "sourceSha256": "cedda4710c08d7ca4e9483358fd9975a3515ef655183baaf6859a7882612396f",
+      "sha256": "32d508a817e4ccab1de03418c7d60a49c7d8b9af348d1f93347ab022ff5e4272",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/rh_client.py",
+      "path": "source/references/rh_client.py.reference.txt",
+      "sourceBytes": 22179,
+      "sourceSha256": "7b2a59db10e023c9d8e60ab18b7ec31a73487461e894a26696e32a3cdd343f72",
+      "sha256": "76cf66dc928cc25d74576233f51facd2bb6a6ab469c3e4348cfa6655bab53973",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/README.md",
+      "path": "source/tools/README.md.reference.txt",
+      "sourceBytes": 3529,
+      "sourceSha256": "c9722a7d99112f4c8471aaa6eade549d99a033dbd1e5a824840d1f05a2de5f2f",
+      "sha256": "c9722a7d99112f4c8471aaa6eade549d99a033dbd1e5a824840d1f05a2de5f2f",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/checks.txt",
+      "path": "source/tools/checks.txt.reference.txt",
+      "sourceBytes": 20678,
+      "sourceSha256": "b484546e43984d6a40cc3042ac97d6e2ee65705053778ad6cb72acf90b96e602",
+      "sha256": "1b6490c3833763ac3d001f943f9c6c8351c730e3c90ea44c550872cb15429c3e",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/rollback.py",
+      "path": "source/tools/rollback.py.reference.txt",
+      "sourceBytes": 9958,
+      "sourceSha256": "172eed55641f60a828b6054f53e9ff00939ad39da0e3e885e835f750a5eb6fb6",
+      "sha256": "172eed55641f60a828b6054f53e9ff00939ad39da0e3e885e835f750a5eb6fb6",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/snapshot.py",
+      "path": "source/tools/snapshot.py.reference.txt",
+      "sourceBytes": 11209,
+      "sourceSha256": "e44c56c24f9ae49652eff886f9822f27d1ad7812f4cecd8ced33174aaef1a32e",
+      "sha256": "e44c56c24f9ae49652eff886f9822f27d1ad7812f4cecd8ced33174aaef1a32e",
+      "treatment": "sanitized-inert-reference"
+    }
+  ],
+  "methods": [
+    {
+      "path": "timeline.md",
+      "sha256": "165afb2fc73a96139cdd433ecaee414a331c7e53f97e03b1364395f85be58441",
+      "sourceSections": [
+        "### 铁律 A",
+        "## 阶段二"
+      ]
+    },
+    {
+      "path": "style.md",
+      "sha256": "f5e580b24a14c888e35fe5c1cb601ec029855a02948db78711e5216821dbd24c",
+      "sourceSections": [
+        "## 阶段三",
+        "## 阶段四"
+      ]
+    },
+    {
+      "path": "storyboard.md",
+      "sha256": "a524ca5af3e500ac3e9078e08bace9653caf634b9cf5c437b0b9e8acc3260823",
+      "sourceSections": [
+        "### 铁律 B",
+        "**C5.",
+        "**C6.",
+        "**C7.",
+        "### 5.2",
+        "### 5.3"
+      ]
+    },
+    {
+      "path": "prompts.md",
+      "sha256": "37ebc070b88e320346c984a547dda7a10c2ab5fce492616eda0fd7f368ddafb7",
+      "sourceSections": [
+        "**C2.",
+        "**C3.",
+        "**C4.",
+        "**C5.",
+        "**C6.",
+        "**C7.",
+        "### 6.3"
+      ]
+    },
+    {
+      "path": "review.md",
+      "sha256": "7c5717404c727d1f484df6b3efc1fb34cc774b080622559e3acde0596c7f4a63",
+      "sourceSections": [
+        "### 铁律 E",
+        "## 阶段七",
+        "### 11.2",
+        "### 11.3",
+        "## 阶段十二"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,511 @@
+{
+  "version": "2.3",
+  "sourceFileCount": 63,
+  "runtime": "native-project-workflow",
+  "files": [
+    {
+      "source": ".gitignore",
+      "path": "source/.gitignore.reference.txt",
+      "sourceBytes": 847,
+      "sourceSha256": "466ffc1410ad8869231df5a992acec9034d7cae6a833268f579bc7558e129d14",
+      "sha256": "466ffc1410ad8869231df5a992acec9034d7cae6a833268f579bc7558e129d14",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "CHANGELOG.md",
+      "path": "source/CHANGELOG.md.reference.txt",
+      "sourceBytes": 59941,
+      "sourceSha256": "70335e2604aaa225c6e4635cd6be81da9068494db26d7b26d6daa7cef8bec3e6",
+      "sha256": "02fda78deb7dd670969edfc593d2893e6ac2da965d850ce0411699f96e6f3ae7",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "drama-auto-pipeline-standalone.md",
+      "path": "source/drama-auto-pipeline-standalone.md.reference.txt",
+      "sourceBytes": 20487,
+      "sourceSha256": "547b8ceb17df8285bfe8b361cf966b0b2a9fe422137f2ee49d7a50753953d964",
+      "sha256": "53fbb2db12d3093f3dd294b93155b1ba007ab87fb2d7fe5645481b3dc02e7fab",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "drama-auto-pipeline-项目说明介绍页.html",
+      "path": "source/drama-auto-pipeline-项目说明介绍页.html.reference.txt",
+      "sourceBytes": 40092,
+      "sourceSha256": "cfb76b8f83d0dbfa8a0855d824a737a72622b71351115113a9f124fd4a22333e",
+      "sha256": "ad1dcf29d6d9731e54e911a90baa63e9612101d4e2ae6327e6800c894fc872b5",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/assets_example.json",
+      "path": "source/examples/assets_example.json.reference.txt",
+      "sourceBytes": 3193,
+      "sourceSha256": "a80ba5ed121d6635bd43a355a14af7bf418da960f77ae67fb09030911fdc2aac",
+      "sha256": "2d7d7b84081fe70b7ac82e84ef0aee64e0c62bfb5c2764ddafb1428381ba71db",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_apply_seg_edit.py",
+      "path": "source/examples/test_apply_seg_edit.py.reference.txt",
+      "sourceBytes": 9084,
+      "sourceSha256": "a60ff3ed3fd77833f5508ec14dada10938e57aa20432b9045027d52e67e698c4",
+      "sha256": "a60ff3ed3fd77833f5508ec14dada10938e57aa20432b9045027d52e67e698c4",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_approve_revoke.py",
+      "path": "source/examples/test_approve_revoke.py.reference.txt",
+      "sourceBytes": 4828,
+      "sourceSha256": "d34719e3d4120d4a5332baccd60e9974a0489f2ed61e0172dbe10150a7cb927f",
+      "sha256": "d34719e3d4120d4a5332baccd60e9974a0489f2ed61e0172dbe10150a7cb927f",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_crop_from_sheet.py",
+      "path": "source/examples/test_crop_from_sheet.py.reference.txt",
+      "sourceBytes": 9060,
+      "sourceSha256": "66c42ee2b68cd88d1be61f14a7ab2058bb98a59e241424314f656fb721d6e031",
+      "sha256": "66c42ee2b68cd88d1be61f14a7ab2058bb98a59e241424314f656fb721d6e031",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_deliverables.py",
+      "path": "source/examples/test_deliverables.py.reference.txt",
+      "sourceBytes": 7797,
+      "sourceSha256": "c7612b967b08ed76493b5f1118f10e12fc0577bbbec978072988844240aa1227",
+      "sha256": "3d3b7a0df74f7f3c5469c09f5914ae8092963b04a4cacf9b1a2c860d93a98df4",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_drama_schema.py",
+      "path": "source/examples/test_drama_schema.py.reference.txt",
+      "sourceBytes": 13214,
+      "sourceSha256": "f8f07043e9b300b73bf0587680f1dd9bf7c8f05085366a205034f66da1368497",
+      "sha256": "f8f07043e9b300b73bf0587680f1dd9bf7c8f05085366a205034f66da1368497",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_mp_html_safe.py",
+      "path": "source/examples/test_mp_html_safe.py.reference.txt",
+      "sourceBytes": 3901,
+      "sourceSha256": "85d2f815c9359e785a274777d7b39c38c2fac6674b05f72e561ff4532f3dfde7",
+      "sha256": "55fbc66e745e649602f88f5eb0d3f6333df4c1667b50ec5170fc685f608737c9",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_prompt_continuity.py",
+      "path": "source/examples/test_prompt_continuity.py.reference.txt",
+      "sourceBytes": 9508,
+      "sourceSha256": "3184a99da945a508c67ae18cd7bdce056c42b2a3ed24944450c5a7ef0148ffa3",
+      "sha256": "2897c463066ee16739fac34f728d279030f4970d67c0cd1a5ebca9b4921324df",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_scan_paths.py",
+      "path": "source/examples/test_scan_paths.py.reference.txt",
+      "sourceBytes": 8445,
+      "sourceSha256": "f0191fa5c13b0f900e75090357559a4e6feaee6c9e050b88c3da9d5af5843c87",
+      "sha256": "8e8477546bfcc85637306513fa5ec1ec375d4cd1c9fa095d9fd5958708ce1bf5",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_scan_secrets.py",
+      "path": "source/examples/test_scan_secrets.py.reference.txt",
+      "sourceBytes": 9033,
+      "sourceSha256": "13ced282a689c7b2fa2a6ddf621b7d363c1da60bc97f256c06a03dfa9dd4d700",
+      "sha256": "fef4a5261081637f4f0db21d36156b6e6d33d2876ae5d5ca754cf4ccb0a04b4b",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_smoke_pages.py",
+      "path": "source/examples/test_smoke_pages.py.reference.txt",
+      "sourceBytes": 7832,
+      "sourceSha256": "b1315cf4c6f5d7915e2d15459731f89454c03af75e8258d888ea38e78cdad81b",
+      "sha256": "441dc9066650b10b1bee1712a429cac2c4cab17bfd360b5bcf1d9d025b1ec577",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_snapshot_package.py",
+      "path": "source/examples/test_snapshot_package.py.reference.txt",
+      "sourceBytes": 6133,
+      "sourceSha256": "49612614f8edc2adeb773eadf5504cd8166bac7f91e5c84f75a8a9c9c5cc7612",
+      "sha256": "8a1dda1f9d95d76b4d007d60917e0f8303a333d6295022b13cabbb7a742e7592",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_speech_leak.py",
+      "path": "source/examples/test_speech_leak.py.reference.txt",
+      "sourceBytes": 4877,
+      "sourceSha256": "debf78f078708db64d309e4d779118d941632b72d8d136c58416a2f85c84abbc",
+      "sha256": "dcc06afc43c63c337a611c38d801e25a957c70c1e776d48cf4b25bd6a6e8c4bb",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "examples/test_workflow_resolution.py",
+      "path": "source/examples/test_workflow_resolution.py.reference.txt",
+      "sourceBytes": 8214,
+      "sourceSha256": "57e3ce1f0bdc4a7614ea536ee85653f7ce70628c10f505e418e5a3777cfe7252",
+      "sha256": "6e458061bef9deaf1861358e95b6fdf1a6f33547aaa22bdf2b69b0ea461ec213",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/00-新电脑部署.md",
+      "path": "source/references/00-新电脑部署.md.reference.txt",
+      "sourceBytes": 10476,
+      "sourceSha256": "6eac30d903cc47ed72daed36a17771a637c4e963f918c679e1c834ef44634273",
+      "sha256": "518d755fd287abda453da3f7ca51a6f2a4963841a4b35fc57c799d7e5a70b4bc",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/apply_seg_edit.py",
+      "path": "source/references/apply_seg_edit.py.reference.txt",
+      "sourceBytes": 22238,
+      "sourceSha256": "e3e3066dc8bfe3edb923ce2ffc431c3eb391e4e0d90ee85d943b2175e34fe4b4",
+      "sha256": "e3e3066dc8bfe3edb923ce2ffc431c3eb391e4e0d90ee85d943b2175e34fe4b4",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/approve_storyboard.py",
+      "path": "source/references/approve_storyboard.py.reference.txt",
+      "sourceBytes": 9757,
+      "sourceSha256": "11242b043a9d96226214aa7d007f615278648afce77bd7103687acbd33645d5e",
+      "sha256": "11242b043a9d96226214aa7d007f615278648afce77bd7103687acbd33645d5e",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/asset_frame_check.py",
+      "path": "source/references/asset_frame_check.py.reference.txt",
+      "sourceBytes": 17605,
+      "sourceSha256": "fd2d60d09bdef4e82b0ca45ba2c759de1da48ed3c81e77f4c048908cc5ab826b",
+      "sha256": "ca240d4f5b919a21384c367015f02a5c71f9a9e16ca49887406c15291cf0edb8",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/audit_html_builder.py",
+      "path": "source/references/audit_html_builder.py.reference.txt",
+      "sourceBytes": 78943,
+      "sourceSha256": "d4f2c06bf2641906512c4351fb2f5fd16682fc4b7d30bdb4cf6c02025d7adce6",
+      "sha256": "ea396721273451e9a08a55e98ddb657c9e8e23846d704baf2e936434a4364a12",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/batch_run_drama.py",
+      "path": "source/references/batch_run_drama.py.reference.txt",
+      "sourceBytes": 154728,
+      "sourceSha256": "cbb8954124edd6a7756cb3532ed40231d9d0799158f41238495e06eb98764b91",
+      "sha256": "32a8e2483958fd780085e9db9b926b539162ca8ea38416eb40c4eca495b6c2e3",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/build_multi_ref_workflow.py",
+      "path": "source/references/build_multi_ref_workflow.py.reference.txt",
+      "sourceBytes": 3264,
+      "sourceSha256": "8ac6a5c3e6ebfcf22cf3d99a83298337b5e63d423c1938b7cfa370931f6063fb",
+      "sha256": "8ac6a5c3e6ebfcf22cf3d99a83298337b5e63d423c1938b7cfa370931f6063fb",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/chain_overview_template.html",
+      "path": "source/references/chain_overview_template.html.reference.txt",
+      "sourceBytes": 12313,
+      "sourceSha256": "0b3024e82179daa0de87b96e26f256be7f842942a27a09641b74b4fef42a6431",
+      "sha256": "c5e45bb497021f642414d3dcf3bcf2d7303d1dff6c67b7bc04be5a11a5afed65",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/check_storyboard.py",
+      "path": "source/references/check_storyboard.py.reference.txt",
+      "sourceBytes": 17370,
+      "sourceSha256": "bf65f34824ba59cfd6ee82ca6fa1a4fd1458e9fb2a44076fcf702dd2e2c60053",
+      "sha256": "bf65f34824ba59cfd6ee82ca6fa1a4fd1458e9fb2a44076fcf702dd2e2c60053",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/consistency_auditor.py",
+      "path": "source/references/consistency_auditor.py.reference.txt",
+      "sourceBytes": 26999,
+      "sourceSha256": "b42d5538e69ea82d7515c79d6353d1abfbe11f5d9f55cea71eda285a4f664d50",
+      "sha256": "aa460b12fda1195d38ab6fa54a7ec7ec67bb6872d8c2e9cc35d7cad36b4704ba",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/crop_from_sheet.py",
+      "path": "source/references/crop_from_sheet.py.reference.txt",
+      "sourceBytes": 13278,
+      "sourceSha256": "80ac8fedf9068351994768f4887682e488b70bfd5566f93f2881d4f5bd279884",
+      "sha256": "cc07ec33c2b633ca9f43d4888a9b3cf7f87c76697eb34c92b982c60233f207b5",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/deps.py",
+      "path": "source/references/deps.py.reference.txt",
+      "sourceBytes": 27634,
+      "sourceSha256": "a44e915d11b92c75c0bce0ac613fb3ad07af8845a2b1f2c030eff97cf074d32a",
+      "sha256": "e223a16b5397574f76ea933dc431625a414bfd2934db694bc36cd5d55d17ac6e",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/drama_schema.py",
+      "path": "source/references/drama_schema.py.reference.txt",
+      "sourceBytes": 8354,
+      "sourceSha256": "630d4cd48f0ff7b8178b31d32b3d9e4334678f3762cb89552ceaee6ae6cb9f3d",
+      "sha256": "630d4cd48f0ff7b8178b31d32b3d9e4334678f3762cb89552ceaee6ae6cb9f3d",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/drama_to_h3_prompts.py",
+      "path": "source/references/drama_to_h3_prompts.py.reference.txt",
+      "sourceBytes": 44873,
+      "sourceSha256": "bc1a7e0979fbc4b72a750a6e46717a8f776640570a07b8d0b17e63f146f1d6be",
+      "sha256": "b1b2b41ea898f326003e1cfd0c857e31d2f98338b868b92a3e0605160ea44d72",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/emotion-performance-library.md",
+      "path": "source/references/emotion-performance-library.md.reference.txt",
+      "sourceBytes": 4860,
+      "sourceSha256": "257398876f2f337488eb84433595dd34f2056b678c8a16ec6105af80ee2b7166",
+      "sha256": "257398876f2f337488eb84433595dd34f2056b678c8a16ec6105af80ee2b7166",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/make_chain_overview.py",
+      "path": "source/references/make_chain_overview.py.reference.txt",
+      "sourceBytes": 19329,
+      "sourceSha256": "de31066b923bb8219321fff78515865f37600a3a37e2b3ca2c7c3dbb21487578",
+      "sha256": "c318bbd116de83a82a00414561fef9f65a8015c36b38f16fc7d47dc1bb4b54cc",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/make_chain_overview_v2.py",
+      "path": "source/references/make_chain_overview_v2.py.reference.txt",
+      "sourceBytes": 18487,
+      "sourceSha256": "5425084ef66281b3969bbfffa16e756c2284d6456bc35191d535acde77c31754",
+      "sha256": "5425084ef66281b3969bbfffa16e756c2284d6456bc35191d535acde77c31754",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/make_noref_workflow.py",
+      "path": "source/references/make_noref_workflow.py.reference.txt",
+      "sourceBytes": 6134,
+      "sourceSha256": "492cdc022949a3d5778a39f6c193a3841dfa96eeef7a2b2cc61b8bf29c1541d9",
+      "sha256": "a3fbd8975be0b42a8285783dc62e46d8b504dd1b9b28c8cdeecc159f257d7791",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/README.md",
+      "path": "source/references/README.md.reference.txt",
+      "sourceBytes": 12007,
+      "sourceSha256": "9fd6210a4239d9653fe4a27b78f9cea6a328dd8aa14cade6fb11efb0705ef93b",
+      "sha256": "7474efd4554878e948f38a3741b8de91107a35f6db6fc3a6a6c9e69367984ffd",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/seedance_image_runner.py",
+      "path": "source/references/seedance_image_runner.py.reference.txt",
+      "sourceBytes": 10160,
+      "sourceSha256": "16cbdf87c79b76ce14f1f8d3898d655e10d2ddcf85d343ad00de3dd1492413d4",
+      "sha256": "6b7204e8afaf796000d0b0865f64ca287b50541a75242e2703377595f24950d1",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/vlm_face_checker.py",
+      "path": "source/references/vlm_face_checker.py.reference.txt",
+      "sourceBytes": 2113,
+      "sourceSha256": "0dccffedc1a0b4ca8b3a93b3693faadae9950bb48c8d48c043b1be170bb70745",
+      "sha256": "2294d4afbc6a6cde19fbec49e1bff2ae818775fc615e354620c867b7bb7a257d",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/voice_designer.py",
+      "path": "source/references/voice_designer.py.reference.txt",
+      "sourceBytes": 3784,
+      "sourceSha256": "ff8fa55f6511c8a99eb0c631eefe20b97067d58158214f69979bb038ed3e471b",
+      "sha256": "b91d3ebadca73c1735eb0f6e22477bc40d250964afb2c24fbaa382f22598227e",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflow_b2_multi_ref.json",
+      "path": "source/references/workflow_b2_multi_ref.json.reference.txt",
+      "sourceBytes": 16802,
+      "sourceSha256": "893a2e9119004b699d0bfdf0ef54726504ae241b3b9a10561d0f253fbbcd5aff",
+      "sha256": "530837bbc037d3940d5f7c2b4d717d6485ad73fe7cce18802dfd9d9c77a33100",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflow_b2_multi_ref_20260918_223207_before_1080p.json",
+      "path": "source/references/workflow_b2_multi_ref_20260918_223207_before_1080p.json.reference.txt",
+      "sourceBytes": 14170,
+      "sourceSha256": "42503deaa31bb3a59850332a3d933625f753b989f005790ecd7101712869ed40",
+      "sha256": "7901cb13aa88bf6a7c81b86b25207f60f34419b5c81a00be00dd53a3b3604821",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflow_wa_api.json",
+      "path": "source/references/workflow_wa_api.json.reference.txt",
+      "sourceBytes": 15549,
+      "sourceSha256": "bc86e4dfa27b7d7520b006c0d355d5d98e1de080fab92230ccd0580d69c2943f",
+      "sha256": "f83f153cabec1347775a91124f47a57e04415c7a8b3564a5e7e8c6ba39c84e5c",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflow_wa_noref.json",
+      "path": "source/references/workflow_wa_noref.json.reference.txt",
+      "sourceBytes": 12767,
+      "sourceSha256": "f269bbb67a64d881d537da86f51a02a8445e98f5ccd18b06a00e6ba5a015be9d",
+      "sha256": "3af79aae1cd93c1182529952c7e25a74f5c2db1fc0c60d9a3a1ddf1e587e464b",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflows.json",
+      "path": "source/references/workflows.json.reference.txt",
+      "sourceBytes": 5630,
+      "sourceSha256": "50328c603a3447ad393c27fd5a8b846d13d240495d5b076d66af33dc6b37d788",
+      "sha256": "41d2f82ed4fde0b6b5cd11dbaab80815e3fbc9c69e3b730cb5cb28a1ac552a30",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "references/workflows_20260919_084950_before_v2.2.json",
+      "path": "source/references/workflows_20260919_084950_before_v2.2.json.reference.txt",
+      "sourceBytes": 4490,
+      "sourceSha256": "8eba91fde6c041a4d9602774dd8d33fbdbc12994bc20baf1e9105e18cf4fc6ca",
+      "sha256": "8ac824f19aacbeaa1213b4320ef360ef5512a3eae566b23eda5e7eabec7c4ec2",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "SKILL.md",
+      "path": "source/SKILL.md.reference.txt",
+      "sourceBytes": 304652,
+      "sourceSha256": "e1b70e147af0a2a4e7c978914ee7d7cc2d911d1b8bfe5db172481d1b4c4d3303",
+      "sha256": "0b3f62be378a61305f9ad0c319c95c6e8416103820083050a059aefb880c2a0c",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/check_delivery_set.py",
+      "path": "source/tools/check_delivery_set.py.reference.txt",
+      "sourceBytes": 8021,
+      "sourceSha256": "b93c95d0cd75c16e7fd4b07a8dbbb670572525f57304d7892d56181fc3533895",
+      "sha256": "b93c95d0cd75c16e7fd4b07a8dbbb670572525f57304d7892d56181fc3533895",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/check_mp_html.py",
+      "path": "source/tools/check_mp_html.py.reference.txt",
+      "sourceBytes": 6772,
+      "sourceSha256": "3f15364665315bb03275f29350e86ce07606c09301b9b7dafce2434ee407cd93",
+      "sha256": "19d8d360dee7c8cb12b2e8be7ee0a3acb69f5e179dee50c73673eea531c37292",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/checks.txt",
+      "path": "source/tools/checks.txt.reference.txt",
+      "sourceBytes": 77136,
+      "sourceSha256": "e3f1998d47274afcd9cbe4e985072a1069b92d62a0911d40308e97747e0c8eb3",
+      "sha256": "6afa5d421bed9173689ef1185067e04ce6f0e86fedd294fd88d38ba0d3030f7f",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/doctor.py",
+      "path": "source/tools/doctor.py.reference.txt",
+      "sourceBytes": 19013,
+      "sourceSha256": "ba1752ff0f445b518df7ac6d62f9ebc170c2d76d455ab4bb8aeca61a0422f6b6",
+      "sha256": "09da6372a7bfe79a7682dc88f9fc24c18605bd3c1bca69cd7513182ff58f7b83",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/make_deliverables.py",
+      "path": "source/tools/make_deliverables.py.reference.txt",
+      "sourceBytes": 27374,
+      "sourceSha256": "c22daea6223cd4b2a757e4ba710b51854760284cfaf6dc26ac716b20ea721d87",
+      "sha256": "252aaf39f0ec7095f8ddccd94f9ef33c2b6945f027b32118ea6b46d1332f151d",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/README.md",
+      "path": "source/tools/README.md.reference.txt",
+      "sourceBytes": 4036,
+      "sourceSha256": "befdfc2d2b8d6b7b1af9fb08a4f6a8f9d2bc533df1380b43d3fc73af27a00be2",
+      "sha256": "67799d0f6e757e79bf7d32f03af4d772bf18092f241f99fad9c54bd467111d8c",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/rollback.py",
+      "path": "source/tools/rollback.py.reference.txt",
+      "sourceBytes": 9964,
+      "sourceSha256": "af6da0598bbedc7ca0e0393d03f178b7add19ad6a9d9b9333123c40da7156701",
+      "sha256": "af6da0598bbedc7ca0e0393d03f178b7add19ad6a9d9b9333123c40da7156701",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/scan_paths.py",
+      "path": "source/tools/scan_paths.py.reference.txt",
+      "sourceBytes": 15871,
+      "sourceSha256": "7843226a888d74df6591fd3457bb18bdbe521971ccc078884c2ce5e6b1fc7ca1",
+      "sha256": "49bb6555c7d45334b5c173076b9924461bcd2242d1e36db3f6ced40b1832f319",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/scan_secrets.py",
+      "path": "source/tools/scan_secrets.py.reference.txt",
+      "sourceBytes": 17278,
+      "sourceSha256": "5be35a8cb6f3ec05d8b3782853761af4cf17c185b77aedc71759251c11ffe8e9",
+      "sha256": "ef21f679e1049fd62f5602b388d043fd776c8deade5ed47cdfcb4f484b73c0bf",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/smoke_pages.py",
+      "path": "source/tools/smoke_pages.py.reference.txt",
+      "sourceBytes": 17149,
+      "sourceSha256": "93682b112372dccd8c23f7b27215e6e2a4468a67743a391abb44686cc77786df",
+      "sha256": "25ef023c85811899049b82184bcd78d5259cb0d8da4015ea88b8ddfeb6a7b004",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "tools/snapshot.py",
+      "path": "source/tools/snapshot.py.reference.txt",
+      "sourceBytes": 30895,
+      "sourceSha256": "3b52798d2f75c29677aa312fb5d8c11fa5efba4eb8e16a24a2706e63ac8fc0de",
+      "sha256": "897a103d8b6a4dbe14c3a157ce294d90d7bb4b255baf3e04c37adfd6d329e1a7",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "vendor/h3-ref2va-optimizer/scripts/validate_ref2va.py",
+      "path": "source/vendor/h3-ref2va-optimizer/scripts/validate_ref2va.py.reference.txt",
+      "sourceBytes": 54866,
+      "sourceSha256": "54c737e41eec29fb2a96e0967ea1c18267c821032a76d6df96618fe8f5423fc5",
+      "sha256": "54c737e41eec29fb2a96e0967ea1c18267c821032a76d6df96618fe8f5423fc5",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "vendor/h3-ref2va-optimizer/scripts/validate_ref2va_local.py",
+      "path": "source/vendor/h3-ref2va-optimizer/scripts/validate_ref2va_local.py.reference.txt",
+      "sourceBytes": 50675,
+      "sourceSha256": "b9a4da2b2fe1c8df05a482aa2758d702f1012edc6cee1ec9df5a4acaa74649dd",
+      "sha256": "b9a4da2b2fe1c8df05a482aa2758d702f1012edc6cee1ec9df5a4acaa74649dd",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "vendor/knowledge-video-director/references/runninghub_runner.py",
+      "path": "source/vendor/knowledge-video-director/references/runninghub_runner.py.reference.txt",
+      "sourceBytes": 20020,
+      "sourceSha256": "4b83828c96cecae148cee32f3011ae469e2d3836cf04237d908e8995643c7f91",
+      "sha256": "94ee297be102398dc349bc3c3488174318a2c4184b8620d741e609bda016b419",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "vendor/MANIFEST.json",
+      "path": "source/vendor/MANIFEST.json.reference.txt",
+      "sourceBytes": 1255,
+      "sourceSha256": "4bb8cb51f1e8cd6487031b77e0b816dc6c7fe5b80bc15d8b56f64a5c29dd90a5",
+      "sha256": "a8aa4774428857144782741d3f3525e5ecb5f14c5226b0cef62df9915b341ae9",
+      "treatment": "sanitized-inert-reference"
+    },
+    {
+      "source": "VERSION",
+      "path": "source/VERSION.reference.txt",
+      "sourceBytes": 5,
+      "sourceSha256": "96dee6ab2bdbbe469c55bd9f52530a7f8098d787299a1ce745c1e9806eef86d8",
+      "sha256": "022804d19c8fe566dc00dca4721c1eadf6ed71164d647a2e77493ac87c4fe3a6",
+      "treatment": "sanitized-inert-reference"
+    }
+  ]
+}

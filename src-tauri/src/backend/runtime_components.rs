@@ -31,6 +31,8 @@ struct FileStamp {
     path: PathBuf,
     bytes: u64,
     modified: SystemTime,
+    #[cfg(unix)]
+    mode: u32,
 }
 
 struct VerifiedCritical {
@@ -230,6 +232,8 @@ struct SourceFile {
     relative: PathBuf,
     source: PathBuf,
     bytes: u64,
+    #[cfg(target_os = "macos")]
+    link_target: Option<PathBuf>,
 }
 
 impl RuntimeComponent {
@@ -345,6 +349,20 @@ impl RuntimeComponent {
             let target = staging.path().join(&file.relative);
             fs::create_dir_all(target.parent().expect("relative file has parent"))
                 .map_err(|error| format!("创建 {} 的资源子目录失败：{error}", self.name))?;
+            #[cfg(target_os = "macos")]
+            if let Some(link) = &file.link_target {
+                if fs::read_link(&file.source).ok().as_ref() != Some(link) {
+                    return Err(format!("{} 的资源软链接在复制前已改变", self.name));
+                }
+                std::os::unix::fs::symlink(link, &target)
+                    .map_err(|error| format!("复制 {} 的资源软链接失败：{error}", self.name))?;
+                if fs::read_link(&target).ok().as_ref() != Some(link) {
+                    return Err(format!("{} 的资源软链接副本校验失败", self.name));
+                }
+                copied_bytes += file.bytes;
+                progress(copied_bytes, total_bytes);
+                continue;
+            }
             let copied = fs::copy(&file.source, &target)
                 .map_err(|error| format!("复制 {} 的资源失败：{error}", self.name))?;
             if copied != file.bytes || hash_file(&file.source)? != hash_file(&target)? {
@@ -352,6 +370,25 @@ impl RuntimeComponent {
             }
             copied_bytes += file.bytes;
             progress(copied_bytes, total_bytes);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let staged_root = staging
+                .path()
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            for file in &files {
+                if file.link_target.is_some() {
+                    let target = staging
+                        .path()
+                        .join(&file.relative)
+                        .canonicalize()
+                        .map_err(|_| "资源软链接副本悬空或循环")?;
+                    if !target.starts_with(&staged_root) {
+                        return Err("资源软链接副本超出暂存目录".into());
+                    }
+                }
+            }
         }
         if self.manifest_hash(staging.path()).as_deref() != Some(&manifest_sha256)
             || !ready(staging.path())
@@ -686,6 +723,10 @@ impl RuntimeComponent {
     }
 
     fn critical_files_ready(&self, root: &Path) -> bool {
+        #[cfg(target_os = "macos")]
+        if !self.executable_modes_ready(root) {
+            return false;
+        }
         let Some(targets) = self.critical_targets(root) else {
             return false;
         };
@@ -717,6 +758,11 @@ impl RuntimeComponent {
                 path: canonical,
                 bytes: metadata.len(),
                 modified,
+                #[cfg(unix)]
+                mode: {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    metadata.permissions().mode()
+                },
             });
         }
         {
@@ -753,6 +799,49 @@ impl RuntimeComponent {
             stamps,
         });
         true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn executable_modes_ready(&self, root: &Path) -> bool {
+        use std::os::unix::fs::PermissionsExt as _;
+        if !matches!(
+            self.name,
+            "blender"
+                | "ffmpeg"
+                | "remotion-runtime"
+                | "ai-media-runtime"
+                | "ai-media-quality-runtime"
+        ) {
+            return true;
+        }
+        let Some(manifest) = fs::read(root.join(self.manifest_relative))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        else {
+            return false;
+        };
+        let paths = match self.name {
+            "ffmpeg" => {
+                let mut paths = vec!["ffmpeg"];
+                if manifest["ffprobeSha256"].is_string() {
+                    paths.push("ffprobe");
+                }
+                paths
+            }
+            "remotion-runtime" => {
+                vec!["node", manifest["browserExecutable"].as_str().unwrap_or("")]
+            }
+            "blender" => vec![manifest["executable"].as_str().unwrap_or("")],
+            _ => vec![manifest["pythonPath"].as_str().unwrap_or("")],
+        };
+        paths.into_iter().all(|relative| {
+            safe_relative(relative)
+                .and_then(|relative| root.join(relative).metadata().ok())
+                .is_some_and(|metadata| {
+                    let mode = metadata.permissions().mode();
+                    metadata.is_file() && mode & 0o111 != 0 && mode & 0o6000 == 0
+                })
+        })
     }
 
     pub(crate) fn retarget_critical_cache(&self, previous_root: &Path, destination: &Path) {
@@ -831,6 +920,16 @@ impl RuntimeComponent {
 fn tree_contains_reparse(root: &Path, allowed_parent: &Path) -> bool {
     fn visit(path: &Path, allowed_parent: &Path) -> Result<(), ()> {
         let metadata = path.symlink_metadata().map_err(|_| ())?;
+        #[cfg(target_os = "macos")]
+        if metadata.file_type().is_symlink() {
+            // remove_dir_all removes the link itself; never recurse into its target.
+            return path
+                .canonicalize()
+                .ok()
+                .filter(|resolved| resolved.starts_with(allowed_parent))
+                .map(|_| ())
+                .ok_or(());
+        }
         if metadata.file_type().is_symlink()
             || !path
                 .canonicalize()
@@ -947,9 +1046,55 @@ fn inventory_targets(root: &Path, manifest: &serde_json::Value) -> Option<Vec<(P
     if entries.len() as u64 != manifest["inventory"]["count"].as_u64()? {
         return None;
     }
+    #[cfg(target_os = "macos")]
+    for entry in &entries {
+        use std::os::unix::fs::PermissionsExt as _;
+        let relative = safe_relative(entry["path"].as_str()?)?;
+        let path = root.join(&relative);
+        let metadata = path.symlink_metadata().ok()?;
+        let kind = entry
+            .get("type")
+            .map(|kind| kind.as_str())
+            .unwrap_or(Some("file"))?;
+        match kind {
+            "file" => {
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return None;
+                }
+                if let Some(mode) = entry["mode"].as_u64() {
+                    if metadata.permissions().mode() & 0o7777 != (mode as u32 & 0o777) {
+                        return None;
+                    }
+                }
+            }
+            "symlink" => {
+                let target = entry["target"].as_str()?;
+                super::component_archive::link_destination(entry["path"].as_str()?, target).ok()?;
+                if !metadata.file_type().is_symlink()
+                    || fs::read_link(&path).ok()?.to_str() != Some(target)
+                {
+                    return None;
+                }
+                let resolved = path.canonicalize().ok()?;
+                let resolved_metadata = fs::metadata(&resolved).ok()?;
+                if !resolved.starts_with(&canonical_root)
+                    || (!resolved_metadata.is_file() && !resolved_metadata.is_dir())
+                    || (resolved_metadata.is_dir()
+                        && path.parent()?.canonicalize().ok()?.starts_with(&resolved))
+                {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
     entries
         .into_iter()
-        .filter(|entry| entry["type"].as_str() == Some("file"))
+        .filter(|entry| {
+            entry
+                .get("type")
+                .is_none_or(|kind| kind.as_str() == Some("file"))
+        })
         .map(|entry| {
             Some((
                 safe_relative(entry["path"].as_str()?)?,
@@ -993,6 +1138,36 @@ fn collect_files(
         }
         let metadata =
             fs::metadata(&resolved).map_err(|error| format!("读取资源元数据失败：{error}"))?;
+        #[cfg(target_os = "macos")]
+        if item
+            .symlink_metadata()
+            .map_err(|error| error.to_string())?
+            .file_type()
+            .is_symlink()
+        {
+            let target = fs::read_link(&item).map_err(|error| error.to_string())?;
+            let target_text = target.to_str().ok_or("资源软链接目标编码无效")?;
+            let path_text = item_relative.to_str().ok_or("资源软链接路径编码无效")?;
+            super::component_archive::link_destination(path_text, target_text)?;
+            if (!metadata.is_file() && !metadata.is_dir())
+                || (metadata.is_dir()
+                    && item
+                        .parent()
+                        .ok_or("资源软链接路径无效")?
+                        .canonicalize()
+                        .map_err(|error| error.to_string())?
+                        .starts_with(&resolved))
+            {
+                return Err("资源软链接类型无效或指向祖先目录".into());
+            }
+            files.push(SourceFile {
+                relative: item_relative,
+                source: item,
+                bytes: target_text.len() as u64,
+                link_target: Some(target),
+            });
+            continue;
+        }
         if metadata.is_dir() {
             directories.push(item_relative.clone());
             collect_files(
@@ -1008,6 +1183,8 @@ fn collect_files(
                 relative: item_relative,
                 source: resolved,
                 bytes: metadata.len(),
+                #[cfg(target_os = "macos")]
+                link_target: None,
             });
         } else {
             return Err("资源含不支持的文件类型".into());
@@ -1037,6 +1214,81 @@ mod tests {
 
     fn fixture_ready(root: &Path) -> bool {
         root.join("runtime/tool.exe").is_file()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_executable_readiness_rejects_removed_execute_permission() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("manifest.json"),
+            b"{\"ffprobeSha256\":null}",
+        )
+        .unwrap();
+        let engine = temp.path().join("ffmpeg");
+        fs::write(&engine, b"engine-bytes").unwrap();
+        let component = RuntimeComponent::new(
+            temp.path().join("store"),
+            temp.path().into(),
+            "ffmpeg",
+            "manifest.json",
+        );
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(component.executable_modes_ready(temp.path()));
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!component.executable_modes_ready(temp.path()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn migration_preserves_framework_symlinks_and_executable_permissions() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let bundled = temp.path().join("bundle/component");
+        fs::create_dir_all(bundled.join("runtime/Framework/Versions/A/Resources")).unwrap();
+        fs::write(bundled.join("manifest.json"), b"version-1").unwrap();
+        fs::write(bundled.join("runtime/tool.exe"), b"runtime-bytes").unwrap();
+        fs::set_permissions(
+            bundled.join("runtime/tool.exe"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        fs::write(
+            bundled.join("runtime/Framework/Versions/A/Resources/payload"),
+            b"payload",
+        )
+        .unwrap();
+        symlink("A", bundled.join("runtime/Framework/Versions/Current")).unwrap();
+        symlink(
+            "Versions/Current/Resources",
+            bundled.join("runtime/Framework/Resources"),
+        )
+        .unwrap();
+        let component = RuntimeComponent::new(
+            temp.path().join("appdata/runtime-components"),
+            bundled,
+            "test-component",
+            "manifest.json",
+        );
+        component.migrate(fixture_ready, |_, _| {}).unwrap();
+        let stored = component.stored_root(fixture_ready).unwrap();
+        assert_eq!(
+            fs::read_link(stored.join("runtime/Framework/Versions/Current")).unwrap(),
+            PathBuf::from("A")
+        );
+        assert_eq!(
+            fs::read(stored.join("runtime/Framework/Resources/payload")).unwrap(),
+            b"payload"
+        );
+        assert_eq!(
+            fs::metadata(stored.join("runtime/tool.exe"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
     }
 
     #[test]

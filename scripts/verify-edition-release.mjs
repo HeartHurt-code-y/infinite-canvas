@@ -1,4 +1,4 @@
-// Read-only verification of the local Windows edition hand-off. No credentials or network are used.
+// Read-only verification of the native edition hand-off. No credentials or network are used.
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -13,6 +13,7 @@ import {
   componentFileSha256,
   componentBytesSha256,
   componentPathIsValid,
+  componentSymlinkTargetIsValid,
   inventoryComponentFiles,
   RUNTIME_COMPONENTS,
   runtimeComponentArchiveUrl,
@@ -25,6 +26,12 @@ import { verifyNsisEditionResourceTable } from "./verify-nsis-edition-resources.
 import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
 import { tosUpdatesObjectKey, tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 import { assertEditionBuildSourceFreshness } from "./edition-source-fingerprint.mjs";
+import {
+  assertMacAppInventories,
+  inventoryMacUpdateArchive,
+  verifyMacDmgApplication,
+  verifyMacNativeApp,
+} from "./verify-macos-edition.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;
@@ -113,7 +120,7 @@ export function assertCompiledEditionPins(
     );
 }
 
-export function assertEditionCatalog(catalog, applicationVersion) {
+export function assertEditionCatalog(catalog, applicationVersion, platform = COMPONENT_PLATFORM) {
   exactKeys(
     catalog,
     ["schemaVersion", "applicationVersion", "platform", "components", "features"],
@@ -122,7 +129,7 @@ export function assertEditionCatalog(catalog, applicationVersion) {
   requireValue(
     catalog.schemaVersion === 1 &&
       catalog.applicationVersion === applicationVersion &&
-      catalog.platform === COMPONENT_PLATFORM,
+      catalog.platform === platform,
     "Component catalog identity does not match this release",
   );
   requireValue(
@@ -172,7 +179,11 @@ export function assertEditionCatalog(catalog, applicationVersion) {
     for (const entry of component.files) {
       exactKeys(
         entry,
-        entry.mode === undefined ? ["path", "size", "sha256"] : ["path", "size", "sha256", "mode"],
+        entry.type === "symlink"
+          ? ["path", "size", "sha256", "mode", "type", "target"]
+          : entry.mode === undefined
+            ? ["path", "size", "sha256"]
+            : ["path", "size", "sha256", "mode"],
         "Catalog file",
       );
       requireValue(
@@ -182,7 +193,16 @@ export function assertEditionCatalog(catalog, applicationVersion) {
           Number.isSafeInteger(entry.size) &&
           entry.size >= 0 &&
           SHA256.test(entry.sha256) &&
-          (entry.mode === undefined || entry.mode === 0o644 || entry.mode === 0o755),
+          (entry.type === "symlink"
+            ? platform.startsWith("darwin-") &&
+              componentSymlinkTargetIsValid(entry.path, entry.target) &&
+              entry.size === Buffer.byteLength(entry.target) &&
+              entry.sha256 === componentBytesSha256(Buffer.from(entry.target)) &&
+              entry.mode === 0o755
+            : entry.mode === undefined ||
+              (platform.startsWith("darwin-")
+                ? Number.isInteger(entry.mode) && entry.mode >= 0 && entry.mode <= 0o777
+                : entry.mode === 0o644 || entry.mode === 0o755)),
         `Invalid or duplicate component file: ${component.id}/${entry.path}`,
       );
       paths.add(entry.path.toLowerCase());
@@ -194,7 +214,8 @@ export function assertEditionCatalog(catalog, applicationVersion) {
     );
     requireValue(
       component.files.find(({ path: entryPath }) => entryPath === component.manifestPath)
-        ?.sha256 === component.manifestSha256,
+        ?.sha256 === component.manifestSha256 &&
+        !component.files.find(({ path: entryPath }) => entryPath === component.manifestPath)?.type,
       `Component manifest is not pinned in its exact inventory: ${component.id}`,
     );
     exactKeys(component.archive, ["format", "url", "size", "sha256"], "Component archive");
@@ -207,6 +228,7 @@ export function assertEditionCatalog(catalog, applicationVersion) {
         component.archive.url ===
           runtimeComponentArchiveUrl(component.id, component.archive.sha256, {
             applicationVersion,
+            platform,
           }),
       `Component archive does not use its trusted content-addressed URL: ${component.id}`,
     );
@@ -328,13 +350,16 @@ async function verifyResourceTable(root, edition, catalog) {
     targetMarker.schemaVersion === 1 &&
       targetMarker.applicationVersion === catalog.applicationVersion &&
       targetMarker.edition === edition &&
-      targetMarker.platform === COMPONENT_PLATFORM,
+      targetMarker.platform === catalog.platform,
     "Raw edition target marker does not match this distribution",
   );
   return { count, config, executablePath };
 }
 
-function verifyOnlineFeed(latest, { version, installer, signature, baseUrl }) {
+function verifyOnlineFeed(
+  latest,
+  { version, installer, signature, baseUrl, platform: platformId },
+) {
   exactKeys(latest, ["version", "notes", "pub_date", "platforms"], "Online latest feed");
   requireValue(
     latest.version === version &&
@@ -343,8 +368,8 @@ function verifyOnlineFeed(latest, { version, installer, signature, baseUrl }) {
       Number.isFinite(Date.parse(latest.pub_date)),
     "Online latest feed identity is invalid",
   );
-  exactKeys(latest.platforms, [COMPONENT_PLATFORM], "Online updater platforms");
-  const platform = latest.platforms[COMPONENT_PLATFORM];
+  exactKeys(latest.platforms, [platformId], "Online updater platforms");
+  const platform = latest.platforms[platformId];
   exactKeys(platform, ["url", "signature"], "Online updater platform");
   requireValue(
     platform.url === `${baseUrl}/${encodeURIComponent(path.basename(installer.path))}` &&
@@ -366,7 +391,7 @@ export function assertOfflineSuiteReceipt(
     receipt.schemaVersion === 1 &&
       receipt.applicationVersion === applicationVersion &&
       receipt.edition === "offline" &&
-      receipt.platform === COMPONENT_PLATFORM &&
+      receipt.platform === catalog.platform &&
       receipt.catalogSha256 === catalogSha256,
     "Offline receipt catalog/version identity mismatch",
   );
@@ -425,15 +450,146 @@ export function assertOfflineSuiteReceipt(
   }
 }
 
+async function verifyMacEditionResources(root, edition, catalog, tauriConfig, verifyMacApp) {
+  requireValue(
+    edition === "online",
+    "macOS component editions currently support only online builds",
+  );
+  const config = await readJson(path.join(root, "src-tauri/tauri.online.conf.json"), root);
+  const expected = [];
+  for (const [source, destination] of Object.entries(config.bundle.resources)) {
+    if (source === "resources/component-catalog.json") {
+      requireValue(destination === "component-catalog.json", "Catalog resource mapping changed");
+      const filename = path.join(root, COMPONENT_CATALOG_RESOURCE);
+      expected.push({
+        path: destination,
+        size: (await regularFile(filename, root)).size,
+        sha256: await componentFileSha256(filename),
+      });
+      continue;
+    }
+    requireValue(
+      source.endsWith("/") &&
+        destination.endsWith("/") &&
+        componentPathIsValid(source.slice(0, -1)) &&
+        componentPathIsValid(destination.slice(0, -1)),
+      "Unsafe macOS edition resource mapping",
+    );
+    const component = catalog.components.find(({ bundlePath }) => `${bundlePath}/` === destination);
+    if (component) {
+      requireValue(
+        component.id === "ffmpeg" && source === "resources/ffmpeg/",
+        "macOS online edition embeds an unexpected component",
+      );
+      expected.push(
+        ...component.files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })),
+      );
+    } else {
+      requireValue(
+        source === destination &&
+          ["skills/anime-drama-v23/", "skills/music-video-workflow/"].includes(source),
+        `Unexpected macOS edition resource mapping: ${source}`,
+      );
+      const files = await inventoryComponentFiles(path.join(root, "src-tauri", source), {
+        workspaceRoot: root,
+      });
+      expected.push(...files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })));
+    }
+  }
+  requireValue(
+    Object.keys(config.bundle.resources).length === 4 &&
+      expected.some(({ path: filename }) => filename.startsWith("ffmpeg/")),
+    "macOS online resource map must contain FFmpeg, two workflow documents and the catalog",
+  );
+  const icons = tauriConfig.bundle?.icon?.filter((filename) => filename.endsWith(".icns")) ?? [];
+  requireValue(
+    icons.length === 1 && componentPathIsValid(icons[0]),
+    "macOS app requires exactly one configured .icns icon",
+  );
+  const icon = path.join(root, "src-tauri", icons[0]);
+  expected.push({
+    path: path.basename(icons[0]),
+    size: (await regularFile(icon, root)).size,
+    sha256: await componentFileSha256(icon),
+  });
+  const files = tauriConfig.bundle.macOS?.files;
+  exactKeys(files, ["Resources/unlock-installed-macos-app.sh"], "macOS supporting files");
+  requireValue(
+    files["Resources/unlock-installed-macos-app.sh"] === "../scripts/unlock-installed-macos-app.sh",
+    "macOS installation support mapping changed",
+  );
+  const unlock = path.join(root, "scripts/unlock-installed-macos-app.sh");
+  expected.push({
+    path: "unlock-installed-macos-app.sh",
+    size: (await regularFile(unlock, root)).size,
+    sha256: await componentFileSha256(unlock),
+  });
+  const targetDirectory = path.join(root, ".cache/tauri-editions", edition, "target");
+  const triple =
+    catalog.platform === "darwin-aarch64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const candidates = ["", triple].map((target) =>
+    path.join(targetDirectory, target, "release/bundle/macos", `${tauriConfig.productName}.app`),
+  );
+  const apps = [];
+  for (const app of candidates) {
+    try {
+      await assertComponentRoot(app, root);
+      requireValue((await lstat(app)).isDirectory(), "macOS app must be a directory");
+      apps.push(app);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+  requireValue(apps.length === 1, "Expected exactly one native release app in this edition target");
+  const targetMarker = await readJson(path.join(targetDirectory, "distribution.json"), root);
+  exactKeys(
+    targetMarker,
+    ["schemaVersion", "applicationVersion", "edition", "platform"],
+    "Edition target marker",
+  );
+  requireValue(
+    targetMarker.schemaVersion === 1 &&
+      targetMarker.applicationVersion === catalog.applicationVersion &&
+      targetMarker.edition === edition &&
+      targetMarker.platform === catalog.platform,
+    "Raw edition target marker does not match this distribution",
+  );
+  const native = await verifyMacApp(apps[0], {
+    applicationVersion: catalog.applicationVersion,
+    platform: catalog.platform,
+    identifier: tauriConfig.identifier,
+    expectedResources: expected,
+  });
+  requireValue(
+    native.codeSignatureVerified === true &&
+      native.architectureVerified === true &&
+      native.bundleResourceCount === expected.length &&
+      native.executablePath === path.join(apps[0], "Contents/MacOS/infinite-canvas") &&
+      Array.isArray(native.inventory),
+    "macOS native app verification is incomplete",
+  );
+  await regularFile(native.executablePath, root);
+  return { ...native, config, appName: `${tauriConfig.productName}.app` };
+}
+
 export async function verifyEditionRelease({
   distributionDirectory,
   root = COMPONENT_REPO_ROOT,
+  platform = COMPONENT_PLATFORM,
   readProductVersion = readWindowsInstallerProductVersion,
   verifySignature = verifyUpdaterSignature,
   readCompiledPins = readWindowsCompiledEditionPins,
+  verifyMacApp = verifyMacNativeApp,
+  verifyMacDmg = verifyMacDmgApplication,
+  inventoryMacArchive = inventoryMacUpdateArchive,
   requireSourceFreshness = false,
 } = {}) {
   requireValue(typeof distributionDirectory === "string", "--distribution-dir is required");
+  requireValue(
+    ["windows-x86_64", "darwin-aarch64", "darwin-x86_64"].includes(platform),
+    "Unsupported edition release platform",
+  );
+  const isMac = platform.startsWith("darwin-");
   root = path.resolve(root);
   const directory = path.resolve(root, distributionDirectory);
   const relative = path.relative(root, directory).replaceAll(path.sep, "/");
@@ -460,13 +616,13 @@ export async function verifyEditionRelease({
     marker.schemaVersion === 1 &&
       marker.applicationVersion === version &&
       marker.edition === edition &&
-      marker.platform === COMPONENT_PLATFORM &&
+      marker.platform === platform &&
       SHA256.test(marker.catalogSha256),
     "Distribution marker does not match its edition/version directory",
   );
   const catalogPath = path.join(root, COMPONENT_CATALOG_RESOURCE);
   const catalog = await readJson(catalogPath, root);
-  assertEditionCatalog(catalog, version);
+  assertEditionCatalog(catalog, version, platform);
   requireValue(
     (await componentFileSha256(catalogPath)) === marker.catalogSha256,
     "Distribution catalog hash is stale or mismatched",
@@ -480,8 +636,12 @@ export async function verifyEditionRelease({
     exactKeys(artifact, ["path", "size", "sha256"], "Distribution artifact");
     requireValue(
       componentPathIsValid(artifact.path) &&
-        (/\.(exe|msi)(?:\.sig)?$/i.test(artifact.path) ||
-          (edition === "offline" && artifact.path.endsWith(".zip"))) &&
+        (isMac
+          ? edition === "online" &&
+            (/\.(dmg|app\.tar\.gz)(?:\.sig)?$/.test(artifact.path) ||
+              artifact.path === "helper/install-macos.sh")
+          : /\.(exe|msi)(?:\.sig)?$/i.test(artifact.path) ||
+            (edition === "offline" && artifact.path.endsWith(".zip"))) &&
         !artifactPaths.has(artifact.path.toLowerCase()) &&
         Number.isSafeInteger(artifact.size) &&
         artifact.size > 0 &&
@@ -520,19 +680,24 @@ export async function verifyEditionRelease({
     ),
     "Distribution contains missing or unregistered files",
   );
-  const installerName = `${tauriConfig.productName}_${version}_x64-${edition}-setup.exe`;
-  const installers = marker.artifacts.filter(({ path: filename }) => filename.endsWith(".exe"));
+  const macArch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+  const installerName = isMac
+    ? `${tauriConfig.productName}_${version}_${macArch}-${edition}.app.tar.gz`
+    : `${tauriConfig.productName}_${version}_x64-${edition}-setup.exe`;
+  const installers = marker.artifacts.filter(({ path: filename }) =>
+    filename.endsWith(isMac ? ".app.tar.gz" : ".exe"),
+  );
   requireValue(
     installers.length === 1 && path.basename(installers[0].path) === installerName,
-    "Expected exactly one current-version edition NSIS installer",
+    "Expected exactly one current-version edition updater package",
   );
   const installer = installers[0];
   requireValue(
     artifactPaths.has(`${installer.path}.sig`.toLowerCase()),
-    "NSIS installer is missing its updater signature",
+    "Edition updater package is missing its updater signature",
   );
   for (const artifact of marker.artifacts.filter(({ path: filename }) =>
-    /\.(exe|msi)$/.test(filename),
+    isMac ? filename.endsWith(".app.tar.gz") : /\.(exe|msi)$/.test(filename),
   )) {
     requireValue(
       artifactPaths.has(`${artifact.path}.sig`.toLowerCase()),
@@ -544,13 +709,60 @@ export async function verifyEditionRelease({
       tauriConfig.plugins.updater.pubkey,
     );
   }
-  const productVersion = await readProductVersion(path.join(directory, installer.path));
-  assertWindowsInstallerProductVersion(productVersion, version);
-  const {
-    count: nsisResources,
-    config: editionConfig,
-    executablePath,
-  } = await verifyResourceTable(root, edition, catalog);
+  const productVersion = isMac
+    ? version
+    : await readProductVersion(path.join(directory, installer.path));
+  if (!isMac) assertWindowsInstallerProductVersion(productVersion, version);
+  const nativeResources = isMac
+    ? await verifyMacEditionResources(root, edition, catalog, tauriConfig, verifyMacApp)
+    : await verifyResourceTable(root, edition, catalog);
+  const { config: editionConfig, executablePath } = nativeResources;
+  let macDmg = null;
+  if (isMac) {
+    const dmgPath = `dmg/${tauriConfig.productName}_${version}_${macArch}-${edition}.dmg`;
+    requireValue(
+      installer.path === `macos/${installerName}` &&
+        sameArray(
+          [...artifactPaths].sort(),
+          [
+            dmgPath,
+            `macos/${installerName}`,
+            `macos/${installerName}.sig`,
+            "helper/install-macos.sh",
+          ]
+            .map((filename) => filename.toLowerCase())
+            .sort(),
+        ),
+      "macOS distribution requires exactly the versioned DMG, updater archive/signature and installation helper",
+    );
+    assertMacAppInventories(
+      await inventoryMacArchive(path.join(directory, installer.path), nativeResources.appName),
+      nativeResources.inventory,
+      "Updater archive",
+    );
+    const dmgVerification = await verifyMacDmg(
+      path.join(directory, dmgPath),
+      nativeResources.appName,
+      nativeResources.inventory,
+    );
+    requireValue(
+      dmgVerification?.dmgVerified === true &&
+        dmgVerification.applicationBytesVerified === true &&
+        dmgVerification.codeSignatureVerified === true,
+      "macOS DMG verification is incomplete",
+    );
+    const helperPath = path.join(directory, "helper/install-macos.sh");
+    const sourceHelper = path.join(root, "scripts/install-macos.sh");
+    await regularFile(sourceHelper, root);
+    requireValue(
+      (await readFile(helperPath)).equals(await readFile(sourceHelper)),
+      "macOS installation helper differs from the verified project source",
+    );
+    macDmg = {
+      ...marker.artifacts.find(({ path: filename }) => filename === dmgPath),
+      ...dmgVerification,
+    };
+  }
   const compiledPins = await readCompiledPins(executablePath);
   assertCompiledEditionPins(compiledPins, {
     catalog,
@@ -582,7 +794,7 @@ export async function verifyEditionRelease({
         executablePath,
       })
     : { sourceFreshnessVerified: false, sourceFingerprint: null, sourceFileCount: 0 };
-  const channel = edition === "online" ? `${COMPONENT_PLATFORM}-online` : COMPONENT_PLATFORM;
+  const channel = edition === "online" ? `${platform}-online` : platform;
   const baseUrl = `${tosUpdatesPublicBaseUrl()}/${channel}`;
   requireValue(
     sameArray(
@@ -619,6 +831,7 @@ export async function verifyEditionRelease({
       installer,
       signature,
       baseUrl,
+      platform,
     });
     const publish = await readJson(path.join(directory, "publish-manifest.json"), root);
     exactKeys(
@@ -640,7 +853,7 @@ export async function verifyEditionRelease({
       publish.schemaVersion === 1 &&
         publish.edition === edition &&
         publish.applicationVersion === version &&
-        publish.platform === COMPONENT_PLATFORM &&
+        publish.platform === platform &&
         publish.channel === channel &&
         publish.catalogSha256 === marker.catalogSha256,
       "Publish manifest identity does not match the edition",
@@ -704,7 +917,7 @@ export async function verifyEditionRelease({
     verified: true,
     edition,
     applicationVersion: version,
-    platform: COMPONENT_PLATFORM,
+    platform,
     channel,
     catalogSha256: marker.catalogSha256,
     ...sourceFreshness,
@@ -717,7 +930,18 @@ export async function verifyEditionRelease({
       updaterSignatureVerified: true,
     },
     artifactCount: marker.artifacts.length,
-    nsisResourceCount: nsisResources,
+    ...(isMac
+      ? {
+          bundleResourceCount: nativeResources.bundleResourceCount,
+          macos: {
+            codeSignatureVerified: true,
+            signingIdentity: nativeResources.signingIdentity,
+            architectureVerified: true,
+            updateArchiveBytesVerified: true,
+            dmg: macDmg,
+          },
+        }
+      : { nsisResourceCount: nativeResources.count }),
     componentArchiveCount: catalog.components.length,
     componentArchiveBytes: archiveBytes,
     publishManifestVerified: edition === "online",

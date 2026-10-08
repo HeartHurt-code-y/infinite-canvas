@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""check_delivery_set.py —— 收尾交付自查：铁律 D32「四件套缺一不算交付」
+
+为什么必须有它（2026-09-19 用户追问「跑完的视频怎么没有出总览？」）：
+  D32 白纸黑字写着交付四件套「缺任何一件都算没交付」，用户 2026-09-15 还专门说过
+  「以后所有的项目完成后，都做一个全链总览网页」。
+  但**没有任何东西在收尾时检查这四件是否齐全** —— 于是本集从头到尾没出过全链总览页，
+  直到用户自己发现。**靠人记得的那一件，一定会缺。**
+
+  判据：**「必须交付的东西」要有一条命令能查，而不是一句要求。**
+
+四件（V2 结构下的可交付形态）：
+  | # | 交付物 | V2 判定方式 |
+  |---|---|---|
+  | 1 | 分镜提示词 | `分镜脚本/分镜_H3提示词_<变体>.md` 或 `视频/shot_*/prompt.txt` 齐（= 段数） |
+  | 2 | 审核页 | `审核/0*.html` ≥ 7 张（关 1–7）或 `审核页_<变体>.html` |
+  | 3 | 成片报告 | `成片报告_<变体>.html` 或 `审核/07_成片审核.html` |
+  | 4 | 全链总览页 | `全链总览_<变体>.html`（**且必须自带「总消耗时长」卡 + 六节齐全 + 零未替换占位符**） |
+
+用法：
+  python tools/check_delivery_set.py --project-root "<项目根>" [--variant 中文版]
+  python tools/check_delivery_set.py --self-test      # 自检：伪造缺件项目，验证它真会报
+
+退出码：0 = 四件齐；1 = 有缺件；3 = 用法错误
+"""
+import argparse
+import glob
+import io
+import os
+import re
+import sys
+import tempfile
+
+SECTIONS = ["一、片子的全貌", "二、剧本", "三、逐段总表",
+            "四、花了多少钱", "五、产物文件", "六、复盘"]
+
+
+def check(root, variant="中文版"):
+    """返回 (items, hard, warn)。items: [(名, 是否齐, 说明)]"""
+    R = root
+    items, hard, warn = [], [], []
+
+    # 1 分镜提示词
+    md = os.path.join(R, "分镜脚本", "分镜_H3提示词_%s.md" % variant)
+    prompts = glob.glob(os.path.join(R, "视频", "shot_*", "prompt.txt"))
+    nseg = 0
+    sbf = os.path.join(R, "分镜脚本", "storyboard.json")
+    if os.path.exists(sbf):
+        try:
+            import json
+            nseg = len((json.load(io.open(sbf, encoding="utf-8")) or {}).get("segments") or [])
+        except Exception:                                     # noqa: BLE001
+            pass
+    ok1 = os.path.exists(md) or (nseg > 0 and len(prompts) >= nseg)
+    items.append(("1 分镜提示词", ok1,
+                  ("%s" % os.path.basename(md)) if os.path.exists(md)
+                  else ("视频/shot_*/prompt.txt %d 份 / 段数 %d" % (len(prompts), nseg))))
+    if not ok1:
+        hard.append("缺「分镜提示词」：既没有 分镜脚本/分镜_H3提示词_%s.md，"
+                    "shot_*/prompt.txt 也不齐（%d/%d）" % (variant, len(prompts), nseg))
+
+    # 2 审核页
+    pages = sorted(glob.glob(os.path.join(R, "审核", "0*.html")))
+    one = os.path.join(R, "审核页_%s.html" % variant)
+    ok2 = len(pages) >= 7 or os.path.exists(one)
+    items.append(("2 审核页", ok2,
+                  "审核/0*.html %d 张" % len(pages) if pages else os.path.basename(one)))
+    if not ok2:
+        hard.append("缺「审核页」：审核/0*.html 只有 %d 张（关 1–7 应有 7 张）"
+                    % len(pages))
+
+    # 3 成片报告
+    rep = os.path.join(R, "成片报告_%s.html" % variant)
+    fin07 = os.path.join(R, "审核", "07_成片审核.html")
+    ok3 = os.path.exists(rep) or os.path.exists(fin07)
+    items.append(("3 成片报告", ok3,
+                  os.path.basename(rep) if os.path.exists(rep) else os.path.basename(fin07)))
+    if not ok3:
+        hard.append("缺「成片报告」：既没有 成片报告_%s.html，也没有 审核/07_成片审核.html" % variant)
+
+    # 4 全链总览页（并校验内容）
+    ov = os.path.join(R, "全链总览_%s.html" % variant)
+    if not os.path.exists(ov):
+        items.append(("4 全链总览页", False, "不存在"))
+        hard.append("缺「全链总览页」：%s 不存在 —— 跑 `python references/"
+                    "make_chain_overview_v2.py --project-root \"%s\" --variant %s`"
+                    % (os.path.basename(ov), R, variant))
+    else:
+        t = io.open(ov, encoding="utf-8", errors="replace").read()
+        miss = [s for s in SECTIONS if s not in t]
+        left = sorted(set(re.findall(r"__[A-Z0-9_]+__", t)))
+        has_wall = "总消耗时长" in t
+        rows = len(re.findall(r"<tr><td class=s>\d\d</td>", t))
+        ok4 = (not miss) and (not left) and has_wall and (nseg == 0 or rows == nseg)
+        det = []
+        if miss:
+            det.append("缺节 %s" % miss)
+        if left:
+            det.append("未替换占位符 %s" % left)
+        if not has_wall:
+            det.append("缺「总消耗时长」卡")
+        if nseg and rows != nseg:
+            det.append("逐段表 %d 行 ≠ 段数 %d" % (rows, nseg))
+        items.append(("4 全链总览页", ok4,
+                      "%.1f KB" % (os.path.getsize(ov) / 1024) if ok4
+                      else "；".join(det)))
+        if not ok4:
+            hard.append("「全链总览页」不合格：%s" % "；".join(det))
+
+    return items, hard, warn
+
+
+def _self_test():
+    """自检：伪造一个「只有审核页」的项目 → 必须报出其余三件缺失（证明它会拦）。"""
+    print("=" * 68)
+    print("收尾交付自查 · 自检（伪造缺件项目）")
+    print("=" * 68)
+    fails = []
+    with tempfile.TemporaryDirectory(prefix="dap_dset_") as td:
+        os.makedirs(os.path.join(td, "审核"))
+        for i in range(1, 8):
+            io.open(os.path.join(td, "审核", "0%d_x.html" % i), "w", encoding="utf-8").write("x")
+        items, hard, _ = check(td)
+        got = [n for n, ok, _d in items if not ok]
+        print("  仅放了审核页 → 判为缺：%s" % got)
+        if len(hard) < 3 or "4 全链总览页" not in got:
+            fails.append("缺件没有被完整报出（hard=%d, got=%s）" % (len(hard), got))
+        else:
+            print("   ✅ 正确报出分镜提示词 / 成片报告 / 全链总览页三件缺失")
+
+        # 反向：补一个「有占位符残留」的总览页 → 必须判不合格
+        io.open(os.path.join(td, "全链总览_中文版.html"), "w", encoding="utf-8").write(
+            "一、片子的全貌 总消耗时长 二、剧本 三、逐段总表 四、花了多少钱 五、产物文件 六、复盘 __LEFT__")
+        _it, hard2, _ = check(td)
+        if not any("不合格" in h for h in hard2):
+            fails.append("总览页有未替换占位符，却没被判不合格")
+        else:
+            print("   ✅ 总览页含未替换占位符 → 正确判为不合格")
+
+    if fails:
+        for f in fails:
+            print("   ❌ %s" % f)
+        print("❌ 自检未通过")
+        return 1
+    print("✅ 自检通过：缺件与坏件都会被拦。")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root")
+    ap.add_argument("--variant", default="中文版")
+    ap.add_argument("--self-test", action="store_true")
+    a = ap.parse_args()
+    if a.self_test:
+        sys.exit(_self_test())
+    if not a.project_root:
+        sys.exit("❌ 需要 --project-root（或 --self-test）")
+
+    items, hard, _w = check(os.path.abspath(a.project_root), a.variant)
+    print("=" * 68)
+    print("收尾交付自查 · 铁律 D32 四件套（变体：%s）" % a.variant)
+    print("=" * 68)
+    for n, ok, det in items:
+        print("  %s %-16s %s" % ("✅" if ok else "❌", n, det))
+    print()
+    if hard:
+        print("❌ 交付四件套不齐 / 不合格（缺任何一件都算没交付）：")
+        for h in hard:
+            print("   · %s" % h)
+        sys.exit(1)
+    print("✅ 四件套齐全且合格。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

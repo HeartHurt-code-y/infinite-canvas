@@ -8,6 +8,7 @@ import {
   assertComponentRoot,
   COMPONENT_REPO_ROOT,
   COMPONENT_PLATFORM,
+  componentPlatform,
   componentBytesSha256,
   componentFileSha256,
   RUNTIME_COMPONENTS,
@@ -20,7 +21,20 @@ import {
   createEditionBuildSource,
 } from "./edition-source-fingerprint.mjs";
 
-export function editionArtifactBasename(filename, edition) {
+export function editionArtifactBasename(
+  filename,
+  edition,
+  { platform, applicationVersion, productName = "无限画布" } = {},
+) {
+  if (platform?.startsWith("darwin-")) {
+    const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+    const extension = filename.endsWith(".app.tar.gz.sig")
+      ? ".app.tar.gz.sig"
+      : filename.endsWith(".app.tar.gz")
+        ? ".app.tar.gz"
+        : ".dmg";
+    return `${productName}_${applicationVersion}_${arch}-${edition}${extension}`;
+  }
   if (/\.(exe|exe\.sig)$/i.test(filename))
     return filename.replace(/-setup(\.exe(?:\.sig)?)$/i, `-${edition}-setup$1`);
   return filename.replace(/(\.msi(?:\.sig)?)$/i, `-${edition}$1`);
@@ -39,6 +53,9 @@ export function editionBuildPlan(
   if (edition !== "online" && edition !== "offline")
     throw new Error("Distribution edition must be online or offline");
   assertComponentPlatform(platform, arch, environment.TAURI_ENV_TARGET_TRIPLE);
+  const distributionPlatform = componentPlatform(platform, arch);
+  if (platform === "darwin" && edition !== "online")
+    throw new Error("macOS offline distribution uses the existing full tauri:build entry point");
   if (environment.CARGO_BUILD_TARGET)
     assertComponentPlatform(platform, arch, environment.CARGO_BUILD_TARGET);
   if (
@@ -65,9 +82,18 @@ export function editionBuildPlan(
   const targetAt = passthrough.indexOf("--target");
   const target =
     targetAt < 0
-      ? passthrough.find((argument) => argument.startsWith("--target="))?.slice(9)
+      ? (passthrough.find((argument) => argument.startsWith("--target="))?.slice(9) ??
+        environment.CARGO_BUILD_TARGET)
       : passthrough[targetAt + 1];
   if (target) assertComponentPlatform(platform, arch, target);
+  if (
+    platform === "darwin" &&
+    !passthrough.some(
+      (argument) => argument === "--bundles" || argument.startsWith("--bundles="),
+    ) &&
+    !passthrough.includes("--no-bundle")
+  )
+    passthrough.push("--bundles", "app,dmg");
   const targetDirectory = path.join(root, ".cache/tauri-editions", edition, "target");
   const generatedConfigPath = path.join(
     root,
@@ -77,6 +103,8 @@ export function editionBuildPlan(
   );
   return {
     edition,
+    platform: distributionPlatform,
+    target,
     targetDirectory,
     generatedConfigPath,
     env: { ...environment, CARGO_TARGET_DIR: targetDirectory, IC_DISTRIBUTION_EDITION: edition },
@@ -149,7 +177,7 @@ export async function writeEditionTargetMarker(
   await writeFile(
     markerPath,
     JSON.stringify(
-      { schemaVersion: 1, applicationVersion, edition: plan.edition, platform: "windows-x86_64" },
+      { schemaVersion: 1, applicationVersion, edition: plan.edition, platform: plan.platform },
       null,
       2,
     ) + "\n",
@@ -168,6 +196,10 @@ export async function archiveEditionBundles(
     applicationVersion,
   );
   const artifacts = [];
+  const isMac = plan.platform?.startsWith("darwin-");
+  const config = isMac
+    ? JSON.parse(await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"))
+    : null;
   async function visit(directory, prefix = "") {
     let names;
     try {
@@ -182,11 +214,24 @@ export async function archiveEditionBundles(
       if (info.isSymbolicLink())
         throw new Error(`Edition artifacts must be regular files: ${from}`);
       const relative = prefix ? `${prefix}/${name}` : name;
-      if (info.isDirectory()) await visit(from, relative);
-      else if (info.isFile()) {
-        const stagedRelative = prefix
-          ? `${prefix}/${editionArtifactBasename(name, plan.edition)}`
-          : editionArtifactBasename(name, plan.edition);
+      if (info.isDirectory()) {
+        if (isMac && name.endsWith(".app")) continue;
+        await visit(from, relative);
+      } else if (info.isFile()) {
+        if (
+          isMac &&
+          !(
+            (prefix === "macos" && /\.app\.tar\.gz(?:\.sig)?$/.test(name)) ||
+            (prefix === "dmg" && name.endsWith(".dmg"))
+          )
+        )
+          continue;
+        const stagedName = editionArtifactBasename(name, plan.edition, {
+          platform: plan.platform,
+          applicationVersion,
+          productName: config?.productName,
+        });
+        const stagedRelative = prefix ? `${prefix}/${stagedName}` : stagedName;
         const to = path.join(output, stagedRelative);
         await mkdir(path.dirname(to), { recursive: true });
         await copyFile(from, to);
@@ -201,16 +246,42 @@ export async function archiveEditionBundles(
   const profile = plan.args.includes("--debug") ? "debug" : "release";
   const targetAt = plan.args.indexOf("--target");
   const target =
-    targetAt < 0
+    plan.target ??
+    (targetAt < 0
       ? plan.args.find((argument) => argument.startsWith("--target="))?.slice(9)
-      : plan.args[targetAt + 1];
-  await visit(path.join(plan.targetDirectory, ...(target ? [target] : []), profile, "bundle"));
+      : plan.args[targetAt + 1]);
+  const bundleRoot = path.join(
+    plan.targetDirectory,
+    ...(target ? [target] : []),
+    profile,
+    "bundle",
+  );
+  if (isMac) {
+    await visit(path.join(bundleRoot, "macos"), "macos");
+    await visit(path.join(bundleRoot, "dmg"), "dmg");
+  } else await visit(bundleRoot);
   if (artifacts.length) {
+    if (isMac) {
+      const helper = path.join(output, "helper/install-macos.sh");
+      await mkdir(path.dirname(helper), { recursive: true });
+      await copyFile(path.join(root, "scripts/install-macos.sh"), helper);
+      artifacts.push({
+        path: "helper/install-macos.sh",
+        size: (await lstat(helper)).size,
+        sha256: await componentFileSha256(helper),
+      });
+    }
     const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
     const catalogSha256 = await componentFileSha256(catalogPath);
     if (plan.edition === "offline")
       artifacts.push(
-        ...(await stageOfflineComponents({ output, root, applicationVersion, catalogSha256 })),
+        ...(await stageOfflineComponents({
+          output,
+          root,
+          applicationVersion,
+          catalogSha256,
+          platform: plan.platform,
+        })),
       );
     await writeFile(
       path.join(output, "distribution.json"),
@@ -219,7 +290,7 @@ export async function archiveEditionBundles(
           schemaVersion: 1,
           applicationVersion,
           edition: plan.edition,
-          platform: "windows-x86_64",
+          platform: plan.platform,
           catalogSha256,
           artifacts,
         },
@@ -234,6 +305,7 @@ export async function archiveEditionBundles(
         applicationVersion,
         catalogSha256,
         artifacts,
+        platform: plan.platform,
       });
     if (sourceSnapshot) {
       if (
@@ -241,12 +313,19 @@ export async function archiveEditionBundles(
         sourceSnapshot.edition !== plan.edition
       )
         throw new Error("Build source snapshot does not match the archived edition/version");
-      const executablePath = path.join(
-        plan.targetDirectory,
-        ...(target ? [target] : []),
-        profile,
-        "infinite-canvas.exe",
-      );
+      const executablePath = isMac
+        ? path.join(
+            bundleRoot,
+            "macos",
+            `${config.productName}.app`,
+            "Contents/MacOS/infinite-canvas",
+          )
+        : path.join(
+            plan.targetDirectory,
+            ...(target ? [target] : []),
+            profile,
+            "infinite-canvas.exe",
+          );
       const record = await createEditionBuildSource({
         snapshot: sourceSnapshot,
         executablePath,
@@ -275,6 +354,7 @@ export async function stageOfflineComponents({
   root = COMPONENT_REPO_ROOT,
   applicationVersion,
   catalogSha256,
+  platform = "windows-x86_64",
 }) {
   const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
   if ((await componentFileSha256(catalogPath)) !== catalogSha256)
@@ -283,7 +363,7 @@ export async function stageOfflineComponents({
   if (
     catalog.schemaVersion !== 1 ||
     catalog.applicationVersion !== applicationVersion ||
-    catalog.platform !== COMPONENT_PLATFORM
+    catalog.platform !== platform
   )
     throw new Error("Offline suite catalog identity does not match this edition");
   await mkdir(path.join(output, "components"), { recursive: true });
@@ -359,7 +439,7 @@ export async function stageOfflineComponents({
         schemaVersion: 1,
         applicationVersion,
         edition: "offline",
-        platform: COMPONENT_PLATFORM,
+        platform,
         catalogSha256,
         components,
       },
@@ -376,13 +456,20 @@ export async function writeOnlineEditionReleasePlan({
   applicationVersion,
   catalogSha256,
   artifacts,
+  platform = COMPONENT_PLATFORM,
 }) {
-  const installers = artifacts.filter((artifact) => /_x64-online-setup\.exe$/.test(artifact.path));
-  if (installers.length > 1) throw new Error("Online edition output has multiple NSIS installers");
+  const isMac = platform?.startsWith("darwin-");
+  const installers = artifacts.filter((artifact) =>
+    isMac
+      ? artifact.path.endsWith("-online.app.tar.gz")
+      : /_x64-online-setup\.exe$/.test(artifact.path),
+  );
+  if (installers.length > 1)
+    throw new Error("Online edition output has multiple updater installers");
   const installer = installers[0];
   const signed =
     installer && artifacts.some((artifact) => artifact.path === `${installer.path}.sig`);
-  const channel = "windows-x86_64-online";
+  const channel = `${platform}-online`;
   const baseUrl = `${tosUpdatesPublicBaseUrl()}/${channel}`;
   let feed = null;
   if (signed) {
@@ -390,10 +477,14 @@ export async function writeOnlineEditionReleasePlan({
     if (!signature) throw new Error("Online updater signature is empty");
     const latest = buildLatestManifest({
       version: applicationVersion,
-      notes: "轻量联网版：需要时可安装对应功能组件，也支持离线组件包。",
+      notes:
+        "轻量联网版：需要时可安装对应功能组件，也支持离线组件包。" +
+        (isMac
+          ? " macOS 包未经 Apple 公证，首次安装可能被 Gatekeeper 拦截，请按随附 install-macos.sh 指引安装。"
+          : ""),
       pubDate: new Date().toISOString(),
       platforms: {
-        "windows-x86_64": {
+        [platform]: {
           url: `${baseUrl}/${encodeURIComponent(path.basename(installer.path))}`,
           signature,
         },
@@ -416,7 +507,7 @@ export async function writeOnlineEditionReleasePlan({
         schemaVersion: 1,
         edition: "online",
         applicationVersion,
-        platform: "windows-x86_64",
+        platform,
         channel,
         catalogSha256,
         feed,

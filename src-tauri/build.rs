@@ -25,17 +25,20 @@ fn main() {
         .map(|(bytes, _)| hex::encode(Sha256::digest(bytes)));
     emit("IC_COMPONENT_CATALOG_SHA256", catalog_hash.as_deref());
     if edition == "online" {
-        assert!(
-            std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-                && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64"),
-            "online edition currently supports only Windows x86_64"
-        );
+        let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let platform = match (target_os.as_str(), target_arch.as_str()) {
+            ("windows", "x86_64") => "windows-x86_64",
+            ("macos", "aarch64") => "darwin-aarch64",
+            ("macos", "x86_64") => "darwin-x86_64",
+            _ => panic!("online edition supports Windows x86_64 and macOS aarch64/x86_64"),
+        };
         let (_, value) = catalog
             .as_ref()
             .expect("online edition requires a prepared component catalog");
         assert!(
             value["schemaVersion"] == 1
-                && value["platform"] == "windows-x86_64"
+                && value["platform"] == platform
                 && value["applicationVersion"] == env!("CARGO_PKG_VERSION"),
             "online component catalog does not match this application build"
         );

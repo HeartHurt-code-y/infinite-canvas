@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+音色设计能力 音色设计运行器
+工作流：workflowId = PROJECT_MODEL_BINDING
+节点：node 8 = 台词文本（prompt），node 9 = 音色描述（voice_description）
+
+用法：
+  python voice_designer.py --project_provider_setting $项目模型_project_provider_setting \
+    --char-id char_01 \
+    --voice-desc "24岁温柔女咖啡店主，中音偏暖带一点鼻音，语速偏慢" \
+    --sample-text "你好，欢迎来到屿间咖啡。" \
+    --output char_01_voice.mp3
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import deps  # noqa: E402
+
+rh = deps.load_项目模型_runner()  # 内置副本优先（V2.0 自包含；旧写法硬编码了本机绝对路径）
+
+WORKFLOW_ID_BREEZE_TTS2 = "PROJECT_MODEL_BINDING"
+N_TEXT = "8"           # CR Prompt Text - 台词
+N_VOICE_DESC = "9"     # CR Prompt Text - 音色描述
+N_SAVE = "6"           # SaveAudio
+
+
+def design_voice(project_provider_setting, char_id, voice_desc, sample_text, output_path,
+                 instance_type="plus", timeout=300):
+    """
+    调 音色设计能力 工作流生成角色音色样本。
+
+    返回：{"task_id": ..., "voice_path": ..., "coins": ...}
+    """
+    node_info = [
+        {"nodeId": N_TEXT, "fieldName": "prompt", "fieldValue": sample_text},
+        {"nodeId": N_VOICE_DESC, "fieldName": "prompt", "fieldValue": voice_desc},
+    ]
+
+    print(f"[音色设计能力] 为 {char_id} 设计音色")
+    print(f"  音色描述: {voice_desc}")
+    print(f"  台词样本: {sample_text}")
+
+    task_id = rh.submit_task(project_provider_setting, node_info, "b2",
+                             workflow_id=WORKFLOW_ID_BREEZE_TTS2,
+                             instance_type=instance_type)
+    print(f"  taskId: {task_id}")
+
+    results = rh.poll_task(project_provider_setting, task_id, "b2", timeout=timeout)
+    # 结果是音频文件
+    audios = [r for r in results if (r.get("type") or "") in ("wav", "mp3", "flac", "m4a")]
+    if not audios:
+        raise RuntimeError(f"音色设计能力 未返回音频产物：{results}")
+
+    audio_url = audios[0]["url"]
+    coins = sum(int(r.get("coins") or 0) for r in results)
+
+    # 下载
+    rh.download(audio_url, output_path)
+    print(f"  ✅ 音色样本已保存：{output_path}（消耗 {coins} RH 币）")
+
+    return {
+        "task_id": task_id,
+        "voice_path": output_path,
+        "coins": coins,
+        "voice_desc": voice_desc,
+        "sample_text": sample_text,
+    }
+
+
+def main():
+    ap = argparse.ArgumentParser(description="音色设计能力 音色设计")
+    ap.add_argument("--project_provider_setting", default="",
+                    help="缺省走 deps 五级读取链（--project_provider_setting > 环境变量 > 项目 .env > 凭证文件）")
+    ap.add_argument("--char-id", required=True, help="角色 ID（如 char_01）")
+    ap.add_argument("--voice-desc", required=True, help="音色描述（中文自然语言）")
+    ap.add_argument("--sample-text", required=True, help="台词样本（3~5 秒）")
+    ap.add_argument("--output", required=True, help="输出 mp3 路径")
+    ap.add_argument("--instance-type", default="plus")
+    args = ap.parse_args()
+
+    if not args.project_provider_setting:
+        key, src = deps.resolve_project_provider_setting("项目模型_project_provider_setting",
+                                        project_root=os.path.dirname(os.path.abspath(args.output)))
+        if key:
+            args.project_provider_setting = key
+            print("🔑 项目模型_project_provider_setting 来源：%s（%s）" % (src, deps.mask(key)))
+    if not args.project_provider_setting:
+        sys.exit(deps.missing_key_hint("项目模型_project_provider_setting"))
+
+    result = design_voice(args.project_provider_setting, args.char_id, args.voice_desc,
+                          args.sample_text, args.output, args.instance_type)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

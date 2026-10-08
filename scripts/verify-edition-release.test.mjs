@@ -14,7 +14,6 @@ import {
 import {
   buildRuntimeComponentCatalog,
   COMPONENT_FEATURES,
-  COMPONENT_PLATFORM,
   COMPONENT_REPO_ROOT,
   componentBytesSha256,
   componentFileSha256,
@@ -29,6 +28,7 @@ import {
 } from "./edition-source-fingerprint.mjs";
 
 const VERSION = "0.2.1";
+const COMPONENT_PLATFORM = "windows-x86_64";
 async function writeJson(filename, value) {
   await mkdir(path.dirname(filename), { recursive: true });
   await writeFile(filename, JSON.stringify(value, null, 2) + "\n");
@@ -110,11 +110,16 @@ async function fixture(t, edition = "online", target = "") {
         sha256: archiveSha256,
         url: runtimeComponentArchiveUrl(definition.id, archiveSha256, {
           applicationVersion: VERSION,
+          platform: COMPONENT_PLATFORM,
         }),
       },
     });
   }
-  const catalog = buildRuntimeComponentCatalog({ applicationVersion: VERSION, components });
+  const catalog = buildRuntimeComponentCatalog({
+    applicationVersion: VERSION,
+    components,
+    platform: COMPONENT_PLATFORM,
+  });
   const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
   await writeJson(catalogPath, catalog);
   const catalogSha256 = await componentFileSha256(catalogPath);
@@ -292,6 +297,7 @@ async function fixture(t, edition = "online", target = "") {
   const calls = { pins: [], signatures: [] };
   const options = {
     root,
+    platform: COMPONENT_PLATFORM,
     distributionDirectory,
     readCompiledPins: (filename) => {
       calls.pins.push(filename);
@@ -357,6 +363,258 @@ async function addSourceRecord(value) {
   await writeJson(path.join(value.distributionDirectory, "build-source.json"), record);
   return record;
 }
+
+async function macFixture(t, platform = "darwin-aarch64", explicitTarget = false) {
+  const f = await fixture(t);
+  f.catalog.platform = platform;
+  for (const component of f.catalog.components)
+    component.archive.url = runtimeComponentArchiveUrl(component.id, component.archive.sha256, {
+      applicationVersion: VERSION,
+      platform,
+    });
+  await writeJson(f.catalogPath, f.catalog);
+  const catalogSha256 = await componentFileSha256(f.catalogPath);
+  f.pins.catalogSha256 = catalogSha256;
+  const configPath = path.join(f.root, "src-tauri/tauri.conf.json");
+  const config = JSON.parse(await readFile(configPath));
+  config.identifier = "com.infinitecanvas.desktop";
+  config.bundle = {
+    icon: ["icons/icon.icns"],
+    macOS: {
+      files: {
+        "Resources/unlock-installed-macos-app.sh": "../scripts/unlock-installed-macos-app.sh",
+      },
+    },
+  };
+  await writeJson(configPath, config);
+  for (const relative of [
+    "src-tauri/icons/icon.icns",
+    "scripts/unlock-installed-macos-app.sh",
+    "scripts/install-macos.sh",
+  ]) {
+    await mkdir(path.dirname(path.join(f.root, relative)), { recursive: true });
+    await writeFile(path.join(f.root, relative), `verified ${relative}`);
+  }
+  await writeJson(path.join(f.targetDirectory, "distribution.json"), {
+    schemaVersion: 1,
+    applicationVersion: VERSION,
+    edition: "online",
+    platform,
+  });
+  const triple = explicitTarget
+    ? platform === "darwin-aarch64"
+      ? "aarch64-apple-darwin"
+      : "x86_64-apple-darwin"
+    : "";
+  const appPath = path.join(f.targetDirectory, triple, "release/bundle/macos/无限画布.app");
+  f.executablePath = path.join(appPath, "Contents/MacOS/infinite-canvas");
+  await mkdir(path.dirname(f.executablePath), { recursive: true });
+  await writeFile(f.executablePath, "native signed Mac executable fixture");
+  await rm(path.join(f.distributionDirectory, "nsis"), { recursive: true });
+  const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+  f.installerPath = `macos/无限画布_${VERSION}_${arch}-online.app.tar.gz`;
+  const dmgPath = `dmg/无限画布_${VERSION}_${arch}-online.dmg`;
+  const paths = [f.installerPath, `${f.installerPath}.sig`, dmgPath, "helper/install-macos.sh"];
+  f.marker.artifacts = [];
+  f.marker.catalogSha256 = catalogSha256;
+  f.marker.platform = platform;
+  for (const filename of paths) {
+    await mkdir(path.dirname(path.join(f.distributionDirectory, filename)), { recursive: true });
+    const body = filename.endsWith(".sig")
+      ? Buffer.from("signature fixture\n")
+      : filename.endsWith(".sh")
+        ? await readFile(path.join(f.root, "scripts/install-macos.sh"))
+        : Buffer.from(`native Mac artifact ${filename}`);
+    await writeFile(path.join(f.distributionDirectory, filename), body);
+    f.marker.artifacts.push({
+      path: filename,
+      size: body.length,
+      sha256: componentBytesSha256(body),
+    });
+  }
+  await writeJson(f.markerPath, f.marker);
+  const channel = `${platform}-online`;
+  const baseUrl = `${tosUpdatesPublicBaseUrl()}/${channel}`;
+  await writeJson(
+    path.join(f.distributionDirectory, "latest.json"),
+    buildLatestManifest({
+      version: VERSION,
+      pubDate: "2026-10-08T00:00:00.000Z",
+      notes: "mac fixture",
+      platforms: {
+        [platform]: {
+          url: `${baseUrl}/${encodeURIComponent(path.basename(f.installerPath))}`,
+          signature: "signature fixture",
+        },
+      },
+    }),
+  );
+  await writeJson(path.join(f.distributionDirectory, "publish-manifest.json"), {
+    schemaVersion: 1,
+    edition: "online",
+    applicationVersion: VERSION,
+    platform,
+    channel,
+    catalogSha256,
+    feed: {
+      localPath: path.join(f.distributionDirectory, "latest.json"),
+      objectKey: tosUpdatesObjectKey(`${channel}/latest.json`),
+      url: `${baseUrl}/latest.json`,
+    },
+    artifacts: f.marker.artifacts.map((artifact) => ({
+      ...artifact,
+      localPath: path.join(f.distributionDirectory, artifact.path),
+      objectKey: tosUpdatesObjectKey(`${channel}/${path.basename(artifact.path)}`),
+      url: `${baseUrl}/${encodeURIComponent(path.basename(artifact.path))}`,
+    })),
+    componentArchives: f.catalog.components.map((component) => ({
+      id: component.id,
+      localPath: path.join(f.packageDirectory, `${component.archive.sha256}.zip`),
+      ...component.archive,
+    })),
+  });
+  let appInventory;
+  f.options = {
+    ...f.options,
+    platform,
+    readProductVersion: () => {
+      throw new Error("Mac must not inspect PE ProductVersion");
+    },
+    readCompiledPins: (filename) => {
+      assert.equal(filename, f.executablePath);
+      return structuredClone(f.pins);
+    },
+    verifyMacApp: async (filename, options) => {
+      assert.equal(filename, appPath);
+      assert.equal(options.platform, platform);
+      assert.equal(options.identifier, config.identifier);
+      assert.equal(options.applicationVersion, VERSION);
+      assert.equal(
+        options.expectedResources.some(({ path: relative }) => relative.startsWith("blender/")),
+        false,
+      );
+      appInventory = [
+        {
+          path: "Contents/MacOS/infinite-canvas",
+          size: (await readFile(f.executablePath)).length,
+          sha256: await componentFileSha256(f.executablePath),
+          mode: 0o755,
+        },
+        ...options.expectedResources.map((entry) => ({
+          path: `Contents/Resources/${entry.path}`,
+          size: entry.size,
+          sha256: entry.sha256,
+          mode: entry.mode ?? 0o644,
+        })),
+      ];
+      return {
+        executablePath: f.executablePath,
+        inventory: appInventory,
+        bundleResourceCount: options.expectedResources.length,
+        codeSignatureVerified: true,
+        signingIdentity: "ad-hoc",
+        architectureVerified: true,
+      };
+    },
+    inventoryMacArchive: (filename, name) => {
+      assert.equal(filename, path.join(f.distributionDirectory, f.installerPath));
+      assert.equal(name, "无限画布.app");
+      return structuredClone(appInventory);
+    },
+    verifyMacDmg: (filename, name, inventory) => {
+      assert.equal(filename, path.join(f.distributionDirectory, dmgPath));
+      assert.equal(name, "无限画布.app");
+      assert.deepEqual(inventory, appInventory);
+      return { dmgVerified: true, applicationBytesVerified: true, codeSignatureVerified: true };
+    },
+  };
+  return f;
+}
+
+test("both Mac architectures verify their native app, DMG, signed updater and independent catalog/channel", async (t) => {
+  for (const [platform, explicitTarget] of [
+    ["darwin-aarch64", false],
+    ["darwin-x86_64", true],
+  ]) {
+    const f = await macFixture(t, platform, explicitTarget);
+    await addSourceRecord(f);
+    const report = await verifyEditionRelease({ ...f.options, requireSourceFreshness: true });
+    assert.equal(report.platform, platform);
+    assert.equal(report.channel, `${platform}-online`);
+    assert.equal(report.macos.signingIdentity, "ad-hoc");
+    assert.equal(report.macos.codeSignatureVerified, true);
+    assert.equal(report.macos.updateArchiveBytesVerified, true);
+    assert.equal(report.macos.dmg.applicationBytesVerified, true);
+    assert.equal(report.installer.path, f.installerPath);
+    assert.equal(report.artifactCount, 4);
+    assert.equal(report.nsisResourceCount, undefined);
+    assert.equal(report.sourceFreshnessVerified, true);
+  }
+});
+
+test("Mac verification refuses changed updater contents, incomplete DMG checks, extra resources and installation helper drift", async (t) => {
+  const f = await macFixture(t);
+  await assert.rejects(
+    verifyEditionRelease({ ...f.options, inventoryMacArchive: () => [] }),
+    /Updater archive application bytes/,
+  );
+  await assert.rejects(
+    verifyEditionRelease({ ...f.options, verifyMacDmg: () => ({ dmgVerified: true }) }),
+    /DMG verification is incomplete/,
+  );
+  const config = JSON.parse(await readFile(f.editionConfigPath));
+  config.bundle.resources["resources/blender/"] = "blender/";
+  await writeJson(f.editionConfigPath, config);
+  await assert.rejects(verifyEditionRelease(f.options), /unexpected component/);
+  delete config.bundle.resources["resources/blender/"];
+  await writeJson(f.editionConfigPath, config);
+  await writeFile(path.join(f.root, "scripts/install-macos.sh"), "changed helper after build");
+  await assert.rejects(verifyEditionRelease(f.options), /helper differs/);
+});
+
+test("Mac catalog preserves Unix file modes and safe relative component links while rejecting escape and Windows links", async (t) => {
+  const f = await macFixture(t);
+  const component = f.catalog.components.find(({ id }) => id === "blender");
+  component.files.find(({ path: filename }) => filename === "LICENSE.txt").mode = 0o640;
+  const target = "A";
+  const link = {
+    path: "Blender.app/Contents/Frameworks/Versions/Current",
+    type: "symlink",
+    target,
+    size: Buffer.byteLength(target),
+    sha256: componentBytesSha256(Buffer.from(target)),
+    mode: 0o755,
+  };
+  component.files.push(link);
+  assertEditionCatalog(f.catalog, VERSION, "darwin-aarch64");
+  for (const wrongTarget of ["../../../../../../outside", "/absolute", "C:/external"]) {
+    const catalog = structuredClone(f.catalog);
+    const entry = catalog.components.find(({ id }) => id === "blender").files.at(-1);
+    Object.assign(entry, {
+      target: wrongTarget,
+      size: Buffer.byteLength(wrongTarget),
+      sha256: componentBytesSha256(Buffer.from(wrongTarget)),
+    });
+    assert.throws(
+      () => assertEditionCatalog(catalog, VERSION, "darwin-aarch64"),
+      /Invalid or duplicate component file/,
+    );
+  }
+  const windows = structuredClone(f.catalog);
+  windows.platform = "windows-x86_64";
+  for (const entry of windows.components)
+    entry.archive.url = runtimeComponentArchiveUrl(entry.id, entry.archive.sha256, {
+      applicationVersion: VERSION,
+      platform: windows.platform,
+    });
+  windows.components
+    .find(({ id }) => id === "blender")
+    .files.find(({ path: filename }) => filename === "LICENSE.txt").mode = 0o644;
+  assert.throws(
+    () => assertEditionCatalog(windows, VERSION, windows.platform),
+    /Invalid or duplicate component file/,
+  );
+});
 
 test("online hand-off verifies the exact release executable's seven pins, signatures, channel, archives and NSIS file table", async (t) => {
   const value = await fixture(t);
@@ -649,12 +907,15 @@ test("catalog schema/path/channel identities and verification directory are stri
   const wrongCatalog = structuredClone(value.catalog);
   wrongCatalog.components[0].files[0].path = "../outside";
   assert.throws(
-    () => assertEditionCatalog(wrongCatalog, VERSION),
+    () => assertEditionCatalog(wrongCatalog, VERSION, COMPONENT_PLATFORM),
     /Invalid or duplicate component file/,
   );
   const wrongArchive = structuredClone(value.catalog);
   wrongArchive.components[0].archive.url = "https://example.com/blender.zip";
-  assert.throws(() => assertEditionCatalog(wrongArchive, VERSION), /trusted content-addressed URL/);
+  assert.throws(
+    () => assertEditionCatalog(wrongArchive, VERSION, COMPONENT_PLATFORM),
+    /trusted content-addressed URL/,
+  );
   await assert.rejects(
     verifyEditionRelease({
       ...value.options,

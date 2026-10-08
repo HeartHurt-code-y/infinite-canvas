@@ -1,0 +1,95 @@
+name: macOS Online Package
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: Native Mac architecture
+        type: choice
+        options:
+          - arm64
+          - x64
+        default: arm64
+      publish:
+        description: Publish verified artifacts and the independent online update feed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-online-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 180
+    env:
+      CI: "true"
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /opt/hostedtoolcache "$HOME/Library/Developer/CoreSimulator" /usr/local/lib/android
+          df -h /
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Confirm native architecture and version
+        env:
+          EXPECTED_ARCH: ${{ inputs.architecture }}
+        run: |
+          test "$(node -p 'process.arch')" = "$EXPECTED_ARCH"
+          node --input-type=module -e 'import {readFileSync} from "node:fs"; const p=JSON.parse(readFileSync("package.json")); const t=JSON.parse(readFileSync("src-tauri/tauri.conf.json")); if(p.version!==t.version) throw Error("Package and Tauri versions differ");'
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Run affected distribution tests
+        run: |
+          export IC_COMPONENT_PYTHON="$(command -v python3)"
+          "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
+          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs
+      - name: Prepare optional signing identity
+        run: bash scripts/prepare-macos-online-signing.sh
+      - name: Build and verify online DMG and updater
+        run: bash scripts/build-macos-online.sh
+      - name: Publish verified online release
+        if: inputs.publish
+        env:
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
+      - name: Upload installation and component artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinite-canvas-macos-online-${{ inputs.architecture }}-${{ github.sha }}
+          path: |
+            .cache/tauri-editions/online/artifacts/*/
+            .cache/runtime-components/packages/*.zip
+            src-tauri/resources/component-catalog.json
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Report installation boundary
+        run: |
+          {
+            echo 'macOS online DMG, updater signature and component archives verified.'
+            echo 'Apple notarization is not performed. Gatekeeper may block first installation; use helper/install-macos.sh supplied with the DMG.'
+          } >> "$GITHUB_STEP_SUMMARY"

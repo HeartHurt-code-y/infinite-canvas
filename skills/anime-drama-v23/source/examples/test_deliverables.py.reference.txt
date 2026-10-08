@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_deliverables.py —— 交付物与实现必须同源的对抗测试（V2.2.3）
+
+为什么必须有它（2026-09-19 实测踩到）：
+  出交付三件套时，我先写了 `standalone.md` 与 `项目说明介绍页.html`，
+  **然后**才把 skill 从 V2.2.1 升到 V2.2.2 —— 于是两个交付物里印的是**旧版本号**，
+  而包已经是新的。更糟的是：这两份文件**已经被打进那一版的 zip 里了**，
+  等于「发出去的说明书上写着上一个版本」。
+
+  这正是铁律 D2-o 说的那件事：**交付文档里的数字必须从实现里取，不许手抄。**
+  （「N 条铁律 / 不变式 M 条 / 版本号」都一样 —— 手抄的那个数字，明天就是错的。）
+
+判据：**交付物里每一个会变的数字，都必须能被一条测试盯住。**
+      没有断言盯着的数字，迟早会和实现分家，而且**分家的时候没人知道**。
+
+五项断言（含反向证伪）：
+  A 两个交付物都存在，且关键结构齐全
+  B 交付物里的版本号 == VERSION（这是本次栽的那一条）
+  C 反向证伪：拿一份**故意写旧版本**的文本喂给检查函数 → 必须报错
+     （否则「B 通过」可能只是因为它恒不报错）
+  D 单文件版的铁律条数 == 从 SKILL.md 现抽的条数（同源，不是手抄）
+  E 「版本历史」在项目说明页里必须位于**最末尾**（用户明确要求）
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import re
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+VERSION = (SKILL / "VERSION").read_text(encoding="utf-8").strip()
+STANDALONE = SKILL / "drama-auto-pipeline-standalone.md"
+ARTICLE = SKILL / "drama-auto-pipeline-项目说明介绍页.html"
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def current_version_slots(text, article=False):
+    """挑出「**该写当前版本号**」的那部分文本 —— 不是整篇。
+
+    ⚠ 第一版这里犯了个经典错误：拿整篇去找 `V<数字>`，于是
+      · 项目说明页的**版本历史表**（V1.0 / V2.0.9 / …）全被报成「旧版本号」
+      · 单文件版的**回退示例** `rollback.py --to V2.2` 也被报成「旧版本号」
+    这两处里的旧版本号是**本来就该存在**的。
+    判据（本项目反复出现的那条）：**判据本身要有判别器** ——
+    「这个词出现在多种语境里，就不能拿它当判据」。
+    所以这里先**划出作用域**：只查头部与页脚这类「当前版本位」，
+    再单独查「版本历史的第一条必须是最新版本」。
+    """
+    if article:
+        i = text.find('版本历史')
+        # ⚠ 必须用 >= 0：find 返回 0 是「就在开头」，不是「没找到」。
+        #   第一版写成 > 0，于是作用域失效 → 把版本历史里的旧版本号全误报了。
+        #   （C3 那条反向证伪就是为了抓这个边界而写的，它真的抓到了。）
+        return text[:i] if i >= 0 else text
+    lines = text.splitlines()
+    return "\n".join(lines[:8] + lines[-6:])
+
+
+def newest_history_entry(text):
+    """版本历史里的**第一条**条目（应该就是当前版本）。"""
+    i = text.find('版本历史')
+    if i < 0:
+        return None
+    m = re.search(r'>V(\d+\.\d+(?:\.\d+)?)<', text[i:])
+    return m.group(1) if m else None
+
+
+def version_mismatches(text):
+    """该写当前版本的地方，是否出现了别的版本号。"""
+    want = VERSION
+    return sorted(v for v in set(re.findall(r"V(\d+\.\d+(?:\.\d+)?)", text))
+                  if v != want)
+
+
+def main():
+    print("=" * 68)
+    print("交付物与实现同源 · 对抗测试（当前 VERSION = %s）" % VERSION)
+    print("=" * 68)
+
+    # ---------- A. 存在性 + 关键结构 ----------
+    ok("A1", STANDALONE.exists(), "单文件版存在")
+    ok("A2", ARTICLE.exists(), "项目说明介绍页存在")
+    if not (STANDALONE.exists() and ARTICLE.exists()):
+        print("\n".join(NOTE + FAIL))
+        sys.exit(1)
+    st = STANDALONE.read_text(encoding="utf-8")
+    ar = ARTICLE.read_text(encoding="utf-8")
+    for kw in ("铁律速查", "七道审核关", "全部铁律（按族分）", "通用判据", "四个最容易踩的坑"):
+        ok("A3", kw in st, "单文件版含「%s」" % kw)
+    for kw in ("七道关卡", "一致性第一位", "四道发版门禁", "敢给成绩单", "版本历史"):
+        ok("A4", kw in ar, "项目说明页含「%s」" % kw)
+
+    # ---------- B. 版本号必须与 VERSION 一致（本次栽的那条）----------
+    ms = version_mismatches(current_version_slots(st))
+    ma = version_mismatches(current_version_slots(ar, article=True))
+    ok("B1", not ms, "单文件版的「当前版本位」没写旧版本号"
+       if not ms else "单文件版当前版本位出现旧版本号 %s" % ms)
+    ok("B2", not ma, "项目说明页的「当前版本位」没写旧版本号"
+       if not ma else "项目说明页当前版本位出现旧版本号 %s" % ma)
+    ok("B3", ("V" + VERSION) in st and ("V" + VERSION) in ar,
+       "两边都明确写出了当前版本 V%s" % VERSION)
+    nw = newest_history_entry(ar)
+    ok("B4", nw == VERSION,
+       "版本历史的第一条就是当前版本（%s）" % nw if nw == VERSION
+       else "版本历史第一条是 %s，但当前版本是 %s" % (nw, VERSION))
+
+    # ---------- C. 反向证伪：旧版本号必须被查出来 ----------
+    ok("C1", version_mismatches("drama-auto-pipeline V0.0.1 · 2020-01-01") == ["0.0.1"],
+       "反向证伪：当前版本位故意写旧版本号 → 确实报出来（不是恒不报错）")
+    ok("C2", version_mismatches("V" + VERSION) == [],
+       "反向证伪：写当前版本 → 不误报")
+    # C3：版本历史里的旧版本号**不许**被误报（第一版就是在这里误报的）
+    _hist = "版本历史  V1.0  V2.0.9  V2.2.1  V" + VERSION
+    ok("C3", version_mismatches(current_version_slots(_hist, article=True)) == [],
+       "反向证伪：版本历史表里的旧版本号不被误报（判别器生效）")
+
+    # ---------- D. 单文件版的铁律条数必须与 SKILL.md 同源 ----------
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    codes, seen = [], set()
+    for m in re.finditer(r'^\*\*([A-G]\d+[a-z\-]*(?:\.\d+)?)\s*[\.·]?\s*(.{0,90})', skill, re.M):
+        c = m.group(1).strip()
+        if c not in seen and re.sub(r'（.*?）', '', m.group(2)).strip('** ').strip():
+            seen.add(c)
+            codes.append(c)
+    m = re.search(r'铁律 \*\*(\d+) 条\*\*', st)
+    got = int(m.group(1)) if m else -1
+    ok("D1", got == len(codes),
+       "单文件版报的铁律条数 %s == 从 SKILL.md 现抽的 %d（同源，不是手抄）" % (got, len(codes)))
+
+    # ---------- E. 版本历史必须在最末尾 ----------
+    i_ver = ar.rfind("版本历史")
+    last_feature = max(ar.rfind(k) for k in ("特点一", "特点二", "特点三", "特点四", "特点五", "特点六"))
+    ok("E1", i_ver > last_feature,
+       "「版本历史」在项目说明页最末尾（位于全部特点之后）")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for f in FAIL:
+            print("   " + f)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

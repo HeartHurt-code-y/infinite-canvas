@@ -1,0 +1,376 @@
+# 回归自检清单（skill 的「不变式」）
+#
+# 格式：<相对路径>|<必须出现的关键字>
+# 每次 snapshot 都会逐条 grep，缺任何一条 = 这次进化把老修复弄丢了 → 拒绝发版。
+# 新增修复时**必须**在这里加一行，这样这条修复以后就再也丢不掉了（铁律 F2）。
+#
+# 用法（由 tools/snapshot.py 自动执行，也可手动跑）：
+#   python tools/snapshot.py --check-only
+
+# ---- V1.0 · 音乐是唯一时间基准（铁律 A1/A5）----
+SKILL.md|音乐是唯一时间基准
+references/plan_mv_storyboard.py|music_window
+references/plan_mv_storyboard.py|align_frames
+references/batch_run_mv.py|music_plan.json
+references/check_alignment.py|window_sum
+
+# ---- V1.0 · 歌词提取 + 强制对齐 + 逐行待核（铁律 A2/A3/A4）----
+references/align_lyrics.py|needleman_wunsch
+references/align_lyrics.py|review_needed
+references/align_lyrics.py|insert_instrumental
+references/align_lyrics.py|[instrumental]
+references/extract_lyrics.py|lyrics_asr.json
+references/extract_lyrics.py|faster-whisper
+SKILL.md|歌词时间轴必须完整
+
+# ---- V1.0 · 只有中近景才对口型 + 不是每句都对口型（铁律 B1/B2）----
+SKILL.md|只有中近景
+references/plan_mv_storyboard.py|SHOT_SYNC
+references/plan_mv_storyboard.py|sync_ratio
+references/mv_to_h3_prompts.py|NO_SYNC_DECL
+references/check_alignment.py|SYNC_SHOTS
+
+# ---- V1.0 · 唱歌不是说话（铁律 C2）----
+references/mv_to_h3_prompts.py|sings:
+references/mv_to_h3_prompts.py|LANG_MARK
+references/mv_to_h3_prompts.py|Acting direction for the whole sequence:
+SKILL.md|sings:
+
+# ---- V1.0 · MV 不传音色参考（声音全部来自母带）----
+references/mv_to_h3_prompts.py|无 <Audio N>
+references/mv_to_h3_prompts.py|<Audio
+# ⚠️ 关键字里的反引号是 markdown 行内代码标记，属**被匹配原文的一部分**，不能省。
+# 教训：初版清单写的是「不出现 <Audio N>」，而 SKILL.md 写的是「不出现 `<Audio N>`」，
+# 自检因此报「找不到」——不是文档缺内容，是清单没照抄书写形式。改动文案时两处一起改。
+SKILL.md|MV 不出现 `<Audio N>`
+
+# ---- V1.0 · 时长贴合 = 音画对齐的工程保证（铁律 D7）----
+references/batch_run_mv.py|def conform
+references/batch_run_mv.py|tpad=stop_mode=clone
+references/batch_run_mv.py|final_master.mp4
+references/batch_run_mv.py|os.replace
+SKILL.md|裁
+
+# ---- V1.0 · 工作流节点契约必须先实测再提交（铁律 D4）----
+references/build_mv_workflow.py|contract_verified
+references/build_mv_workflow.py|--drop-refs
+references/build_mv_workflow.py|def do_inspect
+references/mv_workflows.json|PROJECT_WORKFLOW_BINDING
+references/mv_workflows.json|resolution_default
+references/mv_workflows.json|music_mode
+SKILL.md|87
+SKILL.md|85
+SKILL.md|61
+SKILL.md|42
+
+# ---- V1.0 · 8 道关 + 双门禁（铁律 E1/E3）----
+SKILL.md|8 道审核关
+references/batch_run_mv.py|def gate
+references/batch_run_mv.py|sha1
+references/mv_to_h3_prompts.py|prompt_review.json
+references/audit_html_builder.py|05_提示词审核.html
+references/audit_html_builder.py|06_音乐窗口与口型审核.html
+
+# ---- V1.0 · 审核页齐全 + 最新 + file:/// 绝对路径（铁律 E5）----
+references/audit_html_builder.py|file:///
+references/audit_html_builder.py|未审
+references/audit_html_builder.py|全链总览.html
+references/audit_html_builder.py|01_歌词时间轴审核.html
+references/audit_html_builder.py|08_成片审核.html
+
+# ---- V1.0 · 对齐验收三验（铁律 E4）----
+references/check_alignment.py|def do_plan
+references/check_alignment.py|def do_verify
+references/check_alignment.py|envelope
+references/check_alignment.py|对齐验收.html
+
+# ---- V1.0 · 进化与回退（铁律 F3/F4）----
+SKILL.md|回退
+tools/snapshot.py|checks.txt
+tools/rollback.py|extractall
+tools/rollback.py|--to
+
+# ---- V1.0 · 版本号三处同步（VERSION / SKILL.md 标题行 / frontmatter）----
+# 教训来源：drama-auto-pipeline V1.5 发版后 VERSION=1.5 但 SKILL.md 标题还停在 V1.3。
+# 升级版本号必须同时改这三处 + 本文件，否则自检直接拒绝发版。
+SKILL.md|# 音乐 MV 自动生成 SOP V1.0
+SKILL.md|description: 音乐 MV 自动生成 SOP V1.0
+
+# ---- V1.0 · 无主角模式（铁律 C6）----
+SKILL.md|无主角
+references/plan_mv_storyboard.py|no_hero
+references/mv_to_h3_prompts.py|NO_HERO_DECL
+
+# ---- V1.0 · project_provider 接口口径（踩过的坑，别再踩）----
+references/rh_client.py|apikey
+references/rh_client.py|APIKEY_TASK_IS_RUNNING
+references/rh_client.py|fetch_workflow_json
+references/rh_client.py|fileName
+
+# ---- V1.0.1 · 段长区间口径：硬区间 [4,15] vs 请求区间 [5,15]（回补校验器假阳性）----
+# 教训：qc() 曾把硬边界写成 MIN_REQ-0.3（=4.7s），而 cut_segments() 的契约是 min_dur=4.0，
+# 导致 4.0~4.7s 的段「合法产出、却被自己的校验器判死」（冒烟测试实测 4.6s 被误报）。
+# 判据：**生成器没错、校验器报错 = 校验器假阳性，回补校验器，不是改生成器。**
+references/plan_mv_storyboard.py|H3_MIN_SEC, H3_MAX_SEC = 4.0, 15.0
+references/plan_mv_storyboard.py|H3_MIN_SEC - 1e-6 <= wd <= H3_MAX_SEC
+SKILL.md|两个区间别混
+
+# ---- V1.0.1 · 版本号单一权威来源（正文不重复精确版本号）----
+# 教训：正文顶部硬写「当前精确版本：V1.0」= 与 VERSION 文件重复 = 漂移源。
+SKILL.md|文件为唯一权威
+
+# ---- V1.0.1 · 交付形态与参考技能对齐（两份 README 必须在）----
+references/README.md|17 帧对齐公式
+references/README.md|口径坑
+tools/README.md|四条纪律
+
+# ---- V1.0.2 · 母带本体必须注入音频加载节点（《野心家》实测大坑）----
+# 教训：offset 模式原来只注 node 85 的「起点+时长」，从不替换 node 34 里的示例 mp3
+#       → 窗口取对了、歌是别人的，整片 22 段全废且烧完币才发现。
+references/batch_run_mv.py|def song_path
+references/batch_run_mv.py|def upload_cached
+references/mv_workflows.json|"music_source": "34"
+SKILL.md|母带本体必须注入音频加载节点
+
+# ---- V1.0.2 · 上传台账不得缓存「占位串」（首镜 FAILED 真凶）----
+# 教训：台账里 song.mp3 的 fileName 是 `<上传:song.mp3>`（未上传标记），被原样注进 node 34
+#       → LoadAudio 报 Invalid audio file，任务 FAILED。
+# 判据：RH 的 fileName 永远形如 api/<hash>.<ext>，绝不以 `<` 开头。
+references/batch_run_mv.py|占位串
+references/batch_run_mv.py|cached_fn.startswith("<")
+SKILL.md|绝不允许出现「占位串」
+
+# ---- V1.0.2 · 任务失败必须回挖 failedReason（status 不给原因）----
+# 教训：FAILED 时 /task/openapi/status 只回 {"code":0,"msg":"success","data":"FAILED"}，
+#       真实报错在 /task/openapi/outputs 的 data.failedReason（code=805）。
+#       ⚠️ 同一条教训也适用于「节点注入没生效」类故障：光看 status 等于没报错。
+references/rh_client.py|def fetch_failure
+references/rh_client.py|failedReason
+references/rh_client.py|APIKEY_TASK_STATUS_ERROR
+references/rh_client.py|format_failure
+SKILL.md|回挖
+
+# ---- V1.0.2 · 分辨率枚举不许猜（16:9 没有 Landscape 字样）+ megapixels 拆开注 ----
+# 教训：旧实现把「分辨率档 2」这个**数字**注进 aspect_ratio 枚举 → 平台判非法。
+# 判据：kind 1 = aspect_ratio（枚举字符串，来自 ResolutionSelector 的 AspectRatio 值域），
+#       kind 2 = megapixels（数字档位）。两个入参必须分开注。
+references/mv_workflows.json|resolution_map
+references/mv_workflows.json|1920×1088
+references/batch_run_mv.py|resolution_mp
+SKILL.md|没有 Landscape 字样
+
+# ---- V1.0.2 · 空镜段必须摘图槽连线 + 整包直传（否则示例人物图泄漏）----
+references/batch_run_mv.py|def bake_workflow
+references/batch_run_mv.py|dropped_links
+references/batch_run_mv.py|noref_workflow
+SKILL.md|示例人物图
+
+# ---- V1.0.2 · 工作流契约已实测核实（不再是 TBD 猜测）----
+references/mv_workflows.json|"contract_verified": true
+references/mv_workflows.json|align_formula_source
+references/mv_workflow_api.json|ResolutionSelector
+references/mv_workflow_api.json|TrimAudioDuration
+
+# ---- V1.0.2 · 提示词校验器四处回补（本项目全片清零警告）----
+# ① 空镜段 retention 必须补 <Subject N> 行（否则 RET-NOMARK + RET-MISS + LBL-UNUSED 三码齐发）
+# ② Negative 两级拼装（旧实现按列表元素数截断，含逗号的 3 术语当 1 元素 → NEG-LONG）
+# ③ 中文运镜描述要补官方英文三维度句（否则 CAM-VAGUE）
+# ④ 上传顺序块必须含「图片上传顺序」字样（PIC-ORDER）
+references/mv_to_h3_prompts.py|weak_reference
+references/mv_to_h3_prompts.py|NO_SYNC_NEG
+references/mv_to_h3_prompts.py|def cam_clause
+references/mv_to_h3_prompts.py|图片上传顺序
+
+# ---- V1.0.2 · 分镜表必须能「只重写 md」且带逐段细纲（设计阶段后不再漏刷）----
+# 教训：3.2 设计阶段补完 visual_brief 后没人回头重写 分镜表.md →
+#       交付物里风格停在「（未锁）」、画面构想整列「（待填）」。新入口只重写 md、不碰 json。
+references/plan_mv_storyboard.py|--rewrite-md
+references/plan_mv_storyboard.py|逐段细纲
+SKILL.md|--rewrite-md
+
+# ---- V1.0.2 · 整包直传前必须剥掉 _meta（真 API 格式没有这个键）----
+references/batch_run_mv.py|nd.pop("_meta", None)
+SKILL.md|`_meta`
+
+# ---- V1.0.2 · 帧对齐用实测规律，不靠注册表公式预测（conform 才是保证）----
+# 实测：窗口 10.7s → 260 帧公式值，平台直出 277 帧 = +17（不是 +24）。
+# 判据：不靠公式预测成片长度，一律 conform 裁/补到恰好等于窗口长度（铁律 D7）。
+references/mv_workflows.json|align_formula_measured
+references/mv_workflows.json|frame_align_confirmed": true
+references/mv_workflows.json|resolution_measured
+references/mv_workflows.json|audio_policy_measured
+SKILL.md|align_frames(window) + 17
+
+# ---- V1.0.3 · 在途任务必须 rescue，绝不重复提交（不重复烧币）----
+# 教训：旧版对 status=submitted 的段**直接重新提交** → 双倍烧币；而文档早就写着
+#       「在途任务走 rescue」——**文档承诺 ≠ 代码实现**。
+#       这条必须是代码，不能靠人记得（《野心家》首镜失败后是靠人工拿 taskId 回挖才救回币）。
+references/batch_run_mv.py|rescue
+references/batch_run_mv.py|def finish_from_results
+references/batch_run_mv.py|rescue_id
+SKILL.md|在途 rescue
+
+# ---- V1.0.3 · 企业级降级必须显式授权（提供凭证 ≠ 授权花钱）----
+# 教训：--api-key-e 原先**根本没接进代码**（args._pool_name 硬编码 "consumer"，
+#       调度日志.csv 从不生成）——又一处「文档承诺 ≠ 代码实现」。
+# 判据：给 key = 提供凭证；--allow-enterprise-fallback = 授权花钱。**两者不能互相推定**。
+#       降级还要只对「池子被占」类错误生效（DEGRADE_PAT），并带熔断。
+references/batch_run_mv.py|allow-enterprise-fallback
+references/batch_run_mv.py|def submit_with_fallback
+references/batch_run_mv.py|def log_schedule
+references/batch_run_mv.py|DEGRADE_PAT
+references/batch_run_mv.py|降级已熔断
+SKILL.md|不能互相推定
+SKILL.md|别拿真钱补自己的错
+references/README.md|allow-enterprise-fallback
+references/README.md|project_provider_API_KEY_E
+
+# ---- V1.0.3 · 降级判定必须有离线单测（冒烟测试覆盖不到这条烧钱分支）----
+examples/test_account_fallback.py|def main
+examples/test_account_fallback.py|熔断
+examples/test_account_fallback.py|不联网、不花钱
+
+# ---- V1.0.4 · 双池并行 = **第三个独立开关**（与「提供凭证」「授权降级」并列，三者互不推定）----
+# 判据：给了 key ≠ 同意花钱；同意降级 ≠ 同意并行。所以必须三个开关，不能复用。
+references/batch_run_mv.py|enterprise-parallel
+references/batch_run_mv.py|enterprise_parallel_max
+references/batch_run_mv.py|def run_parallel
+references/batch_run_mv.py|workers-e
+SKILL.md|第三个独立开关
+SKILL.md|双池并行
+references/README.md|enterprise-parallel
+
+# ---- V1.0.4 · 池满 = 没烧钱 → 放回队列，**绝不记 failed** ----
+# 教训：提交被拒（QUEUE_FULL）时一分钱都没扣；记成 failed 会让「重跑一次就能成」的段
+#       变成需要人工介入。所以 run_one 是三态：True / False / None(可重试)。
+# 另：双池模式下池满**不能走降级** —— 本车道改走真钱的话，消费级一被占就会
+#     把整片同时甩给企业级 = **全片烧真钱**。
+references/batch_run_mv.py|class SubmitBusy
+references/batch_run_mv.py|def submit_to_lane
+references/batch_run_mv.py|return None, str(e)
+references/batch_run_mv.py|未烧钱
+examples/test_parallel_lanes.py|池满
+
+# ---- V1.0.4 · 「可重试」≠「可降级」：余额不足 / APIKEY_INVALID 不是瞬时错误 ----
+# 判据：能重试的只有「等一会儿就好」的那类。DEGRADE_PAT 故意含 余额|APIKEY_
+#       （那些确实该改走企业级），所以 TRANSIENT_PAT 必须另写一张**更窄**的表，
+#       不能照抄 —— 照抄会把「余额不足」判成可无限重试。
+references/batch_run_mv.py|TRANSIENT_PAT
+examples/test_parallel_lanes.py|TRANSIENT_PAT 不吃
+examples/test_parallel_lanes.py|余额不足
+
+# ---- V1.0.4 · 真钱封顶：--enterprise-parallel-max 用完 → 车道退役、余下回消费级 ----
+# 判据：用户设了「最多 N 段走企业级」就必须 ≤N —— 这是账单上的闸，超了就是事故。
+references/batch_run_mv.py|真钱封顶
+references/batch_run_mv.py|车道退役
+references/batch_run_mv.py|ENT_SEC_PER_SEG
+examples/test_parallel_lanes.py|封顶
+
+# ---- V1.0.4 · ⚠️ 静默丢活（双池最阴的错，错了也不报错）：车道退役后必须有队列兜底 ----
+# 教训：企业级车道会因「真钱封顶用满 / 连续 3 次池满」主动退役，退役那一刻刚放回的段
+#       可能没人接（消费级车道早因「当时队列空」退出了）→ 那几段**既没跑也没记 failed**，
+#       成片凭空短一截而账面一切正常。这条错了**不会报错**，所以必须有自检项 + 单测。
+references/batch_run_mv.py|队列兜底
+references/batch_run_mv.py|静默丢活
+references/batch_run_mv.py|left.append(q.get_nowait())
+examples/test_parallel_lanes.py|全部被跑完
+SKILL.md|静默丢活
+
+# ---- V1.0.5 · 池满退役判据：**「等了多久」而不是「错了几次」**，且两条车道一视同仁 ----
+# 教训：V1.0.4 写的是「连续 3 次池满退役」且**只让企业级退役** → 消费级会**无限重试**，
+#       池子真满了进程就永远转不停。而 3 次（≈2 分钟）对「池子只是有点挤」又太狠：
+#       退役反而把活推给兜底路径直接判死。时间上限才对：挤就等着，等够了才交棒。
+# 另：单测必须覆盖「两条车道全都池满」—— 只测一条退役，测不出挂死。
+references/batch_run_mv.py|BUSY_GIVE_UP_SEC
+references/batch_run_mv.py|busy_since
+references/batch_run_mv.py|判据是「等了多久」
+examples/test_parallel_lanes.py|没有挂死
+examples/test_parallel_lanes.py|最终全部被兜底跑完
+SKILL.md|等了多久
+
+# ---- V1.0.4 · 台账能加列：append_csv 表头自动升级（老行不许丢）----
+# 教训：DictWriter 对「row 里有、fieldnames 里没有」的键直接 raise
+#       → 给台账加一列 = 让跑过的项目再跑一次就崩。台账要跨版本累积，必须能平滑升级。
+references/batch_run_mv.py|自动升级表头
+references/batch_run_mv.py|eff = old
+references/batch_run_mv.py|钱包元
+examples/test_parallel_lanes.py|老行保住
+
+# ---- V1.0.4 · 口径更正：currentTaskCounts 是「在跑任务数」，不是并发额度 ----
+# 教训：无任务时两把 key 都返回 0 → 之前记的「消费级支持 5 并发」是误读（那只是当时在跑 5 个）。
+#       账号并发上限**没有接口能读**，只能靠「池满放回队列」这种自适应写法兜住。
+# 另：apiType=NORMAL(消费级走币) / SHARED(企业级扣真钱)，但两把 key 指向**同一个钱包**。
+SKILL.md|不是并发额度
+references/README.md|不是并发额度
+references/README.md|同一个钱包
+
+# ---- V1.0.4 · 发版工具自身：CHANGELOG 幂等（同一版本号不许写两遍）----
+# 教训：prepend_changelog 原来无条件插一条 → 手写了条目再跑 snapshot 就有两个 `## V1.0.4`。
+#       「同一个版本号写两遍就是漂移源」是本 skill 自己写着的判据，工具必须自己守。
+# 另：tools/README.md 的「当前状态」停在 V1.0 / 57 条 → 改为不再重复写版本号，只指向 VERSION；
+#     并修掉一处「文档承诺但不存在」的开关（写的 --check，真实是 --check-only）。
+tools/snapshot.py|幂等
+tools/snapshot.py|不重复插入
+tools/README.md|唯一权威
+tools/README.md|--check-only
+# 注：**故意不写「checks.txt 共 N 条」这种自检项** —— 条数每版都变，
+#     写进来等于每版都要改两处，本身就是漂移源（V1.0.4 一度想加，随即撤掉）。
+
+
+# ---- V1.0.6 · 凭证必须跨项目自愈：**「记住了」的唯一判据是「代码读得到」** ----
+# 用户原话（2026-09-17）：「我不是说了把这些key永久记住吗，怎么还找我要？」
+# 复盘：key 早在 2026-09-14 就永久写进 ~/.project_provider/MEMORY.md 了 —— **记忆没丢**。
+#       但 rh_client.load_dotenv 只认「当前项目目录下的 .env」：
+#         · 换个新项目 → 找不到 → resolve_key 抛「❌ 缺少 project_provider API Key」
+#         · 用户看到的就是「又找我要」。
+#       → 铁律：**写在 MEMORY.md 里不等于修好；只有代码能读到才算修好。**
+#         凡是「用户说过一次、以后不该再问」的东西，都必须落成**代码可读的持久化形态**，
+#         而不是只落成一句记忆。记忆是给人看的，凭证是给代码读的，两者不能互相替代。
+# 落地形态：~/.project_provider/credentials/<能力名>/keys.env
+#          （与既有 ~/.project_provider/credentials/meituan-living-deals-assistant/token.json 同规矩）
+references/rh_client.py|CRED_ENV
+references/rh_client.py|credentials
+references/rh_client.py|mv-auto-pipeline
+references/rh_client.py|_read_env_file
+references/rh_client.py|user-env
+references/rh_client.py|project-env
+references/rh_client.py|real-env
+references/rh_client.py|self_heal
+references/rh_client.py|enterprise_key
+references/rh_client.py|credential_report
+# 「无条件 load」这条注释必须留着 —— 它挡的是「环境变量已有时不 load」的写法，
+# 那种写法会让 LAST_SOURCE 留空、诊断报告说谎（V1.0.6 实测踩到过）。
+references/rh_client.py|无条件
+# 优先级必须是「真实环境变量 > 项目 .env > 用户级 keys.env」——
+# 真实环境变量永不被文件改写；项目级可覆盖用户级（不同项目用不同账号）。
+references/rh_client.py|永不被改写
+references/rh_client.py|项目级覆盖用户级
+# _INJECTED：排除「本模块自己注入过的键」，否则第二次 load 时会把上次自己写的
+# 当成「真实环境变量」→ 项目级再也覆盖不了用户级（幂等的关键）。
+references/rh_client.py|_INJECTED
+references/rh_client.py|幂等
+# 两个入口都必须能自愈：resolve_key（消费级）与 enterprise_key（企业级）。
+# 只修消费级 = 企业级 key 在用户级文件里形同虚设。
+references/batch_run_mv.py|project_root=root
+references/batch_run_mv.py|rh.enterprise_key
+# build_mv_workflow.py 没有显式 load_dotenv，它只能靠 resolve_key 自愈 ——
+# 这条注释的作用是防止后人把 self_heal 删掉。
+references/build_mv_workflow.py|self_heal
+# 报错文案必须给出四条路，且指向**实际使用的**凭证路径（cred_path 可覆盖）。
+references/rh_client.py|四种给法
+references/rh_client.py|cred_path
+examples/test_credentials.py|全新空目录
+examples/test_credentials.py|不传任何东西
+examples/test_credentials.py|自愈
+examples/test_credentials.py|项目 .env 覆盖用户级
+examples/test_credentials.py|真实环境变量压过项目 .env
+examples/test_credentials.py|幂等
+examples/test_credentials.py|报错文案含
+SKILL.md|用户级凭证
+SKILL.md|不再问用户要
+SKILL.md|代码能读到
+references/README.md|用户级凭证
+
+
+
+

@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_workflow_resolution.py —— 工作流解析与启动预检的对抗测试（V2.0.16）
+
+为什么必须有它（2026-09-18《橘子汽水味的夏天》第二集 · 今天最贵的一次）：
+  批量报了「成功 20/20 · 3259 RH 币 · 成片已拼」，产出却**不可交付** ——
+  逐段 `log.json` 是 `noref=true / ref_count=0 / audio_count=0`：
+  **整批是以「零参考素材」提交的**（用户自带角色图没用上、尾帧锚点没生效、音色没上传）。
+  后果正是用户点名要保的三条全崩：人脸逐段漂、段间无锚点、台词用模型自带音色。
+  而**全程零报警**。
+
+  两个 bug 叠在一起：
+    ① 显式参数被默认值静默遮蔽 —— `resolve_workflow()` 只看 `--workflow/--workflow-id`，
+       **完全不看 `--multi-ref-workflow`** → 按 default(W-A) 解析 → W-A 的
+       `noref_default=true` → 提交分支里「去参考化」把「多参考图」整个遮蔽。
+    ② 修好 ① 才暴露 —— 文件是 W-B 的（节点 339/326…）、映射是 W-A 的（263/51…）
+       → `RuntimeError: 工作流中不存在节点 263`。
+
+  判据：**「命令跑成功了」与「东西做对了」是两件事。** 退出码说不了后者。
+
+五项断言（**全部走 --dry-run，一分钱不花**）：
+  A 显式 `--multi-ref-workflow` 必须覆盖 `noref_default` → 解析为「带参考」
+  B 互斥的两个显式参数（`--multi-ref-workflow` + `--noref`）→ **必须报错**，不许静默二选一
+  C 反向证伪：**映射与文件不同源**时必须被预检拦下（拿一份未登记的多参考图文件）
+  D 正确组合必须放行（否则 A~C 可能是「恒报错」的假防护）
+  E 预检必须报出槽位是否够用（图片/音频），而不是只说一句「通过」
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+BATCH = SKILL / "references" / "batch_run_drama.py"
+WB_FILE = SKILL / "references" / "workflow_b2_multi_ref.json"
+SMOKE_DIR = SKILL / "tools"
+
+sys.path.insert(0, str(SMOKE_DIR))
+import smoke_pages  # noqa: E402
+
+
+def run(root, extra):
+    cmd = [sys.executable, str(BATCH),
+           "--project-root", str(root),
+           "--storyboard", str(root / "分镜脚本" / "storyboard.json"),
+           "--aspect", "16:9 (Widescreen)",
+           "--dry-run", "--no-enterprise", "--only", "1"] + extra
+    r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def main():
+    fails = []
+
+    def check(name, ok, detail=""):
+        print("   %s %s%s" % ("✅" if ok else "❌", name, ("：" + detail) if detail else ""))
+        if not ok:
+            fails.append(name)
+
+    print("=" * 68)
+    print("工作流解析与启动预检 · 对抗测试（全部 --dry-run，不花钱）")
+    print("=" * 68)
+
+    with tempfile.TemporaryDirectory(prefix="dap_wf_") as td:
+        root = Path(td)
+        smoke_pages.make_fixture(root)
+        # 夹具的分镜默认没有 `status=approved` → 会被「方案未冻结」的冻结门禁拦在预检之后
+        # （那是**另一道**门禁，与本测试无关）。这里把它标成已冻结，让流程能走到预检之后的路径。
+        # 判据：测一个门禁时，不要让**其它**门禁的报错混进断言里。
+        _sb = root / "分镜脚本" / "storyboard.json"
+        _j = json.loads(_sb.read_text(encoding="utf-8"))
+        _j["status"] = "approved"
+        _sb.write_text(json.dumps(_j, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # ---------- A. 显式 --multi-ref-workflow 必须覆盖 noref_default ----------
+        print("\n[A] 显式给 --multi-ref-workflow（W-B 的文件）→ 期望：覆盖 noref_default，带参考")
+        code, out = run(root, ["--multi-ref-workflow", str(WB_FILE)])
+        check("解析为「带参考」", "带参考" in out and "去参考化" not in out.split("[gate]")[0],
+              "退出码 %d" % code)
+        # ⚠ 这条断言我第一版写错了：断言的是「已忽略该工作流的 noref_default」这句话，
+        #   但 `--multi-ref-workflow` 一旦让映射解析到 W-B，W-B 的 noref_default 本来就是 false
+        #   → 那句话根本不会（也不该）打印。**断言要盯结果，不要盯某一句文案。**
+        check("工作流 id 也随文件更新（不是 W-A 的 id）",
+              "PROJECT_MODEL_BINDING" in out)
+        check("映射改用与文件同源的那套", "工作流映射改用 W-B" in out)
+        check("**不出现**「不带任何参考素材」", "不带任何参考素材" not in out)
+
+        # ---------- B. 互斥参数必须报错 ----------
+        print("\n[B] 同时给 --multi-ref-workflow 与 --noref → 期望：拒绝启动")
+        code, out = run(root, ["--multi-ref-workflow", str(WB_FILE), "--noref"])
+        check("退出码非 0", code != 0, "实际 %d" % code)
+        check("说明了互斥原因", "互斥" in out)
+        check("没有静默二选一（未打印任何提交动作）", "submit" not in out)
+
+        # ---------- C. 反向证伪：映射与文件不同源必须被预检拦下 ----------
+        print("\n[C] 拿一份**未登记**的多参考图文件（映射会退回 W-A）→ 期望：预检拦下")
+        bogus = root / "状态" / "bogus_multi_ref.json"
+        bogus.parent.mkdir(parents=True, exist_ok=True)
+        bogus.write_text(WB_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+        code, out = run(root, ["--multi-ref-workflow", str(bogus)])
+        check("退出码非 0", code != 0, "实际 %d" % code)
+        check("报「节点映射与工作流文件不同源」", "不同源" in out,
+              out.strip().splitlines()[-1][:80] if out.strip() else "")
+
+        # ---------- D/E. 正确组合必须放行，且报出槽位是否够用 ----------
+        print("\n[D/E] 正确组合（同源文件）→ 期望：预检通过 + 报出槽位数字")
+        code, out = run(root, ["--multi-ref-workflow", str(WB_FILE)])
+        pre = [l for l in out.splitlines() if "预检通过" in l]
+        check("预检通过", bool(pre) and code == 0, pre[0][:78] if pre else "（未见预检行）")
+        check("报出图片槽位（需 ≥ 实际最大参考图数）",
+              any("图片槽位" in l and "需 ≥" in l for l in out.splitlines()))
+        check("报出音频槽位", any("音频槽位" in l and "需 ≥" in l for l in out.splitlines()))
+
+        # ---------- F. V2.2 核心：不给任何工作流参数 → 必须默认「多参」 ----------
+        print("\n[F] **不给任何工作流参数** → 期望：默认 W-A + 带参考（一致性第一位）")
+        code, out = run(root, [])
+        check("解析为 W-A", "W-A" in out)
+        check("**默认就是带参考**（不是去参考化）", "带参考" in out)
+        check("没有走文生视频", "不带任何参考素材" not in out and "纯文生视频" not in out)
+
+        # ---------- G. 显式 --noref → 允许，但必须大声警告 ----------
+        print("\n[G] 显式 --noref（用户指定文生视频）→ 期望：允许但醒目警告")
+        code, out = run(root, ["--noref"])
+        check("走文生视频", "去参考化" in out)
+        check("警告「一致性无锚点」", "一致性无锚点" in out)
+        check("说明要改回多参怎么办", "--with-ref" in out or "去掉该工作流的 noref_default" in out)
+
+    print("\n" + "=" * 68)
+    if fails:
+        print("❌ 对抗测试不通过：")
+        for f in fails:
+            print("   · %s" % f)
+        sys.exit(1)
+    print("✅ 全部通过：默认即多参；显式参数战胜默认值；互斥参数报错；不同源被拦；"
+          "文生视频须显式且被警告。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

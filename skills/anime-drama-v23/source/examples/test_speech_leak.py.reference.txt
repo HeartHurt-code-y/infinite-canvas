@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_speech_leak.py —— 非台词字段「渗漏」检测的对抗测试（铁律 D2-s）
+
+背景（2026-09-19 用户逐段人眼复核后报的 12 条问题，这里覆盖其中「多出台词」那一类）：
+  用户听到的「多出来的台词」，逐条定位后**全部命中非台词字段**：
+    段2 「她一声"让一下"压下去」       ← overall_soundscape 里**引号内的新增人声**
+    段6 「他不说话…手上一点力都没收」   ← detailed_description 的 → 动作行
+    段14「把话推出去的时候声音是抖的…」 ← 同上
+    段18「准备好的所有后话都被这一句堵回去」← 同上
+    段19「她整个人僵住。那句话是她自己说的」← 同上
+  机制：H3 是音频生成模型，**分不清「这是旁白描述」还是「这是要念的内容」**。
+
+三层判别（**每层都要有判别器**，否则误报会淹掉真缺陷）：
+  A 拟声/语气词（咔 砰 啪 吱呀 嗯…）→ **不算泄漏**（它们本就是该被发出的音效）
+  B 引号里是**本段台词原文**的重复引用   → 警告（改动成本低，但不是必念）
+  C 引号里是**台词块里没有的新增人声**   → **硬拦**（实测必被念）
+
+五项断言（含反向证伪）：
+  A 真缺陷必须被硬拦（段2 的「让一下」形态）
+  B 反向证伪：拟声词不许被误报（第一版把 "咔"/"砰" 全报成硬拦 → 30 处里大半是噪音）
+  C 反向证伪：台词原文的重复引用只算警告，不算硬拦
+  D 反向证伪：干净文本不许被报
+  E 只查**实际进提示词的那份音景**（中文项目不查英文 soundscape —— 第一版查了，报出一堆英文噪音）
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import importlib.util
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL = HERE.parent
+BATCH = SKILL / "references" / "batch_run_drama.py"
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def _load():
+    spec = importlib.util.spec_from_file_location("_b", BATCH)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def main():
+    print("=" * 68)
+    print("非台词字段「渗漏」检测 · 对抗测试（会被念出来的人声）")
+    print("=" * 68)
+    b = _load()
+
+    # A. 真缺陷：音景里写了一句台词块里没有的引语 → 必须硬拦
+    seg = {"soundscape_zh": '教室里的议论声被她一声"让一下"压下去。',
+           "dialogue": [{"char_id": "char_02", "text": "不行，得去医务室！"}]}
+    h, s = b.speech_leak(seg)
+    ok("A", bool(h) and "让一下" in h[0][1],
+       "真缺陷被硬拦：%s" % (h[0][1] if h else "—"))
+
+    # B. 反向证伪：拟声词不是泄漏
+    seg2 = {"soundscape_zh": '笔断的"咔"声、铁门撞墙的"砰"、水搁在桌上的"啪"声。'}
+    h2, s2 = b.speech_leak(seg2)
+    ok("B", not h2 and not s2,
+       "反向证伪：拟声词（咔/砰/啪）不算泄漏 —— 它们是**该被发出的音效**")
+
+    # C. 反向证伪：台词原文的重复引用只算警告
+    seg3 = {"soundscape_zh": '她说"不行，得去医务室！"时，背景人声低了一瞬。',
+            "dialogue": [{"char_id": "char_02", "text": "不行，得去医务室！"}]}
+    h3, s3 = b.speech_leak(seg3)
+    ok("C", (not h3) and bool(s3),
+       "反向证伪：台词原文重复引用 → 警告而非硬拦")
+
+    # D. 反向证伪：干净文本不许被报
+    seg4 = {"soundscape_zh": "输液滴声、窗外树影里的风、衣料摩擦声。",
+            "action_zh": "她低头把果皮削断，手很笨。",
+            "beats": [{"type": "action", "zh": "他抬手扣住她的腕子，力气很大。"}],
+            "dialogue": []}
+    h4, s4 = b.speech_leak(seg4)
+    ok("D", not h4 and not s4, "反向证伪：干净文本不报（%d/%d）" % (len(h4), len(s4)))
+
+    # E. 只查实际进提示词的那份音景（中文项目不查英文 soundscape）
+    seg5 = {"soundscape_zh": "只有环境声。", "soundscape": 'someone says "excuse me" loudly'}
+    h5, s5 = b.speech_leak(seg5)
+    ok("E", not h5 and not s5,
+       "反向证伪：中文项目不查英文 soundscape（它根本不会进提示词）")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for f in FAIL:
+            print("   " + f)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

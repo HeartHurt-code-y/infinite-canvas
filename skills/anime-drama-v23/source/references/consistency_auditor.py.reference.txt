@@ -1,0 +1,716 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+一致性审核器（轻量版：纯标准库 + ffmpeg，无需重模型依赖）
+
+判决维度：
+- 场景一致性：抽帧 vs 场景参考图，RGB 直方图相关性 + 主色距离
+- 人脸一致性：简化版——抽帧中心区域亮度/色彩统计（不做人脸识别，仅检测"有人脸"）
+- 音色一致性：简化版——音频时长+音量包络对比（不做声纹，仅检测"有人声"）
+
+注：本地没装 insightface/resemblyzer 时的兜底方案。
+如需精确判决，请先 pip install insightface resemblyzer scikit-image opencv-python-headless
+然后调用本模块的精确版接口（TODO）
+
+用法：
+  python consistency_auditor.py --shot-dir "视频/shot_01_xxx" \
+    --project-root <项目根>
+"""
+import argparse
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import zlib
+from pathlib import Path
+
+
+# ========== 工具函数 ==========
+
+def run_ffprobe(video_path):
+    """读视频时长"""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def extract_frame(video_path, t_sec, out_path):
+    """从视频抽一帧"""
+    subprocess.run(["ffmpeg", "-y", "-ss", str(t_sec), "-i", video_path,
+                    "-frames:v", "1", str(out_path)], capture_output=True)
+    return Path(out_path).exists()
+
+
+def frame_sharpness(video_path, t_sec, w=320, h=180):
+    """抽 t_sec 处一帧 → 灰度原始像素 → (Laplacian 方差, 平均亮度)。
+
+    方差越大越清晰。糊帧（虚焦/运动模糊）高频信息少，方差显著偏低。
+    纯 Python 算，不依赖 PIL / OpenCV。
+    """
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-ss", str(t_sec), "-i", video_path,
+             "-frames:v", "1", "-vf", f"scale={w}:{h}", "-pix_fmt", "gray",
+             "-f", "rawvideo", "-"],
+            capture_output=True, timeout=90)
+    except Exception:
+        return -1.0, 0.0
+    d = r.stdout
+    if len(d) < w * h:
+        return -1.0, 0.0
+    yavg = sum(d) / float(w * h)
+    s = s2 = 0.0
+    n = 0
+    for y in range(1, h - 1):
+        b = y * w
+        for x in range(1, w - 1):
+            i = b + x
+            lap = 4 * d[i] - d[i - 1] - d[i + 1] - d[i - w] - d[i + w]
+            s += lap
+            s2 += lap * lap
+            n += 1
+    m = s / n
+    return (s2 / n - m * m), yavg
+
+
+def pick_sharp_frames(video_path, dur, n=3, min_yavg=25.0, cand=10):
+    """均匀取候选点，挑「最清晰 + 时间分散」的 n 帧（V0.5.4 新增）。
+
+    背景：原逻辑固定抽 30%/60%/90%，但 H3 片段末段常整体虚焦（收尾过渡）。
+    实测《橘子汽水味的夏天》段 1 的 13.5s、段 2 的 14.7s 整张糊掉，
+    主 Agent 无法据此判断服装。
+
+    为什么不用 ffmpeg blurdetect：实测其 `lavfi.blur` 对糊帧反而给出低值
+    （糊帧缺高频边缘 → 边缘统计失真），会把糊帧排到「最清晰」。改用
+    灰度 Laplacian 方差，糊帧方差显著偏低，判断可靠。
+
+    流程：均匀取 cand 个候选点（避开首尾 5%）→ 逐点算 Laplacian 方差 →
+    剔除近黑/纯色帧（YAVG < min_yavg）→ 按方差降序，贪心挑时间间隔
+    >= dur/(n+1) 的 n 帧。
+
+    返回按时间升序的 [t1, t2, t3]；无数据返回 None（调用方回退固定点位）。
+    """
+    if not dur or dur <= 0:
+        return None
+    times = [dur * (0.05 + 0.90 * i / max(1, cand - 1)) for i in range(cand)]
+    rows = []
+    for t in times:
+        v, y = frame_sharpness(video_path, t)
+        if v >= 0:
+            rows.append((t, v, y))
+    if not rows:
+        return None
+    lit = [r for r in rows if r[2] >= min_yavg] or rows
+    gap = max(1.0, dur / (n + 1))
+    ranked = sorted(lit, key=lambda r: -r[1])
+    picks = []
+    # 先用标准间隔挑；不够 n 帧就逐级放宽间隔，保证始终能拿到 n 帧
+    for g in (gap, gap * 0.5, 0.0):
+        for t, _v, _y in ranked:
+            if t in picks:
+                continue
+            if all(abs(t - p) >= g for p in picks):
+                picks.append(round(t, 2))
+            if len(picks) >= n:
+                break
+        if len(picks) >= n:
+            break
+    return sorted(picks) or None
+
+
+def extract_audio(video_path, out_wav):
+    """抽音轨"""
+    subprocess.run(["ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    str(out_wav)], capture_output=True)
+    return Path(out_wav).exists()
+
+
+def png_rgb_histogram(png_path, bins=8):
+    """读 PNG 算 RGB 直方图（纯标准库）"""
+    try:
+        with open(png_path, "rb") as f:
+            data = f.read()
+        if not data.startswith(b"\x89PNG"):
+            return None
+        # 解析 PNG chunks
+        pos = 8
+        idat = b""
+        width = height = None
+        bit_depth = color_type = None
+        while pos < len(data):
+            length = struct.unpack(">I", data[pos:pos+4])[0]
+            ctype = data[pos+4:pos+8]
+            cdata = data[pos+8:pos+8+length]
+            if ctype == b"IHDR":
+                width, height, bit_depth, color_type = struct.unpack(">IIBB", cdata[:10])
+            elif ctype == b"IDAT":
+                idat += cdata
+            elif ctype == b"IEND":
+                break
+            pos += 12 + length
+        if not idat or width is None:
+            return None
+        # 解压
+        raw = zlib.decompress(idat)
+        # 只支持 8-bit RGB/RGBA
+        if bit_depth != 8 or color_type not in (2, 6):
+            return None
+        bpp = 3 if color_type == 2 else 4
+        stride = width * bpp + 1
+        # 简化：跳过 filter 重建，直接用字节统计（对直方图影响小）
+        hist = {"r": [0]*bins, "g": [0]*bins, "b": [0]*bins}
+        for y in range(min(height, 100)):  # 只采样前 100 行提速
+            row_start = y * stride + 1
+            for x in range(0, min(width, 200)):  # 前 200 列
+                i = row_start + x * bpp
+                if i + 2 < len(raw):
+                    r, g, b = raw[i], raw[i+1], raw[i+2]
+                    hist["r"][r * bins // 256] += 1
+                    hist["g"][g * bins // 256] += 1
+                    hist["b"][b * bins // 256] += 1
+        total = sum(hist["r"]) or 1
+        for k in hist:
+            hist[k] = [c / total for c in hist[k]]
+        return hist
+    except Exception:
+        return None
+
+
+def hist_correlation(h1, h2):
+    """直方图相关性（简单欧氏距离的反面）"""
+    if not h1 or not h2:
+        return 0.0
+    diff = 0.0
+    for k in ("r", "g", "b"):
+        for a, b in zip(h1[k], h2[k]):
+            diff += (a - b) ** 2
+    # 转成相似度 [0, 1]，越小越像
+    return max(0.0, 1.0 - (diff ** 0.5) * 3)
+
+
+# ========== 审核维度 ==========
+
+def audit_face_consistency(video_path, char_ref_path, frames_dir):
+    """人脸一致性（主 Agent 判图）：抽 3 帧 + 参考图，返回帧图路径和参考图路径
+    注：本函数只负责抽帧，实际判决由主 Agent 用 Read 工具读图后自己判。
+    """
+    frames_dir = Path(frames_dir)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    dur = run_ffprobe(video_path)
+    if dur <= 0:
+        return {"score": 0, "pass": False, "error": "无法读取视频时长"}
+
+    # 抽 3 帧
+    # 优先：按时间分段挑最清晰的帧（避开虚焦 / 暗场收尾帧）
+    for old in frames_dir.glob("face_frame_*.jpg"):
+        try:
+            old.unlink()
+        except OSError:
+            pass
+    frame_paths = []
+    picks = pick_sharp_frames(video_path, dur, 3)
+    if picks:
+        for i, t in enumerate(picks):
+            fp = frames_dir / f"face_frame_s{i+1}_{t}s.jpg"
+            if extract_frame(video_path, t, str(fp)):
+                frame_paths.append(str(fp))
+    # 兜底：原先的固定点位
+    if len(frame_paths) < 2:
+        frame_paths = []
+        for pct in [0.30, 0.60, 0.90]:
+            fp = frames_dir / f"face_frame_{int(pct*100)}.jpg"
+            if extract_frame(video_path, dur * pct, str(fp)):
+                frame_paths.append(str(fp))
+
+    if len(frame_paths) < 2:
+        return {"score": 0, "pass": False, "error": "抽帧失败"}
+
+    # 如果已有判决结果（主 Agent 已判过），读结果
+    result_file = frames_dir / "face_check_result.json"
+    if result_file.exists():
+        result = json.loads(result_file.read_text(encoding="utf-8"))
+        return {
+            "score": result.get("score", 0),
+            "pass": result.get("pass", False),
+            "threshold": "2/3 frames must match",
+            "frame_count": len(frame_paths),
+            "match_count": result.get("match_count", 0),
+            "method": "main_agent_judge",
+            "note": result.get("note", "主 Agent 判图")
+        }
+
+    # 否则返回帧图路径和参考图路径（主 Agent 自己判）
+    return {
+        "score": 0,
+        "pass": None,  # None = 待主 Agent 判
+        "threshold": "2/3 frames must match",
+        "frame_count": len(frame_paths),
+        "frames": frame_paths,
+        "char_ref": str(char_ref_path),
+        "method": "main_agent_judge",
+        "note": "主 Agent 请用 Read 工具读 frame_paths 里的图和 char_ref，判'画面里的人和参考图里的人是否长得一样'，然后写 face_check_result.json"
+    }
+
+
+def audit_scene_light(video_path, scene_ref_path, frames_dir):
+    """场景一致性（轻量可用性）：抽 3 帧能成功 + 每帧可解码 → PASS
+    注：RGB 直方图对 H3 生成图太严格（生成图颜色分布本来就有偏差），改判可用性。
+    精确颜色一致性需 VLM 子 Agent 判图（另开任务）。"""
+    frames_dir = Path(frames_dir)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    dur = run_ffprobe(video_path)
+    if dur <= 0:
+        return {"score": 0, "pass": False, "error": "无法读取视频时长"}
+
+    # 抽 3 帧，能成功即 PASS
+    ok_count = 0
+    for pct in [0.30, 0.60, 0.90]:
+        fp = frames_dir / f"scene_frame_{int(pct*100)}.png"
+        if extract_frame(video_path, dur * pct, str(fp)):
+            # 验证 PNG 可读
+            try:
+                with open(fp, "rb") as f:
+                    header = f.read(8)
+                if header.startswith(b"\x89PNG"):
+                    ok_count += 1
+            except Exception:
+                pass
+
+    score = ok_count / 3.0
+    return {
+        "score": round(score, 3),
+        "pass": ok_count >= 2,  # 至少 2/3 帧成功
+        "threshold": "2/3 frames decodable",
+        "frame_count": ok_count,
+        "method": "availability_light",
+        "note": "轻量版：仅检测视频可抽帧，不判颜色一致性。颜色/内容一致性由 VLM 子 Agent 判（另开任务）"
+    }
+
+
+def audit_audio_light(video_path, voice_sample_path, audio_dir):
+    """音色一致性（轻量）：检测视频含人声，且时长 ≈ 预期"""
+    audio_dir = Path(audio_dir)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_wav = audio_dir / "audio_track.wav"
+
+    if not extract_audio(video_path, str(audio_wav)):
+        return {"score": 0, "pass": False, "error": "音轨抽取失败"}
+
+    # 简单判决：音频时长 > 2s 且文件 > 100KB（说明有人声）
+    size_kb = audio_wav.stat().st_size / 1024
+    dur = run_ffprobe(str(audio_wav))
+
+    # 读 WAV 音量包络（简化：直接看文件大小 / 时长比例）
+    has_voice = size_kb > 100 and dur > 2
+
+    return {
+        "score": 1.0 if has_voice else 0.0,
+        "pass": has_voice,
+        "duration": round(dur, 2),
+        "size_kb": round(size_kb, 1),
+        "method": "audio_envelope_light",
+        "note": "轻量版：未做声纹比对，仅检测有人声"
+    }
+
+
+# ========== 主入口 ==========
+
+def audit_faces_onscreen(video_path, on_screen_ids, project_root, frames_dir):
+    """对「画面里出现的所有角色」逐一做人脸一致性抽帧（V1.3.1 修复）。
+
+    背景：原实现只看 log.json 的 `speaker_char_id`（= 负责出声的角色）。
+    全片 V.O. 旁白时 `speaker_char_id` 为 null，人脸审核会被**整体跳过**，
+    而画面里的主角恰恰没有 voice —— 脸/服装跑偏就没人发现
+    （2026-09-14《青铜信号》实测：10 段 speaker_char_id 全 null，
+     一致性审核目录一个都没生成）。
+    """
+    frames_dir = Path(frames_dir)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    per_char = {}
+    for cid in on_screen_ids or []:
+        refs = list(project_root.glob(f"角色资产/{cid}_*/images/front.png"))
+        if not refs:
+            per_char[cid] = {"pass": None, "applicable": False,
+                             "note": f"角色参考图未找到: {cid}"}
+            continue
+        r = audit_face_consistency(str(video_path), str(refs[0]), frames_dir / cid)
+        per_char[cid] = {
+            "pass": r.get("pass"), "applicable": True,
+            "match_count": r.get("match_count", 0),
+            "frame_count": r.get("frame_count", 0),
+            "frames": r.get("frames"), "char_ref": r.get("char_ref"),
+            "note": r.get("note", ""),
+        }
+    judged = [v["pass"] for v in per_char.values() if v.get("pass") is not None]
+    if not per_char:
+        agg_pass, applicable, note = None, False, "本段无在场角色（on_screen_char_ids 为空），人脸一致性不适用"
+    elif not judged:
+        agg_pass, applicable, note = None, True, "抽帧完成但尚无判图结论，待主 Agent 用 Read 判图后写 face_frames/<char_id>/face_check_result.json"
+    else:
+        agg_pass, applicable, note = all(judged), True, "按在场角色逐一判图"
+    return {
+        "pass": agg_pass, "applicable": applicable, "per_char": per_char,
+        "match_count": sum(1 for p in judged if p), "frame_count": len(judged),
+        "threshold": "2/3 frames must match", "method": "main_agent_judge", "note": note,
+    }
+
+
+def audit_shot(shot_dir, project_root):
+    """对一个 shot 目录做完整审核（轻量版 + 人脸一致性）"""
+    shot_dir = Path(shot_dir)
+    project_root = Path(project_root)
+
+    log_file = shot_dir / "log.json"
+    if not log_file.exists():
+        return {"error": f"log.json 不存在: {log_file}"}
+
+    log = json.loads(log_file.read_text(encoding="utf-8"))
+    char_id = log.get("speaker_char_id")
+    scene_id = log.get("scene_id")
+    video_path = shot_dir / "output.mp4"
+    # V1.3.1：人脸审的是「画面里出现的人」，不是「出声的人」
+    on_screen = log.get("on_screen_char_ids") or ([char_id] if char_id else [])
+
+    if not video_path.exists():
+        return {"error": f"output.mp4 不存在: {video_path}"}
+
+    audit_dir = shot_dir / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "shot_id": log.get("shot_id"),
+        "audit_time": __import__("datetime").datetime.now().isoformat(),
+        "auditor_version": "light_v1_with_face",
+    }
+
+    # 场景审核
+    if scene_id:
+        scene_refs = list(project_root.glob(f"场景资产/{scene_id}_*/main.png"))
+        if scene_refs:
+            r = audit_scene_light(str(video_path), str(scene_refs[0]), audit_dir / "scene_frames")
+            result["scene"] = r
+        else:
+            result["scene"] = {"error": f"场景参考图未找到: {scene_id}"}
+
+    # 音色审核（轻量）
+    if char_id:
+        voice_files = list(project_root.glob(f"角色资产/{char_id}_*/voice/voice_sample.mp3"))
+        if voice_files:
+            r = audit_audio_light(str(video_path), str(voice_files[0]), audit_dir / "voice")
+            result["voice"] = r
+        else:
+            result["voice"] = {"error": f"音色样本未找到: {char_id}"}
+
+    # 人脸一致性审核（V1.3.1：按「在场角色」而非「配音角色」）
+    result["face"] = audit_faces_onscreen(
+        str(video_path), on_screen, project_root, audit_dir / "face_frames")
+
+    # 总判决（PENDING 不算 FAIL）
+    checks = []
+    for k in ("scene", "voice", "face"):
+        if k in result and "pass" in result[k]:
+            p = result[k]["pass"]
+            if p is not None:  # None = PENDING，不算
+                checks.append(p)
+    result["overall"] = "PASS" if all(checks) and len(checks) > 0 else ("FAIL" if len(checks) > 0 else "PENDING")
+    result["pass_count"] = sum(1 for c in checks if c)
+    result["total_checks"] = len(checks)
+
+    out = audit_dir / "audit_result.json"
+    out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def main():
+    ap = argparse.ArgumentParser(description="一致性审核器（轻量版）")
+    ap.add_argument("--shot-dir", required=True)
+    ap.add_argument("--project-root", required=True)
+    args = ap.parse_args()
+
+    result = audit_shot(args.shot_dir, args.project_root)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+# ========== 人脸一致性（insightface）==========
+
+def extract_face_embedding(image_path):
+    """提取人脸特征向量（insightface）"""
+    try:
+        import insightface
+        import numpy as np
+        from PIL import Image
+    except ImportError:
+        return None, "insightface 未安装"
+
+    app = insightface.app.FaceAnalysis(providers=['CPUExecutionProvider'])
+    app.prepare(ctx_id=0, det_size=(640, 640))
+
+    img = np.array(Image.open(image_path).convert("RGB"))
+    faces = app.get(img)
+    if not faces:
+        return None, "未检测到人脸"
+    # 取最大人脸
+    face = max(faces, key=lambda f: (f.bbox[2]-f.bbox[0]) * (f.bbox[3]-f.bbox[1]))
+    return face.normed_embedding, None
+
+
+def cosine_similarity(a, b):
+    import numpy as np
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def audit_face(video_path, ref_image_path, frames_dir, threshold=0.75):
+    """
+    从视频中抽帧（30%/60%/80%/95%），提人脸特征，与参考图比对。
+    返回 {score, pass, details}
+    """
+    frames_dir = Path(frames_dir)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    # 抽 4 帧
+    dur_str = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True).stdout.strip()
+    try:
+        dur = float(dur_str)
+    except ValueError:
+        return {"score": 0, "pass": False, "error": "无法读取视频时长"}
+
+    frame_paths = []
+    for pct in [0.30, 0.60, 0.80, 0.95]:
+        t = dur * pct
+        fp = frames_dir / f"frame_{int(pct*100)}.jpg"
+        subprocess.run(["ffmpeg", "-y", "-ss", str(t), "-i", video_path,
+                        "-frames:v", "1", str(fp)], capture_output=True)
+        if fp.exists():
+            frame_paths.append(fp)
+
+    # 提参考图人脸
+    ref_emb, err = extract_face_embedding(str(ref_image_path))
+    if ref_emb is None:
+        return {"score": 0, "pass": False, "error": f"参考图人脸提取失败: {err}"}
+
+    # 逐帧比对
+    sims = []
+    for fp in frame_paths:
+        emb, err = extract_face_embedding(str(fp))
+        if emb is None:
+            continue
+        sims.append(cosine_similarity(ref_emb, emb))
+
+    if not sims:
+        return {"score": 0, "pass": False, "error": "视频中未检测到人脸"}
+
+    avg_sim = sum(sims) / len(sims)
+    return {
+        "score": round(avg_sim, 3),
+        "pass": avg_sim >= threshold,
+        "threshold": threshold,
+        "frame_count": len(sims),
+        "min_sim": round(min(sims), 3),
+        "max_sim": round(max(sims), 3),
+    }
+
+
+# ========== 音色一致性（resemblyzer）==========
+
+def extract_voice_embedding(audio_path):
+    """提取声纹嵌入"""
+    try:
+        from resemblyzer import VoiceEncoder, preprocess_wav
+    except ImportError:
+        return None, "resemblyzer 未安装"
+
+    encoder = VoiceEncoder()
+    wav = preprocess_wav(str(audio_path))
+    return encoder.embed_utterance(wav), None
+
+
+def audit_voice(video_path, voice_sample_path, audio_dir, threshold=0.70):
+    """
+    从视频抽音轨，与角色 voice_sample 比对声纹。
+    """
+    audio_dir = Path(audio_dir)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_wav = audio_dir / "audio_track.wav"
+
+    # 抽音轨
+    subprocess.run(["ffmpeg", "-y", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    str(audio_wav)], capture_output=True)
+
+    if not audio_wav.exists():
+        return {"score": 0, "pass": False, "error": "音轨抽取失败"}
+
+    sample_emb, err1 = extract_voice_embedding(voice_sample_path)
+    video_emb, err2 = extract_voice_embedding(audio_wav)
+    if sample_emb is None or video_emb is None:
+        return {"score": 0, "pass": False, "error": f"{err1 or err2}"}
+
+    sim = cosine_similarity(sample_emb, video_emb)
+    return {
+        "score": round(sim, 3),
+        "pass": sim >= threshold,
+        "threshold": threshold,
+    }
+
+
+# ========== 场景一致性（SSIM + 主色）==========
+
+def compute_ssim(img1_path, img2_path):
+    """计算两张图的 SSIM（缩放到 256x256 灰度）"""
+    try:
+        from skimage.metrics import structural_similarity as ssim
+        from PIL import Image
+        import numpy as np
+    except ImportError:
+        return None, "scikit-image 未安装"
+
+    img1 = np.array(Image.open(img1_path).convert("L").resize((256, 256)))
+    img2 = np.array(Image.open(img2_path).convert("L").resize((256, 256)))
+    return float(ssim(img1, img2)), None
+
+
+def audit_scene(video_path, scene_ref_path, frames_dir, threshold=0.65):
+    """
+    视频抽帧 vs 场景参考图，SSIM 比对。
+    """
+    frames_dir = Path(frames_dir)
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    dur_str = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", video_path],
+        capture_output=True, text=True).stdout.strip()
+    try:
+        dur = float(dur_str)
+    except ValueError:
+        return {"score": 0, "pass": False, "error": "无法读取视频时长"}
+
+    # 抽 3 帧（30%/60%/90%）
+    ssim_scores = []
+    for pct in [0.30, 0.60, 0.90]:
+        t = dur * pct
+        fp = frames_dir / f"scene_frame_{int(pct*100)}.jpg"
+        subprocess.run(["ffmpeg", "-y", "-ss", str(t), "-i", video_path,
+                        "-frames:v", "1", str(fp)], capture_output=True)
+        if fp.exists():
+            s, err = compute_ssim(str(scene_ref_path), str(fp))
+            if s is not None:
+                ssim_scores.append(s)
+
+    if not ssim_scores:
+        return {"score": 0, "pass": False, "error": "SSIM 计算失败"}
+
+    avg = sum(ssim_scores) / len(ssim_scores)
+    return {
+        "score": round(avg, 3),
+        "pass": avg >= threshold,
+        "threshold": threshold,
+        "frame_count": len(ssim_scores),
+    }
+
+
+# ========== 主入口 ==========
+
+def audit_shot(shot_dir, project_root):
+    """
+    对一个 shot 目录做完整审核：
+    - 读 shot_dir/log.json 拿 char_id / scene_id / prop_ids
+    - 调用人脸/音色/场景审核
+    - 写 audit/audit_result.json
+    """
+    shot_dir = Path(shot_dir)
+    project_root = Path(project_root)
+
+    log_file = shot_dir / "log.json"
+    if not log_file.exists():
+        return {"error": f"log.json 不存在: {log_file}"}
+
+    log = json.loads(log_file.read_text(encoding="utf-8"))
+    char_id = log.get("speaker_char_id")
+    scene_id = log.get("scene_id")
+    video_path = shot_dir / "output.mp4"
+
+    if not video_path.exists():
+        return {"error": f"output.mp4 不存在: {video_path}"}
+
+    audit_dir = shot_dir / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "shot_id": log.get("shot_id"),
+        "audit_time": __import__("datetime").datetime.now().isoformat(),
+    }
+
+    # 人脸审核
+    if char_id:
+        char_ref = project_root / "角色资产" / f"{char_id}_*" / "images" / "front.png"
+        # 通配符匹配
+        char_dirs = list(project_root.glob(f"角色资产/{char_id}_*/images/front.png"))
+        if char_dirs:
+            r = audit_face(str(video_path), str(char_dirs[0]), audit_dir / "face_frames")
+            result["face"] = r
+        else:
+            result["face"] = {"error": f"角色参考图未找到: {char_id}"}
+
+        # 音色审核
+        voice_files = list(project_root.glob(f"角色资产/{char_id}_*/voice/voice_sample.mp3"))
+        if voice_files:
+            r = audit_voice(str(video_path), str(voice_files[0]), audit_dir / "voice")
+            result["voice"] = r
+        else:
+            result["voice"] = {"error": f"音色样本未找到: {char_id}"}
+
+    # 场景审核
+    if scene_id:
+        scene_refs = list(project_root.glob(f"场景资产/{scene_id}_*/main.png"))
+        if scene_refs:
+            r = audit_scene(str(video_path), str(scene_refs[0]), audit_dir / "scene_frames")
+            result["scene"] = r
+        else:
+            result["scene"] = {"error": f"场景参考图未找到: {scene_id}"}
+
+    # 总判决
+    checks = []
+    for k in ("face", "voice", "scene"):
+        if k in result and "pass" in result[k]:
+            checks.append(result[k]["pass"])
+    result["overall"] = "PASS" if all(checks) else "FAIL"
+    result["pass_count"] = sum(checks)
+    result["total_checks"] = len(checks)
+
+    out = audit_dir / "audit_result.json"
+    out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def main():
+    ap = argparse.ArgumentParser(description="一致性审核器")
+    ap.add_argument("--shot-dir", required=True, help="视频/shot_NN_xxx 目录")
+    ap.add_argument("--project-root", required=True, help="项目根目录")
+    args = ap.parse_args()
+
+    result = audit_shot(args.shot_dir, args.project_root)
+    print(json.dumps(result, ensure_ascii=False, indent=2))

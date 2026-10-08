@@ -17,6 +17,16 @@ pub(crate) struct ComponentFile {
     pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<u32>,
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+impl ComponentFile {
+    pub(crate) fn is_symlink(&self) -> bool {
+        self.kind.as_deref() == Some("symlink")
+    }
 }
 
 pub(crate) fn valid_sha256(value: &str) -> bool {
@@ -66,6 +76,94 @@ pub(crate) fn safe_relative(value: &str) -> Result<PathBuf, String> {
 
 pub(crate) fn path_key(value: &str) -> String {
     value.nfc().collect::<String>().to_lowercase()
+}
+
+/// Normalize a relative link target without ever crossing the component root.
+/// The ZIP contract allows framework links such as `Versions/Current -> A`.
+pub(crate) fn link_destination(path: &str, target: &str) -> Result<String, String> {
+    safe_relative(path)?;
+    if target.is_empty()
+        || target.len() > 4096
+        || target.starts_with('/')
+        || target.contains(['\\', ':', '<', '>', '"', '|', '?', '*'])
+        || target.chars().any(char::is_control)
+        || target.split('/').count() > 32
+    {
+        return Err("组件软链接目标无效".into());
+    }
+    let mut parts: Vec<&str> = path.split('/').collect();
+    parts.pop();
+    for part in target.split('/') {
+        match part {
+            "" => return Err("组件软链接目标含空片段".into()),
+            "." => {}
+            ".." => {
+                parts.pop().ok_or("组件软链接目标超出组件目录")?;
+            }
+            other => {
+                safe_relative(other)?;
+                parts.push(other);
+            }
+        }
+    }
+    let relative = parts.join("/");
+    safe_relative(&relative)?;
+    Ok(relative)
+}
+
+fn validate_links(files: &[ComponentFile]) -> Result<(), String> {
+    let links: HashMap<&str, &ComponentFile> = files
+        .iter()
+        .filter(|file| file.is_symlink())
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    for file in links.values() {
+        let mut destination = link_destination(&file.path, file.target.as_deref().unwrap_or(""))?;
+        let mut seen = HashSet::new();
+        // Resolve symlinks in every path prefix, including directory aliases.
+        loop {
+            if !seen.insert(destination.clone()) || seen.len() > files.len() {
+                return Err("组件软链接目标含循环".into());
+            }
+            let mut replacement = None;
+            let mut prefix = String::new();
+            for part in destination.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(part);
+                if let Some(link) = links.get(prefix.as_str()) {
+                    let resolved =
+                        link_destination(&link.path, link.target.as_deref().unwrap_or(""))?;
+                    let suffix = &destination[prefix.len()..];
+                    replacement = Some(format!("{resolved}{suffix}"));
+                    break;
+                }
+            }
+            match replacement {
+                Some(next) => destination = next,
+                None => break,
+            }
+        }
+        let target_file = files
+            .iter()
+            .any(|candidate| candidate.path == destination && !candidate.is_symlink());
+        let target_directory = files
+            .iter()
+            .any(|candidate| candidate.path.starts_with(&(destination.clone() + "/")));
+        if !target_file && !target_directory {
+            return Err("组件软链接目标缺失".into());
+        }
+        let parent = file
+            .path
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if target_directory && (parent == destination || parent.starts_with(&(destination + "/"))) {
+            return Err("组件软链接不能指向自身的祖先目录".into());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
@@ -130,8 +228,21 @@ pub(crate) fn validate_files(files: &[ComponentFile]) -> Result<u64, String> {
             || file
                 .mode
                 .is_some_and(|mode| mode & !0o777 != 0 || mode & 0o6000 != 0)
+            || !matches!(file.kind.as_deref(), None | Some("file") | Some("symlink"))
         {
             return Err("组件文件清单含重复路径、摘要或权限错误".into());
+        }
+        if file.is_symlink() {
+            let target = file.target.as_deref().ok_or("组件软链接缺少目标")?;
+            link_destination(&file.path, target)?;
+            if file.size != target.len() as u64
+                || file.sha256 != hex::encode(Sha256::digest(target.as_bytes()))
+                || file.mode != Some(0o755)
+            {
+                return Err("组件软链接目标、摘要或权限不匹配".into());
+            }
+        } else if file.target.is_some() {
+            return Err("普通组件文件不能指定软链接目标".into());
         }
         total = total.checked_add(file.size).ok_or("组件解压大小溢出")?;
         if total > 20 * 1024 * 1024 * 1024 {
@@ -150,6 +261,7 @@ pub(crate) fn validate_files(files: &[ComponentFile]) -> Result<u64, String> {
             }
         }
     }
+    validate_links(files)?;
     Ok(total)
 }
 
@@ -205,6 +317,35 @@ pub(crate) fn verify_tree(
     ) -> Result<(), String> {
         check_cancel(cancel)?;
         let metadata = path.symlink_metadata().map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            #[cfg(not(unix))]
+            return Err("此平台不支持组件软链接".into());
+            #[cfg(unix)]
+            {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| error.to_string())?
+                    .to_string_lossy()
+                    .into_owned();
+                let file = expected.get(&relative).ok_or("组件存在未登记软链接")?;
+                let target = fs::read_link(path).map_err(|error| error.to_string())?;
+                if !file.is_symlink()
+                    || target.to_str() != file.target.as_deref()
+                    || !seen.insert(relative)
+                {
+                    return Err("组件软链接目标与清单不匹配".into());
+                }
+                let resolved = path.canonicalize().map_err(|_| "组件软链接悬空或循环")?;
+                let resolved_metadata =
+                    fs::metadata(&resolved).map_err(|error| error.to_string())?;
+                if !resolved.starts_with(root)
+                    || (!resolved_metadata.is_file() && !resolved_metadata.is_dir())
+                {
+                    return Err("组件软链接目标超出目录或类型无效".into());
+                }
+                return Ok(());
+            }
+        }
         if is_link(&metadata)
             || !path
                 .canonicalize()
@@ -237,10 +378,18 @@ pub(crate) fn verify_tree(
                 .get(&relative)
                 .ok_or_else(|| format!("组件存在未登记文件：{relative}"))?;
             if !seen.insert(relative.clone())
+                || file.is_symlink()
                 || metadata.len() != file.size
                 || hash_file(path, cancel)? != (file.sha256.clone(), file.size)
             {
                 return Err(format!("组件文件校验失败：{relative}"));
+            }
+            #[cfg(unix)]
+            if let Some(expected_mode) = file.mode {
+                use std::os::unix::fs::PermissionsExt as _;
+                if metadata.permissions().mode() & 0o7777 != expected_mode {
+                    return Err(format!("组件文件权限校验失败：{relative}"));
+                }
             }
         } else {
             return Err("组件存在特殊文件".into());
@@ -298,6 +447,7 @@ pub(crate) fn extract_zip(
         files.iter().map(|file| (file.path.clone(), file)).collect();
     let mut seen = HashSet::new();
     let mut extracted = HashSet::new();
+    let mut links = Vec::new();
     let mut completed = 0u64;
     let mut buffer = [0u8; 128 * 1024];
     for index in 0..zip.len() {
@@ -315,9 +465,18 @@ pub(crate) fn extract_zip(
         if !seen.insert(path_key(&name)) {
             return Err("组件 ZIP 含重复成员".into());
         }
+        let expected_file = expected.get(&name).copied();
+        let symlink = expected_file.is_some_and(ComponentFile::is_symlink);
         if member.unix_mode().is_some_and(|mode| {
             let kind = mode & 0o170000;
-            (kind != 0 && kind != if directory { 0o040000 } else { 0o100000 }) || mode & 0o6000 != 0
+            let expected_kind = if directory {
+                0o040000
+            } else if symlink {
+                0o120000
+            } else {
+                0o100000
+            };
+            (kind != 0 && kind != expected_kind) || mode & 0o6000 != 0
         }) {
             return Err("组件 ZIP 含符号链接或特殊成员".into());
         }
@@ -331,9 +490,22 @@ pub(crate) fn extract_zip(
             }
             continue;
         }
-        let file = expected
-            .get(&name)
-            .ok_or_else(|| format!("组件 ZIP 含未登记文件：{name}"))?;
+        let file = expected_file.ok_or_else(|| format!("组件 ZIP 含未登记文件：{name}"))?;
+        if symlink
+            && member
+                .unix_mode()
+                .is_none_or(|mode| mode & 0o170000 != 0o120000)
+        {
+            return Err("组件 ZIP 软链接类型与清单不匹配".into());
+        }
+        if let Some(mode) = file.mode {
+            if member
+                .unix_mode()
+                .is_none_or(|actual| actual & 0o777 != mode)
+            {
+                return Err("组件 ZIP 文件权限与清单不匹配".into());
+            }
+        }
         if member.size() != file.size {
             return Err(format!("组件 ZIP 文件大小不匹配：{name}"));
         }
@@ -345,6 +517,25 @@ pub(crate) fn extract_zip(
         }
         create_safe_parents(&root, &relative)?;
         let target = root.join(&relative);
+        if symlink {
+            let mut payload = Vec::new();
+            member
+                .by_ref()
+                .take(file.size + 1)
+                .read_to_end(&mut payload)
+                .map_err(|error| error.to_string())?;
+            if payload.len() as u64 != file.size
+                || hex::encode(Sha256::digest(&payload)) != file.sha256
+                || std::str::from_utf8(&payload).ok() != file.target.as_deref()
+            {
+                return Err("组件 ZIP 软链接目标与清单不匹配".into());
+            }
+            links.push((target, file.target.clone().ok_or("组件软链接缺少目标")?));
+            completed += file.size;
+            progress(completed, total);
+            extracted.insert(name);
+            continue;
+        }
         let mut output = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -388,6 +579,17 @@ pub(crate) fn extract_zip(
     if extracted.len() != expected.len() {
         return Err("组件 ZIP 缺少登记文件".into());
     }
+    for (path, target) in links {
+        check_cancel(cancel)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, path)
+            .map_err(|error| format!("恢复组件软链接失败：{error}"))?;
+        #[cfg(not(unix))]
+        {
+            let _ = (path, target);
+            return Err("此平台不支持组件软链接".into());
+        }
+    }
     verify_tree(&root, files, false, cancel)
 }
 
@@ -411,7 +613,121 @@ mod tests {
             size: bytes.len() as u64,
             sha256: hex::encode(Sha256::digest(bytes)),
             mode: None,
+            kind: None,
+            target: None,
         }
+    }
+    fn expected_link(path: &str, target: &str) -> ComponentFile {
+        ComponentFile {
+            mode: Some(0o755),
+            kind: Some("symlink".into()),
+            target: Some(target.into()),
+            ..expected(path, target.as_bytes())
+        }
+    }
+    #[test]
+    fn link_inventory_rejects_escape_cycles_dangling_and_linked_parent_entries() {
+        let payload = expected("Framework/Versions/A/Resources/payload", b"data");
+        let valid = vec![
+            payload.clone(),
+            expected_link("Framework/Versions/Current", "A"),
+            expected_link("Framework/Resources", "Versions/Current/Resources"),
+        ];
+        validate_files(&valid).unwrap();
+        for bad in [
+            vec![
+                payload.clone(),
+                expected_link("Framework/outside", "../../outside"),
+            ],
+            vec![expected_link("a", "b"), expected_link("b", "a")],
+            vec![
+                payload.clone(),
+                expected_link("Framework/missing", "missing-target"),
+            ],
+            vec![
+                payload.clone(),
+                expected_link("Framework/Versions/A/Resources/up", ".."),
+            ],
+            vec![
+                payload.clone(),
+                expected_link("Framework/Versions/Current", "A"),
+                expected("Framework/Versions/Current/new", b"alias-write"),
+            ],
+        ] {
+            assert!(validate_files(&bad).is_err());
+        }
+        let mut corrupt = valid.clone();
+        corrupt[1].sha256 = "a".repeat(64);
+        assert!(validate_files(&corrupt).is_err());
+        let mut bad_mode = valid;
+        bad_mode[1].mode = Some(0o4777);
+        assert!(validate_files(&bad_mode).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn restores_executable_modes_and_framework_links_then_detects_tampering() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("framework.zip");
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        writer
+            .add_symlink(
+                "Framework/Versions/Current",
+                "A",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer
+            .add_symlink(
+                "Framework/Resources",
+                "Versions/Current/Resources",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer
+            .start_file(
+                "Framework/Versions/A/Resources/engine",
+                SimpleFileOptions::default().unix_permissions(0o755),
+            )
+            .unwrap();
+        writer.write_all(b"engine-bytes").unwrap();
+        writer.finish().unwrap();
+        let (digest, size) = hash_file(&archive, &AtomicBool::new(false)).unwrap();
+        let files = vec![
+            ComponentFile {
+                mode: Some(0o755),
+                ..expected("Framework/Versions/A/Resources/engine", b"engine-bytes")
+            },
+            expected_link("Framework/Versions/Current", "A"),
+            expected_link("Framework/Resources", "Versions/Current/Resources"),
+        ];
+        let staging = tempfile::tempdir_in(temp.path()).unwrap();
+        extract_zip(
+            &archive,
+            staging.path(),
+            size,
+            &digest,
+            &files,
+            &AtomicBool::new(false),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(staging.path().join("Framework/Resources/engine")).unwrap(),
+            b"engine-bytes"
+        );
+        let engine = staging.path().join("Framework/Versions/A/Resources/engine");
+        assert_eq!(
+            fs::metadata(&engine).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(verify_tree(staging.path(), &files, false, &AtomicBool::new(false)).is_err());
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = staging.path().join("Framework/Resources");
+        fs::remove_file(&link).unwrap();
+        symlink(temp.path(), &link).unwrap();
+        assert!(verify_tree(staging.path(), &files, false, &AtomicBool::new(false)).is_err());
     }
     #[test]
     fn archive_validates_inventory_and_rejects_corrupt_payload() {

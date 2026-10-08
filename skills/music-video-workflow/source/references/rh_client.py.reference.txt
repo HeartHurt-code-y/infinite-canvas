@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""project_provider 客户端（mv-auto-pipeline 自包含版，纯标准库）
+
+为什么自包含：本 skill 要能独立分发，不依赖别的 skill 的 references 路径。
+
+端点（官方，2026-09 实测校准）：
+  取工作流 JSON  POST /api/openapi/getJsonApiFormat    Body: {"apiKey","workflowId"} → data.prompt(JSON 字符串)
+  上传素材       POST /task/openapi/upload               form: apiKey + fileType + file → data.fileName
+  提交任务       POST /task/openapi/create               Body: {"workflowId","apiKey","nodeInfoList","instanceType"}
+                 或终极模式 Body: {"apiKey","workflowId","workflow":<改造后的完整 JSON 字符串>}
+  查状态         POST /task/openapi/status               Body: {"apiKey","taskId"} → data.taskStatus
+  取产物         POST /task/openapi/outputs              Body: {"apiKey","taskId"} → data[]{fileUrl,fileType,nodeId,consumeCoins,taskCostTime}
+  查余额         POST /uc/openapi/accountStatus          Body: {"apikey"}⚠️ 小写！→ data.remainCoins/remainMoney/apiType/currentTaskCounts
+
+铁律：
+  ⚠️ 产物 fileUrl 仅 24h 有效 —— SUCCESS 后立刻下载
+  ⚠️ 节点注入要用 upload 返回的 fileName（形如 openapi/xxx.jpg），不是 download_url
+  ⚠️ 域名必须是 [项目内资源]
+  ⚠️ accountStatus 的参数名是小写 apikey（写 apiKey 会失败）
+  ⚠️ /task/openapi/outputs 返回 code=804(APIKEY_TASK_IS_RUNNING) 时 data 是 dict 不是 list，必须轮询
+
+API Key 四级读取（不得写死、不得反复找用户要）：
+  ① --api-key <KEY>            当次显式指定（最高优先）
+  ② 真实环境变量               shell 里 export 的，永不被文件里的值改写
+  ③ <项目根>/.env              项目级覆盖（不同项目可用不同账号）
+  ④ ~/.project_provider/credentials/mv-auto-pipeline/keys.env
+                               **用户级凭证、跨项目永久生效** —— 默认就位，
+                               所以新项目里不传任何 key 也应该跑得通。
+
+⚠️ 血泪教训（2026-09-17 用户原话：「我不是说了把这些key永久记住吗，怎么还找我要？」）：
+   key 早就永久记在 ~/.project_provider/MEMORY.md 了，但**代码只认「当前项目目录下的 .env」** ——
+   换个新项目就报「❌ 缺少 project_provider API Key」。记忆归记忆，代码不读等于没记。
+   → 用户级凭证文件是本条铁律的**唯一落地形态**，resolve_key 必须能自愈读取。
+"""
+import json
+import os
+import random
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+try:
+    import ssl
+    _CTX = ssl.create_default_context()
+except Exception:  # noqa: BLE001
+    _CTX = None
+
+HOST = "[项目内资源]"
+B2_GETJSON = HOST + "/api/openapi/getJsonApiFormat"
+B2_UPLOAD = HOST + "/task/openapi/upload"
+B2_CREATE = HOST + "/task/openapi/create"
+B2_STATUS = HOST + "/task/openapi/status"
+B2_OUTPUTS = HOST + "/task/openapi/outputs"
+UC_STATUS = HOST + "/uc/openapi/accountStatus"
+
+AUDIO_EXT = ("mp3", "wav", "m4a", "aac", "flac", "ogg", "wma")
+VIDEO_EXT = ("mp4", "avi", "mov", "webm", "mkv")
+
+
+# ---------------------------------------------------------------- 凭证（跨项目永久生效）
+# 位置约定：~/.project_provider/credentials/<能力名>/keys.env
+#          （与既有 ~/.project_provider/credentials/meituan-living-deals-assistant/token.json 同规矩）
+CRED_DIR = os.path.join(os.path.expanduser("~"), ".project_provider", "credentials", "mv-auto-pipeline")
+CRED_ENV = os.path.join(CRED_DIR, "keys.env")
+
+ENV_NAMES = ("project_provider_API_KEY", "project_provider_API_KEY_C",
+             "project_provider_API_KEY_E", "项目模型_API_KEY", "项目模型_API_BASE")
+
+# 本模块**自己**注入过的键。用于「真实环境变量」快照时把它们排除掉，
+# 否则第二次 load 时读到的「真实值」其实是上一次自己写的 → 项目级再也覆盖不了。
+_INJECTED = set()
+LAST_SOURCE = {}          # key -> "cli" / "real-env" / "project-env" / "user-env"，供诊断打印
+
+
+def _read_env_file(path, names):
+    """解析 KEY=VALUE 文件为 dict（不碰 os.environ）。文件不存在就返回 {}。"""
+    out = {}
+    if not path or not os.path.isfile(path):
+        return out
+    try:
+        with open(path, encoding="utf-8-sig") as f:   # utf-8-sig：记事本存的 BOM 也要吃得下
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"').strip("'")
+                if k in names and v:
+                    out[k] = v
+    except OSError as e:
+        print(f"⚠ 凭证文件读取失败（{path}）：{e}，忽略")
+    return out
+
+
+def load_dotenv(project_root: str = "", names=ENV_NAMES, cred_path: str = "", quiet: bool = False):
+    """把凭证读进 os.environ，返回合并后的 dict。
+
+    优先级（高 → 低）：真实环境变量 > <项目根>/.env > 用户级 keys.env。
+    bash export 在 PowerShell 子进程里读不到，所以文件读取这条链必须自己兜住。
+    """
+    names = tuple(names)
+    # ① 真实环境变量快照（排除自己注入过的，保证幂等 & 项目级可覆盖用户级）
+    real = {k: os.environ[k] for k in names
+            if os.environ.get(k) and k not in _INJECTED}
+    user_p = cred_path or CRED_ENV
+    proj_p = os.path.join(project_root or ".", ".env")
+    user_env = _read_env_file(user_p, names)          # ④ 用户级（最底）
+    proj = _read_env_file(proj_p, names)              # ③ 项目级
+
+    merged = {}
+    merged.update(user_env)
+    merged.update(proj)                               # 项目级覆盖用户级
+    merged.update(real)                               # 真实环境变量最高，永不被改写
+
+    for k, v in merged.items():
+        os.environ[k] = v
+        _INJECTED.add(k)
+        LAST_SOURCE[k] = ("real-env" if k in real
+                          else "project-env" if k in proj else "user-env")
+    if not quiet:
+        if user_env:
+            print(f"[cred] 用户级凭证 {user_p} → 载入 {', '.join(sorted(user_env))}")
+        elif not real:
+            print(f"[cred] ⚠ 用户级凭证不存在：{user_p}\n"
+                  f"       新项目里将只能靠 .env / 环境变量；建议补齐该文件（跨项目永久生效）")
+    return merged
+
+
+def resolve_key(cli_key: str = "", project_root: str = "", self_heal: bool = True,
+                cred_path: str = "") -> str:
+    """读取 API Key（消费级优先）。**self_heal=True 时会先自动加载凭证文件** ——
+    调用方即使忘了先 load_dotenv，也不会退化成「又找用户要 key」。
+
+    ⚠️ self_heal 是**无条件** load（不是「环境变量空才 load」）——
+       load 只是读两个小文本，成本可忽略；换来的是 LAST_SOURCE 永远准确。
+       写成「空才 load」会导致：环境变量已有时不 load → LAST_SOURCE 留空 → 诊断报告说谎。
+    """
+    k = (cli_key or "").strip()
+    if k:
+        LAST_SOURCE["project_provider_API_KEY"] = "cli"
+        return k
+    if self_heal:
+        load_dotenv(project_root or os.getcwd(), cred_path=cred_path, quiet=True)
+    k = os.environ.get("project_provider_API_KEY", "").strip() \
+        or os.environ.get("project_provider_API_KEY_C", "").strip()
+    if not k:
+        raise SystemExit(
+            "❌ 缺少 project_provider API Key（优先消费级 / 走 供应商报告费用）。四种给法任选：\n"
+            "   ① --api-key <KEY>                        当次显式指定\n"
+            "   ② 用户级凭证（跨项目永久生效、默认已就位）：\n"
+            f"      {cred_path or CRED_ENV}\n"
+            "      内容形如：project_provider_API_KEY=<KEY>\n"
+            "   ③ <项目根>/.env 里写 project_provider_API_KEY=<KEY>（项目级覆盖）\n"
+            "   ④ 环境变量 project_provider_API_KEY=<KEY>\n"
+            "   —— 正常情况①③④都不用管，②在就够。"
+        )
+    return k
+
+
+def enterprise_key(cli_key: str = "", project_root: str = "", cred_path: str = "") -> str:
+    """读企业级 key（SHARED / 扣钱包真钱）。没有就返回空串（不抛错 —— 降级是可选能力）。"""
+    k = (cli_key or "").strip()
+    if k:
+        LAST_SOURCE["project_provider_API_KEY_E"] = "cli"
+        return k
+    load_dotenv(project_root or os.getcwd(), cred_path=cred_path, quiet=True)
+    return os.environ.get("project_provider_API_KEY_E", "").strip()
+
+
+def credential_report(project_root: str = "", cred_path: str = "") -> list:
+    """诊断用：每个键「是否存在 + 从哪来（不打印 key 本体）」。"""
+    load_dotenv(project_root, cred_path=cred_path, quiet=True)
+    rows = []
+    for k in ENV_NAMES:
+        v = os.environ.get(k, "")
+        rows.append({"name": k, "present": bool(v),
+                     "source": LAST_SOURCE.get(k, "-"),
+                     "masked": (v[:8] + "…" + v[-4:]) if len(v) > 14 else ("(短)" if v else "")})
+    return rows
+
+
+def _headers(api_key):
+    return {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+
+def _post_json(url, payload, api_key, timeout=60, retries=5):
+    """瞬时网络错误指数退避就地重试。"""
+    last = None
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers=_headers(api_key), method="POST")
+            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            wait = min(2 ** i * 2, 30)
+            print(f"[net] {type(e).__name__} 第{i+1}次重试，{wait}s 后重发 ...")
+            time.sleep(wait)
+    raise RuntimeError(f"网络重试 {retries} 次仍失败: {url} ({last})")
+
+
+# ---------------------------------------------------------------- 工作流自省
+def fetch_workflow_json(api_key, workflow_id):
+    """按 workflowId 拉完整工作流 JSON（节点自省，注入字段不用猜）。"""
+    resp = _post_json(B2_GETJSON, {"apiKey": api_key, "workflowId": str(workflow_id)}, api_key)
+    if resp.get("code") != 0:
+        raise RuntimeError(f"取工作流 JSON 失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    d = resp.get("data", {})
+    raw = d.get("prompt") if isinstance(d, dict) else d
+    wf = json.loads(raw) if isinstance(raw, str) else raw
+    if not isinstance(wf, dict) or not wf:
+        raise RuntimeError(f"工作流 JSON 解析出来不是节点字典: {type(wf)}")
+    return wf
+
+
+def describe_node(wf, nid):
+    """返回某个节点的可读摘要（class_type + 标量输入 + 连接输入）。"""
+    nd = wf.get(str(nid)) or {}
+    inp = nd.get("inputs", {}) or {}
+    scalars, links = {}, {}
+    for k, v in inp.items():
+        if isinstance(v, list) and len(v) == 2 and isinstance(v[0], (str, int)):
+            links[k] = f"<link {v[0]}.{v[1]}>"
+        elif isinstance(v, list) and len(v) == 3 and isinstance(v[1], int):
+            links[k] = f"<widget {v[0]}.{v[1]}>"
+        else:
+            scalars[k] = str(v)[:70]
+    return {"nodeId": str(nid), "class_type": nd.get("class_type", "?"),
+            "widgets": nd.get("widgets_values"), "scalars": scalars, "links": links}
+
+
+def audit_contract(wf, nodes, fields):
+    """提交前硬校验：契约节点必须存在、字段名必须命中（铁律 D4）。
+    返回 (ok, [问题...])。"""
+    problems = []
+    for role in ("prompt", "music", "resolution", "image"):
+        nid = str((nodes or {}).get(role) or "")
+        fld = (fields or {}).get(role) or ""
+        if not nid:
+            problems.append(f"注册表缺少 nodes.{role}")
+            continue
+        if nid not in wf:
+            problems.append(f"节点 {nid}（{role}）在工作流里不存在 —— 节点契约对不上")
+            continue
+        if fld and fld != "TBD":
+            keys = set((wf[nid].get("inputs") or {}).keys())
+            if fld not in keys:
+                problems.append(
+                    f"节点 {nid}（{role}）没有输入字段 '{fld}'；实际字段 = {sorted(keys)}"
+                )
+    for role in ("music_start", "music_dur"):
+        fld = (fields or {}).get(role) or ""
+        if fld and fld != "TBD" and str(nodes.get("music")) in wf:
+            keys = set((wf[nodes["music"]].get("inputs") or {}).keys())
+            if fld not in keys:
+                problems.append(f"节点 {nodes['music']}（music）没有输入字段 '{fld}'；实际字段 = {sorted(keys)}")
+    return (not problems), problems
+
+
+# ---------------------------------------------------------------- 素材上传
+def upload_media(api_key, local_path, file_type=None):
+    """上传本地文件，返回 fileName（节点注入专用）。"""
+    if not os.path.isfile(local_path):
+        raise FileNotFoundError(f"要上传的文件不存在: {local_path}")
+    fn = os.path.basename(local_path)
+    ext = fn.rsplit(".", 1)[-1].lower() if "." in fn else ""
+    if file_type is None:
+        file_type = ("audio" if ext in AUDIO_EXT else "video" if ext in VIDEO_EXT else "image")
+
+    boundary = f"----rh{uuid.uuid4().hex}"
+    with open(local_path, "rb") as f:
+        data = f.read()
+    parts = []
+    for name, val in (("apiKey", api_key), ("fileType", file_type)):
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{val}\r\n".encode()
+        )
+    parts.append(
+        (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+         f"filename=\"{fn}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+        + data + f"\r\n--{boundary}--\r\n".encode()
+    )
+    req = urllib.request.Request(B2_UPLOAD, data=b"".join(parts), method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=600, context=_CTX) as r:
+        resp = json.loads(r.read().decode("utf-8", "replace"))
+    if resp.get("code") != 0:
+        raise RuntimeError(f"上传失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    d = resp.get("data", {}) or {}
+    fname = d.get("fileName") or d.get("file_name") or ""
+    if not fname:
+        raise RuntimeError(f"上传响应无 fileName: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    print(f"[upload] {fn} ({file_type}, {len(data) // 1024}KB) -> {fname}")
+    return fname
+
+
+# ---------------------------------------------------------------- 提交 / 轮询
+def submit_task(api_key, workflow_id=None, node_info_list=None,
+                instance_type=None, workflow_json=None):
+    """提交任务。传入 workflow_json（dict 或 str）= 直传改造后的完整工作流。"""
+    payload = {"apiKey": api_key}
+    if workflow_json is not None:
+        if not workflow_id:
+            raise ValueError("直传 workflow 模式仍需同时带 workflowId（平台按它定位模板）")
+        payload["workflowId"] = str(workflow_id)
+        payload["workflow"] = (workflow_json if isinstance(workflow_json, str)
+                               else json.dumps(workflow_json, ensure_ascii=False))
+    else:
+        if not workflow_id:
+            raise ValueError("缺少 workflowId")
+        payload["workflowId"] = str(workflow_id)
+        payload["nodeInfoList"] = node_info_list or []
+    if instance_type:
+        payload["instanceType"] = instance_type
+
+    resp = _post_json(B2_CREATE, payload, api_key)
+    data = resp.get("data") or {}
+    if resp.get("code") not in (0, None) or not data.get("taskId"):
+        raise RuntimeError(f"提交失败: {json.dumps(resp, ensure_ascii=False)[:400]}")
+    print(f"[submit] taskId={data['taskId']} "
+          f"status={data.get('taskStatus', data.get('status'))}"
+          + (f" tips={str(data.get('promptTips'))[:150]}" if data.get("promptTips") else ""))
+    return data["taskId"]
+
+
+def get_outputs(api_key, task_id, retries=8, interval=10):
+    """取产物。code=804(APIKEY_TASK_IS_RUNNING) 时 data 不是 list → 轮询到真 list。"""
+    for _ in range(retries):
+        out = _post_json(B2_OUTPUTS, {"apiKey": api_key, "taskId": task_id}, api_key, timeout=30)
+        d = out.get("data")
+        if isinstance(d, list):
+            return d
+        print(f"[outputs] 未就绪（code={out.get('code')} msg={out.get('msg')}），{interval}s 后重查 ...")
+        time.sleep(interval)
+    raise RuntimeError(f"outputs 始终未返回 list（taskId={task_id}，凭此 id 可在 RH 控制台救回）")
+
+
+def fetch_failure(api_key, task_id):
+    """FAILED 任务取**真实**报错（哪个节点、崩在哪一行）。
+
+    ⚠️ 血泪教训（《野心家》MV 首镜实测）：/task/openapi/status 在任务失败时只回
+       `{"code":0,"msg":"success","data":"FAILED"}` —— **真实原因一个字都没有**。
+       照它报错，人只能看到「任务失败: code=0 msg=success」，完全无法定位。
+       真正的报错藏在 /task/openapi/outputs：code=805 APIKEY_TASK_STATUS_ERROR，
+       data.failedReason 里带 exception_type / node_id / node_name / traceback。
+    """
+    try:
+        r = _post_json(B2_OUTPUTS, {"apiKey": api_key, "taskId": task_id}, api_key, timeout=30)
+    except Exception as e:  # noqa: BLE001
+        return {"_error": f"取失败详情出错: {e}"}
+    d = r.get("data")
+    if isinstance(d, dict) and d.get("failedReason"):
+        return d["failedReason"]
+    return {"_raw": r}
+
+
+def format_failure(fr):
+    """把 failedReason 压成一行可读文本。"""
+    if not isinstance(fr, dict):
+        return str(fr)
+    if fr.get("_error"):
+        return fr["_error"]
+    tb = fr.get("traceback") or ""
+    if isinstance(tb, str) and tb.startswith("["):
+        try:
+            tb = " | ".join(json.loads(tb))
+        except ValueError:
+            pass
+    if not tb and fr.get("_raw"):
+        return json.dumps(fr["_raw"], ensure_ascii=False)[:400]
+    return (f"{fr.get('exception_type') or '?'} @ node {fr.get('node_id')}"
+            f"({fr.get('node_name')}) → {fr.get('exception_message') or ''} {tb}").strip()
+
+
+def poll_task(api_key, task_id, interval=10, timeout=2400, on_tick=None):
+    """轮询到 SUCCESS，返回产物列表（含 consumeCoins / taskCostTime）。"""
+    t0 = time.time()
+    while True:
+        time.sleep(interval)
+        resp = _post_json(B2_STATUS, {"apiKey": api_key, "taskId": task_id}, api_key, timeout=30)
+        data = resp.get("data")
+        status = data.get("taskStatus") if isinstance(data, dict) else data
+        if status == "SUCCESS":
+            items = get_outputs(api_key, task_id)
+            results = [{"url": x.get("fileUrl"), "type": x.get("fileType"),
+                        "nodeId": x.get("nodeId"),
+                        "coins": x.get("consumeCoins"), "money": x.get("consumeMoney"),
+                        "cost_s": x.get("taskCostTime")} for x in items]
+            coins = sum(int(x.get("coins") or 0) for x in results)
+            print(f"[done] 耗时 {int(time.time() - t0)}s · 产物 {len(results)} 个 · 消耗 {coins} 供应商报告费用")
+            return results
+        if status == "FAILED":
+            # ★ V1.0.2：一定要回挖 failedReason，否则只剩一句「code=0 msg=success」
+            raise RuntimeError("任务失败: " + format_failure(fetch_failure(api_key, task_id)))
+        el = int(time.time() - t0)
+        if el > timeout:
+            raise TimeoutError(f"轮询超时 {timeout}s（taskId={task_id}，可凭此 id 救回）")
+        if on_tick:
+            on_tick(el, status)
+        else:
+            print(f"[poll] {status} {el}s ...")
+
+
+def download(url, out_path):
+    from urllib.parse import quote
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    safe = quote(url, safe=":/?&=%.#-_.~")
+    last = None
+    for i in range(5):
+        try:
+            req = urllib.request.Request(safe, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=600, context=_CTX) as r:
+                blob = r.read()
+            # 先写 tmp 再 replace —— Windows 上原地覆盖不刷新创建时间（drama 铁律 D20 教训）
+            tmp = out_path + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(blob)
+            os.replace(tmp, out_path)
+            print(f"[download] {out_path} ({len(blob) // 1024}KB)")
+            return out_path
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            last = e
+            time.sleep(min(2 ** i * 2, 30))
+    raise RuntimeError(f"下载失败: {url} ({last})")
+
+
+def account_status(api_key):
+    """账户余额 + 占用情况。⚠️ 参数名小写 apikey。"""
+    resp = _post_json(UC_STATUS, {"apikey": api_key}, api_key, timeout=30)
+    d = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+    return {
+        "remainCoins": d.get("remainCoins"), "remainMoney": d.get("remainMoney"),
+        "currency": d.get("currency"), "currentTaskCounts": d.get("currentTaskCounts"),
+        "apiType": d.get("apiType"), "raw_code": resp.get("code"),
+        "raw_msg": resp.get("msg"),
+    }
+
+
+def cny_per_coin(st):
+    """币/元比值从账号现算，禁止写死（drama 铁律 D32 补充）。"""
+    try:
+        c, m = float(st.get("remainCoins") or 0), float(st.get("remainMoney") or 0)
+        if c > 0 and m > 0:
+            return c / m
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def pick_video(results):
+    """从产物里挑视频（fileType 或扩展名）。"""
+    for r in results:
+        t = (r.get("type") or "").lower()
+        u = (r.get("url") or "").lower()
+        if t in ("mp4", "webm", "mov", "gif", "video") or u.rsplit(".", 1)[-1] in VIDEO_EXT:
+            return r
+    return results[0] if results else None
+
+
+def rand_seed():
+    return random.randint(0, 2 ** 53)
