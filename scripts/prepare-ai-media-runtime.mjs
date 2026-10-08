@@ -22,6 +22,15 @@ import { fileURLToPath } from "node:url";
 import { AI_MEDIA_PRUNING_POLICY, pruneAiMediaRuntime } from "./ai-media-runtime-prune.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const applicationVersion = JSON.parse(
+  await readFile(path.join(root, "package.json"), "utf8"),
+).version;
+// Public artifact hosts can reject an anonymous HTTP-client agent. Identify the
+// actual build tool while retaining the pinned byte length and checksum checks.
+const downloadHeaders = {
+  "User-Agent": `infinite-canvas-build/${applicationVersion}`,
+  Accept: "application/octet-stream",
+};
 export const RUNTIME_VERSION = "ai-media-onnx-v1";
 export const QUALITY_RUNTIME_VERSION = "ai-media-v1";
 export const DEPTH_COMMIT = "4f5ae23172ba60fd7bc11ef671cca678842c7072";
@@ -145,7 +154,7 @@ export async function downloadVerified(url, target, pin) {
   await mkdir(path.dirname(target), { recursive: true });
   const temporary = `${target}.${randomUUID()}.part`;
   try {
-    const response = await fetch(url);
+    const response = await fetch(url, { headers: downloadHeaders });
     if (!response.ok || !response.body) throw new Error(`下载失败 ${response.status}: ${url}`);
     await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx" }));
     const digest = await sha256(temporary);

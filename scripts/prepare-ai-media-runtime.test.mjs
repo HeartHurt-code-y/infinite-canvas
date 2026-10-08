@@ -4,6 +4,7 @@ import { mkdtemp, writeFile, mkdir, rm, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { AI_MEDIA_PRUNING_POLICY } from "./ai-media-runtime-prune.mjs";
 import {
   downloadVerified,
@@ -80,6 +81,47 @@ test("corrupted cached artifacts are rejected without publishing downloaded byte
     /校验失败/,
   );
   assert.equal(await readFile(target, "utf8"), "old");
+});
+
+test("artifact downloads identify the project and verify complete response bytes", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ai-media-download-agent-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const bytes = Buffer.from("pinned-official-model-payload");
+  let accepted = 0;
+  const server = createServer((request, response) => {
+    if (
+      !/^infinite-canvas-build\/\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(
+        request.headers["user-agent"] ?? "",
+      ) ||
+      request.headers.accept !== "application/octet-stream"
+    ) {
+      response.writeHead(403);
+      response.end("Project download identity required");
+      return;
+    }
+    accepted += 1;
+    response.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Length": bytes.length,
+    });
+    response.end(bytes);
+  });
+  t.after(() => {
+    server.closeAllConnections();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/model.pth`;
+  const anonymous = await fetch(url);
+  assert.equal(anonymous.status, 403);
+  await anonymous.arrayBuffer();
+  const target = path.join(directory, "model.pth");
+  const pin = { bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  await downloadVerified(url, target, pin);
+  assert.deepEqual(await readFile(target), bytes);
+  assert.equal(await sha256(target), pin.sha256);
+  await downloadVerified(url, target, pin);
+  assert.equal(accepted, 1, "a verified cache entry does not need another network request");
 });
 
 test("prepared components reuse only unchanged build inputs and every recorded file", async (t) => {

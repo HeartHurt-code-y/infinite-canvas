@@ -62,7 +62,7 @@ jobs:
         run: |
           export IC_COMPONENT_PYTHON="$(command -v python3)"
           "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
-          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs
+          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs scripts/prepare-ai-media-runtime.test.mjs
       - name: Prepare optional signing identity
         run: bash scripts/prepare-macos-online-signing.sh
       - name: Build and verify online DMG and updater
