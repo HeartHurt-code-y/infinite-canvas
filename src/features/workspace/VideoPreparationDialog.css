@@ -118,6 +118,10 @@
   align-items: center;
   min-height: 2rem;
   margin: var(--space-xs) 0;
+  /* 选中区间由组件内联 style 注入实际值；这里声明本地默认值作为该局部令牌的契约，
+     内联样式在同一元素上优先级更高，子元素继承的是实际值。 */
+  --selection-start: 0%;
+  --selection-width: 0%;
 }
 .video-preparation__selection {
   position: absolute;

@@ -70,7 +70,7 @@
 }
 
 .reelbench__quality {
-  border: 1px solid var(--border-color, #444);
+  border: 1px solid var(--color-rule);
   border-radius: 10px;
   padding: 12px;
 }
@@ -93,7 +93,7 @@
   align-content: start;
   gap: 8px;
   min-width: 0;
-  border: 1px solid var(--border-color, #444);
+  border: 1px solid var(--color-rule);
   border-radius: 10px;
   padding: 10px;
 }
