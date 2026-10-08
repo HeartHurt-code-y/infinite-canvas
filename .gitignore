@@ -81,3 +81,6 @@ src-tauri/resources/ai-media-runtime/
 src-tauri/resources/ai-media-quality-runtime/
 # 一次性排查与格式化中间产物，任何提交都不应包含
 .tmp/
+# Qoder Canvas 会话余量产物：每次会话都会重排 report.json 与新的 .canvas.tsx，
+# 且不在 tsconfig 内（此前只能靠 eslint/prettier 各自的忽略规则绕过）。
+.qoder-credits/
