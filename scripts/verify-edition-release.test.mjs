@@ -461,12 +461,18 @@ async function macFixture(t, platform = "darwin-aarch64", explicitTarget = false
       objectKey: tosUpdatesObjectKey(`${channel}/latest.json`),
       url: `${baseUrl}/latest.json`,
     },
-    artifacts: f.marker.artifacts.map((artifact) => ({
-      ...artifact,
-      localPath: path.join(f.distributionDirectory, artifact.path),
-      objectKey: tosUpdatesObjectKey(`${channel}/${path.basename(artifact.path)}`),
-      url: `${baseUrl}/${encodeURIComponent(path.basename(artifact.path))}`,
-    })),
+    artifacts: f.marker.artifacts.map((artifact) => {
+      const publicName =
+        artifact.path === "helper/install-macos.sh"
+          ? `install-macos-${VERSION}.sh`
+          : path.basename(artifact.path);
+      return {
+        ...artifact,
+        localPath: path.join(f.distributionDirectory, artifact.path),
+        objectKey: tosUpdatesObjectKey(`${channel}/${publicName}`),
+        url: `${baseUrl}/${encodeURIComponent(publicName)}`,
+      };
+    }),
     componentArchives: f.catalog.components.map((component) => ({
       id: component.id,
       localPath: path.join(f.packageDirectory, `${component.archive.sha256}.zip`),
@@ -570,6 +576,24 @@ test("Mac verification refuses changed updater contents, incomplete DMG checks, 
   await writeJson(f.editionConfigPath, config);
   await writeFile(path.join(f.root, "scripts/install-macos.sh"), "changed helper after build");
   await assert.rejects(verifyEditionRelease(f.options), /helper differs/);
+});
+
+test("Mac release verification binds the public installation helper to the application version", async (t) => {
+  const f = await macFixture(t);
+  const manifestPath = path.join(f.distributionDirectory, "publish-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath));
+  const helper = manifest.artifacts.find(
+    ({ path: filename }) => filename === "helper/install-macos.sh",
+  );
+  for (const name of ["install-macos.sh", "install-macos-0.2.0.sh"]) {
+    helper.objectKey = tosUpdatesObjectKey(`darwin-aarch64-online/${name}`);
+    helper.url = `${tosUpdatesPublicBaseUrl()}/darwin-aarch64-online/${name}`;
+    await writeJson(manifestPath, manifest);
+    await assert.rejects(
+      verifyEditionRelease(f.options),
+      /Publish artifact identity\/path\/channel mismatch/,
+    );
+  }
 });
 
 test("Mac catalog preserves Unix file modes and safe relative component links while rejecting escape and Windows links", async (t) => {

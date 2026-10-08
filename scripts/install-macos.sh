@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# 无 Apple 证书的一键安装/修复脚本：让未签名的包在任何 Mac 上都能打开。
+# 无 Apple 证书的一键安装脚本：保留联网版签名，兼容旧包签名修复。
 #
 # 为什么需要它：没有 Developer ID 证书时，下载来的包会被两件事挡住，而且它们互相独立——
 #   1. Gatekeeper：包带 com.apple.quarantine 属性 → 提示「无法验证开发者」或「已损坏」。
 #   2. Apple Silicon 内核：arm64 可执行文件必须有有效签名才会被执行，
 #      否则被直接杀掉（"Killed: 9"）。注意 Tauri 在没有签名身份时**什么都不签**
 #      （不是退回 ad-hoc，而是整段跳过），随包分发的 FFmpeg / Blender 也可能未签名。
-# 因此「清 quarantine」不足以让 app 正常跑起来，必须同时做 **ad-hoc 重新签名**。
+# 旧的未签名完整包需要 ad-hoc 重签；带组件目录的联网版必须保留构建时的签名和文件摘要。
 #
 # 用法（把 <文件> 换成 DMG 或 .app 的路径）：
 #   sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
@@ -21,8 +21,8 @@
 #   --no-install     就地修复，不复制到 /Applications（用于从 DMG 直接运行的场景）
 #   --dry-run        只解析参数并打印将要做的事，不做任何改动（可在任意平台跑）
 #
-# 做了什么：清掉 DMG 与 .app 的隔离属性 → 由内到外 ad-hoc 重签 app 内所有可执行文件
-#          → 装到 /Applications → 校验签名与 Gatekeeper 评估。
+# 做了什么：装到 /Applications → 校验联网版原有签名并清隔离属性；旧完整包由内到外重签
+#          → 校验签名与 Gatekeeper 评估。
 #
 # 退出码：0 成功；1 失败；2 用法错误。
 set -euo pipefail
@@ -152,49 +152,64 @@ else
   log "就地修复（不复制）：$dest_app"
 fi
 
+# 联网版组件目录和原生清单固定了准备阶段的文件摘要。重签 Mach-O 会改变文件内容，
+# 不能用旧包的签名修复路径绕过信任校验，即使原有签名已经损坏也必须拒绝。
+preserve_pinned_signature=0
+component_catalog="$dest_app/Contents/Resources/component-catalog.json"
+if [ -e "$component_catalog" ] || [ -L "$component_catalog" ]; then
+  preserve_pinned_signature=1
+  log "联网版组件目录存在，校验构建时的原始签名…"
+  codesign --verify --deep --strict "$dest_app" >/dev/null 2>&1 ||
+    fail "联网版原有签名校验失败；重新签名会破坏组件信任摘要，请重新下载可信安装包。"
+fi
+
 # ---- 3. 清除隔离属性 ---------------------------------------------------------
 log "清除 app 的隔离属性…"
 xattr -dr com.apple.quarantine "$dest_app" 2>/dev/null || true
 # 其它扩展属性会让 codesign 报 "resource fork, Finder information, or similar detritus not allowed"。
 xattr -cr "$dest_app" 2>/dev/null || true
 
-# ---- 4. ad-hoc 重新签名（由内到外）-------------------------------------------
+# ---- 4. 保留联网版签名；旧完整包 ad-hoc 重新签名（由内到外）--------------------
 #
-# Apple Silicon 上这一步是**必须**的：arm64 可执行文件没有有效签名会被内核直接杀掉。
+# 旧的未签名完整包在 Apple Silicon 上需要这一步：没有有效签名会被内核直接杀掉。
 # 顺序必须由深到浅，否则先签外层会让内层二进制失去签名。
 # 用 `-s -` 即 ad-hoc 身份，不需要任何证书。
-log "ad-hoc 重新签名（由内到外）…"
-
-# 收集需要签名的 Mach-O 文件（magic: 0xFEEDFACF / 0xCAFEBABE 等）。
-while IFS= read -r candidate; do
-  [ -f "$candidate" ] || continue
-  magic="$(head -c 4 "$candidate" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
-  case "$magic" in
-    cffaedfe | cefaedfe | cafebabe | bebafeca | feedface) printf '%s\n' "$candidate" ;;
-  esac
-done < <(find "$dest_app" -type f -perm -u+x 2>/dev/null || true) >"$work_dir/macho.txt"
-
-# 由深到浅：先签最内层，再签外层，否则先签外层会让内层签名失效。
-# awk 给每行加上长度前缀，sort -rn 即按路径长度倒序（越深的路径越长）。
-awk '{ print length($0), $0 }' "$work_dir/macho.txt" | sort -rn | cut -d' ' -f2- >"$work_dir/ordered.txt"
-
-signed_count=0
-while IFS= read -r candidate; do
-  [ -n "$candidate" ] || continue
-  if codesign --force --sign - --timestamp=none "$candidate" >/dev/null 2>&1; then
-    signed_count=$((signed_count + 1))
-  else
-    warn "无法签名（跳过）：$candidate"
-  fi
-done <"$work_dir/ordered.txt"
-
-log "已签名 $signed_count 个可执行文件。"
-
-# 最后签 bundle 本身（--deep 会重复签内层，这里不用；内层已逐个处理）。
-if codesign --force --sign - --timestamp=none "$dest_app" >/dev/null 2>&1; then
-  log "已签名 app bundle。"
+if [ "$preserve_pinned_signature" -eq 1 ]; then
+  log "保留联网版全部可执行文件和 app bundle 的原有签名。"
 else
-  warn "签名 app bundle 失败，继续尝试校验。"
+  log "ad-hoc 重新签名（由内到外）…"
+
+  # 收集需要签名的 Mach-O 文件（magic: 0xFEEDFACF / 0xCAFEBABE 等）。
+  while IFS= read -r candidate; do
+    [ -f "$candidate" ] || continue
+    magic="$(head -c 4 "$candidate" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d ' \n')"
+    case "$magic" in
+      cffaedfe | cefaedfe | cafebabe | bebafeca | feedface) printf '%s\n' "$candidate" ;;
+    esac
+  done < <(find "$dest_app" -type f -perm -u+x 2>/dev/null || true) >"$work_dir/macho.txt"
+
+  # 由深到浅：先签最内层，再签外层，否则先签外层会让内层签名失效。
+  # awk 给每行加上长度前缀，sort -rn 即按路径长度倒序（越深的路径越长）。
+  awk '{ print length($0), $0 }' "$work_dir/macho.txt" | sort -rn | cut -d' ' -f2- >"$work_dir/ordered.txt"
+
+  signed_count=0
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    if codesign --force --sign - --timestamp=none "$candidate" >/dev/null 2>&1; then
+      signed_count=$((signed_count + 1))
+    else
+      warn "无法签名（跳过）：$candidate"
+    fi
+  done <"$work_dir/ordered.txt"
+
+  log "已签名 $signed_count 个可执行文件。"
+
+  # 最后签 bundle 本身（--deep 会重复签内层，这里不用；内层已逐个处理）。
+  if codesign --force --sign - --timestamp=none "$dest_app" >/dev/null 2>&1; then
+    log "已签名 app bundle。"
+  else
+    warn "签名 app bundle 失败，继续尝试校验。"
+  fi
 fi
 
 # ---- 5. 校验 -----------------------------------------------------------------
@@ -202,6 +217,9 @@ log "校验签名…"
 if codesign --verify --deep --strict "$dest_app" >/dev/null 2>&1; then
   log "签名校验通过。"
 else
+  if [ "$preserve_pinned_signature" -eq 1 ]; then
+    fail "联网版签名校验未通过；请重新下载可信安装包，不能通过重签绕过组件信任校验。"
+  fi
   warn "codesign --verify 未通过；app 可能仍能启动，但若打不开请把完整输出发给开发者。"
 fi
 

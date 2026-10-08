@@ -8,6 +8,7 @@ import {
   prepareOnlinePublication,
   publishOnlineEdition,
 } from "./publish-online-updates.mjs";
+import { createOnlineUpdateTransport } from "./online-update-transport.mjs";
 import {
   componentBytesSha256,
   RUNTIME_COMPONENTS,
@@ -65,7 +66,10 @@ async function fixture(t, version = "0.2.1", platform = PLATFORM) {
       ["helper/install-macos.sh", Buffer.from("verified installation helper")],
     );
   for (const [relative, body] of paths) {
-    const basename = path.basename(relative);
+    const basename =
+      relative === "helper/install-macos.sh"
+        ? `install-macos-${version}.sh`
+        : path.basename(relative);
     const localPath = path.join(directory, relative);
     const objectKey = tosUpdatesObjectKey(`${channel}/${basename}`);
     await mkdir(path.dirname(localPath), { recursive: true });
@@ -205,14 +209,18 @@ function mockTransport(initial = new Map()) {
   return state;
 }
 
-function oldFeed(version = "0.2.0") {
+function oldFeed(version = "0.2.0", platform = PLATFORM) {
+  const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+  const filename = platform.startsWith("darwin-")
+    ? `无限画布_${version}_${arch}-online.app.tar.gz`
+    : `无限画布_${version}_x64-online-setup.exe`;
   return encode({
     version,
     notes: "old online",
     pub_date: "2026-10-07T00:00:00.000Z",
     platforms: {
-      [PLATFORM]: {
-        url: `${tosUpdatesPublicBaseUrl()}/${CHANNEL}/${encodeURIComponent(`无限画布_${version}_x64-online-setup.exe`)}`,
+      [platform]: {
+        url: `${tosUpdatesPublicBaseUrl()}/${platform}-online/${encodeURIComponent(filename)}`,
         signature: "old signature",
       },
     },
@@ -251,12 +259,150 @@ test("both Mac channels publish their DMG, updater/signature, installation helpe
     assert.equal(mutations.length, 12);
     assert.equal(mutations.at(-1).objectKey, tosUpdatesObjectKey(`${platform}-online/latest.json`));
     assert.ok(report.objects.some(({ objectKey }) => objectKey.endsWith(".dmg")));
-    assert.ok(report.objects.some(({ objectKey }) => objectKey.endsWith("/install-macos.sh")));
+    assert.ok(
+      report.objects.some(({ objectKey }) => objectKey.endsWith("/install-macos-0.2.2.sh")),
+    );
     assert.equal(
       report.objects.some(({ objectKey }) => objectKey.includes("windows-x86_64")),
       false,
     );
     assert.ok(f.feed.platforms[platform].url.endsWith(".app.tar.gz"));
+  }
+});
+
+test("a later Mac release can update its installation helper while preserving the previous immutable helper", async (t) => {
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const previous = await fixture(t, "0.2.1", platform);
+    const next = await fixture(t, "0.2.2", platform);
+    const transport = mockTransport();
+    await publishOnlineEdition({ ...previous.options, transportFactory: () => transport });
+    const helper = next.manifest.artifacts.find(
+      ({ path: filename }) => filename === "helper/install-macos.sh",
+    );
+    const corrected = Buffer.from("corrected installation helper for the next release");
+    await writeFile(helper.localPath, corrected);
+    helper.size = corrected.length;
+    helper.sha256 = componentBytesSha256(corrected);
+    await next.writeManifest();
+    const report = await publishOnlineEdition({
+      ...next.options,
+      transportFactory: () => transport,
+    });
+    assert.equal(report.published, true);
+    const previousKey = tosUpdatesObjectKey(`${platform}-online/install-macos-0.2.1.sh`);
+    const nextKey = tosUpdatesObjectKey(`${platform}-online/install-macos-0.2.2.sh`);
+    assert.notEqual(previousKey, nextKey);
+    assert.deepEqual(
+      transport.objects.get(previousKey).body,
+      Buffer.from("verified installation helper"),
+    );
+    assert.deepEqual(transport.objects.get(nextKey).body, corrected);
+    assert.equal(
+      writes(transport).some(({ objectKey }) => objectKey.endsWith("/install-macos.sh")),
+      false,
+    );
+  }
+});
+
+test("Mac publication rejects unversioned helpers and helpers from another release before opening transport", async (t) => {
+  const f = await fixture(t, "0.2.2", "darwin-aarch64");
+  const helper = f.manifest.artifacts.find(
+    ({ path: filename }) => filename === "helper/install-macos.sh",
+  );
+  for (const name of ["install-macos.sh", "install-macos-0.2.1.sh"]) {
+    helper.objectKey = tosUpdatesObjectKey(`darwin-aarch64-online/${name}`);
+    helper.url = url(helper.objectKey);
+    await f.writeManifest();
+    await assert.rejects(
+      publishOnlineEdition({
+        ...f.options,
+        transportFactory: () => {
+          throw new Error("must not read credentials");
+        },
+      }),
+      /Artifact upload is outside the dedicated online channel/,
+    );
+  }
+});
+
+test("both Mac releases pass the real TOS transport scope, public digest checks, old-feed backup and final CAS", async (t) => {
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const f = await fixture(t, "0.2.2", platform);
+    const feedKey = tosUpdatesObjectKey(`${platform}-online/latest.json`);
+    const previousFeed = oldFeed("0.2.1", platform);
+    const previousEtag = '"previous-Mac-feed"';
+    const objects = new Map([[feedKey, { body: previousFeed, etag: previousEtag }]]);
+    const calls = [];
+    const report = await publishOnlineEdition({
+      ...f.options,
+      transportFactory: (options) => {
+        assert.equal(options.platform, platform);
+        assert.equal(options.root, f.root);
+        return createOnlineUpdateTransport({
+          ...options,
+          environment: {
+            TOS_ACCESS_KEY: "FIXTURE_ONLY_ACCESS",
+            TOS_SECRET_KEY: "FIXTURE_ONLY_SECRET",
+          },
+          request: async (request) => {
+            const parsed = new URL(request.url);
+            const objectKey = parsed.pathname.split("/").map(decodeURIComponent).join("/").slice(1);
+            calls.push({ ...request, objectKey });
+            let entry = objects.get(objectKey);
+            if (request.method === "PUT") {
+              if (
+                (request.headers["if-none-match"] === "*" && entry) ||
+                (request.headers["if-match"] && request.headers["if-match"] !== entry?.etag)
+              )
+                return { status: 412, body: Buffer.alloc(0), headers: {} };
+              const body = Buffer.from(request.body);
+              assert.equal(request.headers["x-tos-meta-sha256"], componentBytesSha256(body));
+              entry = { body, etag: `"fixture-${calls.length}"` };
+              objects.set(objectKey, entry);
+            }
+            if (!entry) return { status: 404, body: Buffer.alloc(0), headers: {} };
+            const sha256 = componentBytesSha256(entry.body);
+            if (request.hash) assert.equal(parsed.search, "");
+            return {
+              status: 200,
+              body: Buffer.from(entry.body),
+              headers: {
+                "content-length": String(entry.body.length),
+                "x-tos-meta-sha256": sha256,
+              },
+              etag: entry.etag,
+              size: entry.body.length,
+              sha256,
+            };
+          },
+        });
+      },
+    });
+    assert.equal(report.published, true);
+    assert.equal(report.publicObjectsVerified, true);
+    assert.equal(calls[0].method, "HEAD");
+    assert.equal(calls[0].objectKey, feedKey);
+    const mutations = calls.filter(({ method }) => method === "PUT");
+    assert.equal(mutations.length, 13); // Eleven payloads, old-feed backup, then the feed.
+    const feedCommit = mutations.at(-1);
+    assert.equal(feedCommit.objectKey, feedKey);
+    assert.equal(feedCommit.headers["if-match"], previousEtag);
+    assert.equal(feedCommit.headers["cache-control"], "no-cache, no-store");
+    assert.ok(mutations.slice(0, -1).every(({ headers }) => headers["if-none-match"] === "*"));
+    assert.ok(
+      mutations.slice(0, -1).every(({ headers }) => /immutable/.test(headers["cache-control"])),
+    );
+    const backupKey = tosUpdatesObjectKey(
+      `${platform}-online/backups/${componentBytesSha256(previousFeed)}.json`,
+    );
+    assert.deepEqual(objects.get(backupKey).body, previousFeed);
+    assert.deepEqual(objects.get(feedKey).body, encode(f.feed));
+    assert.equal(calls.filter(({ hash }) => hash).length, 13);
+    assert.equal(
+      calls.some(({ objectKey }) => objectKey.includes("windows-x86_64")),
+      false,
+    );
+    assert.equal(f.verificationCalls(), 2);
   }
 });
 

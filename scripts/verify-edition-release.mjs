@@ -876,14 +876,17 @@ export async function verifyEditionRelease({
         "Publish artifact",
       );
       const expected = marker.artifacts[index];
+      const publicName =
+        isMac && expected.path === "helper/install-macos.sh"
+          ? `install-macos-${version}.sh`
+          : path.basename(expected.path);
       requireValue(
         artifact.path === expected.path &&
           artifact.size === expected.size &&
           artifact.sha256 === expected.sha256 &&
           artifact.localPath === path.join(directory, expected.path) &&
-          artifact.objectKey ===
-            tosUpdatesObjectKey(`${channel}/${path.basename(expected.path)}`) &&
-          artifact.url === `${baseUrl}/${encodeURIComponent(path.basename(expected.path))}`,
+          artifact.objectKey === tosUpdatesObjectKey(`${channel}/${publicName}`) &&
+          artifact.url === `${baseUrl}/${encodeURIComponent(publicName)}`,
         "Publish artifact identity/path/channel mismatch",
       );
     }

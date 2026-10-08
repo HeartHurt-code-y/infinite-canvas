@@ -268,6 +268,13 @@ test("Mac archive preserves signed updater bytes, excludes the app tree and reco
     /darwin-aarch64-online\/.*aarch64-online\.app\.tar\.gz$/,
   );
   assert.match(feed.notes, /Gatekeeper/);
+  const publish = JSON.parse(await readFile(path.join(output, "publish-manifest.json")));
+  const helper = publish.artifacts.find(
+    ({ path: filename }) => filename === "helper/install-macos.sh",
+  );
+  assert.equal(helper.localPath, path.join(output, "helper/install-macos.sh"));
+  assert.match(helper.objectKey, /darwin-aarch64-online\/install-macos-0\.2\.1\.sh$/);
+  assert.ok(helper.url.endsWith("/darwin-aarch64-online/install-macos-0.2.1.sh"));
   assert.equal(
     await componentFileSha256(path.join(output, "macos/无限画布_0.2.1_aarch64-online.app.tar.gz")),
     await componentFileSha256(path.join(bundle, "macos/无限画布.app.tar.gz")),

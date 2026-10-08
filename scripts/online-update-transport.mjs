@@ -11,7 +11,11 @@ import {
   parseTosUploadId,
   buildCompleteMultipartJson,
 } from "./publish-tos-updates.mjs";
-import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-component-catalog.mjs";
+import {
+  assertComponentRoot,
+  COMPONENT_PLATFORM,
+  COMPONENT_REPO_ROOT,
+} from "./runtime-component-catalog.mjs";
 import { resolveComponentPython } from "./package-runtime-components.mjs";
 import {
   TOS_UPDATES_BUCKET,
@@ -24,26 +28,54 @@ import {
 const PART_SIZE = 8 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_SMALL_BYTES = 1024 * 1024;
-const ONLINE_PREFIX = `${TOS_UPDATES_PREFIX}/windows-x86_64-online/`;
-const COMPONENT_PREFIX = `${TOS_UPDATES_PREFIX}/components/windows-x86_64/`;
+const ONLINE_PLATFORMS = Object.freeze({
+  "windows-x86_64": "x64",
+  "darwin-aarch64": "aarch64",
+  "darwin-x86_64": "x64",
+});
+const VERSION = "[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?";
+const COMPONENT_IDS =
+  "blender|remotion-runtime|ffmpeg|pose-runtime|gpt-image-2-style-library|ai-media-runtime|ai-media-quality-runtime";
+
+function onlinePrefix(platform) {
+  if (!Object.hasOwn(ONLINE_PLATFORMS, platform))
+    throw new Error("Unsupported online transport platform");
+  return `${TOS_UPDATES_PREFIX}/${platform}-online/`;
+}
+
+function isOnlineFeed(key) {
+  return Object.keys(ONLINE_PLATFORMS).some(
+    (platform) => key === `${onlinePrefix(platform)}latest.json`,
+  );
+}
 
 export function assertOnlineObjectKey(key) {
   if (typeof key !== "string" || key.includes("\\") || key.includes("%"))
     throw new Error("Invalid online object key");
-  const relative = key.startsWith(ONLINE_PREFIX) ? key.slice(ONLINE_PREFIX.length) : "";
-  const version = "[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?";
-  if (
-    relative === "latest.json" ||
-    /^backups\/[a-f0-9]{64}\.json$/.test(relative) ||
-    new RegExp(`^无限画布_${version}_x64-online-setup\\.exe(?:\\.sig)?$`).test(relative)
-  )
-    return key;
-  if (
-    new RegExp(
-      `^${COMPONENT_PREFIX}${version}/(?:blender|remotion-runtime|ffmpeg|pose-runtime|gpt-image-2-style-library|ai-media-runtime|ai-media-quality-runtime)-[a-f0-9]{64}\\.zip$`,
-    ).test(key)
-  )
-    return key;
+  for (const [platform, arch] of Object.entries(ONLINE_PLATFORMS)) {
+    const prefix = onlinePrefix(platform);
+    const relative = key.startsWith(prefix) ? key.slice(prefix.length) : "";
+    if (relative === "latest.json" || /^backups\/[a-f0-9]{64}\.json$/.test(relative)) return key;
+    const artifact =
+      platform === "windows-x86_64"
+        ? `^无限画布_${VERSION}_${arch}-online-setup\\.exe(?:\\.sig)?$`
+        : `^无限画布_${VERSION}_${arch}-online(?:\\.app\\.tar\\.gz(?:\\.sig)?|\\.dmg)$`;
+    if (
+      new RegExp(artifact).test(relative) ||
+      (platform.startsWith("darwin-") &&
+        (relative === "install-macos.sh" ||
+          new RegExp(`^install-macos-${VERSION}\\.sh$`).test(relative)))
+    )
+      return key;
+    const componentPrefix = `${TOS_UPDATES_PREFIX}/components/${platform}/`;
+    if (
+      key.startsWith(componentPrefix) &&
+      new RegExp(`^${VERSION}/(?:${COMPONENT_IDS})-[a-f0-9]{64}\\.zip$`).test(
+        key.slice(componentPrefix.length),
+      )
+    )
+      return key;
+  }
   throw new Error("Object is outside the dedicated online/component release scope");
 }
 
@@ -251,11 +283,13 @@ function httpFailure(result, operation) {
 
 export async function createOnlineUpdateTransport({
   root = COMPONENT_REPO_ROOT,
+  platform = COMPONENT_PLATFORM ?? "windows-x86_64",
   environment = process.env,
   configLoader = loadOnlinePublishConfig,
   request = requestOnlineObject,
   onProgress = console.log,
 } = {}) {
+  const authenticationFeedKey = `${onlinePrefix(platform)}latest.json`;
   const config = configLoader({ root, environment });
   // Try the same base64-console compatibility as the existing project publisher.
   let authenticated = false;
@@ -263,7 +297,7 @@ export async function createOnlineUpdateTransport({
     const signed = presignUrl({
       method: "HEAD",
       host: tosUpdatesHost(),
-      objectKey: `${ONLINE_PREFIX}latest.json`,
+      objectKey: authenticationFeedKey,
       region: config.region,
       accessKey: config.accessKey,
       secretKey: candidate,
@@ -380,6 +414,10 @@ export async function createOnlineUpdateTransport({
     ifMatch,
   }) {
     assertOnlineObjectKey(objectKey);
+    if (objectKey.endsWith("/install-macos.sh"))
+      throw new Error(
+        "Legacy macOS installation helpers are read-only; publish a versioned helper",
+      );
     if (
       Boolean(ifNoneMatch) === Boolean(ifMatch) ||
       (ifNoneMatch && ifNoneMatch !== "*") ||
@@ -391,7 +429,7 @@ export async function createOnlineUpdateTransport({
     const bytes = localPath ? undefined : Buffer.from(body ?? "");
     if ((localPath && body !== undefined) || (!localPath && !bytes.length))
       throw new Error("Online write requires one file or nonempty body");
-    const isFeed = objectKey === `${ONLINE_PREFIX}latest.json`;
+    const isFeed = isOnlineFeed(objectKey);
     if (!isFeed && ifNoneMatch !== "*")
       throw new Error("Release payloads and backups are immutable");
     const digest = metadata?.sha256;

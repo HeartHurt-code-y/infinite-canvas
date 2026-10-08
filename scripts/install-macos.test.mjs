@@ -5,7 +5,15 @@
 // 因此这里用 --dry-run 在任意平台覆盖解析路径（macOS 上再额外断言平台守卫）。
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -16,11 +24,18 @@ const IS_MACOS = process.platform === "darwin";
 
 /** 找一个可用的 bash；没有就跳过（Windows 上通常没有）。 */
 function findBash() {
+  // Windows 的 bash 命令常指向未配置发行版的 WSL；沿 Git 安装路径找到可执行的 Bash。
+  const gitProbe = spawnSync("git", ["--exec-path"], { encoding: "utf8" });
+  const gitBash =
+    process.platform === "win32" && gitProbe.status === 0
+      ? path.resolve(gitProbe.stdout.trim(), "../../..", "bin/bash.exe")
+      : null;
   for (const candidate of [
     "bash",
     "/bin/bash",
     "/usr/bin/bash",
     "C:/Program Files/Git/bin/bash.exe",
+    ...(gitBash ? [gitBash] : []),
   ]) {
     const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" });
     if (!probe.error && probe.status === 0) return candidate;
@@ -261,5 +276,150 @@ test("a real run is gated on macOS", skipWithoutBash, () =>
       assert.notEqual(result.status, 0);
       assert.match(result.stderr, /只在 macOS 上运行/);
     }
+  }),
+);
+
+// 执行完整安装脚本，只替换 macOS 平台工具。复制、Mach-O 扫描和退出处理都走真实 Bash。
+// 所有路径位于独立临时目录；mock codesign 的 --force 会真实改变假 Mach-O 文件的内容。
+function mockedInstall(dir, { online, signatureValid, noInstall = false }) {
+  const commands = path.join(dir, "commands");
+  const app = path.join(dir, "source", "Pinned Fixture.app");
+  const target = path.join(dir, "installed");
+  const resources = path.join(app, "Contents", "Resources");
+  mkdirSync(commands, { recursive: true });
+  mkdirSync(resources, { recursive: true });
+  const executable = path.join(resources, "ffmpeg.exe");
+  const payload = Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 1, 2, 3, 4]);
+  writeFileSync(executable, payload);
+  chmodSync(executable, 0o755);
+  if (online) writeFileSync(path.join(resources, "component-catalog.json"), "{}");
+  const logFile = path.join(dir, "commands.log");
+  const repaired = path.join(dir, "signature-repaired");
+  const mocks = {
+    uname: "printf 'Darwin\\n'",
+    id: "printf '0\\n'",
+    xattr:
+      'printf \'xattr\' >> "$IC_TEST_LOG"; printf \'\\t%s\' "$@" >> "$IC_TEST_LOG"; printf \'\\n\' >> "$IC_TEST_LOG"',
+    spctl:
+      'printf \'spctl\' >> "$IC_TEST_LOG"; printf \'\\t%s\' "$@" >> "$IC_TEST_LOG"; printf \'\\n\' >> "$IC_TEST_LOG"; exit 1',
+    codesign: `printf 'codesign' >> "$IC_TEST_LOG"
+printf '\\t%s' "$@" >> "$IC_TEST_LOG"
+printf '\\n' >> "$IC_TEST_LOG"
+if [ "$1" = "--verify" ]; then
+  [ "$IC_TEST_SIGNATURE_VALID" = "1" ] || [ -f "$IC_TEST_REPAIRED" ] || exit 1
+elif [ "$1" = "--force" ]; then
+  candidate="\${!#}"
+  if [ -f "$candidate" ]; then printf 'resigned' >> "$candidate"; fi
+  touch "$IC_TEST_REPAIRED"
+fi`,
+  };
+  for (const [name, body] of Object.entries(mocks)) {
+    const filename = path.join(commands, name);
+    writeFileSync(filename, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`);
+    chmodSync(filename, 0o755);
+  }
+  const launcher = `
+command_dir="$1"; script="$2"; source_app="$3"; target_dir="$4"; temporary="$5"
+if command -v cygpath >/dev/null 2>&1; then
+  command_dir="$(cygpath -u "$command_dir")"
+  script="$(cygpath -u "$script")"
+  source_app="$(cygpath -u "$source_app")"
+  target_dir="$(cygpath -u "$target_dir")"
+  temporary="$(cygpath -u "$temporary")"
+  IC_TEST_LOG="$(cygpath -u "$IC_TEST_LOG")"
+  IC_TEST_REPAIRED="$(cygpath -u "$IC_TEST_REPAIRED")"
+fi
+export PATH="$command_dir:$PATH" TMPDIR="$temporary" IC_TEST_LOG IC_TEST_REPAIRED
+if [ "$IC_TEST_NO_INSTALL" = "1" ]; then
+  exec bash "$script" "$source_app" --no-install
+fi
+exec bash "$script" "$source_app" --target "$target_dir"
+`;
+  const result = spawnSync(
+    bash,
+    ["-c", launcher, "install-fixture", commands, SCRIPT, app, target, dir],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        IC_TEST_LOG: logFile,
+        IC_TEST_REPAIRED: repaired,
+        IC_TEST_SIGNATURE_VALID: signatureValid ? "1" : "0",
+        IC_TEST_NO_INSTALL: noInstall ? "1" : "0",
+      },
+    },
+  );
+  const calls = existsSync(logFile)
+    ? readFileSync(logFile, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => line.split("\t"))
+    : [];
+  const installedExecutable = noInstall
+    ? executable
+    : path.join(target, path.basename(app), "Contents", "Resources", "ffmpeg.exe");
+  return { ...result, calls, installedExecutable, originalExecutable: executable, payload };
+}
+
+test(
+  "online install preserves pinned executable bytes and never re-signs a valid bundle",
+  skipWithoutBash,
+  () =>
+    withTempDir((dir) => {
+      const result = mockedInstall(dir, { online: true, signatureValid: true });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(readFileSync(result.installedExecutable), result.payload);
+      assert.deepEqual(readFileSync(result.originalExecutable), result.payload);
+      const signatures = result.calls.filter(([tool]) => tool === "codesign");
+      assert.equal(signatures.length, 2, "verify both the original and the final signature");
+      for (const [, ...args] of signatures) {
+        assert.ok(
+          args.includes("--verify") && args.includes("--deep") && args.includes("--strict"),
+        );
+        assert.ok(!args.includes("--force") && !args.includes("--sign"));
+      }
+      assert.ok(result.calls.some(([tool, flag]) => tool === "xattr" && flag === "-dr"));
+      assert.ok(result.calls.some(([tool, flag]) => tool === "xattr" && flag === "-cr"));
+    }),
+);
+
+test(
+  "online install rejects an invalid existing signature without attempting repair",
+  skipWithoutBash,
+  () =>
+    withTempDir((dir) => {
+      const result = mockedInstall(dir, { online: true, signatureValid: false, noInstall: true });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /联网版原有签名校验失败.*重新下载可信安装包/);
+      assert.deepEqual(readFileSync(result.installedExecutable), result.payload);
+      assert.deepEqual(
+        result.calls.map(([tool, flag]) => [tool, flag]),
+        [["codesign", "--verify"]],
+      );
+    }),
+);
+
+test("legacy complete bundles still repair executable and app signatures", skipWithoutBash, () =>
+  withTempDir((dir) => {
+    const result = mockedInstall(dir, { online: false, signatureValid: false });
+    assert.equal(result.status, 0, result.stderr);
+    const forceCalls = result.calls.filter(
+      ([tool, flag]) => tool === "codesign" && flag === "--force",
+    );
+    assert.ok(
+      forceCalls.some((args) => args.at(-1).endsWith("/ffmpeg.exe")),
+      "repair the nested executable",
+    );
+    assert.ok(
+      forceCalls.some((args) => args.at(-1).endsWith("/Pinned Fixture.app")),
+      "repair the app bundle",
+    );
+    assert.notDeepEqual(readFileSync(result.installedExecutable), result.payload);
+    assert.deepEqual(readFileSync(result.originalExecutable), result.payload);
+    assert.equal(
+      result.calls.at(-2)?.[1],
+      "--verify",
+      "verify the repaired bundle before Gatekeeper assessment",
+    );
   }),
 );

@@ -511,12 +511,18 @@ export async function writeOnlineEditionReleasePlan({
         channel,
         catalogSha256,
         feed,
-        artifacts: artifacts.map((artifact) => ({
-          ...artifact,
-          localPath: path.join(output, artifact.path),
-          objectKey: tosUpdatesObjectKey(`${channel}/${path.basename(artifact.path)}`),
-          url: `${baseUrl}/${encodeURIComponent(path.basename(artifact.path))}`,
-        })),
+        artifacts: artifacts.map((artifact) => {
+          const publicName =
+            isMac && artifact.path === "helper/install-macos.sh"
+              ? `install-macos-${applicationVersion}.sh`
+              : path.basename(artifact.path);
+          return {
+            ...artifact,
+            localPath: path.join(output, artifact.path),
+            objectKey: tosUpdatesObjectKey(`${channel}/${publicName}`),
+            url: `${baseUrl}/${encodeURIComponent(publicName)}`,
+          };
+        }),
         componentArchives: catalog.components.map((component) => ({
           id: component.id,
           localPath: path.join(

@@ -1216,6 +1216,91 @@ mod tests {
         root.join("runtime/tool.exe").is_file()
     }
 
+    fn write_inventory_manifest(root: &Path, entries: serde_json::Value) -> serde_json::Value {
+        let bytes = serde_json::to_vec(&entries).unwrap();
+        fs::write(root.join("files-manifest.json"), &bytes).unwrap();
+        let manifest = serde_json::json!({
+            "inventory": {
+                "path": "files-manifest.json",
+                "sha256": hex::encode(Sha256::digest(&bytes)),
+                "count": entries.as_array().unwrap().len(),
+            }
+        });
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        manifest
+    }
+
+    #[test]
+    fn native_pose_inventory_accepts_untyped_regular_files_and_explicit_file_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain = "pose_landmarker_full.task";
+        let typed = "LICENSE.txt";
+        fs::write(temp.path().join(plain), b"pose-model").unwrap();
+        fs::write(temp.path().join(typed), b"license").unwrap();
+        let plain_digest = hex::encode(Sha256::digest(b"pose-model"));
+        let typed_digest = hex::encode(Sha256::digest(b"license"));
+        let manifest = write_inventory_manifest(
+            temp.path(),
+            serde_json::json!([
+                {"path": plain, "size": 10, "sha256": plain_digest},
+                {"path": typed, "type": "file", "size": 7, "sha256": typed_digest},
+            ]),
+        );
+        assert_eq!(
+            inventory_targets(temp.path(), &manifest),
+            Some(vec![
+                (PathBuf::from(plain), plain_digest),
+                (PathBuf::from(typed), typed_digest),
+            ])
+        );
+        let component = RuntimeComponent::new(
+            temp.path().join("store"),
+            temp.path().into(),
+            "pose-runtime",
+            "manifest.json",
+        );
+        assert!(component.critical_files_ready(temp.path()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_inventory_checks_framework_links_and_file_permissions() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let engine_relative = "Framework/Versions/A/Resources/engine";
+        let link_relative = "Framework/Resources";
+        fs::create_dir_all(temp.path().join("Framework/Versions/A/Resources")).unwrap();
+        let engine = temp.path().join(engine_relative);
+        fs::write(&engine, b"engine-bytes").unwrap();
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        symlink("A", temp.path().join("Framework/Versions/Current")).unwrap();
+        let link = temp.path().join(link_relative);
+        symlink("Versions/Current/Resources", &link).unwrap();
+        let digest = hex::encode(Sha256::digest(b"engine-bytes"));
+        let manifest = write_inventory_manifest(
+            temp.path(),
+            serde_json::json!([
+                {"path": engine_relative, "type": "file", "mode": 0o755, "sha256": digest},
+                {"path": "Framework/Versions/Current", "type": "symlink", "target": "A"},
+                {"path": link_relative, "type": "symlink", "target": "Versions/Current/Resources"},
+            ]),
+        );
+        assert_eq!(
+            inventory_targets(temp.path(), &manifest),
+            Some(vec![(PathBuf::from(engine_relative), digest)])
+        );
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(inventory_targets(temp.path(), &manifest).is_none());
+        fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::remove_file(&link).unwrap();
+        symlink(temp.path(), &link).unwrap();
+        assert!(inventory_targets(temp.path(), &manifest).is_none());
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn native_executable_readiness_rejects_removed_execute_permission() {

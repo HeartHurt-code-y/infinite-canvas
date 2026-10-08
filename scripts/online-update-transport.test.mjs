@@ -58,11 +58,12 @@ function reply({
   };
 }
 
-async function injectedTransport(t, handler = async () => reply()) {
+async function injectedTransport(t, handler = async () => reply(), options = {}) {
   const root = await privateRoot(t);
   const calls = [];
   const progress = [];
   const transport = await createOnlineUpdateTransport({
+    ...options,
     root,
     configLoader: () => ({ ...FIXTURE_CONFIG }),
     request: async (request) => {
@@ -188,7 +189,7 @@ test(
   },
 );
 
-test("object scope accepts exactly online installers, backups, feed, and seven component identities", () => {
+test("object scope accepts the Windows installer and both matching Mac DMGs/updaters/helpers, feeds, backups and seven components", () => {
   assert.equal(assertOnlineObjectKey(FEED), FEED);
   assert.equal(assertOnlineObjectKey(INSTALLER), INSTALLER);
   assert.equal(assertOnlineObjectKey(`${INSTALLER}.sig`), `${INSTALLER}.sig`);
@@ -196,18 +197,30 @@ test("object scope accepts exactly online installers, backups, feed, and seven c
     assertOnlineObjectKey(`${PREFIX}backups/${"a".repeat(64)}.json`),
     `${PREFIX}backups/${"a".repeat(64)}.json`,
   );
-  for (const id of [
-    "blender",
-    "remotion-runtime",
-    "ffmpeg",
-    "pose-runtime",
-    "gpt-image-2-style-library",
-    "ai-media-runtime",
-    "ai-media-quality-runtime",
-  ])
-    assertOnlineObjectKey(
-      `${TOS_UPDATES_PREFIX}/components/windows-x86_64/0.2.1/${id}-${"a".repeat(64)}.zip`,
-    );
+  for (const platform of ["windows-x86_64", "darwin-aarch64", "darwin-x86_64"]) {
+    const prefix = `${TOS_UPDATES_PREFIX}/${platform}-online/`;
+    for (const suffix of ["latest.json", `backups/${"a".repeat(64)}.json`])
+      assert.equal(assertOnlineObjectKey(`${prefix}${suffix}`), `${prefix}${suffix}`);
+    if (platform.startsWith("darwin-")) {
+      const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
+      for (const suffix of [".dmg", ".app.tar.gz", ".app.tar.gz.sig"])
+        assertOnlineObjectKey(`${prefix}无限画布_0.2.1_${arch}-online${suffix}`);
+      assertOnlineObjectKey(`${prefix}install-macos.sh`);
+      assertOnlineObjectKey(`${prefix}install-macos-0.2.1.sh`);
+    }
+    for (const id of [
+      "blender",
+      "remotion-runtime",
+      "ffmpeg",
+      "pose-runtime",
+      "gpt-image-2-style-library",
+      "ai-media-runtime",
+      "ai-media-quality-runtime",
+    ])
+      assertOnlineObjectKey(
+        `${TOS_UPDATES_PREFIX}/components/${platform}/0.2.1/${id}-${"a".repeat(64)}.zip`,
+      );
+  }
   for (const key of [
     `${TOS_UPDATES_PREFIX}/latest.json`,
     `${TOS_UPDATES_PREFIX}/windows-x86_64/latest.json`,
@@ -216,12 +229,91 @@ test("object scope accepts exactly online installers, backups, feed, and seven c
     `${PREFIX}extra.exe`,
     `${PREFIX}无限画布_0.2.1_x64-offline-setup.exe`,
     `${TOS_UPDATES_PREFIX}/components/windows-x86_64/0.2.1/arbitrary-${"a".repeat(64)}.zip`,
-    `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/0.2.1/blender-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-universal/0.2.1/blender-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/0.2.1/arbitrary-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-x86_64/0.2.1/blender.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/../blender-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64/latest.json`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64/latest.json`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_x64-online.dmg`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/无限画布_0.2.1_aarch64-online.app.tar.gz`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_aarch64-full.app.tar.gz`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/无限画布_0.2.1_x64-delta.app.tar.gz`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_aarch64-online.dmg.sig`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_x64-online-setup.exe`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/resources/manifest.json`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/helper/install-macos.sh`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/install-macos.sh.sig`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/install-macos-latest.sh`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/install-macos-0.2.1.sh.sig`,
+    `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/extra.app.tar.gz`,
+    `${PREFIX}无限画布_0.2.1_x64-online.dmg`,
+    `${PREFIX}install-macos.sh`,
+    `${PREFIX}install-macos-0.2.1.sh`,
     `${PREFIX}%2e%2e/latest.json`,
     `${PREFIX}backups\\${"a".repeat(64)}.json`,
   ])
     assert.throws(() => assertOnlineObjectKey(key));
   assert.equal(onlineObjectUrl(INSTALLER).includes("%E6%97%A0"), true);
+});
+
+test("Mac authentication probes the selected feed and feed CAS retains conditional mutable caching", async (t) => {
+  const body = Buffer.from("fixture Mac feed");
+  const metadata = { sha256: componentBytesSha256(body) };
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const feed = `${TOS_UPDATES_PREFIX}/${platform}-online/latest.json`;
+    const f = await injectedTransport(t, async () => reply(), { platform });
+    assert.equal(f.calls[0].method, "HEAD");
+    assert.equal(f.calls[0].objectKey, feed);
+    await f.transport.putObject({
+      objectKey: feed,
+      body,
+      metadata,
+      ifMatch: '"previous-Mac-feed"',
+    });
+    const request = f.calls.at(-1);
+    assert.equal(request.objectKey, feed);
+    assert.equal(request.headers["if-match"], '"previous-Mac-feed"');
+    assert.match(request.query.get("X-Tos-SignedHeaders"), /if-match/i);
+    assert.equal(request.headers["cache-control"], "no-cache, no-store");
+    await f.transport.putObject({ objectKey: feed, body, metadata, ifNoneMatch: "*" });
+    assert.equal(f.calls.at(-1).headers["cache-control"], "no-cache, no-store");
+    const helper = `${TOS_UPDATES_PREFIX}/${platform}-online/install-macos-0.2.1.sh`;
+    await f.transport.putObject({ objectKey: helper, body, metadata, ifNoneMatch: "*" });
+    assert.match(f.calls.at(-1).headers["cache-control"], /immutable/);
+    const before = f.calls.length;
+    await assert.rejects(
+      f.transport.putObject({ objectKey: helper, body, metadata, ifMatch: "old-helper" }),
+      /immutable/,
+    );
+    assert.equal(f.calls.length, before);
+  }
+  await assert.rejects(
+    createOnlineUpdateTransport({
+      platform: "darwin-universal",
+      configLoader: () => {
+        throw new Error("credentials must not be read for an unsupported platform");
+      },
+    }),
+    /Unsupported online transport platform/,
+  );
+});
+
+test("legacy unversioned Mac helpers remain readable but cannot start any upload", async (t) => {
+  const body = Buffer.from("legacy installation helper");
+  const metadata = { sha256: componentBytesSha256(body) };
+  for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
+    const f = await injectedTransport(t, async () => reply({ body }), { platform });
+    const objectKey = `${TOS_UPDATES_PREFIX}/${platform}-online/install-macos.sh`;
+    assert.deepEqual((await f.transport.readObject({ objectKey })).body, body);
+    const before = f.calls.length;
+    for (const condition of [{ ifNoneMatch: "*" }, { ifMatch: "old-helper" }])
+      await assert.rejects(
+        f.transport.putObject({ objectKey, body, metadata, ...condition }),
+        /read-only; publish a versioned helper/,
+      );
+    assert.equal(f.calls.length, before);
+  }
 });
 
 test("native HTTPS response hashing is complete, constant-memory, and bounded", async () => {

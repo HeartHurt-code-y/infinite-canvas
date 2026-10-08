@@ -268,7 +268,10 @@ export async function prepareOnlinePublication({
       ["path", "size", "sha256", "localPath", "objectKey", "url"],
       "Publish artifact",
     );
-    const expectedName = path.basename(artifact.path);
+    const expectedName =
+      isMac && artifact.path === "helper/install-macos.sh"
+        ? `install-macos-${version}.sh`
+        : path.basename(artifact.path);
     requireValue(
       artifactPaths.includes(artifact.path) &&
         artifact.localPath === path.join(directory, artifact.path) &&
@@ -430,7 +433,7 @@ export async function publishOnlineEdition({
     },
   };
   if (dryRun) return { ...report, published: false, localReleaseVerified: true };
-  const transport = await transportFactory({ root: plan.root });
+  const transport = await transportFactory({ root: plan.root, platform: plan.platform });
   for (const method of ["readObject", "headObject", "putObject", "verifyPublicObject"])
     requireValue(typeof transport?.[method] === "function", `Online transport lacks ${method}`);
   const previous = await transport.readObject({
