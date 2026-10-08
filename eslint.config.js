@@ -30,6 +30,9 @@ export default defineConfig([
     "src-tauri/resources/remotion-runtime/**",
     // 独立的本地渲染工程，由自身的校验测试和实际渲染验证。
     "tools/remotion-runtime/**",
+    // Qoder Canvas 会话产物（.canvas.tsx），不属于本项目源码也不在 tsconfig 内，
+    // 类型感知解析器会直接报 parser 错误。
+    ".qoder-credits/**",
   ]),
   {
     files: ["**/*.{ts,tsx}"],

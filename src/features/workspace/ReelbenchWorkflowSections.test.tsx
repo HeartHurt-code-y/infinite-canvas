@@ -168,7 +168,7 @@ describe("Reelbench shot review", () => {
             checkpoint: {
               ...source.config.checkpoint,
               reelbench: {
-                ...source.config.checkpoint.reelbench!,
+                ...source.config.checkpoint.reelbench,
                 inputSignature: reelbenchInputSignature(originalLocalConfig),
               },
             },

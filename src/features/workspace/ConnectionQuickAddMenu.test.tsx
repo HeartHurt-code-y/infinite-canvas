@@ -61,14 +61,18 @@ describe("ConnectionQuickAddMenu", () => {
       "选择后在画布创建节点",
     );
     expect(screen.getAllByRole("menuitem")).toHaveLength(nodeChoices.length);
-    expect(screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ }),
+    ).not.toBeInTheDocument();
 
     rerender(<ConnectionQuickAddMenu {...props} connectionMode />);
     expect(screen.getByRole("menu", { name: "添加节点" })).toHaveAccessibleDescription(
       "选择后创建并自动连线",
     );
     expect(screen.getAllByRole("menuitem")).toHaveLength(nodeChoices.length);
-    expect(screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ }),
+    ).not.toBeInTheDocument();
     for (const [label, kind] of nodeChoices) {
       const item = screen.getByRole("menuitem", { name: label });
       expect(item).toBeEnabled();

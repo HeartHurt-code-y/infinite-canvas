@@ -54,23 +54,23 @@ function renderHarness(node: OutputNodeData) {
 
 describe("CanvasOutputNode 保存素材菜单", () => {
   it("图片产物只显示一个入口，三个目标复用原回调且不触发节点拖动", () => {
-    const callbacks = renderHarness(makeOutputNode());
+    const utils = renderHarness(makeOutputNode());
     const trigger = screen.getByRole("button", { name: "保存产物：sample.png" });
     fireEvent.mouseDown(trigger);
     fireEvent.click(trigger);
     expect(screen.getByRole("group", { name: "保存素材：sample.png" })).toBeInTheDocument();
     fireEvent.mouseDown(screen.getByRole("button", { name: "保存到本地素材库" }));
     fireEvent.click(screen.getByRole("button", { name: "保存到本地素材库" }));
-    expect(callbacks.onUploadToLocal).toHaveBeenCalledExactlyOnceWith("output-upload-test");
-    expect(callbacks.onNodeDragStart).not.toHaveBeenCalled();
+    expect(utils.onUploadToLocal).toHaveBeenCalledExactlyOnceWith("output-upload-test");
+    expect(utils.onNodeDragStart).not.toHaveBeenCalled();
 
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("button", { name: "保存到云端素材库" }));
-    expect(callbacks.onUploadToCloud).toHaveBeenCalledExactlyOnceWith("output-upload-test");
+    expect(utils.onUploadToCloud).toHaveBeenCalledExactlyOnceWith("output-upload-test");
 
     fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("button", { name: "保存到对象存储" }));
-    expect(callbacks.onUploadToObjectStorage).toHaveBeenCalledExactlyOnceWith("output-upload-test");
+    expect(utils.onUploadToObjectStorage).toHaveBeenCalledExactlyOnceWith("output-upload-test");
   });
 
   it("旧文档未设置上传标记时三个目标都可保存", () => {

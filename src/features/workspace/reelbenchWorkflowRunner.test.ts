@@ -191,8 +191,8 @@ describe("Reelbench workflow safeguards", () => {
       updatedAt: 2,
     };
     const downloader = {
-      getEngine: vi.fn(async () => ({ state: "ready", lastError: null })),
-      startDownload: vi.fn(async () => failedJob),
+      getEngine: vi.fn(() => Promise.resolve({ state: "ready", lastError: null })),
+      startDownload: vi.fn(() => Promise.resolve(failedJob)),
     } as unknown as VideoDownloaderClient;
     const runner = createReelbenchWorkflowRunner({ downloader, now: () => 123 });
     const result = await runner.run({

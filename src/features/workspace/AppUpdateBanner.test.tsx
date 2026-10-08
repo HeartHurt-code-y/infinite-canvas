@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkForAppUpdate,
@@ -62,7 +62,7 @@ describe("AppUpdateBanner", () => {
     expect(screen.queryByRole("button", { name: "立即更新" })).not.toBeInTheDocument();
 
     finishDownload?.();
-    await waitFor(() => expect(screen.getByText("正在完成安装")).toBeInTheDocument());
+    expect(await screen.findByText("正在完成安装")).toBeInTheDocument();
   });
 
   it("keeps an uncertain installation failure visible without offering another install", async () => {
@@ -82,7 +82,7 @@ describe("AppUpdateBanner", () => {
     render(<AppUpdateBanner />);
     await checkForAppUpdate({ quiet: true });
 
-    await waitFor(() => expect(screen.getByText(/安装结果尚不确定/)).toBeInTheDocument());
+    expect(await screen.findByText(/安装结果尚不确定/)).toBeInTheDocument();
     expect(screen.getByText("更新失败")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重启应用后检查" })).toBeEnabled();
     expect(install).toHaveBeenCalledTimes(1);
