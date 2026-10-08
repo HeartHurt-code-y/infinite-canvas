@@ -90,6 +90,11 @@ export default defineConfig({
           setupFiles: ["./src/test/setup.ts"],
           include: ["src/**/*.test.tsx", ...jsdomTsTests],
           exclude: [...sharedExclude, "src/**/*.browser.test.{ts,tsx}"],
+          // 全局 10 秒是给并行全量跑的普通用例定的；v8 覆盖率插桩会让重画布
+          // 集成用例放大约 6.5 倍（实测同一用例 1.56s → 10.17s），于是
+          // pnpm test:coverage 每次都随机假超时。只抬高 dom 预算，
+          // 不放宽 unit/browser，也不掩盖真实回归。
+          testTimeout: 30_000,
         },
       },
       {
