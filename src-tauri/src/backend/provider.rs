@@ -3300,7 +3300,7 @@ struct MappedParameter {
     value: Value,
 }
 
-fn request_path(operation_schema: &Value, fallback: &str) -> BackendResult<String> {
+pub(crate) fn request_path(operation_schema: &Value, fallback: &str) -> BackendResult<String> {
     let path = operation_schema
         .pointer("/request/path")
         .and_then(Value::as_str)

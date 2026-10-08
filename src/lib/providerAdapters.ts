@@ -8,6 +8,19 @@ export const DOUBAO_VOICE_BASE_URL = "https://openspeech.bytedance.com";
 /** Grsai 图片生成 API：自有协议（`/v1/api/generate` + `/v1/api/result`）。 */
 export const GRSAI_ADAPTER_ID = "grsai_v1";
 
+/**
+ * 语音合成的两个请求档案，与后端 `model_schema.rs` 一一对应：豆包语音 OpenSpeech
+ * 的 SSE 接口，以及 OpenAI 兼容网关的 `POST /v1/tts/create`。
+ */
+export const DOUBAO_TTS_REQUEST_PROFILE = "doubao_voice_tts_v3_sse";
+export const GATEWAY_TTS_REQUEST_PROFILE = "gateway_tts_create_v1";
+
+export function speechRequestProfile(schema: Record<string, unknown> | undefined): string {
+  const operation = schema?.["speech_generation"] as Record<string, unknown> | undefined;
+  const profile = operation?.["requestProfileId"];
+  return typeof profile === "string" ? profile : "";
+}
+
 export function doubaoSamiCredentialRefs(providerConnectionId: string) {
   return {
     appkey: `provider:${providerConnectionId}:sami_appkey`,

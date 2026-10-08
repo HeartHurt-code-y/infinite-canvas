@@ -9,6 +9,16 @@ export interface SpeechVoice {
   readonly engine: string;
 }
 
+/** 网关 `audio_config`：未填写的字段不发送，由上游按输出格式取默认值。 */
+export interface SpeechAudioConfig {
+  readonly format?: "mp3" | "wav" | "pcm" | "ogg_opus" | "flac";
+  readonly sampleRate?: number;
+  readonly speechRate?: number;
+  readonly loudnessRate?: number;
+  readonly pitchRate?: number;
+  readonly enableSubtitle?: boolean;
+}
+
 export interface SynthesizeSpeechCommand {
   /** Stable identity for one workflow run and utterance. Reusing it with changed input fails. */
   readonly requestId: string;
@@ -16,6 +26,10 @@ export interface SynthesizeSpeechCommand {
   readonly modelDefinitionId: string;
   readonly text: string;
   readonly voiceId: string;
+  /** 仅 OpenAI 兼容网关的 `/v1/tts/create` 连接支持。 */
+  readonly audioConfig?: SpeechAudioConfig;
+  /** 音色复刻参考音频的本地文件路径，仅网关连接支持。 */
+  readonly referenceAudioPath?: string;
 }
 
 export interface ListSpeechVoicesCommand {
@@ -35,6 +49,8 @@ export interface SynthesizedSpeech {
   readonly durationSeconds: number;
   readonly voiceId: string;
   readonly requestSignature: string;
+  /** 网关 `X-Subtitle` 落盘的字幕 JSON；豆包链路或上游未返回字幕时为空。 */
+  readonly subtitlePath: string | null;
 }
 
 export interface ComposeDubbedVideoCommand {
@@ -62,6 +78,7 @@ const voiceSchema = v.object({
 const synthesizedSchema = v.object({
   path: v.string(), mimeType: v.literal("audio/wav"), durationSeconds: positive,
   voiceId: v.string(), requestSignature: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
+  subtitlePath: v.nullable(v.string()),
 });
 const dubbedSchema = v.object({
   path: v.string(), durationSeconds: positive,

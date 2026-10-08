@@ -15,11 +15,14 @@ use super::{
         self, NormalizeCoverImageCommand, NormalizedCoverImage, ResumeCoverImageResultCommand,
     },
     downloader::{VideoCookieBrowser, VideoDownloadJobRecord, VideoDownloaderEngineStatus},
-    error::{BackendError, CommandResult, IntoCommandResult as _},
+    error::{BackendError, BackendResult, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
     mac_delta_update::{self, MacDeltaUpdateStatus},
     material_transfer,
-    model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
+    model_schema::{
+        GATEWAY_TTS_REQUEST_PROFILE, provider_scoped_model_definition_id,
+        validate_schema_for_operations,
+    },
     mv_audio::{
         self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
     },
@@ -67,8 +70,8 @@ use super::{
         ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, LocalBase64AssetGroupRecord,
         LocalBase64AssetPage, LocalBase64AssetRecord, MediaType, ModelDefinition,
         MoveLocalBase64AssetsCommand, ObserveAssetStatusCommand, ProviderConnection,
-        ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
+        ProviderModelBinding, ProviderModelSelection, ProviderTokenGroup, RealPersonAuthLink,
+        RealPersonGroup, RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
         RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
         RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveExistingAssetCommand,
@@ -710,6 +713,60 @@ pub fn delete_provider_token_group(
     Ok(())
 }
 
+/// 应用能执行的语音合成协议只有两种：豆包语音 OpenSpeech 的 SSE 接口，以及
+/// OpenAI 兼容网关的 `POST /v1/tts/create`（魔芋 `seed-audio` 系）。端点由连接
+/// 适配器决定，因此这里按连接判定，不看模型显示名，也不按域名猜。
+fn validate_speech_bindings(
+    provider_connection_id: &str,
+    adapter_id: &str,
+    selections: &[ProviderModelSelection],
+) -> BackendResult<()> {
+    let is_voice_connection = adapter_id == super::provider_adapter::DOUBAO_VOICE_ADAPTER_ID;
+    let gateway_connection =
+        ProviderAdapterKind::parse(adapter_id) == Some(ProviderAdapterKind::Moyu);
+    for selection in selections {
+        if !selection.enabled {
+            continue;
+        }
+        if is_voice_connection {
+            if selection.remote_model_id != "seed-tts-2.0"
+                || selection.enabled_operations != vec![GenerationOperation::SpeechGeneration]
+            {
+                return Err(BackendError::validation(
+                    "豆包语音连接只允许绑定 seed-tts-2.0 语音生成模型",
+                    json!({"remoteModelId": selection.remote_model_id}),
+                ));
+            }
+            continue;
+        }
+        if !selection
+            .enabled_operations
+            .contains(&GenerationOperation::SpeechGeneration)
+        {
+            continue;
+        }
+        let profile = selection
+            .operation_schema
+            .pointer("/speech_generation/requestProfileId")
+            .and_then(Value::as_str);
+        if !gateway_connection || profile != Some(GATEWAY_TTS_REQUEST_PROFILE) {
+            return Err(BackendError::validation(
+                if gateway_connection {
+                    "该语音模型的合成端点不是应用已接入的网关 /v1/tts/create，请重新拉取模型目录后启用语音生成。"
+                } else {
+                    "语音生成模型只能绑定在独立的火山豆包语音连接或 OpenAI 兼容网关连接上。"
+                },
+                json!({
+                    "providerConnectionId": provider_connection_id,
+                    "remoteModelId": selection.remote_model_id,
+                    "requestProfileId": profile,
+                }),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn replace_provider_model_bindings(
     state: State<'_, BackendState>,
@@ -720,32 +777,12 @@ pub fn replace_provider_model_bindings(
         .storage
         .get_provider_connection(&command.provider_connection_id)
         .command()?;
-    let is_voice = provider.adapter_id == super::provider_adapter::DOUBAO_VOICE_ADAPTER_ID;
-    for selection in &command.selections {
-        if !selection.enabled {
-            continue;
-        }
-        if is_voice {
-            if selection.remote_model_id != "seed-tts-2.0"
-                || selection.enabled_operations != vec![GenerationOperation::SpeechGeneration]
-            {
-                return Err(BackendError::validation(
-                    "豆包语音连接只允许绑定 seed-tts-2.0 语音生成模型",
-                    json!({"remoteModelId": selection.remote_model_id}),
-                )
-                .payload());
-            }
-        } else if selection
-            .enabled_operations
-            .contains(&GenerationOperation::SpeechGeneration)
-        {
-            return Err(BackendError::validation(
-                "语音生成模型必须使用独立的火山豆包语音连接",
-                json!({"providerConnectionId": command.provider_connection_id}),
-            )
-            .payload());
-        }
-    }
+    validate_speech_bindings(
+        &command.provider_connection_id,
+        &provider.adapter_id,
+        &command.selections,
+    )
+    .command()?;
     state
         .storage
         .replace_provider_model_bindings(&command)
@@ -2130,7 +2167,11 @@ pub fn rename_ai_media_output(
 #[cfg(test)]
 mod tests {
     // 适配器 id 常量只被下面的校验用例消费（生产代码走 is_supported_adapter_id / require）。
-    use super::super::provider_adapter::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
+    use super::super::model_schema::DOUBAO_TTS_REQUEST_PROFILE;
+    use super::super::provider_adapter::{
+        ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, DOUBAO_VOICE_ADAPTER_ID, GRSAI_ADAPTER_ID,
+        MOYU_ADAPTER_ID,
+    };
     use super::*;
 
     fn provider(base_url: &str) -> UpsertProviderConnectionCommand {
@@ -2233,5 +2274,106 @@ mod tests {
         );
         wrong_scope.selections[0].model_definition_id = "remote::other::video-v1".into();
         assert!(validate_model_selections(&wrong_scope).is_err());
+    }
+
+    fn speech_selection(
+        connection_id: &str,
+        remote_model_id: &str,
+        profile: &str,
+    ) -> ProviderModelSelection {
+        ProviderModelSelection {
+            model_definition_id: provider_scoped_model_definition_id(
+                connection_id,
+                remote_model_id,
+            ),
+            display_name: remote_model_id.into(),
+            remote_model_id: remote_model_id.into(),
+            enabled: true,
+            enabled_operations: vec![GenerationOperation::SpeechGeneration],
+            operation_schema: json!({
+                "speech_generation": { "resultType": "audio", "requestProfileId": profile }
+            }),
+            token_group: None,
+        }
+    }
+
+    #[test]
+    fn speech_bindings_only_accept_protocols_the_app_can_execute() {
+        // OpenAI 兼容网关 + 网关 /v1/tts/create 档案：本次接入的绑定入口。
+        assert!(
+            validate_speech_bindings(
+                "company",
+                MOYU_ADAPTER_ID,
+                &[speech_selection(
+                    "company",
+                    "seed-audio-1.0",
+                    GATEWAY_TTS_REQUEST_PROFILE
+                )],
+            )
+            .is_ok()
+        );
+        // 网关连接上挂豆包 SSE 档案：不能拿 X-Api-Key 协议去打网关，拒绝而不是发错端点。
+        assert!(
+            validate_speech_bindings(
+                "company",
+                MOYU_ADAPTER_ID,
+                &[speech_selection(
+                    "company",
+                    "seed-tts-2.0",
+                    DOUBAO_TTS_REQUEST_PROFILE
+                )],
+            )
+            .is_err()
+        );
+        // 没有语音合成端点的适配器一律不允许绑定语音模型。
+        for adapter in [ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, GRSAI_ADAPTER_ID] {
+            assert!(
+                validate_speech_bindings(
+                    "company",
+                    adapter,
+                    &[speech_selection(
+                        "company",
+                        "seed-audio-1.0",
+                        GATEWAY_TTS_REQUEST_PROFILE
+                    )],
+                )
+                .is_err(),
+                "{adapter} 不应允许绑定语音模型"
+            );
+        }
+        // 独立豆包语音连接仍只允许 seed-tts-2.0，且不能顺带启用其他能力。
+        assert!(
+            validate_speech_bindings(
+                "voice",
+                DOUBAO_VOICE_ADAPTER_ID,
+                &[speech_selection(
+                    "voice",
+                    "seed-tts-2.0",
+                    DOUBAO_TTS_REQUEST_PROFILE
+                )],
+            )
+            .is_ok()
+        );
+        let mut with_text = speech_selection("voice", "seed-tts-2.0", DOUBAO_TTS_REQUEST_PROFILE);
+        with_text
+            .enabled_operations
+            .push(GenerationOperation::TextGeneration);
+        assert!(validate_speech_bindings("voice", DOUBAO_VOICE_ADAPTER_ID, &[with_text]).is_err());
+        assert!(
+            validate_speech_bindings(
+                "voice",
+                DOUBAO_VOICE_ADAPTER_ID,
+                &[speech_selection(
+                    "voice",
+                    "seed-audio-1.0",
+                    GATEWAY_TTS_REQUEST_PROFILE
+                )],
+            )
+            .is_err()
+        );
+        // 停用的绑定不参与校验。
+        let mut disabled = speech_selection("company", "video-v1", "openai_images_v1");
+        disabled.enabled = false;
+        assert!(validate_speech_bindings("company", ARK_ADAPTER_ID, &[disabled]).is_ok());
     }
 }

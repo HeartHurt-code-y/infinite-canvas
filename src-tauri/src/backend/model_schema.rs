@@ -84,6 +84,13 @@ const GATEWAY_IMAGE_PATH: &str = "/v1/images/generations";
 /// doubao 文本模型的原生对话接口（网关对应 `/v1/chat/completions`）。
 const ARK_CHAT_PATH: &str = "/chat/completions";
 const GATEWAY_CHAT_PATH: &str = "/v1/chat/completions";
+/// OpenAI 兼容网关的语音合成接口（魔芋 `seed-audio` 系文档）：JSON 提交，
+/// 成功响应体直接是音频二进制，字幕走 `X-Subtitle` 响应头。
+pub const GATEWAY_TTS_PATH: &str = "/v1/tts/create";
+/// 豆包语音 OpenSpeech 的合成接口，只在独立语音连接上存在。
+pub const DOUBAO_TTS_PATH: &str = "/api/v3/tts/unidirectional/sse";
+pub const GATEWAY_TTS_REQUEST_PROFILE: &str = "gateway_tts_create_v1";
+pub const DOUBAO_TTS_REQUEST_PROFILE: &str = "doubao_voice_tts_v3_sse";
 
 /// 按连接方言改写操作 Schema 里的请求端点。
 ///
@@ -101,7 +108,8 @@ pub fn apply_request_dialect(schema: &mut Value, model_id: &str, dialect: Reques
     let video = apply_video_dialect(schema, &identity, dialect);
     let image = apply_image_dialect(schema, &identity, dialect);
     let text = apply_text_dialect(schema, &identity, dialect);
-    video || image || text
+    let speech = apply_speech_dialect(schema, &identity);
+    video || image || text || speech
 }
 
 fn operation_object_mut(
@@ -358,6 +366,34 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
     }
 }
 
+/// 语音：`seed-tts-*` ↔ 豆包 OpenSpeech SSE，`seed-audio-*` ↔ 网关 `/v1/tts/create`。
+///
+/// 端点由模型家族唯一决定（豆包语音模型只在独立语音连接上提供，网关 TTS 模型只在
+/// OpenAI 兼容网关上提供），所以这里不参与连接方言判断，只把历史上按另一家族写下的
+/// 定义归一回来，保证 `synthesize_speech` 读到的请求档案与路径始终成对。
+fn apply_speech_dialect(schema: &mut Value, identity: &str) -> bool {
+    if !is_doubao_voice_tts_model(identity) && !is_gateway_tts_model(identity) {
+        return false;
+    }
+    let Some(operation) = operation_object_mut(schema, GenerationOperation::SpeechGeneration)
+    else {
+        return false;
+    };
+    let profile = speech_request_profile(identity);
+    let path = if profile == DOUBAO_TTS_REQUEST_PROFILE {
+        DOUBAO_TTS_PATH
+    } else {
+        GATEWAY_TTS_PATH
+    };
+    let mut changed = set_request_field(operation, "requestProfileId", json!(profile));
+    if let Some(request) = operation.get_mut("request").and_then(Value::as_object_mut) {
+        changed |= set_request_field(request, "path", json!(path));
+        changed |= set_request_field(request, "encoding", json!("json"));
+        changed |= set_request_field(request, "parameterContainer", json!("root"));
+    }
+    changed
+}
+
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
     // 草稿样片契约以完整模型 ID 为准，不能被聚合目录里的 text/chat 标签覆盖。
     if is_seedance_draft_video_model(model_id) {
@@ -371,6 +407,12 @@ pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) ->
     // RD 网关的三个模型同理：目录能力字段可能把它们误报成 chat/文本。
     if is_rd_video_model(model_id) {
         return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
+    if is_doubao_voice_tts_model(model_id) || is_gateway_tts_model(model_id) {
+        // 语音家族有确定的合成合同（SSE 或二进制音频端点）。聚合目录把这类型号
+        // 泛化上报成 chat/text 时，不能让通用能力标签覆盖已知端点，同上面的按次
+        // 视频模型规则。
+        return default_model_schema(model_id, &[GenerationOperation::SpeechGeneration]);
     }
     if let Some(schema) = advertised_schema(item) {
         return complete_advertised_schema(schema, model_id);
@@ -896,6 +938,48 @@ pub fn text_request_profile(model_id: &str) -> &'static str {
     } else {
         "openai_chat_v1"
     }
+}
+
+/// 语音合成的请求档案同样按模型家族落定：`seed-tts-*` 只在豆包语音 OpenSpeech
+/// 上有 SSE 接口，`seed-audio-*` 只在 OpenAI 兼容网关上有 `/v1/tts/create`。
+/// 两个家族互斥，因此这里不需要连接方言参与。
+pub fn is_doubao_voice_tts_model(model_id: &str) -> bool {
+    model_id.trim().to_ascii_lowercase().starts_with("seed-tts")
+}
+
+pub fn is_gateway_tts_model(model_id: &str) -> bool {
+    model_id
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("seed-audio")
+}
+
+fn speech_request_profile(model_id: &str) -> &'static str {
+    if is_doubao_voice_tts_model(model_id) {
+        DOUBAO_TTS_REQUEST_PROFILE
+    } else {
+        GATEWAY_TTS_REQUEST_PROFILE
+    }
+}
+
+/// 语音操作 Schema。配音不走通用生成任务通道，而由 `synthesize_speech` 命令
+/// 独立执行，所以参数不声明成节点表单字段，避免生成一排没有消费者的控件。
+fn speech_operation_schema(model_id: &str) -> Value {
+    let (profile, path) = match speech_request_profile(model_id) {
+        DOUBAO_TTS_REQUEST_PROFILE => (DOUBAO_TTS_REQUEST_PROFILE, DOUBAO_TTS_PATH),
+        _ => (GATEWAY_TTS_REQUEST_PROFILE, GATEWAY_TTS_PATH),
+    };
+    json!({
+        "resultType": "audio",
+        "requestProfileId": profile,
+        "profileVersion": 1,
+        "request": {
+            "path": path,
+            "encoding": "json",
+            "parameterContainer": "root"
+        },
+        "parameters": {}
+    })
 }
 
 pub fn schema_for_enabled_operations(
@@ -1609,17 +1693,7 @@ fn gpt_image_text_to_image_parameters_with_response_format() -> Value {
 
 fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> Value {
     match operation {
-        GenerationOperation::SpeechGeneration => json!({
-            "resultType": "audio",
-            "requestProfileId": "doubao_voice_tts_v3_sse",
-            "profileVersion": 1,
-            "request": {
-                "path": "/api/v3/tts/unidirectional/sse",
-                "encoding": "json",
-                "parameterContainer": "root"
-            },
-            "parameters": {}
-        }),
+        GenerationOperation::SpeechGeneration => speech_operation_schema(model_id),
         GenerationOperation::TextGeneration => {
             let profile = text_request_profile(model_id);
             // 对话端点按 OpenAI 兼容网关声明；方舟连接由 `apply_request_dialect`
@@ -3169,6 +3243,99 @@ fn validate_parameter_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speech_profile_and_endpoint_follow_the_model_family() {
+        // 魔芋 seed-audio 系：JSON 提交 + 音频二进制响应，端点是网关的 /v1/tts/create。
+        let gateway =
+            default_operation_schema("seed-audio-1.0", GenerationOperation::SpeechGeneration);
+        assert_eq!(
+            gateway["requestProfileId"].as_str(),
+            Some(GATEWAY_TTS_REQUEST_PROFILE)
+        );
+        assert_eq!(gateway["request"]["path"].as_str(), Some(GATEWAY_TTS_PATH));
+        assert_eq!(gateway["resultType"].as_str(), Some("audio"));
+        // 豆包 seed-tts 系仍留在独立语音连接的 SSE 接口上。
+        let doubao =
+            default_operation_schema("seed-tts-2.0", GenerationOperation::SpeechGeneration);
+        assert_eq!(
+            doubao["requestProfileId"].as_str(),
+            Some(DOUBAO_TTS_REQUEST_PROFILE)
+        );
+        assert_eq!(doubao["request"]["path"].as_str(), Some(DOUBAO_TTS_PATH));
+        assert_eq!(
+            schema_for_enabled_operations(
+                &Value::Object(Map::new()),
+                "seed-audio-1.0",
+                &[GenerationOperation::SpeechGeneration],
+                RequestDialect::VolcengineArk
+            )["speech_generation"]["request"]["path"]
+                .as_str(),
+            Some(GATEWAY_TTS_PATH)
+        );
+    }
+
+    #[test]
+    fn catalog_models_recognised_as_speech_keep_their_family_endpoint() {
+        let item = json!({ "id": "seed-audio-1.0", "display_name": "Seed Audio 1.0" });
+        let schema = infer_catalog_schema(&item, "seed-audio-1.0", "Seed Audio 1.0");
+        assert_eq!(
+            operations_from_schema(&schema),
+            vec![GenerationOperation::SpeechGeneration]
+        );
+        assert_eq!(
+            schema["speech_generation"]["request"]["path"].as_str(),
+            Some(GATEWAY_TTS_PATH)
+        );
+        // 聚合目录把语音模型泛化成 chat 能力时，已知家族不能被泛化标签覆盖。
+        let mislabelled = json!({ "id": "seed-audio-1.0", "operations": ["chat"] });
+        assert_eq!(
+            infer_catalog_schema(&mislabelled, "seed-audio-1.0", "Seed Audio 1.0")["speech_generation"]
+                ["requestProfileId"]
+                .as_str(),
+            Some(GATEWAY_TTS_REQUEST_PROFILE)
+        );
+    }
+
+    #[test]
+    fn speech_dialect_repairs_a_definition_saved_for_the_other_family() {
+        let mut schema =
+            default_model_schema("seed-audio-1.0", &[GenerationOperation::SpeechGeneration]);
+        schema["speech_generation"]["request"]["path"] = json!(DOUBAO_TTS_PATH);
+        schema["speech_generation"]["requestProfileId"] = json!(DOUBAO_TTS_REQUEST_PROFILE);
+        assert!(apply_request_dialect(
+            &mut schema,
+            "seed-audio-1.0",
+            RequestDialect::OpenAiCompatible
+        ));
+        assert_eq!(
+            schema["speech_generation"]["request"]["path"].as_str(),
+            Some(GATEWAY_TTS_PATH)
+        );
+        assert_eq!(
+            schema["speech_generation"]["requestProfileId"].as_str(),
+            Some(GATEWAY_TTS_REQUEST_PROFILE)
+        );
+        // 已归一则不再改写，避免每次打开数据库都把定义标成「有变化」。
+        assert!(!apply_request_dialect(
+            &mut schema,
+            "seed-audio-1.0",
+            RequestDialect::OpenAiCompatible
+        ));
+        // 未接入的语音型号原样保留，不被强行套上任何一家端点。
+        let mut unknown =
+            default_model_schema("some-voice-model", &[GenerationOperation::SpeechGeneration]);
+        unknown["speech_generation"]["request"]["path"] = json!("/custom/tts");
+        assert!(!apply_request_dialect(
+            &mut unknown,
+            "some-voice-model",
+            RequestDialect::OpenAiCompatible
+        ));
+        assert_eq!(
+            unknown["speech_generation"]["request"]["path"].as_str(),
+            Some("/custom/tts")
+        );
+    }
 
     #[test]
     fn catalog_schema_prefers_advertised_fields_and_aliases() {

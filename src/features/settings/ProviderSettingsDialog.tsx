@@ -38,10 +38,12 @@ import {
   MOYU_ADAPTER_ID,
   assembleBailianBaseUrl,
   doubaoSamiCredentialRefs,
+  GATEWAY_TTS_REQUEST_PROFILE,
   isArkAdapter,
   isBailianAdapter,
   isValidBailianWorkspaceId,
   parseBailianWorkspaceId,
+  speechRequestProfile,
 } from "../../lib/providerAdapters";
 import { SearchableMultiSelect } from "../../components/SearchableMultiSelect";
 
@@ -222,6 +224,13 @@ function operationsFromUsage(usage: ModelUsage): GenerationOperation[] {
 
 function emptyModelUsage(): ModelUsage {
   return { kind: "none", textToImage: false, imageToImage: false };
+}
+
+/** 语音合成有两条互斥协议，模型标注按它自己的请求档案区分，不按连接显示名猜。 */
+function speechModelNote(model: RemoteModelOption): string {
+  return speechRequestProfile(model.operationSchema) === GATEWAY_TTS_REQUEST_PROFILE
+    ? "语音合成 · 网关 /v1/tts/create"
+    : "语音合成 · 豆包语音 V3";
 }
 
 function initialModelUsage(model: RemoteModelOption): ModelUsage {
@@ -990,7 +999,8 @@ export function ProviderSettingsDialog({
                   <span className="settings-step">02</span>
                   <h3 id="model-picker-title">分类生成模型</h3>
                   <p>
-                    每个供应商分别保存图片、视频、文本与语音模型；豆包语音连接需启用语音生成模型。
+                    每个供应商分别保存图片、视频、文本与语音模型；语音合成可以绑定独立的豆包语音连接，也可以启用
+                    OpenAI 兼容网关发布的 /v1/tts/create 语音模型。
                   </p>
                 </div>
               </div>
@@ -1156,7 +1166,9 @@ export function ProviderSettingsDialog({
                               对话补全 · 自动适配 OpenAI / Anthropic / Gemini 接口格式
                             </span>
                           ) : usage.kind === "speech" ? (
-                            <span className="model-option__type-note">语音合成 · 豆包语音 V3</span>
+                            <span className="model-option__type-note">
+                              {speechModelNote(model)}
+                            </span>
                           ) : null}
                         </div>
                         <label className="model-option__token">

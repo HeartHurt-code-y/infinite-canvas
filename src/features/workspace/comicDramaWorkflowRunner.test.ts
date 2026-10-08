@@ -108,32 +108,43 @@ function setup(deliverable: "video" | "documents" = "documents") {
     },
   };
   const speech = {
-    listVoices: vi.fn(async () => [{
-      id: "project-voice-father",
-      name: "项目父亲音色",
-      language: "zh-CN",
-      engine: "project-provider",
-    }]),
-    getRequestStatus: vi.fn(async (): Promise<SpeechRequestStatus> => ({
-      status: "ready",
-      path: "C:\\output\\voice.wav",
-      requestSignature: "a".repeat(64),
-    })),
-    synthesize: vi.fn(async () => ({
-      path: "C:\\output\\voice.wav",
-      mimeType: "audio/wav" as const,
-      durationSeconds: 1,
-      voiceId: "project-voice-father",
-      requestSignature: "a".repeat(64),
-    })),
-    composeDubbedVideo: vi.fn(async () => ({
-      path: "C:\\output\\dubbed.mp4",
-      durationSeconds: 5,
-      requestSignature: "b".repeat(64),
-      videoSignature: "c".repeat(64),
-    })),
+    listVoices: vi.fn(() =>
+      Promise.resolve([
+        {
+          id: "project-voice-father",
+          name: "项目父亲音色",
+          language: "zh-CN",
+          engine: "project-provider",
+        },
+      ]),
+    ),
+    getRequestStatus: vi.fn((): Promise<SpeechRequestStatus> =>
+      Promise.resolve({
+        status: "ready",
+        path: "C:\\output\\voice.wav",
+        requestSignature: "a".repeat(64),
+      }),
+    ),
+    synthesize: vi.fn(() =>
+      Promise.resolve({
+        path: "C:\\output\\voice.wav",
+        mimeType: "audio/wav" as const,
+        durationSeconds: 1,
+        voiceId: "project-voice-father",
+        requestSignature: "a".repeat(64),
+        subtitlePath: null,
+      }),
+    ),
+    composeDubbedVideo: vi.fn(() =>
+      Promise.resolve({
+        path: "C:\\output\\dubbed.mp4",
+        durationSeconds: 5,
+        requestSignature: "b".repeat(64),
+        videoSignature: "c".repeat(64),
+      }),
+    ),
   };
-  const clipSignature = vi.fn(async () => "c".repeat(64));
+  const clipSignature = vi.fn(() => Promise.resolve("c".repeat(64)));
   const rawRunner = createComicDramaWorkflowRunner({
     promptClient: fake.promptClient,
     generationClient: fake.generation,

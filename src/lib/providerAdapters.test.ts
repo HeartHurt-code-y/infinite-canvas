@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   BAILIAN_ADAPTER_ID,
+  GATEWAY_TTS_REQUEST_PROFILE,
   MOYU_ADAPTER_ID,
   assembleBailianBaseUrl,
   isBailianAdapter,
   isValidBailianWorkspaceId,
   parseBailianWorkspaceId,
+  speechRequestProfile,
 } from "./providerAdapters";
 
 describe("providerAdapters", () => {
@@ -29,5 +31,14 @@ describe("providerAdapters", () => {
     expect(isValidBailianWorkspaceId("")).toBe(false);
     expect(isValidBailianWorkspaceId("bad.id")).toBe(false);
     expect(isValidBailianWorkspaceId("llm-ok_1")).toBe(true);
+  });
+
+  it("reads the speech request profile out of a model operation schema", () => {
+    const gateway = speechRequestProfile({
+      speech_generation: { requestProfileId: GATEWAY_TTS_REQUEST_PROFILE },
+    });
+    expect(gateway).toBe(GATEWAY_TTS_REQUEST_PROFILE);
+    expect(speechRequestProfile({ speech_generation: { resultType: "audio" } })).toBe("");
+    expect(speechRequestProfile({})).toBe("");
   });
 });
