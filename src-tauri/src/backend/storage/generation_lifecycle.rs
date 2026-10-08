@@ -7,7 +7,7 @@ use super::{Storage, now_ms};
 use crate::backend::{
     error::{BackendError, BackendResult},
     model_schema::{
-        RequestDialect, is_rd_video_model, is_seedance_draft_video_model,
+        RequestDialect, is_pixverse_video_model, is_rd_video_model, is_seedance_draft_video_model,
         is_sp25_per_use_video_model,
     },
     types::{
@@ -119,6 +119,9 @@ pub enum GenerationLifecycleFact {
     },
     ObservationDegraded {
         attempt_id: String,
+        error: Value,
+    },
+    ObservationPollingExpired {
         error: Value,
     },
     ObservationTerminated {
@@ -513,6 +516,21 @@ impl Storage {
                     &transaction,
                     task_id,
                     "automatic_retry_exhausted",
+                    &json!({ "taskId": task_id, "reason": error }),
+                )?;
+            }
+            GenerationLifecycleFact::ObservationPollingExpired { error } => {
+                transition = Some(commit_task_transition_in(
+                    &transaction,
+                    task_id,
+                    GenerationTaskTransition::ChangeQueryHealth {
+                        health: QueryHealth::Degraded,
+                    },
+                )?);
+                append_event(
+                    &transaction,
+                    task_id,
+                    "polling_expired",
                     &json!({ "taskId": task_id, "reason": error }),
                 )?;
             }
@@ -1120,6 +1138,8 @@ fn is_sp25_video_result_task(
     Ok(model_id.as_deref().is_some_and(|model| {
         is_sp25_per_use_video_model(model)
             || is_rd_video_model(model)
+            || (is_pixverse_video_model(model)
+                && RequestDialect::for_adapter(&adapter_id) == RequestDialect::OpenAiCompatible)
             || (is_seedance_draft_video_model(model)
                 && RequestDialect::for_adapter(&adapter_id) == RequestDialect::OpenAiCompatible)
     }) && task_remote_id == result.remote_task_id)
@@ -1645,6 +1665,7 @@ fn validate_query_health_transition(
         || matches!(
             (current, next),
             (QueryHealth::Healthy, QueryHealth::RetryWait)
+                | (QueryHealth::Healthy, QueryHealth::Degraded)
                 | (QueryHealth::RetryWait, QueryHealth::Healthy)
                 | (QueryHealth::RetryWait, QueryHealth::Degraded)
                 | (QueryHealth::Degraded, QueryHealth::Healthy)
@@ -2345,6 +2366,137 @@ mod tests {
                 .iter()
                 .any(|event| event.event_type == "automatic_retry")
         );
+    }
+
+    #[test]
+    fn pixverse_polling_expiry_preserves_remote_identity_and_manual_query_recovery() {
+        for running in [false, true] {
+            let task_id = if running {
+                "pixverse-running"
+            } else {
+                "pixverse-queued"
+            };
+            let (directory, storage, lifecycle) = task_lifecycle_for_model(
+                task_id,
+                GenerationOperation::VideoGeneration,
+                "PixVerse-V6",
+            );
+            begin_submission(&lifecycle, task_id);
+            record_successful_call(&lifecycle, task_id, "submit-1", "submit-call-1", "submit");
+            lifecycle
+                .commit(
+                    task_id,
+                    GenerationLifecycleFact::SubmissionRemoteAccepted {
+                        attempt_id: "submit-1".into(),
+                        call_id: "submit-call-1".into(),
+                        tokens: None,
+                        remote_task_id: "pixverse-remote-id".into(),
+                    },
+                )
+                .expect("accept original paid submission");
+            if running {
+                lifecycle
+                    .commit(
+                        task_id,
+                        GenerationLifecycleFact::BeginObservation {
+                            attempt_id: "observe-1".into(),
+                            backoff_ms: None,
+                        },
+                    )
+                    .expect("begin observation");
+                record_successful_call(
+                    &lifecycle,
+                    task_id,
+                    "observe-1",
+                    "observe-call-1",
+                    "observe",
+                );
+                lifecycle
+                    .commit(
+                        task_id,
+                        GenerationLifecycleFact::ObservationApplied {
+                            attempt_id: "observe-1".into(),
+                            call_id: "observe-call-1".into(),
+                            tokens: None,
+                            observation: GenerationRemoteObservation::Running {
+                                progress: Some(42.0),
+                            },
+                        },
+                    )
+                    .expect("apply successful pending observation");
+            }
+            let before = storage.get_task_detail(task_id).expect("before expiry");
+            lifecycle
+                .commit(
+                    task_id,
+                    GenerationLifecycleFact::ObservationPollingExpired {
+                        error: json!({ "kind": "remote_polling_window_expired" }),
+                    },
+                )
+                .expect("stop only automatic polling");
+
+            let reopened = Storage::open(&directory.path().join("backend.sqlite"))
+                .expect("reopen persisted task");
+            let paused = reopened.get_task_detail(task_id).expect("persisted expiry");
+            assert_eq!(paused.summary.status, before.summary.status);
+            assert_eq!(paused.summary.query_health, QueryHealth::Degraded);
+            assert_eq!(paused.summary.remote_task_id, before.summary.remote_task_id);
+            assert_eq!(
+                paused.summary.remote_model_id_snapshot,
+                before.summary.remote_model_id_snapshot
+            );
+            assert_eq!(paused.summary.progress, before.summary.progress);
+            assert_eq!(paused.summary.created_at, before.summary.created_at);
+            assert!(paused.summary.completed_at.is_none());
+            assert!(paused.final_error.is_none());
+            assert_eq!(paused.logical_request, before.logical_request);
+            assert_eq!(paused.resolved_request, before.resolved_request);
+            assert_eq!(paused.attempts.len(), before.attempts.len());
+            assert_eq!(paused.calls.len(), before.calls.len());
+            assert!(
+                paused
+                    .attempts
+                    .iter()
+                    .all(|attempt| attempt.outcome.as_deref() == Some("succeeded"))
+            );
+            assert!(
+                paused
+                    .events
+                    .iter()
+                    .any(|event| event.event_type == "polling_expired")
+            );
+
+            lifecycle
+                .commit(task_id, GenerationLifecycleFact::ManualObservationRequested)
+                .expect("manual query restores observation health");
+            lifecycle
+                .commit(
+                    task_id,
+                    GenerationLifecycleFact::BeginObservation {
+                        attempt_id: "observe-resumed".into(),
+                        backoff_ms: None,
+                    },
+                )
+                .expect("resume observing original task");
+            let resumed = storage.get_task_detail(task_id).expect("manual recovery");
+            assert_eq!(resumed.summary.query_health, QueryHealth::Healthy);
+            assert_eq!(resumed.summary.status, before.summary.status);
+            assert_eq!(
+                resumed.summary.remote_task_id.as_deref(),
+                Some("pixverse-remote-id")
+            );
+            assert_eq!(resumed.calls.len(), before.calls.len());
+            assert_eq!(resumed.attempts.len(), before.attempts.len() + 1);
+            assert_eq!(resumed.attempts.last().unwrap().phase, "observe");
+            assert_eq!(
+                resumed
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.phase == "submit")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

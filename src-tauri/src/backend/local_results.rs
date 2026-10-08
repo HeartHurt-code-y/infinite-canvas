@@ -17,8 +17,8 @@ use super::{
     error::{BackendError, BackendResult},
     model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
     provider::{
-        ImageSource, ProviderRuntime, ResultDownloadAuth, is_seedance_draft_gateway_task,
-        redact_url_string,
+        ImageSource, ProviderRuntime, ResultDownloadAuth, is_pixverse_gateway_task,
+        is_seedance_draft_gateway_task, redact_url_string,
     },
     result_transfer::{
         self, TransferPolicy, TransferProgress, download_result, is_retryable_transfer,
@@ -194,7 +194,8 @@ impl LocalResultService {
             .remote_model_id_snapshot
             .as_deref()
             .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model))
-            || is_seedance_draft_gateway_task(&task))
+            || is_seedance_draft_gateway_task(&task)
+            || is_pixverse_gateway_task(&task))
     }
 
     fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {
@@ -1847,6 +1848,23 @@ mod tests {
         output_name: Option<&str>,
         seedance_draft: bool,
     ) {
+        signed_video_download_case_for_model(
+            refresh_before_first,
+            resume_status,
+            output_name,
+            seedance_draft,
+            false,
+        )
+        .await;
+    }
+
+    async fn signed_video_download_case_for_model(
+        refresh_before_first: bool,
+        resume_status: Option<SaveStatus>,
+        output_name: Option<&str>,
+        seedance_draft: bool,
+        pixverse: bool,
+    ) {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
 
@@ -1878,6 +1896,9 @@ mod tests {
                                 "content": { "video_url": result_url }
                             }}
                         }})
+                    } else if pixverse {
+                        json!({ "id": "remote-video", "task_id": "remote-video", "status": "success",
+                            "progress": "100%", "data": { "status": "SUCCESS", "result_url": result_url } })
                     } else {
                         json!({
                             "task_id": "remote-video",
@@ -1934,6 +1955,8 @@ mod tests {
                 model_definition_id: "sp25-test-model",
                 remote_model_id: Some(if seedance_draft {
                     "doubao-seedance-2-5-260628"
+                } else if pixverse {
+                    "PixVerse-V6"
                 } else {
                     "sp2.5-720p-30s-ch5"
                 }),
@@ -2150,6 +2173,19 @@ mod tests {
     #[tokio::test]
     async fn expired_sp25_video_link_is_refreshed_without_resubmitting() {
         sp25_signed_download_case(false, None, None).await;
+    }
+
+    #[tokio::test]
+    async fn pixverse_expired_and_interrupted_results_query_original_task_without_resubmitting() {
+        signed_video_download_case_for_model(false, None, Some("拍我视频"), false, true).await;
+        signed_video_download_case_for_model(
+            true,
+            Some(SaveStatus::Interrupted),
+            Some("拍我视频"),
+            false,
+            true,
+        )
+        .await;
     }
 
     #[tokio::test]

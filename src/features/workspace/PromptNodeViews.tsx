@@ -10,6 +10,7 @@ import {
 } from "../../lib/backend";
 import {
   isMinimaxH3VideoModel,
+  isPixverseVideoModel,
   isWan30VideoModel,
   modelParameterCapabilities,
   resolvedParameterValue,
@@ -1611,12 +1612,14 @@ function GenerationParameterField({
   capability,
   value,
   locked = false,
+  allowAutomatic = false,
   onChange,
 }: {
   readonly capability: ModelParameterCapability;
   readonly value: ModelParameterValue;
   readonly hasMediaInputs: boolean;
   readonly locked?: boolean;
+  readonly allowAutomatic?: boolean;
   readonly onChange: (value: ModelParameterValue) => void;
 }) {
   const disabled = locked;
@@ -1648,13 +1651,19 @@ function GenerationParameterField({
           disabled={disabled}
           title={locked ? "由当前任务类型自动设置" : undefined}
           onChange={(event) => {
+            if (capability.optional && allowAutomatic && event.target.value === "") {
+              onChange("");
+              return;
+            }
             const selected = capability.options.find(
               (option) => String(option.value) === event.target.value,
             );
             if (selected) onChange(selected.value);
           }}
         >
-          {!capability.options.some((option) => option.value === value) ? (
+          {capability.optional && allowAutomatic ? <option value="">自动</option> : null}
+          {!(capability.optional && allowAutomatic && value === "") &&
+          !capability.options.some((option) => option.value === value) ? (
             <option value={String(value)}>{String(value)}（当前值）</option>
           ) : null}
           {capability.options.map((option) => (
@@ -1677,7 +1686,9 @@ function GenerationParameterField({
         title={locked ? "由当前任务类型自动设置" : undefined}
         inputMode={numeric ? "numeric" : "text"}
         step={capability.step ?? (capability.type === "integer" ? 1 : undefined)}
-        placeholder={capability.optional ? "随机" : undefined}
+        placeholder={
+          capability.optional ? (capability.key === "seed" ? "随机" : "可选") : undefined
+        }
         value={String(value)}
         onChange={(event) => {
           if (!numeric) {
@@ -1771,6 +1782,8 @@ export function VideoNodeSettings({
     selectedModel?.remoteModelId ?? "",
   );
   const seedanceDraftEnabled = showSeedanceDraft && config.parameterValues["draft"] === true;
+  const pixverse = isPixverseVideoModel(selectedModel?.remoteModelId ?? "");
+  const pixverseHasImages = (mediaInputs ?? []).some((input) => input.kind === "image");
 
   return (
     <div className="canvas-gen-node__settings" aria-label="视频生成参数">
@@ -1909,6 +1922,21 @@ export function VideoNodeSettings({
             已保留 {perTaskPublicUrls.length} 个参考 URL；提交时保留当前输入，
             接口能否表达这些素材由后端反馈。
           </small>
+        </div>
+      ) : null}
+
+      {pixverse ? (
+        <div className="canvas-gen-node__media-roles" role="status" aria-label="PixVerse 生成说明">
+          <small>
+            生成模式选择自动时，有参考图生成图生视频，无参考图生成文生视频；图生视频需要时长，默认 5
+            秒。
+          </small>
+          <small>
+            {pixverseHasImages
+              ? "图生视频的画幅由参考图决定，服务端会忽略画幅参数。"
+              : "画幅参数仅在无参考图的文生视频中生效。"}
+          </small>
+          <small>1080p 需要账户开通权限；支持范围及参数组合以服务端返回为准。</small>
         </div>
       ) : null}
 
@@ -2116,16 +2144,19 @@ export function VideoNodeSettings({
             capability={capability}
             value={resolvedParameterValue(capability, taskState.parameterValues)}
             hasMediaInputs={hasMediaInputs}
+            allowAutomatic
             locked={
               taskState.lockedParameters.includes(capability.key) ||
               (seedanceDraftEnabled && capability.key === "resolution")
             }
-            onChange={(value) =>
+            onChange={(value) => {
+              const parameterValues = { ...taskState.parameterValues, [capability.key]: value };
+              if (capability.optional && value === "") delete parameterValues[capability.key];
               onChange({
                 ...config,
-                parameterValues: { ...taskState.parameterValues, [capability.key]: value },
-              })
-            }
+                parameterValues,
+              });
+            }}
           />
         );
       })}

@@ -26,7 +26,16 @@ const catalog: readonly ProviderCatalogEntry[] = [
       createdAt: 1,
       updatedAt: 1,
     },
-    models: [DOMESTIC, OVERSEAS, RD, "wan3.0-video", PER_TASK, "sp2.5-720p-30s-ch4"].map((id) => ({
+    models: [
+      DOMESTIC,
+      OVERSEAS,
+      RD,
+      "wan3.0-video",
+      PER_TASK,
+      "sp2.5-720p-30s-ch4",
+      "PixVerse-V6",
+      "PixVerse-C1",
+    ].map((id) => ({
       definitionId: id,
       remoteModelId: id,
       displayName: id,
@@ -76,6 +85,50 @@ function mountSettings(
 }
 
 describe("VideoNodeSettings Seedance task interaction", () => {
+  it("offers PixVerse defaults and returns explicit generation modes to automatic inference", () => {
+    const { changed } = mountSettings("PixVerse-V6", [first], catalog, { parameterValues: {} });
+    const mode = screen.getByRole("combobox", { name: "能力模式" });
+    expect(mode).toHaveValue("");
+    expect(
+      within(mode)
+        .getAllByRole("option")
+        .map((option) => option.textContent),
+    ).toEqual(["自动", "文生视频", "图生视频", "多图融合"]);
+    expect(screen.getByLabelText("清晰度")).toHaveValue("540p");
+    expect(screen.getByLabelText("时长")).toHaveValue("5");
+    expect(screen.getByRole("checkbox", { name: "生成音频" })).not.toBeChecked();
+    expect(screen.getByRole("checkbox", { name: "多镜头" })).not.toBeChecked();
+    expect(screen.getByText(/图生视频的画幅由参考图决定/)).toBeInTheDocument();
+    expect(screen.getByLabelText("画幅")).toBeEnabled();
+    expect(screen.getByText(/1080p 需要账户开通权限/)).toBeInTheDocument();
+    expect(
+      within(screen.getByLabelText("清晰度")).getByRole("option", { name: "1080p" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "任务类型" })).not.toBeInTheDocument();
+    fireEvent.change(mode, { target: { value: "img" } });
+    expect(changed.mock.lastCall?.[0].parameterValues["action"]).toBe("img");
+    fireEvent.change(mode, { target: { value: "" } });
+    expect(mode).toHaveValue("");
+    expect(changed.mock.lastCall?.[0].parameterValues).not.toHaveProperty("action");
+  });
+
+  it("keeps saved PixVerse parameters while offering C1 controls without the V6 multi-clip default", () => {
+    mountSettings("PixVerse-C1", [], catalog, {
+      parameterValues: {
+        duration: 20,
+        quality: "1080p",
+        action: "modify",
+        generate_multi_clip_switch: true,
+      },
+    });
+    expect(screen.getByLabelText("时长")).toHaveValue("20");
+    expect(screen.getByLabelText("清晰度")).toHaveValue("1080p");
+    expect(screen.getByLabelText("能力模式")).toHaveValue("modify");
+    expect(screen.queryByRole("checkbox", { name: "多镜头" })).not.toBeInTheDocument();
+    expect(screen.getByText(/画幅参数仅在无参考图的文生视频中生效/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("explicitly opts into 480p draft generation and explains the manual paid final step", () => {
     const { changed } = mountSettings(DOMESTIC, [], catalog, {
       parameterValues: { resolution: "720p", duration: 5, ratio: "16:9" },

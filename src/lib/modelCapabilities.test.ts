@@ -4,6 +4,7 @@ import {
   generationParameters,
   isGeminiImageModel,
   isMinimaxH3VideoModel,
+  isPixverseVideoModel,
   isRdVideoModel,
   isSeedreamImageModel,
   modelAllowsMediaOnlyPrompt,
@@ -12,6 +13,107 @@ import {
 } from "./modelCapabilities";
 
 describe("model capabilities", () => {
+  it.each(["PixVerse-V6", "PixVerse-C1"])(
+    "declares the documented PixVerse generation profile for %s",
+    (modelId) => {
+      const schema = defaultModelOperationSchema(modelId, ["video_generation"]);
+      expect(schema["video_generation"]).toMatchObject({
+        requestProfileId: "moyu_pixverse_video_v1",
+        request: { mediaEncoding: "pixverse_image_inputs", promptMode: "prompt_or_media" },
+      });
+      expect(modelAllowsMediaOnlyPrompt(schema, "video_generation")).toBe(true);
+      const capabilities = modelParameterCapabilities(schema, "video_generation", modelId);
+      expect(capabilities.find((capability) => capability.key === "action")).toMatchObject({
+        optional: true,
+        defaultValue: "",
+        options: [
+          { value: "text", label: "文生视频" },
+          { value: "img", label: "图生视频" },
+          { value: "fusion", label: "多图融合" },
+        ],
+      });
+      expect(capabilities.find((capability) => capability.key === "duration")?.options).toEqual(
+        Array.from({ length: 15 }, (_, index) => ({ value: index + 1, label: `${index + 1} 秒` })),
+      );
+      expect(
+        capabilities
+          .find((capability) => capability.key === "aspect_ratio")
+          ?.options.map((option) => option.value),
+      ).toEqual(["16:9", "9:16", "4:3", "3:4", "1:1", "2:3", "3:2", "21:9"]);
+      expect(
+        capabilities
+          .find((capability) => capability.key === "quality")
+          ?.options.map((option) => option.value),
+      ).toEqual(["360p", "540p", "720p", "1080p"]);
+      expect(
+        capabilities.some((capability) => capability.key === "generate_multi_clip_switch"),
+      ).toBe(modelId === "PixVerse-V6");
+      const defaults = generationParameters(capabilities, {}, true);
+      expect(defaults).toMatchObject({
+        quality: "540p",
+        duration: 5,
+        aspect_ratio: "16:9",
+        generate_audio_switch: false,
+      });
+      expect(defaults).not.toHaveProperty("action");
+      expect(defaults).not.toHaveProperty("seed");
+      expect(defaults).not.toHaveProperty("template_id");
+      expect(
+        generationParameters(
+          capabilities,
+          { duration: 18, aspect_ratio: "2:1", quality: "4k", action: "modify", new_flag: true },
+          true,
+        ),
+      ).toMatchObject({
+        duration: 18,
+        aspect_ratio: "2:1",
+        quality: "4k",
+        action: "modify",
+        new_flag: true,
+      });
+    },
+  );
+
+  it("repairs legacy empty PixVerse capabilities while respecting nonempty server declarations", () => {
+    for (const operation of [{ resultType: "video" }, { parameters: {} }]) {
+      const capabilities = modelParameterCapabilities(
+        { video_generation: operation },
+        "video_generation",
+        "PixVerse-C1",
+      );
+      expect(capabilities.find((capability) => capability.key === "duration")?.defaultValue).toBe(
+        5,
+      );
+      expect(capabilities.find((capability) => capability.key === "quality")?.defaultValue).toBe(
+        "540p",
+      );
+    }
+    expect(
+      modelParameterCapabilities(
+        {
+          video_generation: {
+            parameters: { duration: { type: "integer", default: 20, enum: [20, 30] } },
+          },
+        },
+        "video_generation",
+        "PixVerse-V6",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        key: "duration",
+        defaultValue: 20,
+        options: [
+          { value: 20, label: "20 秒" },
+          { value: 30, label: "30 秒" },
+        ],
+      }),
+    ]);
+    expect(isPixverseVideoModel("pixverse-v6")).toBe(true);
+    expect(isPixverseVideoModel("PixVerse-C1")).toBe(true);
+    expect(isPixverseVideoModel("PixVerse-V5")).toBe(false);
+    expect(isPixverseVideoModel("custom-PixVerse-V6")).toBe(false);
+  });
+
   it("uses only the documented SP 2.5 per-task parameters", () => {
     for (const [modelId, first, last] of [
       ["sp2.5-720p-4-15s", 4, 15],

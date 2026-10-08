@@ -336,14 +336,16 @@ impl MediaResolver {
             .get("requestProfileId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // 按次系列与 RD 网关把本地素材上传到供应商的 /v1/assets/uploads，
+        // 按次系列、RD 与 PixVerse 通过供应商上传接口处理本地素材，
         // 因此解析阶段必须拿到本地字节；纯 URL 素材不受影响。
-        let needs_local_bytes = matches!(request_profile, "sp25_per_use_video_v1" | "rd_video_v1")
-            || image_edit_needs_local_bytes(
-                task.operation,
-                task.remote_model_id_snapshot.as_deref(),
-                &operation_schema,
-            );
+        let needs_local_bytes = matches!(
+            request_profile,
+            "sp25_per_use_video_v1" | "rd_video_v1" | "moyu_pixverse_video_v1"
+        ) || image_edit_needs_local_bytes(
+            task.operation,
+            task.remote_model_id_snapshot.as_deref(),
+            &operation_schema,
+        );
         for input in inputs {
             let (resolved, lease) = self
                 .resolve_target(

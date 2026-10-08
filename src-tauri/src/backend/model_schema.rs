@@ -152,6 +152,10 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     if dialect == RequestDialect::AliyunBailian {
         return apply_bailian_wan_video_dialect(schema, identity);
     }
+    // PixVerse 的已知合同属于兼容网关；同名模型出现在其他连接时，不能把
+    // 供应商自定义的原生路径替换成魔芋路径。
+    let pixverse_profile_changed = dialect == RequestDialect::OpenAiCompatible
+        && refresh_pixverse_video_defaults(schema, identity);
     let draft_profile_changed = apply_seedance_draft_video_dialect(schema, identity, dialect);
     let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
         return false;
@@ -176,7 +180,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
             let native_seedance =
                 identity.contains("seedance") && !is_dreamina_seedance_video_model(identity);
             if !native_seedance {
-                return draft_profile_changed;
+                return draft_profile_changed || pixverse_profile_changed;
             }
             let mut changed = draft_profile_changed;
             changed |= set_request_field(request, "path", json!(ARK_VIDEO_PATH));
@@ -207,7 +211,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
                 return changed;
             }
             if path != ARK_VIDEO_PATH {
-                return draft_profile_changed;
+                return draft_profile_changed || pixverse_profile_changed;
             }
             let mut changed = set_request_field(request, "path", json!(GATEWAY_VIDEO_PATH));
             // 参数容器随方言走：原生契约把画幅/时长/分辨率平铺在顶层、content 也在顶层，
@@ -395,6 +399,20 @@ fn apply_speech_dialect(schema: &mut Value, identity: &str) -> bool {
 }
 
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
+    // 两个完整 PixVerse 型号有明确的视频合同，不能被目录通用 chat 标签覆盖。
+    // 若目录提供视频扩展 Schema，仍保留其中的自定义参数与标记。
+    if is_pixverse_video_model(model_id) {
+        if let Some(schema) = advertised_schema(item)
+            && schema.get("video_generation").is_some_and(Value::is_object)
+        {
+            let mut schema = complete_advertised_schema(schema, model_id);
+            if let Some(object) = schema.as_object_mut() {
+                object.retain(|key, _| key == "video_generation");
+            }
+            return schema;
+        }
+        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
     // 草稿样片契约以完整模型 ID 为准，不能被聚合目录里的 text/chat 标签覆盖。
     if is_seedance_draft_video_model(model_id) {
         return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
@@ -465,6 +483,69 @@ fn contains_identity_token(identity: &str, expected: &str) -> bool {
 fn is_wan_30_video_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
     identity.contains("wan3.0-video") || identity.contains("wan3-0-video")
+}
+
+pub(crate) const MOYU_PIXVERSE_VIDEO_PROFILE: &str = "moyu_pixverse_video_v1";
+
+/// 只接受文档的完整型号，避免把 PixVerse-V5 或未来后缀型号误套 V6/C1 能力。
+pub(crate) fn is_pixverse_video_model(model_id: &str) -> bool {
+    model_id.eq_ignore_ascii_case("PixVerse-V6") || model_id.eq_ignore_ascii_case("PixVerse-C1")
+}
+
+fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
+    if !is_pixverse_video_model(model_id) {
+        return None;
+    }
+    let mut parameters = json!({
+        "aspect_ratio": {
+            "type": "string", "label": "画幅", "default": "16:9",
+            "enum": ["16:9", "9:16", "4:3", "3:4", "1:1", "2:3", "3:2", "21:9"],
+            "order": 0
+        },
+        "duration": {
+            "type": "integer", "label": "时长", "default": 5,
+            "enum": (1..=15).map(Value::from).collect::<Vec<_>>(), "order": 1
+        },
+        "quality": {
+            "type": "string", "label": "清晰度", "default": "540p",
+            "enum": ["360p", "540p", "720p", "1080p"],
+            "requestLocation": "metadata", "order": 2
+        },
+        "generate_audio_switch": {
+            "type": "boolean", "label": "生成音频", "default": false,
+            "requestLocation": "metadata", "order": 3
+        },
+        "seed": {
+            "type": "integer", "label": "随机种子", "optional": true, "order": 5
+        },
+        "template_id": {
+            "type": "integer", "label": "特效模板 ID", "optional": true,
+            "requestLocation": "metadata", "order": 6
+        },
+        "action": {
+            "type": "string", "label": "能力模式", "optional": true,
+            "enum": ["text", "img", "fusion"], "requestLocation": "metadata", "order": 7
+        }
+    });
+    if model_id.eq_ignore_ascii_case("PixVerse-V6") {
+        parameters["generate_multi_clip_switch"] = json!({
+            "type": "boolean", "label": "多镜头", "default": false,
+            "requestLocation": "metadata", "order": 4
+        });
+    }
+    Some(json!({
+        "resultType": "video",
+        "requestProfileId": MOYU_PIXVERSE_VIDEO_PROFILE,
+        "profileVersion": 1,
+        "request": {
+            "path": GATEWAY_VIDEO_PATH,
+            "observePath": "/v1/video/generations/{task_id}",
+            "encoding": "json", "parameterContainer": "root",
+            "mediaEncoding": "pixverse_image_inputs", "mediaField": "images",
+            "metadataField": "metadata", "promptMode": "prompt_or_media"
+        },
+        "parameters": parameters
+    }))
 }
 
 fn is_seedance_20_video_model(model_id: &str) -> bool {
@@ -1251,6 +1332,7 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     refresh_vidu_video_defaults(&mut complete, model_id);
     refresh_minimax_h3_video_defaults(&mut complete, model_id);
     refresh_sp25_per_use_video_defaults(&mut complete, model_id);
+    refresh_pixverse_video_defaults(&mut complete, model_id);
     complete
 }
 
@@ -1914,6 +1996,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
         }
         GenerationOperation::VideoGeneration => {
             let identity = model_id.to_ascii_lowercase();
+            if let Some(schema) = pixverse_video_operation_schema(model_id) {
+                return schema;
+            }
             if let Some(schema) = sp25_per_use_video_operation_schema(model_id) {
                 return schema;
             }
@@ -2346,6 +2431,73 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
     }
+}
+
+/// 把早期 PixVerse 通用 metadata/content 视频合同刷新为明确的顶层参数与
+/// 图片 URL/img_id 数组合同。保留扩展参数定义与供应商标记；已经具备当前档案
+/// 时保持原样，避免覆盖保存后的自定义参数与端点。
+pub fn refresh_pixverse_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    let Some(mut replacement) = pixverse_video_operation_schema(model_id) else {
+        return false;
+    };
+    let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
+        return false;
+    };
+    let has_current_profile = operation.get("requestProfileId").and_then(Value::as_str)
+        == Some(MOYU_PIXVERSE_VIDEO_PROFILE)
+        && operation
+            .get("request")
+            .and_then(|request| request.get("mediaEncoding"))
+            .and_then(Value::as_str)
+            == Some("pixverse_image_inputs");
+    if has_current_profile {
+        // 当前档案允许供应商调整已有参数；补齐目录只声明扩展参数时缺失的
+        // 基础能力即可，不覆盖当前档案的参数定义和自定义请求路径。
+        let Some(canonical_parameters) = replacement.get("parameters").and_then(Value::as_object)
+        else {
+            return false;
+        };
+        let Some(parameters) = operation
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+        else {
+            operation.insert("parameters".into(), json!(canonical_parameters));
+            return true;
+        };
+        let mut changed = false;
+        for (key, value) in canonical_parameters {
+            if !parameters.contains_key(key) {
+                parameters.insert(key.clone(), value.clone());
+                changed = true;
+            }
+        }
+        return changed;
+    }
+    if let Some(provided_parameters) = operation.get("parameters").and_then(Value::as_object)
+        && let Some(target_parameters) = replacement
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+    {
+        for (key, value) in provided_parameters {
+            target_parameters
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    let mut replacement = replacement.as_object().cloned().unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    if *operation == replacement {
+        return false;
+    }
+    *operation = replacement;
+    true
 }
 
 /// 按次系列只允许其文档列出的请求字段。旧的通用 Seedance 档案即使带有非空
@@ -3243,6 +3395,164 @@ fn validate_parameter_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixverse_profiles_match_only_the_documented_complete_model_ids() {
+        for model_id in ["PixVerse-V6", "PixVerse-C1", "pixverse-v6", "PIXVERSE-C1"] {
+            assert!(is_pixverse_video_model(model_id));
+            let operation =
+                default_operation_schema(model_id, GenerationOperation::VideoGeneration);
+            assert_eq!(operation["requestProfileId"], MOYU_PIXVERSE_VIDEO_PROFILE);
+            assert_eq!(operation["request"]["parameterContainer"], "root");
+            assert_eq!(
+                operation["request"]["mediaEncoding"],
+                "pixverse_image_inputs"
+            );
+            assert_eq!(
+                operation["request"]["observePath"],
+                "/v1/video/generations/{task_id}"
+            );
+            assert_eq!(operation["request"]["promptMode"], "prompt_or_media");
+            assert_eq!(operation["parameters"]["duration"]["default"], 5);
+            assert_eq!(
+                operation["parameters"]["duration"]["enum"],
+                json!((1..=15).collect::<Vec<_>>())
+            );
+            assert_eq!(
+                operation["parameters"]["quality"]["enum"],
+                json!(["360p", "540p", "720p", "1080p"])
+            );
+            assert_eq!(
+                operation["parameters"]["quality"]["requestLocation"],
+                "metadata"
+            );
+            assert!(operation["parameters"]["action"].get("default").is_none());
+            assert_eq!(
+                operation["parameters"]["action"]["enum"],
+                json!(["text", "img", "fusion"])
+            );
+            assert_eq!(
+                operation["parameters"]
+                    .get("generate_multi_clip_switch")
+                    .is_some(),
+                model_id.eq_ignore_ascii_case("PixVerse-V6")
+            );
+        }
+        for model_id in [
+            "PixVerse-V5",
+            "PixVerse-V6-pro",
+            "PixVerse-C1-preview",
+            "vendor/PixVerse-V6",
+        ] {
+            assert!(!is_pixverse_video_model(model_id));
+            assert!(pixverse_video_operation_schema(model_id).is_none());
+        }
+    }
+
+    #[test]
+    fn pixverse_catalog_fixes_chat_labels_and_preserves_video_extensions() {
+        for item in [
+            json!({ "id": "PixVerse-C1", "operations": ["chat"] }),
+            json!({ "id": "PixVerse-C1", "capabilities": { "operations": {
+                "text_generation": { "resultType": "text", "parameters": {} }
+            } } }),
+        ] {
+            let schema = infer_catalog_schema(&item, "PixVerse-C1", "PixVerse C1");
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration]
+            );
+            assert_eq!(
+                schema["video_generation"]["requestProfileId"],
+                MOYU_PIXVERSE_VIDEO_PROFILE
+            );
+        }
+        let advertised = json!({ "operations": {
+            "text_generation": { "resultType": "text", "parameters": {} },
+            "video_generation": {
+                "resultType": "video", "vendorTag": "custom",
+                "parameters": { "vendor_option": { "type": "string", "optional": true } }
+            }
+        } });
+        let schema = infer_catalog_schema(&advertised, "PixVerse-V6", "PixVerse V6");
+        assert_eq!(
+            operations_from_schema(&schema),
+            [GenerationOperation::VideoGeneration]
+        );
+        assert_eq!(schema["video_generation"]["vendorTag"], "custom");
+        assert_eq!(
+            schema["video_generation"]["parameters"]["duration"]["default"],
+            5
+        );
+        assert_eq!(
+            schema["video_generation"]["parameters"]["vendor_option"]["optional"],
+            true
+        );
+    }
+
+    #[test]
+    fn pixverse_old_saved_schema_is_repaired_only_for_the_gateway_dialect() {
+        let stale = json!({ "video_generation": {
+            "resultType": "video", "requestProfileId": "moyu_video_metadata_v1",
+            "request": { "path": "/vendor/video", "parameterContainer": "metadata", "contentContainer": "metadata" },
+            "parameters": { "vendor_option": { "type": "string", "optional": true } },
+            "vendorTag": "keep"
+        } });
+        for dialect in [
+            RequestDialect::VolcengineArk,
+            RequestDialect::AliyunBailian,
+            RequestDialect::Grsai,
+        ] {
+            let mut preserved = stale.clone();
+            assert!(!apply_request_dialect(
+                &mut preserved,
+                "PixVerse-V6",
+                dialect
+            ));
+            assert_eq!(preserved, stale);
+        }
+        let mut repaired = stale;
+        assert!(apply_request_dialect(
+            &mut repaired,
+            "PixVerse-V6",
+            RequestDialect::OpenAiCompatible
+        ));
+        let video = &repaired["video_generation"];
+        assert_eq!(video["requestProfileId"], MOYU_PIXVERSE_VIDEO_PROFILE);
+        assert_eq!(video["request"]["path"], "/v1/video/generations");
+        assert_eq!(video["request"]["parameterContainer"], "root");
+        assert!(video["request"].get("contentContainer").is_none());
+        assert_eq!(video["vendorTag"], "keep");
+        assert!(video["parameters"].get("vendor_option").is_some());
+        assert!(!apply_request_dialect(
+            &mut repaired,
+            "PixVerse-V6",
+            RequestDialect::OpenAiCompatible
+        ));
+    }
+
+    #[test]
+    fn pixverse_normalization_keeps_explicit_parameters_and_metadata() {
+        let operation =
+            default_operation_schema("PixVerse-C1", GenerationOperation::VideoGeneration);
+        let supplied = json!({
+            "duration": 16, "quality": "future_quality", "seed": -1,
+            "generate_multi_clip_switch": true,
+            "metadata": { "duration": 8, "quality": "1080p", "action": "modify", "media_id": "123" }
+        });
+        let normalized = normalize_parameters(&operation, &supplied).unwrap();
+        for (key, value) in supplied.as_object().unwrap() {
+            assert_eq!(normalized.get(key), Some(value), "{key}");
+        }
+        assert_eq!(normalized["aspect_ratio"], "16:9");
+        assert_eq!(normalized["generate_audio_switch"], false);
+        assert!(
+            normalize_parameters(&operation, &json!({}))
+                .unwrap()
+                .get("action")
+                .is_none()
+        );
+    }
 
     #[test]
     fn speech_profile_and_endpoint_follow_the_model_family() {

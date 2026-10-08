@@ -55,6 +55,10 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   background: "背景通道",
   layer_decomposition: "图层拆分",
   draft: "先生成草稿样片",
+  action: "能力模式",
+  generate_audio_switch: "生成音频",
+  generate_multi_clip_switch: "多镜头",
+  template_id: "特效模板 ID",
 };
 
 const OPTION_LABELS: Readonly<Record<string, string>> = {
@@ -75,6 +79,9 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   generation: "生成",
   regeneration: "再生成",
   h3_context_ir: "智能扩写",
+  text: "文生视频",
+  img: "图生视频",
+  fusion: "多图融合",
   "-1": "智能时长",
   disabled: "关闭",
   fast: "快速",
@@ -578,6 +585,75 @@ export function isMinimaxH3VideoModel(modelId: string): boolean {
   );
 }
 
+export const PIXVERSE_VIDEO_PROFILE_ID = "moyu_pixverse_video_v1";
+
+/** Only the model IDs documented by the Moyu PixVerse contract use this profile. */
+export function isPixverseVideoModel(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+  return normalized === "pixverse-v6" || normalized === "pixverse-c1";
+}
+
+function pixverseVideoParameters(modelId: string): Record<string, unknown> {
+  return {
+    action: {
+      type: "string",
+      label: "能力模式",
+      optional: true,
+      enum: ["text", "img", "fusion"],
+      requestLocation: "metadata",
+      order: 7,
+    },
+    quality: {
+      type: "string",
+      label: "清晰度",
+      default: "540p",
+      enum: ["360p", "540p", "720p", "1080p"],
+      requestLocation: "metadata",
+      order: 2,
+    },
+    aspect_ratio: {
+      type: "string",
+      label: "画幅",
+      default: "16:9",
+      enum: ["16:9", "9:16", "4:3", "3:4", "1:1", "2:3", "3:2", "21:9"],
+      order: 0,
+    },
+    duration: {
+      type: "integer",
+      label: "时长",
+      default: 5,
+      enum: Array.from({ length: 15 }, (_, index) => index + 1),
+      order: 1,
+    },
+    seed: { type: "integer", label: "随机种子", optional: true, order: 5 },
+    generate_audio_switch: {
+      type: "boolean",
+      label: "生成音频",
+      default: false,
+      requestLocation: "metadata",
+      order: 3,
+    },
+    ...(modelId.toLowerCase() === "pixverse-v6"
+      ? {
+          generate_multi_clip_switch: {
+            type: "boolean",
+            label: "多镜头",
+            default: false,
+            requestLocation: "metadata",
+            order: 4,
+          },
+        }
+      : {}),
+    template_id: {
+      type: "integer",
+      label: "特效模板 ID",
+      optional: true,
+      requestLocation: "metadata",
+      order: 6,
+    },
+  };
+}
+
 /**
  * Seedance 2.5 RD 网关（new-api 内核）的视频模型：
  * `rd-seedance-2.5-480p` / `rd-seedance-2.5-720p` / `rd-seedance-2.5-1080p`。
@@ -637,6 +713,7 @@ function rdVideoParameters(modelId: string): Record<string, unknown> {
 
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  if (isPixverseVideoModel(modelId)) return pixverseVideoParameters(modelId);
   const perTask = perTaskVideoProfile(modelId);
   if (perTask) {
     return {
@@ -1017,12 +1094,22 @@ export function defaultModelOperationSchema(
       }
       const wan30 = isWan30VideoModel(modelId);
       const draftProfile = modelId.toLowerCase() === SEEDANCE_DRAFT_MODEL_ID;
+      const pixverse = isPixverseVideoModel(modelId);
       return [
         operation,
         {
           resultType: "video",
           parameters: draftProfile ? seedanceDraftVideoParameters() : videoParameters(modelId),
           ...(draftProfile ? { requestProfileId: SEEDANCE_DRAFT_PROFILE_ID } : {}),
+          ...(pixverse
+            ? {
+                requestProfileId: PIXVERSE_VIDEO_PROFILE_ID,
+                request: {
+                  mediaEncoding: "pixverse_image_inputs",
+                  promptMode: "prompt_or_media",
+                },
+              }
+            : {}),
           ...(wan30 ? { request: { promptMode: "prompt_or_media" } } : {}),
         },
       ];
@@ -1060,7 +1147,8 @@ export function modelParameterCapabilities(
   const declaredParameters = operationDefinition?.["parameters"];
   const draftProfile = operationDefinition?.["requestProfileId"] === SEEDANCE_DRAFT_PROFILE_ID;
   if (!isRecord(declaredParameters)) {
-    if (operationDefinition && !perTaskVideoProfile(modelId)) return [];
+    if (operationDefinition && !perTaskVideoProfile(modelId) && !isPixverseVideoModel(modelId))
+      return [];
     const fallback = fallbackParameters(modelId, operation);
     return Object.entries(fallback)
       .flatMap(([key, value], index) => parameterCapability(key, value, undefined, index) ?? [])
@@ -1079,6 +1167,7 @@ export function modelParameterCapabilities(
       isVeoVideoModel(modelId) ||
       isViduVideoModel(modelId) ||
       isMinimaxH3VideoModel(modelId) ||
+      isPixverseVideoModel(modelId) ||
       isRdVideoModel(modelId) ||
       isGptImageModel(modelId) ||
       isGeminiImageModel(modelId) ||

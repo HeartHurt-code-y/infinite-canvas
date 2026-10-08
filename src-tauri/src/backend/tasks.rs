@@ -15,8 +15,9 @@ use super::{
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
     model_schema::{
-        RequestDialect, apply_request_dialect, default_model_schema, is_rd_video_model,
-        is_seedance_draft_video_model, is_sp25_per_use_video_model, normalize_parameters,
+        RequestDialect, apply_request_dialect, default_model_schema, is_pixverse_video_model,
+        is_rd_video_model, is_seedance_draft_video_model, is_sp25_per_use_video_model,
+        normalize_parameters, refresh_pixverse_video_defaults,
     },
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
     staging::StagingService,
@@ -35,6 +36,46 @@ use super::{
 const MAX_AUTOMATIC_RETRIES: u32 = 3;
 const DEFAULT_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const WAN_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+const PIXVERSE_INITIAL_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+const PIXVERSE_LATER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+const PIXVERSE_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[derive(Clone, Copy)]
+struct VideoPollingPolicy {
+    initial_interval: std::time::Duration,
+    pixverse: bool,
+}
+
+impl VideoPollingPolicy {
+    fn for_model(model_id: Option<&str>, dialect: RequestDialect) -> Self {
+        Self {
+            initial_interval: video_poll_interval(model_id),
+            pixverse: dialect == RequestDialect::OpenAiCompatible
+                && model_id.is_some_and(is_pixverse_video_model),
+        }
+    }
+
+    fn interval(self, elapsed: std::time::Duration) -> std::time::Duration {
+        if self.pixverse && elapsed >= PIXVERSE_INITIAL_POLL_WINDOW {
+            PIXVERSE_LATER_POLL_INTERVAL
+        } else {
+            self.initial_interval
+        }
+    }
+
+    fn next_wait(self, elapsed: std::time::Duration) -> Option<std::time::Duration> {
+        let interval = self.interval(elapsed);
+        if self.pixverse {
+            let remaining = PIXVERSE_POLL_WINDOW.checked_sub(elapsed)?;
+            if remaining.is_zero() {
+                return None;
+            }
+            Some(interval.min(remaining))
+        } else {
+            Some(interval)
+        }
+    }
+}
 
 #[derive(Default)]
 struct VideoPollRegistry {
@@ -78,13 +119,27 @@ struct SuccessfulObservation {
 }
 
 /// 冻结任务时以绑定的远端模型 ID 为准。旧库中的 model_definitions 可能仍存着
-/// Seedance 通用档案；按次与 RD 型号必须使用已知的专属协议，不能让旧档案决定
+/// Seedance 通用档案；按次、RD 与 PixVerse 型号必须使用已知的专属协议，不能让旧档案决定
 /// 素材暂存或付费请求的形状。其他型号和操作继续沿用已保存的自定义 Schema。
 fn operation_schema_for_start(
     stored_operations: &Value,
     operation: GenerationOperation,
     remote_model_id: Option<&str>,
+    dialect: RequestDialect,
 ) -> Option<Value> {
+    if operation == GenerationOperation::VideoGeneration
+        && dialect == RequestDialect::OpenAiCompatible
+        && let Some(model_id) = remote_model_id.filter(|id| is_pixverse_video_model(id))
+    {
+        let mut refreshed = stored_operations.clone();
+        if refreshed.get(operation.as_str()).is_none() {
+            return default_model_schema(model_id, &[operation])
+                .get(operation.as_str())
+                .cloned();
+        }
+        refresh_pixverse_video_defaults(&mut refreshed, model_id);
+        return refreshed.get(operation.as_str()).cloned();
+    }
     if operation == GenerationOperation::VideoGeneration
         && let Some(model_id) =
             remote_model_id.filter(|id| is_sp25_per_use_video_model(id) || is_rd_video_model(id))
@@ -188,6 +243,7 @@ impl GenerationTaskService {
             &model.operations,
             command.operation,
             binding.remote_model_id.as_deref(),
+            RequestDialect::for_adapter(&provider.adapter_id),
         )
         .ok_or_else(|| {
             BackendError::validation(
@@ -955,16 +1011,23 @@ impl GenerationTaskService {
         staging_leases: Vec<super::staging::StagingLease>,
         wake: &tokio::sync::Notify,
     ) -> BackendResult<()> {
-        let poll_interval = video_poll_interval(
-            self.storage
-                .get_task_execution(task_id)?
-                .remote_model_id_snapshot
-                .as_deref(),
+        let initial_task = self.storage.get_task_execution(task_id)?;
+        let poll_policy = VideoPollingPolicy::for_model(
+            initial_task.remote_model_id_snapshot.as_deref(),
+            RequestDialect::for_adapter(&initial_task.adapter_id_snapshot),
         );
+        // Each observation worker gets a bounded window. Manual recovery starts
+        // another window against the existing frozen remote identity; it never
+        // returns to the paid submission path.
+        let poll_started = tokio::time::Instant::now();
         loop {
             let mut successful_observation = None;
             let mut backoff_ms = None;
             for retry_index in 0..=MAX_AUTOMATIC_RETRIES {
+                if poll_policy.next_wait(poll_started.elapsed()).is_none() {
+                    self.stop_expired_video_polling(task_id)?;
+                    return Ok(());
+                }
                 let attempt_id = Uuid::new_v4().to_string();
                 self.commit_fact(
                     task_id,
@@ -1026,7 +1089,13 @@ impl GenerationTaskService {
                             self.emit_retry_exhausted_notice(task_id, &error);
                             return Ok(());
                         }
-                        let delay = retry_delay_ms(retry_index + 1);
+                        let mut delay = retry_delay_ms(retry_index + 1);
+                        if poll_policy.pixverse {
+                            delay =
+                                delay
+                                    .max(poll_policy.interval(poll_started.elapsed()).as_millis()
+                                        as u64);
+                        }
                         warn!(
                             "[generation] 视频状态查询失败，进入查询重试: taskId={task_id}, 第 {}/{MAX_AUTOMATIC_RETRIES} 次查询重试, 退避 {delay}ms（只重试查询，不会重新提交生成）",
                             retry_index + 1
@@ -1041,7 +1110,14 @@ impl GenerationTaskService {
                             },
                         )?;
                         self.emit_retry_notice(task_id, retry_index + 1, delay, Some(&error), true);
-                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        let retry_wait = std::time::Duration::from_millis(delay);
+                        let retry_wait = if poll_policy.pixverse {
+                            retry_wait
+                                .min(PIXVERSE_POLL_WINDOW.saturating_sub(poll_started.elapsed()))
+                        } else {
+                            retry_wait
+                        };
+                        tokio::time::sleep(retry_wait).await;
                         backoff_ms = Some(delay);
                     }
                 }
@@ -1064,7 +1140,13 @@ impl GenerationTaskService {
                 GenerationOperation::TextToImage | GenerationOperation::ImageToImage
             );
             let kind = if image_task { "图片" } else { "视频" };
-            match observation.remote_status.to_ascii_uppercase().as_str() {
+            let remote_status = observation.remote_status.to_ascii_uppercase();
+            let remote_status = if poll_policy.pixverse && remote_status.trim().is_empty() {
+                "PENDING"
+            } else {
+                remote_status.as_str()
+            };
+            match remote_status {
                 "NOT_START" | "SUBMITTED" | "QUEUED" | "PENDING" => {
                     info!(
                         "[generation] {kind}任务远端排队中: taskId={}, 远端状态={}, 进度={:?}",
@@ -1355,8 +1437,44 @@ impl GenerationTaskService {
                     return Ok(());
                 }
             }
+            let Some(poll_interval) = poll_policy.next_wait(poll_started.elapsed()) else {
+                self.stop_expired_video_polling(task_id)?;
+                return Ok(());
+            };
             let _ = tokio::time::timeout(poll_interval, wake.notified()).await;
         }
+    }
+
+    fn stop_expired_video_polling(&self, task_id: &str) -> BackendResult<()> {
+        let task = self.storage.get_task_execution(task_id)?;
+        let reason = json!({
+            "kind": "remote_polling_window_expired",
+            "message": "已达到 10 分钟自动查询时限，可手动查询原任务继续获取结果，不会重新提交生成",
+            "remoteTaskId": task.remote_task_id,
+            "queryOnly": true,
+            "windowSeconds": PIXVERSE_POLL_WINDOW.as_secs(),
+        });
+        self.commit_fact(
+            task_id,
+            GenerationLifecycleFact::ObservationPollingExpired {
+                error: reason.clone(),
+            },
+        )?;
+        warn!(
+            "[generation] PixVerse 自动查询达到 10 分钟时限，保留任务状态及远端 ID，用户可手动查询: taskId={task_id}"
+        );
+        self.emit(
+            "generation:polling-stopped",
+            &json!({ "taskId": task_id, "reason": reason, "queryOnly": true }),
+        );
+        let _ = self
+            .app
+            .notification()
+            .builder()
+            .title("生成任务自动查询已停止")
+            .body("PixVerse 任务已查询 10 分钟，可手动查询原任务继续获取结果")
+            .show();
+        Ok(())
     }
 
     async fn cleanup_staging_leases(
@@ -1616,6 +1734,108 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pixverse_polling_changes_cadence_and_stops_at_ten_minutes() {
+        use std::time::Duration;
+
+        for model_id in ["PixVerse-V6", "pixverse-c1"] {
+            let policy =
+                VideoPollingPolicy::for_model(Some(model_id), RequestDialect::OpenAiCompatible);
+            assert_eq!(
+                policy.next_wait(Duration::ZERO),
+                Some(Duration::from_secs(5))
+            );
+            assert_eq!(
+                policy.next_wait(Duration::from_secs(29)),
+                Some(Duration::from_secs(5))
+            );
+            assert_eq!(
+                policy.next_wait(Duration::from_secs(30)),
+                Some(Duration::from_secs(10))
+            );
+            assert_eq!(
+                policy.next_wait(Duration::from_secs(599)),
+                Some(Duration::from_secs(1))
+            );
+            assert_eq!(policy.next_wait(Duration::from_secs(600)), None);
+            assert_eq!(policy.next_wait(Duration::from_secs(601)), None);
+        }
+        for model_id in ["PixVerse-V5", "PixVerse-V6-pro", "sp2.5-720p-30s-ch5"] {
+            let policy =
+                VideoPollingPolicy::for_model(Some(model_id), RequestDialect::OpenAiCompatible);
+            assert_eq!(
+                policy.next_wait(Duration::from_secs(600)),
+                Some(Duration::from_secs(5))
+            );
+        }
+        let wan = VideoPollingPolicy::for_model(
+            Some("wan3.0-video-prime"),
+            RequestDialect::OpenAiCompatible,
+        );
+        assert_eq!(
+            wan.next_wait(Duration::from_secs(600)),
+            Some(Duration::from_secs(15))
+        );
+        let native =
+            VideoPollingPolicy::for_model(Some("PixVerse-V6"), RequestDialect::VolcengineArk);
+        assert_eq!(
+            native.next_wait(Duration::from_secs(600)),
+            Some(Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn pixverse_task_freezes_known_contract_instead_of_stale_seedance_metadata() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "request": { "parameterContainer": "metadata", "contentContainer": "metadata" },
+                "parameters": { "channel_extension": { "type": "string", "default": "preserved" } }
+            }
+        });
+        for model_id in ["PixVerse-V6", "PixVerse-C1"] {
+            let frozen = operation_schema_for_start(
+                &stale,
+                GenerationOperation::VideoGeneration,
+                Some(model_id),
+                RequestDialect::OpenAiCompatible,
+            )
+            .expect("known PixVerse contract");
+            assert_eq!(frozen["requestProfileId"], "moyu_pixverse_video_v1");
+            assert_eq!(frozen["request"]["parameterContainer"], "root");
+            assert_eq!(frozen["request"]["mediaEncoding"], "pixverse_image_inputs");
+            assert_eq!(
+                frozen["parameters"]["channel_extension"]["default"],
+                "preserved"
+            );
+            for dialect in [
+                RequestDialect::VolcengineArk,
+                RequestDialect::AliyunBailian,
+                RequestDialect::Grsai,
+            ] {
+                assert_eq!(
+                    operation_schema_for_start(
+                        &stale,
+                        GenerationOperation::VideoGeneration,
+                        Some(model_id),
+                        dialect
+                    ),
+                    Some(stale["video_generation"].clone())
+                );
+            }
+        }
+        assert_eq!(
+            operation_schema_for_start(
+                &stale,
+                GenerationOperation::VideoGeneration,
+                Some("PixVerse-V6-pro"),
+                RequestDialect::OpenAiCompatible,
+            ),
+            Some(stale["video_generation"].clone())
+        );
+    }
+
+    #[test]
     fn rd_task_snapshot_preserves_channel_parameters_outside_local_schema() {
         let stale = json!({
             "video_generation": {
@@ -1628,6 +1848,7 @@ mod tests {
             &stale,
             GenerationOperation::VideoGeneration,
             Some("rd-seedance-2.5-720p"),
+            RequestDialect::OpenAiCompatible,
         )
         .expect("RD transport schema");
         assert_eq!(schema["requestProfileId"], "rd_video_v1");
@@ -1657,6 +1878,7 @@ mod tests {
             &stale,
             GenerationOperation::VideoGeneration,
             Some("sp2.5-720p-30s-ch5"),
+            RequestDialect::OpenAiCompatible,
         )
         .expect("canonical video schema");
         assert_eq!(frozen["requestProfileId"], "sp25_per_use_video_v1");
@@ -1670,6 +1892,7 @@ mod tests {
                 &stale,
                 GenerationOperation::TextGeneration,
                 Some("sp2.5-720p-30s-ch5"),
+                RequestDialect::OpenAiCompatible,
             ),
             Some(stale["text_generation"].clone())
         );
@@ -1678,6 +1901,7 @@ mod tests {
                 &stale,
                 GenerationOperation::VideoGeneration,
                 Some("sp2.5-720p-30s-ch7"),
+                RequestDialect::OpenAiCompatible,
             ),
             Some(stale["video_generation"].clone())
         );
