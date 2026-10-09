@@ -66,6 +66,8 @@ jobs:
       - name: Prepare optional signing identity
         run: bash scripts/prepare-macos-online-signing.sh
       - name: Build and verify online DMG and updater
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/build-macos-online.sh
       - name: Publish verified online release
         if: inputs.publish

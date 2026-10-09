@@ -328,12 +328,54 @@ async function flattenInternalLinks(directory) {
   await walk(directory);
 }
 
-export async function prepareDepthCode(destination) {
-  const base = `https://raw.githubusercontent.com/DepthAnything/Video-Depth-Anything/${DEPTH_COMMIT}`;
-  const response = await fetch(
-    `https://api.github.com/repos/DepthAnything/Video-Depth-Anything/git/trees/${DEPTH_COMMIT}?recursive=1`,
+async function githubTreeFailure(response) {
+  const details = [];
+  try {
+    const body = await response.json();
+    // Map recognized public API messages to fixed text. Never print raw response
+    // bodies or headers, which may contain echoed credentials or private data.
+    for (const message of [
+      "API rate limit exceeded",
+      "You have exceeded a secondary rate limit",
+      "Bad credentials",
+      "Resource not accessible by integration",
+      "Resource not accessible by personal access token",
+      "Requires authentication",
+      "Not Found",
+    ]) {
+      if (typeof body.message === "string" && body.message.startsWith(message)) {
+        details.push(message);
+        break;
+      }
+    }
+  } catch {
+    // A non-JSON response still reports its HTTP status without exposing it.
+  }
+  const remaining = response.headers.get("x-ratelimit-remaining");
+  if (/^\d{1,8}$/.test(remaining ?? "")) details.push(`rate remaining=${remaining}`);
+  return new Error(
+    `无法获取固定版本深度源码: ${response.status}${details.length ? ` (${details.join("; ")})` : ""}`,
   );
-  if (!response.ok) throw new Error(`无法获取固定版本深度源码: ${response.status}`);
+}
+
+export async function prepareDepthCode(
+  destination,
+  { fetchFn = globalThis.fetch, environment = process.env } = {},
+) {
+  const base = `https://raw.githubusercontent.com/DepthAnything/Video-Depth-Anything/${DEPTH_COMMIT}`;
+  const token = typeof environment.GITHUB_TOKEN === "string" ? environment.GITHUB_TOKEN.trim() : "";
+  const response = await fetchFn(
+    `https://api.github.com/repos/DepthAnything/Video-Depth-Anything/git/trees/${DEPTH_COMMIT}?recursive=1`,
+    {
+      headers: {
+        "User-Agent": downloadHeaders["User-Agent"],
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    },
+  );
+  if (!response.ok) throw await githubTreeFailure(response);
   const tree = await response.json();
   const entries = tree.tree.filter(
     (entry) =>
@@ -344,7 +386,7 @@ export async function prepareDepthCode(destination) {
   );
   for (const entry of entries) {
     if (!safeRelative(entry.path)) throw new Error("上游源码路径越界");
-    const response = await fetch(`${base}/${entry.path}`);
+    const response = await fetchFn(`${base}/${entry.path}`, { headers: downloadHeaders });
     if (!response.ok) throw new Error(`固定版本源码下载失败: ${entry.path}`);
     const bytes = Buffer.from(await response.arrayBuffer());
     const gitHash = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");

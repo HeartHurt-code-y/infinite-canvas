@@ -8,6 +8,8 @@ import { createServer } from "node:http";
 import { AI_MEDIA_PRUNING_POLICY } from "./ai-media-runtime-prune.mjs";
 import {
   downloadVerified,
+  prepareDepthCode,
+  DEPTH_COMMIT,
   fileInventory,
   safeRelative,
   torchVersions,
@@ -122,6 +124,111 @@ test("artifact downloads identify the project and verify complete response bytes
   assert.equal(await sha256(target), pin.sha256);
   await downloadVerified(url, target, pin);
   assert.equal(accepted, 1, "a verified cache entry does not need another network request");
+});
+
+async function depthCodeFixture(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "ai-media-depth-source-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(path.join(root, "licenses"));
+  const files = new Map([
+    ["LICENSE", Buffer.from("Apache-2.0 fixture")],
+    ["video_depth_anything/__init__.py", Buffer.from("# fixed depth code\n")],
+  ]);
+  const tree = [...files].map(([filename, bytes]) => ({
+    path: filename,
+    type: "blob",
+    size: bytes.length,
+    sha: createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex"),
+  }));
+  const requests = [];
+  const fetchFn = async (url, options) => {
+    requests.push({ url, headers: new Headers(options.headers) });
+    if (new URL(url).origin === "https://api.github.com") return Response.json({ tree });
+    const prefix = `https://raw.githubusercontent.com/DepthAnything/Video-Depth-Anything/${DEPTH_COMMIT}/`;
+    assert.ok(url.startsWith(prefix), "raw files stay at the fixed commit");
+    const bytes = files.get(url.slice(prefix.length));
+    assert.ok(bytes, "only selected source files are downloaded");
+    return new Response(bytes);
+  };
+  return {
+    root,
+    destination: path.join(root, "code/video-depth-anything"),
+    tree,
+    files,
+    requests,
+    fetchFn,
+  };
+}
+
+test("fixed depth sources authenticate only GitHub API and preserve the checked source bytes", async (t) => {
+  for (const token of ["", "fixture-private-github-token"]) {
+    const fixture = await depthCodeFixture(t);
+    await prepareDepthCode(fixture.destination, {
+      fetchFn: fixture.fetchFn,
+      environment: { GITHUB_TOKEN: token },
+    });
+    assert.equal(fixture.requests.length, 3);
+    const api = fixture.requests[0];
+    assert.equal(
+      api.url,
+      `https://api.github.com/repos/DepthAnything/Video-Depth-Anything/git/trees/${DEPTH_COMMIT}?recursive=1`,
+    );
+    assert.equal(api.headers.get("authorization"), token ? `Bearer ${token}` : null);
+    assert.equal(api.headers.get("accept"), "application/vnd.github+json");
+    for (const request of fixture.requests) {
+      assert.match(request.headers.get("user-agent"), /^infinite-canvas-build\//);
+      if (new URL(request.url).origin !== "https://api.github.com") {
+        assert.equal(request.headers.get("authorization"), null);
+        assert.equal(request.headers.get("accept"), "application/octet-stream");
+      }
+    }
+    for (const [filename, bytes] of fixture.files)
+      assert.deepEqual(await readFile(path.join(fixture.destination, filename)), bytes);
+    assert.deepEqual(
+      await readFile(path.join(fixture.root, "licenses/video-depth-anything-Apache-2.0.txt")),
+      fixture.files.get("LICENSE"),
+    );
+  }
+});
+
+test("fixed depth sources reject changed Git blob hashes and sizes", async (t) => {
+  for (const changedField of ["sha", "size"]) {
+    const fixture = await depthCodeFixture(t);
+    const code = fixture.tree.find((entry) => entry.path.endsWith("__init__.py"));
+    code[changedField] = changedField === "sha" ? "0".repeat(40) : code.size + 1;
+    await assert.rejects(
+      prepareDepthCode(fixture.destination, { fetchFn: fixture.fetchFn, environment: {} }),
+      /深度源码 Git 内容校验失败/,
+    );
+    await assert.rejects(readFile(path.join(fixture.destination, code.path)), { code: "ENOENT" });
+  }
+});
+
+test("GitHub source errors report only known public messages and numeric rate limits", async (t) => {
+  const fixture = await depthCodeFixture(t);
+  const token = "fixture-never-log-this-secret";
+  for (const message of [`API rate limit exceeded: ${token}`, `Unknown ${token}`]) {
+    await assert.rejects(
+      prepareDepthCode(fixture.destination, {
+        environment: { GITHUB_TOKEN: token },
+        fetchFn: async () =>
+          Response.json(
+            { message, Authorization: `Bearer ${token}`, sensitive: token },
+            { status: 403, headers: { "x-ratelimit-remaining": "0" } },
+          ),
+      }),
+      (error) => {
+        assert.match(error.message, /深度源码: 403/);
+        assert.match(error.message, /rate remaining=0/);
+        assert.equal(error.message.includes(token), false);
+        assert.equal(error.message.includes("Authorization"), false);
+        assert.equal(error.message.includes("Unknown"), false);
+        if (message.startsWith("API rate limit exceeded"))
+          assert.match(error.message, /API rate limit exceeded/);
+        return true;
+      },
+    );
+  }
 });
 
 test("prepared components reuse only unchanged build inputs and every recorded file", async (t) => {
