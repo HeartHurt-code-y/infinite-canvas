@@ -1033,7 +1033,7 @@ fn inventory_targets(root: &Path, manifest: &serde_json::Value) -> Option<Vec<(P
     let relative = safe_relative(manifest["inventory"]["path"].as_str()?)?;
     let inventory = root.join(relative);
     let canonical_root = root.canonicalize().ok()?;
-    if !inventory.canonicalize().ok()?.starts_with(canonical_root) {
+    if !inventory.canonicalize().ok()?.starts_with(&canonical_root) {
         return None;
     }
     let bytes = fs::read(&inventory).ok()?;
