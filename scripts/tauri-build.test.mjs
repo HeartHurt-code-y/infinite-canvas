@@ -95,3 +95,18 @@ test("signed editions keep deletion tombstones and signing in one actual CLI ove
   );
   assert.equal(configureEditionUpdaterConfig([], { enableUpdaterArtifacts: true, root }), false);
 });
+
+test("normalizes BOM and boundary whitespace in inline CI keys without changing passwords or input", () => {
+  const original = {
+    TAURI_SIGNING_PRIVATE_KEY: "\uFEFF  encoded-private-key\r\n",
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "  protected\r\n",
+  };
+  const resolved = resolveUpdaterSigningEnv(original, "missing-updater-key");
+  assert.equal(resolved.TAURI_SIGNING_PRIVATE_KEY, "encoded-private-key");
+  assert.equal(
+    resolved.TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+    original.TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+  );
+  assert.equal(original.TAURI_SIGNING_PRIVATE_KEY, "\uFEFF  encoded-private-key\r\n");
+  assert.equal(resolved.TAURI_SIGNING_PRIVATE_KEY_PATH, undefined);
+});

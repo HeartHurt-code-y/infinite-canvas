@@ -92,6 +92,11 @@ export function resolveUpdaterSigningEnv(env, defaultKeyPath) {
   const hasInlineKey =
     typeof next.TAURI_SIGNING_PRIVATE_KEY === "string" &&
     next.TAURI_SIGNING_PRIVATE_KEY.trim() !== "";
+  if (hasInlineKey) {
+    // CI secrets can retain a UTF-8 BOM or trailing newline from the key file.
+    // Normalize the key exactly like file input; passwords stay byte-for-byte.
+    next.TAURI_SIGNING_PRIVATE_KEY = next.TAURI_SIGNING_PRIVATE_KEY.trim();
+  }
   const hasPath =
     typeof next.TAURI_SIGNING_PRIVATE_KEY_PATH === "string" &&
     next.TAURI_SIGNING_PRIVATE_KEY_PATH.trim() !== "";

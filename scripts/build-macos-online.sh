@@ -18,6 +18,7 @@ fi
 repo_root="$(pwd -P)"
 test -f "$repo_root/package.json"
 test -f "$repo_root/src-tauri/tauri.online.conf.json"
+node scripts/verify-updater-signing-key.mjs
 release_version="$(node -p "require('./package.json').version")"
 [[ "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid release version' >&2; exit 1; }
 # Remove only generated outputs inside this verified workspace; retain Cargo's cache.
