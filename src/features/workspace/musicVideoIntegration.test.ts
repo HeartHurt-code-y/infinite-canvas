@@ -244,9 +244,15 @@ describe("native music-video workflow integration", () => {
       }));
     const initial = workflowVersionState(read().config).currentVersionId;
     const second = JSON.stringify(read("mv-two"));
+    // 歌词修订 + 进入待确认计划阶段：阶段推进留下一个版本边界。
     mutate((config) => ({
       ...config,
       musicVideo: { ...config.musicVideo!, officialLyrics: "第一稿歌词" },
+      checkpoint: {
+        ...config.checkpoint,
+        phase: "awaiting_approval",
+        lastActivePhase: config.checkpoint.lastActivePhase,
+      },
     }));
     const oldTip = workflowVersionState(read().config).currentVersionId;
     canvas.commands.applyNodeChanges([

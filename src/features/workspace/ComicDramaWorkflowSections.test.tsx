@@ -7,6 +7,8 @@ import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWor
 import {
   comicDramaDeliveryMarkdown,
   comicDramaDeliveryBundle,
+  comicDramaInputReady,
+  comicDramaRequirements,
   createComicDramaCheckpoint,
   createComicDramaOptions,
   type ComicDramaWorkflowOptions,
@@ -214,6 +216,54 @@ describe("comic drama node", () => {
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "移除第 2 集" }));
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+  });
+
+  it("lists every missing episode script as a required gap", () => {
+    render(
+      <ComicDramaConfiguration
+        options={createComicDramaOptions()}
+        brief=""
+        disabled={false}
+        onChange={vi.fn()}
+        onBriefChange={vi.fn()}
+      />,
+    );
+    // 默认一集空剧本：剧本标签带红色星号，交付格式参数保持选填。
+    expect(
+      screen.getByText("完整剧本").querySelector(".workflow-required-mark__asterisk"),
+    ).not.toBeNull();
+    expect(
+      screen.getByText("集名").querySelector(".workflow-required-mark__asterisk"),
+    ).not.toBeNull();
+    const formatMark = screen.getByText("画幅");
+    expect(formatMark.querySelector(".workflow-required-mark__optional")).not.toBeNull();
+    expect(formatMark.querySelector(".workflow-required-mark__asterisk")).toBeNull();
+    // 清单逐条对应运行器的真实校验，而不是只给一个布尔。
+    const withEpisodes = (episodes: ComicDramaWorkflowOptions["episodes"]) =>
+      comicDramaRequirements({ ...createComicDramaOptions(), episodes }).map((item) => item.field);
+    expect(withEpisodes([{ id: "ep01", title: "第 1 集", script: "正文" }])).toEqual([]);
+    expect(withEpisodes([{ id: "ep01", title: " ", script: " " }])).toEqual([
+      "第 1 集集名",
+      "第 1 集剧本",
+    ]);
+    expect(withEpisodes([])).toEqual(["分集剧本"]);
+    expect(
+      withEpisodes(
+        Array.from({ length: 11 }, (_, index) => ({
+          id: `ep${index + 1}`,
+          title: `第 ${index + 1} 集`,
+          script: "正文",
+        })),
+      ),
+    ).toEqual(["集数"]);
+    // 门槛函数与旧内联判断等价：至少一集且每集都有标题与剧本。
+    expect(comicDramaInputReady(createComicDramaOptions())).toBe(false);
+    expect(
+      comicDramaInputReady({
+        ...createComicDramaOptions(),
+        episodes: [{ id: "ep01", title: "第 1 集", script: "正文" }],
+      }),
+    ).toBe(true);
   });
 
   it("imports sorted episode files and preserves existing episodes", async () => {

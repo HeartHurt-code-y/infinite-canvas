@@ -9,6 +9,7 @@ import type { OptimizeVideoPromptCommand, ProviderCatalogEntry } from "../../lib
 import type { CommerceSourceClient } from "../../lib/commerceSources";
 import { catalog, fakeDependencies, node, planJson } from "../../test/videoWorkflowFixtures";
 import {
+  commerceRequirements,
   createCommerceOptions,
   type CommerceSource,
   type CommerceStage,
@@ -526,6 +527,29 @@ describe("commerce composite workflow", () => {
     expect(imageCalls()).toHaveLength(imageCount);
     expect(result.film?.assets.find((asset) => asset.id === "CHAR-01")).toEqual(generatedAsset);
     expect(result.shots).toHaveLength(3);
+  });
+
+  it("requires product information always, and a real product image only for video delivery", () => {
+    // 什么都没填：先要商品资料，再要真实商品图。
+    expect(commerceRequirements(createCommerceOptions()).map((item) => item.field)).toEqual([
+      "商品资料",
+      "真实商品图",
+    ]);
+    // 有名称/卖点/链接/文档任一项就不再要求「商品资料」，但成片仍要真实商品图。
+    expect(
+      commerceRequirements({ ...createCommerceOptions(), productUrl: "https://shop.example/cup" }),
+    ).toEqual([expect.objectContaining({ field: "真实商品图" })]);
+    // 只做文档与提示词时不需要图；已有真实商品图时什么也不缺。
+    expect(
+      commerceRequirements({
+        ...createCommerceOptions(),
+        productName: "通勤水杯",
+        deliverable: "documents",
+      }),
+    ).toEqual([]);
+    expect(commerceRequirements({ ...createCommerceOptions(), materials: [productImage] })).toEqual(
+      [],
+    );
   });
 
   it("rejects attempts to regenerate product IDs or silently omit real product references", async () => {

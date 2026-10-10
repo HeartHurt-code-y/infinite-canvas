@@ -14,6 +14,7 @@ import {
   reverseVideoDeliveryMarkdown,
   type ReverseVideoWorkflowOptions,
 } from "./reverseVideoWorkflowModel";
+import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ReverseVideoWorkflowSections.css";
 
@@ -79,7 +80,9 @@ export function ReverseVideoConfiguration({
         </div>
       ) : (
         <label className="canvas-knowledge-workflow__brief">
-          <span>分享链接或分享文案</span>
+          <span>
+            <RequiredMark>分享链接或分享文案</RequiredMark>
+          </span>
           <ImeTextarea
             aria-label="反推视频分享链接"
             value={options.sourceUrl}
@@ -119,7 +122,9 @@ export function ReverseVideoConfiguration({
       </small>
       {pickError ? <p role="alert">{pickError}</p> : null}
       <label className="canvas-knowledge-workflow__brief">
-        <span>补充方向（可选）</span>
+        <span>
+          <OptionalMark>补充方向</OptionalMark>
+        </span>
         <ImeTextarea
           aria-label="反推补充方向"
           value={brief}

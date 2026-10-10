@@ -5392,6 +5392,7 @@ svg[data-spin="true"] {
 
 .canvas-knowledge-workflow__actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   min-height: var(--size-control);
@@ -5400,10 +5401,14 @@ svg[data-spin="true"] {
   border-top: var(--rule-thin) solid var(--color-rule);
 }
 
-.canvas-knowledge-workflow__actions > span {
-  color: var(--color-muted);
-  font-size: var(--text-2xs);
-  line-height: 1.45;
+/* 缺口清单单独占一整行，提示语与主按钮留在同一行。 */
+.canvas-knowledge-workflow__action-row {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  min-width: 0;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -13743,4 +13748,92 @@ details[open] > summary .history-disclosure__caret {
 .canvas-remotion-workflow__delivery-actions button:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/* ── 工作流参数必填标识与缺口清单 ────────────────────────────────────────
+ * 星号、可选、必填文字都由 RequiredMark / OptionalMark 渲染成标签文字的**同级兄弟**
+ * （见组件注释：这样可见文本才与可访问名一致，且不破坏结构选择器的标签排版）。
+ * 生成点见 src/features/workspace/workflowFieldRequirements.tsx。 */
+.workflow-required-mark__asterisk {
+  margin-inline-start: 0.1em;
+  color: var(--color-error);
+  font-weight: 700;
+}
+
+.workflow-required-mark__required-text {
+  margin-inline-start: 0.15em;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  font-weight: 400;
+}
+
+.workflow-required-mark__optional {
+  margin-inline-start: 0.25em;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  font-weight: 400;
+}
+
+/*
+ * 同一行里出现「标签文字 + 星号」两个行内元素时，`.xxx__field > span` 那类排版规则
+ * 会按两个块排布，行高被大字号一侧撑开、间距也会重算。这里只对成对出现的容器收紧。
+ */
+.canvas-gen-node__field:has(> .workflow-required-mark__asterisk),
+.canvas-prompt-node__field:has(> .workflow-required-mark__asterisk),
+.canvas-knowledge-workflow__brief:has(> .workflow-required-mark__asterisk) {
+  gap: 0;
+}
+
+.canvas-gen-node__field:has(> .workflow-required-mark__asterisk) > span,
+.canvas-prompt-node__field:has(> .workflow-required-mark__asterisk) > span,
+.canvas-knowledge-workflow__brief:has(> .workflow-required-mark__asterisk) > span {
+  line-height: 1.2;
+}
+
+.workflow-required-hint {
+  display: grid;
+  gap: var(--space-2xs);
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid color-mix(in oklch, var(--color-error) 42%, transparent);
+  border-radius: var(--radius-control);
+  background: var(--color-error-soft);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+
+.workflow-required-hint__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  color: var(--color-error);
+  font-size: var(--text-xs);
+}
+
+.workflow-required-hint__list {
+  display: grid;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workflow-required-hint__list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  align-items: baseline;
+}
+
+.workflow-required-hint__field {
+  color: var(--color-ink);
+  font-weight: 700;
+}
+
+.workflow-required-hint__text {
+  color: var(--color-ink-2);
+}
+
+.workflow-required-hint__foot {
+  color: var(--color-muted);
 }

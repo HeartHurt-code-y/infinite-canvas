@@ -11,6 +11,7 @@ import {
   type ComicDramaReview,
   type ComicDramaWorkflowOptions,
 } from "./comicDramaWorkflowModel";
+import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 interface ComicDramaConfigurationProps {
@@ -102,6 +103,7 @@ export function ComicDramaConfiguration({
     }
   };
 
+  // 缺口清单由节点 footer 统一渲染：配置区默认收起，把清单藏在里面等于没提示。
   return (
     <details
       ref={settingsRef}
@@ -114,7 +116,9 @@ export function ComicDramaConfiguration({
       </summary>
       <fieldset disabled={disabled || importing} className="canvas-comic-drama-workflow__settings">
         <label className="canvas-comic-drama-workflow__import">
-          <span>导入分集剧本</span>
+          <span>
+            <OptionalMark>导入分集剧本</OptionalMark>
+          </span>
           <input
             type="file"
             aria-label="导入漫剧分集剧本"
@@ -135,7 +139,9 @@ export function ComicDramaConfiguration({
             <legend>第 {index + 1} 集</legend>
             <div className="canvas-comic-drama-workflow__episode-heading">
               <label>
-                <span>集名</span>
+                <span>
+                  <RequiredMark>集名</RequiredMark>
+                </span>
                 <ImeInput
                   aria-label={`第 ${index + 1} 集集名`}
                   value={episode.title}
@@ -164,7 +170,9 @@ export function ComicDramaConfiguration({
               </button>
             </div>
             <label className="canvas-knowledge-workflow__brief">
-              <span>完整剧本</span>
+              <span>
+                <RequiredMark>完整剧本</RequiredMark>
+              </span>
               <ImeTextarea
                 rows={5}
                 aria-label={`第 ${index + 1} 集剧本`}
@@ -202,7 +210,9 @@ export function ComicDramaConfiguration({
           添加一集
         </button>
         <label className="canvas-knowledge-workflow__brief">
-          <span>视觉风格</span>
+          <span>
+            <OptionalMark>视觉风格</OptionalMark>
+          </span>
           <ImeTextarea
             aria-label="漫剧视觉风格"
             rows={2}
@@ -212,7 +222,7 @@ export function ComicDramaConfiguration({
         </label>
         <div className="canvas-comic-drama-workflow__format">
           <label>
-            画幅
+            <OptionalMark>画幅</OptionalMark>
             <select
               aria-label="漫剧画幅"
               value={options.aspectRatio}
@@ -224,7 +234,7 @@ export function ComicDramaConfiguration({
             </select>
           </label>
           <label>
-            交付方式
+            <OptionalMark>交付方式</OptionalMark>
             <select
               aria-label="漫剧交付方式"
               value={options.deliverable}
@@ -238,7 +248,9 @@ export function ComicDramaConfiguration({
           </label>
         </div>
         <label className="canvas-knowledge-workflow__brief">
-          <span>补充制作要求（可选）</span>
+          <span>
+            <OptionalMark>补充制作要求</OptionalMark>
+          </span>
           <ImeTextarea
             aria-label="漫剧制作要求"
             rows={2}
@@ -257,7 +269,9 @@ export function ComicDramaConfiguration({
           </small>
           <fieldset disabled={disabled && !bindingPending}>
             <label>
-              <span>项目语音供应商</span>
+              <span>
+                <RequiredMark>项目语音供应商</RequiredMark>
+              </span>
               <select
                 aria-label="漫剧语音供应商"
                 value={options.speech?.model.providerId ?? ""}
@@ -286,7 +300,9 @@ export function ComicDramaConfiguration({
               </select>
             </label>
             <label>
-              <span>语音合成模型</span>
+              <span>
+                <RequiredMark>语音合成模型</RequiredMark>
+              </span>
               <select
                 aria-label="漫剧语音模型"
                 value={options.speech?.model.modelDefinitionId ?? ""}
@@ -324,7 +340,8 @@ export function ComicDramaConfiguration({
                 return (
                   <label key={asset.id}>
                     <span>
-                      {asset.name}（{asset.id}）· 控制台音色 ID，需账号已开通
+                      {asset.name}（{asset.id}）· <RequiredMark>控制台音色 ID</RequiredMark>
+                      ，需账号已开通
                     </span>
                     <ImeInput
                       aria-label={`${asset.name}控制台音色 ID`}

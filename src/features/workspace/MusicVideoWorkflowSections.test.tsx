@@ -7,6 +7,8 @@ import {
   MUSIC_VIDEO_APPROVAL,
   createMusicVideoCheckpoint,
   createMusicVideoOptions,
+  musicVideoInputReady,
+  musicVideoRequirements,
 } from "./musicVideoWorkflowModel";
 import { initializeWorkflowVersions, recordWorkflowVersion } from "./workflowVersionHistory";
 import { createWorkflowExecutionPlan } from "./workflowExecutionPlan";
@@ -80,6 +82,60 @@ describe("MV workflow user controls", () => {
     });
   });
 
+  it("marks only the original song as required and lists it as the single gap", () => {
+    const callbacks = props();
+    const source = { ...node(), key: "mv-gap", config: config() };
+    const { rerender } = render(<KnowledgeVideoWorkflowNode {...callbacks} node={source} />);
+    // 未选歌曲：节点 footer 说明还差什么，歌曲标签带红色星号。
+    expect(screen.getByText("还差 1 项必填内容")).toBeInTheDocument();
+    expect(
+      screen.getByText("歌曲文件", { selector: ".workflow-required-hint__field" }),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByText("歌曲文件", { selector: ".canvas-music-video__file-label" })
+        .querySelector(".workflow-required-mark__asterisk"),
+    ).not.toBeNull();
+    // 其余参数保持选填：画幅、交付、人物模式都有推荐默认，不该要求小白用户动手。
+    expect(
+      screen.getByText("画幅").querySelector(".workflow-required-mark__optional"),
+    ).not.toBeNull();
+    rerender(
+      <KnowledgeVideoWorkflowNode
+        {...callbacks}
+        node={{
+          ...source,
+          config: {
+            ...source.config,
+            musicVideo: {
+              ...source.config.musicVideo!,
+              songPath: "C:/songs/track.mp3",
+              songName: "歌曲",
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.queryByText(/还差 1 项必填内容/)).not.toBeInTheDocument();
+    // 需求清单与运行器门槛同源：只有「使用人物参考图」模式会追加一项。
+    const base = createMusicVideoOptions();
+    expect(musicVideoRequirements(base).map((item) => item.field)).toEqual(["歌曲文件"]);
+    expect(musicVideoRequirements({ ...base, songPath: "C:/songs/a.mp3" })).toEqual([]);
+    expect(
+      musicVideoRequirements({
+        ...base,
+        songPath: "C:/songs/a.mp3",
+        characterMode: "reference",
+      }).map((item) => item.field),
+    ).toEqual(["人物参考图"]);
+    // 门槛函数与旧内联判断等价：有歌即通过，「使用参考图」模式还需要至少一张人物图。
+    expect(musicVideoInputReady(base)).toBe(false);
+    expect(musicVideoInputReady({ ...base, songPath: "C:/songs/a.mp3" })).toBe(true);
+    expect(
+      musicVideoInputReady({ ...base, songPath: "C:/songs/a.mp3", characterMode: "reference" }),
+    ).toBe(false);
+  });
+
   it("requires explicit plan approval and sends the actual MV stage decision on click", () => {
     const callbacks = props();
     const base = config();
@@ -137,7 +193,7 @@ describe("MV workflow user controls", () => {
     expect(callbacks.onContinue).toHaveBeenLastCalledWith(source.key, "第二段改为间奏");
   });
 
-  it("saves edited MV stage content as a new local workflow version and locks editing during production", () => {
+  it("saves edited MV stage content into the current workflow version and locks editing during production", () => {
     const callbacks = props();
     function Harness({ running = false }: { readonly running?: boolean }) {
       const [value, setValue] = useState(() => {
@@ -203,7 +259,9 @@ describe("MV workflow user controls", () => {
       target: { value: "用户校正后的歌词" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存阶段新版本" }));
-    expect(screen.getByText("2 个工作流版本")).toBeInTheDocument();
+    // 同一生成阶段内的阶段成果编辑就地更新当前版本，版本数不变；
+    // 旧稿由阶段交付物自己的“历史稿”保留。
+    expect(screen.getByText("1 个工作流版本")).toBeInTheDocument();
     expect(screen.getByText("歌曲时间线 · v2 · 待确认")).toBeInTheDocument();
     expect(screen.getByText("1 份历史稿")).toBeInTheDocument();
     const section = screen.getByRole("region", { name: "MV 阶段交付物" });

@@ -235,6 +235,14 @@ describe("ReverseVideoConfiguration", () => {
     expect(screen.queryByRole("link")).not.toBeInTheDocument();
   });
 
+  it("marks the video source as required and the extra direction as optional", () => {
+    const props = { brief: "", disabled: false, onChange: vi.fn(), onBriefChange: vi.fn() };
+    render(<ReverseVideoConfiguration {...props} options={createReverseVideoOptions()} />);
+    // 只有「分享链接或分享文案」带红星，补充方向是弱化的「可选」。
+    expect(screen.getByText("*")).toHaveClass("workflow-required-mark__asterisk");
+    expect(screen.getByText("（可选）")).toHaveClass("workflow-required-mark__optional");
+  });
+
   it("publishes Chinese composition only after confirmation and locks running inputs", () => {
     const onChange = vi.fn();
     const onBriefChange = vi.fn();

@@ -72,6 +72,11 @@
   flex-basis: 100%;
   overflow-wrap: anywhere;
 }
+/* 参数名与红色星号跟着文件选择按钮走，不与文件名单占一行。 */
+.canvas-music-video__file-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .canvas-music-video__file audio {
   width: 100%;
 }

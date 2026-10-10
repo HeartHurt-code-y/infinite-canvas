@@ -433,6 +433,32 @@ describe("KnowledgeVideoWorkflowNode", () => {
     fireEvent.click(screen.getByRole("button", { name: "导出影视制作文档" }));
     expect(onExport).toHaveBeenCalledWith(source.key);
   });
+  it("lists every missing required field and marks them with a red asterisk", () => {
+    const config = {
+      ...createKnowledgeVideoWorkflowConfig(selections, true),
+      remotion: createRemotionOptions(),
+      checkpoint: {
+        ...createKnowledgeVideoWorkflowConfig(selections, true).checkpoint,
+        remotion: createRemotionCheckpoint(),
+      },
+    };
+
+    render(<KnowledgeVideoWorkflowNode {...commonProps(createNode(config))} />);
+
+    // 小白用户看到的是「还差几项、分别是什么」，而不是一个灰掉的按钮。
+    expect(screen.getByText("还差 1 项必填内容")).toBeInTheDocument();
+    expect(screen.getByText("动画描述或草图")).toBeInTheDocument();
+    expect(screen.getByText("其余参数已按推荐值预置，可以不改直接开始。")).toBeInTheDocument();
+
+    // 必填字段旁边有红色星号，选填字段写「可选」，不再靠用户猜。
+    expect(document.querySelector(".workflow-required-mark__asterisk")).not.toBeNull();
+    expect(screen.getAllByText("（可选）").length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toHaveAttribute(
+      "title",
+      expect.stringContaining("还差 1 项必填内容：动画描述或草图"),
+    );
+  });
+
   it("keeps the default view simple and starts after the brief is filled", () => {
     const onExecute = vi.fn();
 

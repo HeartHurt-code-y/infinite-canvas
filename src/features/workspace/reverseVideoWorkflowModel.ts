@@ -3,6 +3,11 @@ import type {
   ReverseVideoEvidence,
   ReverseVideoLearning,
 } from "../../lib/reverseVideo";
+import {
+  requirementsMet,
+  type WorkflowRequirement,
+  type WorkflowRequirements,
+} from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 export interface ReverseVideoWorkflowOptions {
@@ -122,13 +127,43 @@ export function reverseVideoSourceUrl(value: string): string | null {
   }
 }
 
-export function reverseVideoInputReady(
-  _brief: string,
+/**
+ * 反推工作流尚缺的必填项：**一条真实视频**（分享链接或本地文件二选一）。
+ * 补充方向是选填，所以 `brief` 只影响提示措辞——已经把「补充方向」写满却没给
+ * 视频的用户，最需要的是一句「文字不能代替视频」。
+ */
+export function reverseVideoRequirements(
+  brief: string,
   options: ReverseVideoWorkflowOptions,
-): boolean {
+): WorkflowRequirements {
+  const requirements: WorkflowRequirement[] = [];
   const hasLocal = Boolean(options.localVideoPath.trim());
   const hasUrl = Boolean(options.sourceUrl.trim());
-  return hasLocal !== hasUrl && (hasLocal || reverseVideoSourceUrl(options.sourceUrl) !== null);
+  if (!hasLocal && !hasUrl)
+    requirements.push({
+      field: "视频来源",
+      hint: brief.trim()
+        ? "补充方向不能代替视频：请再提供一条视频分享链接，或选择一个本地视频。"
+        : "粘贴一条视频分享链接（可直接粘贴整段分享文案），或选择一个本地视频。",
+    });
+  else if (hasLocal && hasUrl)
+    requirements.push({
+      field: "视频来源",
+      hint: "本地视频与分享链接只能选一种：移除本地视频，或清空分享链接。",
+    });
+  else if (!hasLocal && reverseVideoSourceUrl(options.sourceUrl) === null)
+    requirements.push({
+      field: "视频分享链接",
+      hint: "分享文案里需要恰好一条能识别的 http(s) 链接，或改用本地视频。",
+    });
+  return requirements;
+}
+
+export function reverseVideoInputReady(
+  brief: string,
+  options: ReverseVideoWorkflowOptions,
+): boolean {
+  return requirementsMet(reverseVideoRequirements(brief, options));
 }
 
 export const REVERSE_VIDEO_CONTINUITY =

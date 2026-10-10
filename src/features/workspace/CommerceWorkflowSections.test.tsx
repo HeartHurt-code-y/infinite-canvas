@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -76,12 +76,19 @@ describe("commerce workflow node", () => {
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     expect(screen.getByLabelText("带货制作模式")).toHaveValue("quick");
     expect(screen.getByLabelText("带货剧情类型")).toHaveValue("智能推荐");
+    // 视频模式：「商品图片与文档」是这一区唯一的必填项，红星标在它身上。
+    const settings = screen.getByText("商品资料与制作设置").closest("details")!;
+    expect(within(settings).getByText("*")).toHaveClass("workflow-required-mark__asterisk");
+    // 缺口清单由节点统一渲染：有商品名称仍差一张真实商品图。
+    expect(screen.getByText("真实商品图")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加商品资料" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled());
+    expect(screen.queryByText("真实商品图")).not.toBeInTheDocument();
     expect(onPick).toHaveBeenCalledWith(node().key);
     expect(screen.getByRole("img", { name: "商品实物.png" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "移除商品资料 商品实物.png" }));
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
+    expect(screen.getByText("真实商品图")).toBeInTheDocument();
   });
 
   it("starts document production with text facts and only the project text model", () => {
@@ -102,9 +109,15 @@ describe("commerce workflow node", () => {
     render(<Harness />);
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByText("商品资料与制作设置"));
+    // 文档模式只需要文字资料：配置区没有红星，缺口清单里也不提商品图。
+    const settings = screen.getByText("商品资料与制作设置").closest("details")!;
+    expect(within(settings).queryByText("*")).not.toBeInTheDocument();
+    expect(screen.getByText("商品资料")).toBeInTheDocument();
+    expect(screen.queryByText("真实商品图")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("带货商品事实与卖点"), {
       target: { value: "咖啡杯，陶瓷材质，容量 350 毫升" },
     });
+    expect(screen.queryByText("商品资料")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("带货制作模式"), { target: { value: "full" } });
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.getByLabelText("带货制作模式")).toHaveValue("full");

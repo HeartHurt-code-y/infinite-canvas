@@ -4,6 +4,11 @@ import type {
   ReelbenchShotDraft as NativeReelbenchShotDraft,
   ReelbenchValidation as NativeReelbenchValidation,
 } from "../../lib/reelbenchBackend";
+import {
+  requirementsMet,
+  type WorkflowRequirement,
+  type WorkflowRequirements,
+} from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowConfig } from "./workspaceModel";
 
 export const REELBENCH_SIZES = [
@@ -182,22 +187,53 @@ export function reelbenchSourceUrl(value: string): string | null {
   }
 }
 
-export function reelbenchInputReady(_brief: string, options: ReelbenchWorkflowOptions): boolean {
+/**
+ * 拉片工作流尚缺的必填项。
+ *
+ * 只有**一条真实原片**是真正的必填：文本模型分析的是本机抽出的画面，主题文字
+ * 无法代替原片。切点、时长、倍率都有推荐默认值，正常状态下不会出现在清单里；
+ * 只有被手动改成越界值（或在数字输入框里清空成 NaN）时才列出——此时输入确实
+ * 做不出结果，而且必须说清是哪一项，否则用户只能看到按钮变灰。
+ */
+export function reelbenchRequirements(options: ReelbenchWorkflowOptions): WorkflowRequirements {
+  const requirements: WorkflowRequirement[] = [];
   const hasLocal = Boolean(options.localVideoPath.trim());
   const hasUrl = Boolean(options.sourceUrl.trim());
-  return (
-    hasLocal !== hasUrl &&
-    (hasLocal || reelbenchSourceUrl(options.sourceUrl) !== null) &&
-    Number.isFinite(options.sceneThreshold) &&
-    options.sceneThreshold >= 0.05 &&
-    options.sceneThreshold <= 0.9 &&
-    Number.isFinite(options.minShotSeconds) &&
-    options.minShotSeconds >= 0.1 &&
-    options.minShotSeconds <= 5 &&
-    Number.isFinite(options.syncScale) &&
-    options.syncScale >= 1 &&
-    options.syncScale <= 3
-  );
+  if (!hasLocal && !hasUrl)
+    requirements.push({
+      field: "原片视频",
+      hint: "粘贴一条视频分享链接，或选择一个本地视频文件；文字描述不能代替原片。",
+    });
+  else if (hasLocal && hasUrl)
+    requirements.push({
+      field: "原片来源",
+      hint: "本地视频与分享链接只能选一种：移除本地视频，或清空分享链接。",
+    });
+  else if (!hasLocal && reelbenchSourceUrl(options.sourceUrl) === null)
+    requirements.push({
+      field: "视频分享链接",
+      hint: "需要一条完整且唯一的 http(s) 分享链接，或改用本地视频。",
+    });
+  if (
+    !Number.isFinite(options.sceneThreshold) ||
+    options.sceneThreshold < 0.05 ||
+    options.sceneThreshold > 0.9
+  )
+    requirements.push({ field: "切点敏感度", hint: "填写 0.05～0.9 之间的数值，推荐 0.3。" });
+  if (
+    !Number.isFinite(options.minShotSeconds) ||
+    options.minShotSeconds < 0.1 ||
+    options.minShotSeconds > 5
+  )
+    requirements.push({ field: "最短镜头（秒）", hint: "填写 0.1～5 之间的数值，推荐 0.25。" });
+  if (!Number.isFinite(options.syncScale) || options.syncScale < 1 || options.syncScale > 3)
+    requirements.push({ field: "同步视频画面倍率", hint: "选择 1×、2× 或 3×，默认 1×。" });
+  return requirements;
+}
+
+/** 界面拦截与缺口清单同源：`需求清单为空` 即 `可以开始`。 */
+export function reelbenchInputReady(_brief: string, options: ReelbenchWorkflowOptions): boolean {
+  return requirementsMet(reelbenchRequirements(options));
 }
 
 export function reelbenchInputSignature(config: KnowledgeVideoWorkflowConfig): string {

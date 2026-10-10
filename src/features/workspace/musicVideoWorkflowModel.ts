@@ -6,6 +6,7 @@ import type {
   MvSongProbe,
 } from "../../lib/mvMedia";
 import type { AiFilmAsset } from "./aiFilmWorkflowModel";
+import type { WorkflowRequirement, WorkflowRequirements } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 
@@ -168,6 +169,39 @@ export function createMusicVideoOptions(): MusicVideoWorkflowOptions {
     deliverable: "video",
   };
 }
+
+/**
+ * MV 的必填边界：只有「缺了就一定做不出结果、而且无法推断」的输入才算必填。
+ *
+ * - 原曲文件：时间线、分镜、成片全部以真实音频为准，歌词文本替代不了（运行器会直接拒绝）。
+ * - 人物参考图：只在用户主动选择「使用人物参考图」时才成为硬输入；选「生成固定人物」
+ *   或「无固定人物」都不需要，所以这里按模式条件判断。
+ *
+ * 其余参数（视觉风格、画幅、人物模式、交付方式、正面演唱占比、声学分析方式、豆包语音
+ * 连接）都有推荐默认值或由工作流自动决定，一律选填，避免给小白用户增加负担。
+ * 「豆包语音连接」在成片模式下是运行器的硬性依赖，但它是项目凭据配置而非内容输入，
+ * 与模型槽位一样只标红、不进缺口清单，避免把「去别的页面配凭据」混进「还差几项内容」。
+ */
+export function musicVideoRequirements(options: MusicVideoWorkflowOptions): WorkflowRequirements {
+  const requirements: WorkflowRequirement[] = [];
+  if (!options.songPath.trim())
+    requirements.push({
+      field: "歌曲文件",
+      hint: "点「选择歌曲」导入完整原曲音频；歌词文本不能代替歌曲，时间线与成片都以它为准。",
+    });
+  if (options.characterMode === "reference" && options.characterReferences.length === 0)
+    requirements.push({
+      field: "人物参考图",
+      hint: "当前是「使用人物参考图」模式，添加至少一张人物图；也可把人物模式改为「生成固定人物」，由工作流自动设定人物。",
+    });
+  return requirements;
+}
+
+/** 节点与运行器共用的输入门槛，与界面缺口清单同源，避免「界面说齐了、点下去报无效」。 */
+export function musicVideoInputReady(options: MusicVideoWorkflowOptions): boolean {
+  return musicVideoRequirements(options).length === 0;
+}
+
 export function createMusicVideoCheckpoint(): MusicVideoWorkflowCheckpoint {
   return { song: null, stages: {}, pending: null, planningComplete: false };
 }

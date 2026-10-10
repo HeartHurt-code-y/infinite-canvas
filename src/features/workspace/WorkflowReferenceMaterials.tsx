@@ -12,6 +12,7 @@ import {
 import type { WorkflowCanvasInput } from "./workflowCanvasInputs";
 import type { ConnectedCanvasTextInput } from "./canvasInputs";
 import type { KnowledgeVideoWorkflowConfig } from "./workspaceModel";
+import { OptionalMark } from "./workflowFieldRequirements";
 import "./WorkflowReferenceMaterials.css";
 
 const MATERIAL_KIND_LABELS = {
@@ -74,7 +75,9 @@ export function WorkflowReferenceMaterials({
       aria-busy={picking}
     >
       <div className="canvas-commerce-workflow__materials-heading">
-        <strong>参考素材（可选）</strong>
+        <strong>
+          <OptionalMark>参考素材</OptionalMark>
+        </strong>
         <button
           type="button"
           aria-label="添加工作流多模态参考素材"

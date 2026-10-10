@@ -25,6 +25,7 @@ import {
   type ReelbenchShot,
   type ReelbenchWorkflowOptions,
 } from "./reelbenchWorkflowModel";
+import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ReelbenchWorkflowSections.css";
 
@@ -155,7 +156,9 @@ export function ReelbenchConfiguration({
         </div>
       ) : (
         <label>
-          <span>视频分享链接或分享文案</span>
+          <span>
+            <RequiredMark>视频分享链接或分享文案</RequiredMark>
+          </span>
           <ImeTextarea
             aria-label="拉片视频分享链接"
             rows={2}
@@ -182,7 +185,9 @@ export function ReelbenchConfiguration({
       ) : null}
       {pickError ? <p role="alert">{pickError}</p> : null}
       <label>
-        <span>分析用途</span>
+        <span>
+          <OptionalMark>分析用途</OptionalMark>
+        </span>
         <select
           aria-label="拉片分析用途"
           value={options.purpose}
@@ -199,7 +204,9 @@ export function ReelbenchConfiguration({
         </select>
       </label>
       <label>
-        <span>重点要求（可选）</span>
+        <span>
+          <OptionalMark>重点要求</OptionalMark>
+        </span>
         <ImeTextarea
           aria-label="拉片重点要求"
           rows={2}
@@ -210,7 +217,9 @@ export function ReelbenchConfiguration({
       </label>
       <div className="reelbench__settings">
         <label>
-          <span>切点敏感度</span>
+          <span>
+            <OptionalMark>切点敏感度</OptionalMark>
+          </span>
           <input
             aria-label="切点敏感度"
             type="number"
@@ -225,7 +234,9 @@ export function ReelbenchConfiguration({
           <small>较小数值会检出更多镜头。</small>
         </label>
         <label>
-          <span>最短镜头（秒）</span>
+          <span>
+            <OptionalMark>最短镜头（秒）</OptionalMark>
+          </span>
           <input
             aria-label="最短镜头秒数"
             type="number"
@@ -239,7 +250,9 @@ export function ReelbenchConfiguration({
           />
         </label>
         <label>
-          <span>报告语言</span>
+          <span>
+            <OptionalMark>报告语言</OptionalMark>
+          </span>
           <select
             aria-label="拉片报告语言"
             value={options.language}
@@ -264,7 +277,9 @@ export function ReelbenchConfiguration({
       </label>
       {options.includeSyncVideo ? (
         <label>
-          <span>同步视频画面倍率</span>
+          <span>
+            <OptionalMark>同步视频画面倍率</OptionalMark>
+          </span>
           <select
             aria-label="同步视频画面倍率"
             value={options.syncScale}

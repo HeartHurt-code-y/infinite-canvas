@@ -1,4 +1,5 @@
 import type { AiFilmAsset } from "./aiFilmWorkflowModel";
+import type { WorkflowRequirement, WorkflowRequirements } from "./workflowFieldRequirements";
 import type {
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowShot,
@@ -236,6 +237,52 @@ export function createComicDramaOptions(): ComicDramaWorkflowOptions {
 }
 export function createComicDramaCheckpoint(): ComicDramaWorkflowCheckpoint {
   return { episodes: [], sharedAssets: [], pending: null, planningComplete: false };
+}
+
+/**
+ * 漫剧的必填边界：剧本是唯一硬输入，其余都有推荐默认。
+ *
+ * 逐条对应运行器的真实校验（`planComicDrama` 会直接拒绝这些情况），因此界面缺口清单
+ * 与拦截完全一致：
+ *   - 一集都没有 → 没有任何可制作内容；
+ *   - 超过 10 集 → 超出单次制作的合法范围；
+ *   - 某集标题或剧本为空 → 该集没有可制作的内容（标题要有，交付文档全靠它区分剧集）。
+ *
+ * 视觉风格、画幅、交付方式都有默认值；语音供应商、合成模型与逐角色音色 ID 是成片
+ * 模式下的项目凭据配置，由配音门禁单独提示，不混进「还差几项内容」。
+ */
+export function comicDramaRequirements(options: ComicDramaWorkflowOptions): WorkflowRequirements {
+  const requirements: WorkflowRequirement[] = [];
+  if (!options.episodes.length)
+    return [
+      {
+        field: "分集剧本",
+        hint: "先添加一集并粘贴剧本，或点「导入分集剧本」选择 TXT / Markdown 文件。",
+      },
+    ];
+  if (options.episodes.length > 10)
+    requirements.push({
+      field: "集数",
+      hint: `当前 ${options.episodes.length} 集，一次最多制作 10 集：请移除多余的集，或拆成两次制作。`,
+    });
+  options.episodes.forEach((episode, index) => {
+    if (!episode.title.trim())
+      requirements.push({
+        field: `第 ${index + 1} 集集名`,
+        hint: "集名用于区分交付文档里的剧集，留空时工作流无法标注这一集。",
+      });
+    if (!episode.script.trim())
+      requirements.push({
+        field: `第 ${index + 1} 集剧本`,
+        hint: "粘贴小说、创意或已有剧本；剧情、分镜与对白全部以它为依据。",
+      });
+  });
+  return requirements;
+}
+
+/** 节点与运行器共用的输入门槛，与界面缺口清单同源。 */
+export function comicDramaInputReady(options: ComicDramaWorkflowOptions): boolean {
+  return comicDramaRequirements(options).length === 0;
 }
 
 /** Only characters with approved spoken lines need a voice binding. */

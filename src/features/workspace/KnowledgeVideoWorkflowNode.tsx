@@ -2,6 +2,7 @@ import { Icon } from "../../components/Icon";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
 import {
   musicVideoLipReviewSignature,
+  musicVideoRequirements,
   patchMusicVideoArtifact,
   setMusicVideoLipReview,
 } from "./musicVideoWorkflowModel";
@@ -30,13 +31,15 @@ import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWor
 import {
   comicDramaDubbedShotSignature,
   comicDramaLipReviewComplete,
+  comicDramaRequirements,
   reviewComicDramaDubbedShot,
 } from "./comicDramaWorkflowModel";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
-import { commerceInputReady } from "./commerceWorkflowModel";
+import { commerceInputReady, commerceRequirements } from "./commerceWorkflowModel";
 import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowSections";
+import { remotionRequirements } from "./remotionWorkflowModel";
 import { XhsCoverConfiguration, XhsCoverDeliverables } from "./XhsCoverWorkflowSections";
-import { xhsCoverInputReady } from "./xhsCoverWorkflowModel";
+import { xhsCoverInputReady, xhsCoverRequirements } from "./xhsCoverWorkflowModel";
 import {
   ProductSceneConfiguration,
   ProductSceneDeliverables,
@@ -46,14 +49,23 @@ import {
   productSceneInputReady,
   productSceneInputSignature,
   productSceneQualityEnabled,
+  productSceneRequirements,
 } from "./productSceneWorkflowModel";
 import {
   ReverseVideoConfiguration,
   ReverseVideoDeliverables,
 } from "./ReverseVideoWorkflowSections";
-import { reverseVideoInputReady, reverseVideoSourceUrl } from "./reverseVideoWorkflowModel";
+import {
+  reverseVideoInputReady,
+  reverseVideoRequirements,
+  reverseVideoSourceUrl,
+} from "./reverseVideoWorkflowModel";
 import { ReelbenchConfiguration, ReelbenchDeliverables } from "./ReelbenchWorkflowSections";
-import { reelbenchInputReady, reelbenchInputSignature } from "./reelbenchWorkflowModel";
+import {
+  reelbenchInputReady,
+  reelbenchInputSignature,
+  reelbenchRequirements,
+} from "./reelbenchWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 import { WorkflowPlanReview } from "./WorkflowPlanReview";
 import { WorkflowVersionHistoryPanel } from "./WorkflowVersionHistoryPanel";
@@ -66,6 +78,13 @@ import {
   workflowMaterialQuota,
   removeWorkflowHistoricalText,
 } from "./workflowMaterials";
+import {
+  OptionalMark,
+  RequiredMark,
+  WorkflowRequirementsHint,
+  workflowRequirementsSummary,
+  type WorkflowRequirements,
+} from "./workflowFieldRequirements";
 
 const REVERSE_VIDEO_WORKFLOW_STAGES = [
   { phase: "planning", label: "下载与抽帧" },
@@ -147,6 +166,12 @@ interface ModelSlotProps {
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly filter: ModelFilter;
   readonly disabled?: boolean;
+  /**
+   * 模型槽位默认是「必填」——没有可用的文本/图片/视频模型时工作流真的跑不起来。
+   * 少数可选能力（例如自动视觉检查）只在启用时才需要，传 false 显示为可选，
+   * 免得小白用户在可选能力上被要求配置。
+   */
+  readonly required?: boolean;
   readonly onChange: (selection: NodeModelSelection) => void;
 }
 
@@ -156,6 +181,7 @@ function ModelSlot({
   providerCatalog,
   filter,
   disabled = false,
+  required = true,
   onChange,
 }: ModelSlotProps) {
   const providers = providerCatalog
@@ -170,7 +196,9 @@ function ModelSlot({
 
   return (
     <fieldset className="canvas-knowledge-workflow__model-slot">
-      <legend>{label}</legend>
+      <legend>
+        {required ? <RequiredMark>{label}</RequiredMark> : <OptionalMark>{label}</OptionalMark>}
+      </legend>
       <label>
         <span>项目供应商</span>
         <select
@@ -666,12 +694,84 @@ export function KnowledgeVideoWorkflowNode({
   const materialsValid = allMaterials.every(
     (material) => Number.isFinite(material.byteSize) && material.byteSize > 0,
   );
+  /*
+   * 尚缺的必填项。每个工作流模型导出的 `*Requirements()` 是唯一来源：界面列出的
+   * 缺口和运行器拦截的条件由此对齐，不会出现「看着都填好了，点下去说设置无效」。
+   * 顺序按用户补录的自然顺序排，编辑器给的 hint 会直接显示在卡片上。
+   */
+  const missingRequirements: WorkflowRequirements = isReelbench
+    ? reelbenchRequirements(reelbenchOptions)
+    : isProductScene
+      ? productSceneRequirements(productSceneOptions)
+      : isMusicVideo
+        ? musicVideoRequirements(musicVideoOptions)
+        : isReverse
+          ? reverseVideoRequirements(effectiveConfig.brief, reverseOptions)
+          : isCover
+            ? xhsCoverRequirements(effectiveConfig.brief, coverOptions)
+            : isRemotion
+              ? remotionRequirements(effectiveConfig.brief)
+              : commerceOptions
+                ? commerceRequirements(commerceOptions)
+                : comicDramaOptions
+                  ? comicDramaRequirements(comicDramaOptions)
+                  : effectiveConfig.brief.trim()
+                    ? []
+                    : [
+                        {
+                          field: "制作要求",
+                          hint: "用一句话说明要做什么；画幅、时长等细节可以留给工作流自动决定。",
+                        },
+                      ];
+  /* 不算「字段」的拦截项也要说清楚，否则按钮灰着却看不到原因。 */
+  const extraBlockers: WorkflowRequirements = [
+    ...(materialsValid
+      ? []
+      : [
+          {
+            field: "参考素材",
+            hint: "有素材读取不到大小，请在下方参考素材里移除后重新添加。",
+          },
+        ]),
+    ...(unsupportedProductReferences
+      ? [
+          {
+            field: "通用参考素材",
+            hint: "产品场景图只使用专用产品原图，请移除上方通用参考与连线。",
+          },
+        ]
+      : []),
+    ...(modelsReady
+      ? []
+      : [
+          {
+            field: "模型配置",
+            hint: "展开下方「模型配置」选择可用的项目模型；项目里有已启用模型时会自动预选推荐值。",
+          },
+        ]),
+  ];
   const readyToExecute =
     inputReady &&
     modelsReady &&
     materialsValid &&
     !pickingMaterials &&
     !unsupportedProductReferences;
+  /*
+   * 卡片上要列出的缺口。除了字段级必填项，还要算上「不是字段但确实在拦」的项；
+   * 万一某条老校验仍未落到需求清单里，也要兜一句话，绝不让按钮灰着却看不出原因。
+   */
+  const blockingRequirements: WorkflowRequirements = [
+    ...missingRequirements,
+    ...extraBlockers,
+    ...(missingRequirements.length === 0 && extraBlockers.length === 0 && !inputReady
+      ? [
+          {
+            field: "制作输入",
+            hint: "当前设置还不完整，请按下方提示补齐后再开始。",
+          },
+        ]
+      : []),
+  ];
   const effectiveNode = { ...node, config: effectiveConfig };
   const executionPlan = getWorkflowExecutionPlan(effectiveNode);
   const awaitingPlan =
@@ -813,19 +913,19 @@ export function KnowledgeVideoWorkflowNode({
           <span>{versions.versions.length} 个工作流版本</span>
           <button
             type="button"
-            aria-label="撤销当前工作流编辑"
+            aria-label="回到上一个工作流版本"
             disabled={versionBusy || !versions.canUndo || !onUndoVersion}
             onClick={() => changeWorkflowVersion(() => onUndoVersion?.(node.key))}
           >
-            撤销
+            上一版本
           </button>
           <button
             type="button"
-            aria-label="重做当前工作流编辑"
+            aria-label="回到下一个工作流版本"
             disabled={versionBusy || !versions.canRedo || !onRedoVersion}
             onClick={() => changeWorkflowVersion(() => onRedoVersion?.(node.key))}
           >
-            重做
+            下一版本
           </button>
           <button
             type="button"
@@ -840,7 +940,13 @@ export function KnowledgeVideoWorkflowNode({
           <div className="canvas-knowledge-workflow__inputs">
             {!isReverse && !isReelbench && !isCommerce && !isComicDrama && !isProductScene ? (
               <label className="canvas-knowledge-workflow__brief">
-                <span>这次要制作什么？</span>
+                <span>
+                  {isMusicVideo || isCover ? (
+                    <OptionalMark>这次要制作什么？</OptionalMark>
+                  ) : (
+                    <RequiredMark>这次要制作什么？</RequiredMark>
+                  )}
+                </span>
                 <ImeTextarea
                   aria-label={
                     isMusicVideo
@@ -873,7 +979,7 @@ export function KnowledgeVideoWorkflowNode({
             ) : null}
             {unsupportedProductReferences ? (
               <p role="alert">
-                产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再确认产品抠图。
+                产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再核对和确认专用参考图。
               </p>
             ) : null}
             <WorkflowReferenceMaterials
@@ -905,8 +1011,22 @@ export function KnowledgeVideoWorkflowNode({
           <ProductSceneConfiguration
             options={productSceneOptions}
             disabled={configurationLocked || phase === "awaiting_approval"}
+            planningDisabled={configurationLocked}
             onChange={(productScene) => onChange({ ...node.config, productScene })}
             onBusyChange={setPickingMaterials}
+            designCandidates={(node.config.checkpoint.productScene?.rows ?? []).flatMap((row) =>
+              row.outputPath
+                ? [
+                    {
+                      path: row.outputPath,
+                      label: `场景成图 ${row.index}`,
+                      kind: "generated" as const,
+                      sourceNodeId: node.key,
+                      ...(row.taskId ? { taskId: row.taskId } : {}),
+                    },
+                  ]
+                : [],
+            )}
           />
         ) : null}
 
@@ -1043,7 +1163,9 @@ export function KnowledgeVideoWorkflowNode({
             </summary>
             <div className="canvas-knowledge-workflow__body">
               <label className="canvas-knowledge-workflow__brief">
-                <span>已有剧本、角色资料与本次修改要求</span>
+                <span>
+                  <OptionalMark>已有剧本、角色资料与本次修改要求</OptionalMark>
+                </span>
                 <ImeTextarea
                   aria-label="影视已有资料"
                   rows={4}
@@ -1059,7 +1181,7 @@ export function KnowledgeVideoWorkflowNode({
                 />
               </label>
               <label>
-                起始阶段
+                <OptionalMark>起始阶段</OptionalMark>
                 <select
                   aria-label="影视起始阶段"
                   disabled={configurationLocked}
@@ -1083,7 +1205,7 @@ export function KnowledgeVideoWorkflowNode({
                 </select>
               </label>
               <label>
-                交付方式
+                <OptionalMark>交付方式</OptionalMark>
                 <select
                   aria-label="影视交付方式"
                   disabled={configurationLocked}
@@ -1153,6 +1275,8 @@ export function KnowledgeVideoWorkflowNode({
                 providerCatalog={providerCatalog}
                 filter={TEXT_MODEL_FILTER}
                 disabled={configurationLocked}
+                /* 产品场景的视觉检查是可选能力：内置方法本身不要求它，只有开了自动检查才需要。 */
+                required={!isProductScene}
                 onChange={(selection) => patchModels("text", selection)}
               />
             ) : null}
@@ -1166,6 +1290,8 @@ export function KnowledgeVideoWorkflowNode({
                     isCover || isProductReference ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER
                   }
                   disabled={configurationLocked}
+                  /* 封面只交付提示词时不需要出图模型。 */
+                  required={!(isCover && coverOptions.deliverable === "prompt")}
                   onChange={(selection) => patchModels("image", selection)}
                 />
                 {!isCover && !isProductScene ? (
@@ -1904,55 +2030,65 @@ export function KnowledgeVideoWorkflowNode({
             </>
           ) : phase === "idle" ? (
             <>
-              <span>
-                {pickingMaterials
-                  ? "参考素材选择完成后即可开始"
-                  : !inputReady
-                    ? isProductScene
-                      ? "请添加同一产品的参考原图，并逐张确认身份与原始角度"
-                      : isMusicVideo
-                        ? musicVideoOptions?.songPath
-                          ? "请添加人物参考图后开始制作"
-                          : "请先选择一首完整歌曲"
-                        : isReelbench
-                          ? "请先选择一条本地视频或提供一条有效分享链接"
-                          : isReverse
-                            ? "请粘贴一条有效视频分享链接，或选择本地视频"
-                            : isCover
-                              ? "请填写封面内容并添加 1–3 张人物参考图"
-                              : isCommerce
-                                ? commerceOptions?.deliverable === "video" &&
-                                  !commerceOptions.materials.some(
-                                    (material) => material.kind === "image",
-                                  )
-                                  ? "请添加真实商品图后开始制作"
-                                  : "请填写商品资料后开始制作"
-                                : isComicDrama
-                                  ? "请填写每集剧本，至少添加一集"
-                                  : "填写制作要求后即可开始"
-                    : !modelsReady
+              {blockingRequirements.length ? (
+                <WorkflowRequirementsHint requirements={blockingRequirements} />
+              ) : null}
+              {/* 提示语与开始按钮必须同处一行：缺口清单单独占一整行顶在上面，
+                  否则 flex 换行会把「还差什么」推到按钮下面。 */}
+              <div className="canvas-knowledge-workflow__action-row">
+                <span>
+                  {pickingMaterials
+                    ? "参考素材选择完成后即可开始"
+                    : !inputReady
                       ? isProductScene
-                        ? productSceneQuality && configuredModels.text === "待配置"
-                          ? "请为自动检查配置可看图的文本模型"
-                          : isProductReference
-                            ? "请配置支持参考图片的图片模型"
-                            : "请配置支持文字生图的图片模型"
-                        : isCover
-                          ? "请配置文本模型与支持参考图的图片模型"
-                          : isReverse || isReelbench || isRemotion || documentsOnly
-                            ? "请先配置文本模型"
-                            : "请先完成三个模型配置"
-                      : "先查看执行计划，确认后开始"}
-              </span>
-              <button
-                type="button"
-                className="canvas-knowledge-workflow__primary"
-                disabled={!readyToExecute}
-                onClick={() => onExecute(node.key)}
-              >
-                <Icon name="play" aria-hidden="true" size="md" />
-                查看执行计划
-              </button>
+                        ? "请添加同一产品的参考原图，并逐张确认身份与原始角度"
+                        : isMusicVideo
+                          ? musicVideoOptions?.songPath
+                            ? "请添加人物参考图后开始制作"
+                            : "请先选择一首完整歌曲"
+                          : isReelbench
+                            ? "请先选择一条本地视频或提供一条有效分享链接"
+                            : isReverse
+                              ? "请粘贴一条有效视频分享链接，或选择本地视频"
+                              : isCover
+                                ? "请填写封面内容，或直接指定一个标题"
+                                : isCommerce
+                                  ? commerceOptions?.deliverable === "video" &&
+                                    !commerceOptions.materials.some(
+                                      (material) => material.kind === "image",
+                                    )
+                                    ? "请添加真实商品图后开始制作"
+                                    : "请填写商品资料后开始制作"
+                                  : isComicDrama
+                                    ? "请填写每集剧本，至少添加一集"
+                                    : "填写制作要求后即可开始"
+                      : !modelsReady
+                        ? isProductScene
+                          ? productSceneQuality && configuredModels.text === "待配置"
+                            ? "请为自动检查配置可看图的文本模型"
+                            : isProductReference
+                              ? "请配置支持参考图片的图片模型"
+                              : "请配置支持文字生图的图片模型"
+                          : isCover
+                            ? "请配置文本模型与支持参考图的图片模型"
+                            : isReverse || isReelbench || isRemotion || documentsOnly
+                              ? "请先配置文本模型"
+                              : "请先完成三个模型配置"
+                        : "先查看执行计划，确认后开始"}
+                </span>
+                <button
+                  type="button"
+                  className="canvas-knowledge-workflow__primary"
+                  disabled={!readyToExecute}
+                  title={
+                    readyToExecute ? undefined : workflowRequirementsSummary(blockingRequirements)
+                  }
+                  onClick={() => onExecute(node.key)}
+                >
+                  <Icon name="play" aria-hidden="true" size="md" />
+                  查看执行计划
+                </button>
+              </div>
             </>
           ) : isActivePhase(phase) ? (
             <>

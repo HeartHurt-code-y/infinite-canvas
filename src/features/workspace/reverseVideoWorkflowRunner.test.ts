@@ -24,6 +24,7 @@ import {
   createReverseVideoOptions,
   reverseVideoDeliveryMarkdown,
   reverseVideoInputReady,
+  reverseVideoRequirements,
   reverseVideoSourceUrl,
   type ReverseVideoAnalysis,
 } from "./reverseVideoWorkflowModel";
@@ -707,6 +708,26 @@ describe("reverse video source and output contracts", () => {
       }),
     ).toBe(false);
     expect(reverseVideoInputReady("主题不能代替视频", createReverseVideoOptions())).toBe(false);
+    // 缺口清单与 InputReady 同源：写满补充方向仍然只差一条真实视频。
+    const [missingVideo] = reverseVideoRequirements(
+      "主题不能代替视频",
+      createReverseVideoOptions(),
+    );
+    expect(missingVideo?.field).toBe("视频来源");
+    expect(missingVideo?.hint).toContain("补充方向不能代替视频");
+    expect(
+      reverseVideoRequirements("", {
+        ...createReverseVideoOptions(),
+        sourceUrl: "https://a.example/",
+      }),
+    ).toEqual([]);
+    const [ambiguousLink] = reverseVideoRequirements("", {
+      sourceUrl: "https://a.example/ https://b.example/",
+      localVideoPath: "",
+      localVideoName: "",
+    });
+    expect(ambiguousLink?.field).toBe("视频分享链接");
+    expect(ambiguousLink?.hint).toContain("恰好一条");
   });
 
   it("validates coverage of actual duration, ending actions, camera/audio evidence, and three distinct routes", () => {

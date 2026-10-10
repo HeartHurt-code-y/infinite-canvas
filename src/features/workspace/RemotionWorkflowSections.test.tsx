@@ -7,6 +7,7 @@ import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowS
 import {
   createRemotionCheckpoint,
   createRemotionOptions,
+  remotionRequirements,
   type AnimationPlan,
 } from "./remotionWorkflowModel";
 
@@ -58,6 +59,25 @@ describe("RemotionWorkflowSections", () => {
     for (const label of ["动画模板", "动画视觉主题", "动画画面尺寸", "动画时长", "动画导出格式"]) {
       expect(screen.getByLabelText(label)).toBeDisabled();
     }
+  });
+
+  it("marks every animation setting optional and keeps the description as the only requirement", () => {
+    render(
+      <RemotionConfiguration
+        options={createRemotionOptions()}
+        disabled={false}
+        onChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByText("动画与导出设置"));
+    // 模板、主题、尺寸、时长、格式都有推荐默认值：配置区里一个红星都没有。
+    expect(screen.queryByText("*")).not.toBeInTheDocument();
+    expect(screen.getAllByText("（可选）")).toHaveLength(5);
+    // 唯一必填项是节点上的「动画描述」，缺口文案由节点 footer 统一渲染。
+    const [missingBrief] = remotionRequirements("   ");
+    expect(missingBrief?.field).toBe("动画描述或草图");
+    expect(missingBrief?.hint).toContain("流程或关系");
+    expect(remotionRequirements("用循环流程图展示学习闭环")).toEqual([]);
   });
 
   it("renders GIF as an image and MP4 as video with editable project and document actions", () => {

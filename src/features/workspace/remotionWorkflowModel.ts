@@ -1,3 +1,4 @@
+import { requirementsMet, type WorkflowRequirements } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 export const ANIMATION_TEMPLATES = {
@@ -106,6 +107,26 @@ export function createRemotionCheckpoint(): RemotionWorkflowCheckpoint {
     history: [],
     renderJob: null,
   };
+}
+/**
+ * 动画逻辑图的必填项只有**动画描述**：模板、主题、尺寸、时长、导出格式都在
+ * `createRemotionOptions()` 里预置了推荐值，自动匹配能直接开工。所以清单要么
+ * 是空的，要么只差这一项——不需要用户先学会怎么选参数。
+ */
+export function remotionRequirements(brief: string): WorkflowRequirements {
+  return brief.trim()
+    ? []
+    : [
+        {
+          field: "动画描述或草图",
+          hint: "一句话说明要展示的流程或关系，例如「提出问题 → 尝试解决 → 收集反馈 → 改进」；也可以直接粘贴 ASCII 草图。",
+        },
+      ];
+}
+
+/** 运行器与节点按钮共用同一份清单，避免「能点却做不出来」。 */
+export function remotionInputReady(brief: string): boolean {
+  return requirementsMet(remotionRequirements(brief));
 }
 export function remotionDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
   const state = checkpoint.remotion;

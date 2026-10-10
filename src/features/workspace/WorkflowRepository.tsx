@@ -265,8 +265,8 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               <h2 className="workflow-repository__card-title">小红书封面工作流</h2>
             </div>
             <p className="workflow-repository__description">
-              添加人物参考图和选题，自动提炼标题、匹配八种风格、生成与检查封面，交付 3:4
-              竖版图片及提示词。
+              填写选题即可开始；想沿用真人形象时再添加人物参考图。自动提炼标题、匹配八种风格、生成与检查封面，交付
+              3:4 竖版图片及提示词。
             </p>
             <ol className="workflow-repository__stages" aria-label="小红书封面工作流能力">
               {["标题与风格", "参考图生成", "自动检查", "封面交付"].map((label) => (

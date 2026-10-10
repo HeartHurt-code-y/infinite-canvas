@@ -269,6 +269,9 @@ export function CanvasGenNode({
 
       <div className="canvas-gen-node__prompt-section">
         <div className="canvas-gen-node__section-heading">
+          {/* 提示词是生成节点的唯一必填输入，但这里刻意不放红色星号：这段
+              标签文字通过 aria-labelledby 直接充当输入框的可访问名（见 App.test.tsx
+              的 "提示词输入框，输入 @ 引用素材"），星号会污染这个名称。*/}
           <span id={promptLabelId}>
             <span aria-hidden="true">提示词</span>
             <span className="sr-only">提示词输入框，输入 @ 引用素材</span>

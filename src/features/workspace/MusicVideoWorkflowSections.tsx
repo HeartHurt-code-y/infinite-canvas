@@ -13,6 +13,7 @@ import {
   type MusicVideoStage,
   type MusicVideoWorkflowOptions,
 } from "./musicVideoWorkflowModel";
+import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./MusicVideoWorkflowSections.css";
 
@@ -40,6 +41,9 @@ export function MusicVideoConfiguration({
       <fieldset disabled={disabled}>
         <div className="canvas-music-video__file">
           <strong>{options.songName || "先选择一首完整歌曲"}</strong>
+          <span className="canvas-music-video__file-label">
+            <RequiredMark>歌曲文件</RequiredMark>
+          </span>
           <button type="button" disabled={!onPick} onClick={() => onPick?.("song")}>
             {options.songPath ? "更换歌曲" : "选择歌曲"}
           </button>
@@ -62,7 +66,7 @@ export function MusicVideoConfiguration({
         </div>
         <p>使用原曲作为最终音轨。歌词时间线和每段画面均由你确认后继续。</p>
         <label>
-          官方歌词（可选）
+          <OptionalMark>官方歌词</OptionalMark>
           <ImeTextarea
             aria-label="MV 官方歌词"
             rows={4}
@@ -72,7 +76,7 @@ export function MusicVideoConfiguration({
           />
         </label>
         <label>
-          带时间戳的 LRC 歌词（可选）
+          <OptionalMark>带时间戳的 LRC 歌词</OptionalMark>
           <ImeTextarea
             aria-label="MV 时间戳歌词"
             rows={4}
@@ -82,7 +86,7 @@ export function MusicVideoConfiguration({
           />
         </label>
         <label>
-          歌曲声学分析
+          <OptionalMark>歌曲声学分析</OptionalMark>
           <select
             aria-label="MV 歌曲声学分析"
             value={musicVideoSpeechAnalysisMode(options)}
@@ -101,7 +105,9 @@ export function MusicVideoConfiguration({
         </label>
         {musicVideoSpeechAnalysisMode(options) === "automatic" ? (
           <label>
-            豆包语音连接
+            {/* 成片模式下运行器要求已启用的豆包语音连接，缺了会直接阻断，所以标必填；
+                它是项目凭据配置而非内容输入，因此不进缺口清单。 */}
+            <RequiredMark>豆包语音连接</RequiredMark>
             <select
               aria-label="MV 豆包语音连接"
               value={options.speechProviderConnectionId ?? ""}
@@ -125,7 +131,7 @@ export function MusicVideoConfiguration({
           历史手工文档模式不标记为已自动验证。
         </small>
         <label>
-          视觉风格
+          <OptionalMark>视觉风格</OptionalMark>
           <ImeTextarea
             aria-label="MV 视觉风格"
             rows={2}
@@ -136,7 +142,7 @@ export function MusicVideoConfiguration({
         </label>
         <div className="canvas-music-video__row">
           <label>
-            人物模式
+            <OptionalMark>人物模式</OptionalMark>
             <select
               aria-label="MV 人物模式"
               value={options.characterMode}
@@ -153,7 +159,7 @@ export function MusicVideoConfiguration({
             </select>
           </label>
           <label>
-            画幅
+            <OptionalMark>画幅</OptionalMark>
             <select
               aria-label="MV 画幅"
               value={options.aspectRatio}
@@ -165,7 +171,7 @@ export function MusicVideoConfiguration({
             </select>
           </label>
           <label>
-            交付
+            <OptionalMark>交付</OptionalMark>
             <select
               aria-label="MV 交付方式"
               value={options.deliverable}
@@ -180,6 +186,9 @@ export function MusicVideoConfiguration({
         </div>
         {options.characterMode === "reference" ? (
           <div className="canvas-music-video__file">
+            <span className="canvas-music-video__file-label">
+              <RequiredMark>人物参考图</RequiredMark>
+            </span>
             <button type="button" disabled={!onPick} onClick={() => onPick?.("character")}>
               添加人物参考图
             </button>
@@ -207,7 +216,7 @@ export function MusicVideoConfiguration({
         ) : null}
         {options.characterMode !== "none" ? (
           <label>
-            正面演唱目标占比（%）
+            <OptionalMark>正面演唱目标占比（%）</OptionalMark>
             <input
               aria-label="MV 正面演唱占比"
               type="number"
@@ -697,7 +706,7 @@ export function MusicVideoDeliverables({
                   <p>片段或原曲尚未就绪。</p>
                 )}
                 <label>
-                  验收备注（可选）
+                  <OptionalMark>验收备注</OptionalMark>
                   <ImeTextarea
                     rows={2}
                     value={lipNotes[shot.id] ?? review?.note ?? ""}

@@ -1,5 +1,10 @@
 import type { PickedPromptMaterial } from "../../lib/backend";
 import type { AiFilmAsset } from "./aiFilmWorkflowModel";
+import {
+  requirementsMet,
+  type WorkflowRequirement,
+  type WorkflowRequirements,
+} from "./workflowFieldRequirements";
 import type {
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowShot,
@@ -104,16 +109,39 @@ export function createCommerceOptions(): CommerceWorkflowOptions {
 export function createCommerceCheckpoint(): CommerceWorkflowCheckpoint {
   return { stages: {}, sources: null, sharedAssets: [], pending: null, planningComplete: false };
 }
-export function commerceInputReady(options: CommerceWorkflowOptions): boolean {
-  return (
-    !!(
-      options.productName.trim() ||
-      options.productFacts.trim() ||
-      options.productUrl.trim() ||
-      options.materials.length
-    ) &&
-    (options.deliverable === "documents" || options.materials.some((item) => item.kind === "image"))
+/**
+ * 剧情带货尚缺的必填项。
+ *
+ * 只有两件事真的做不出来：**一点商品信息都没有**（模型无从下笔），以及
+ * **选了「制作完整成片」却没有真实商品图**（生成图不能凭空造商品外观，商品
+ * 必须有实物依据）。名称、卖点、链接、图片/文档四选一即可，不必样样齐；
+ * 选「仅制作文档与提示词」时只需要文字，不需要图。
+ */
+export function commerceRequirements(options: CommerceWorkflowOptions): WorkflowRequirements {
+  const requirements: WorkflowRequirement[] = [];
+  const hasProductInfo = Boolean(
+    options.productName.trim() ||
+    options.productFacts.trim() ||
+    options.productUrl.trim() ||
+    options.materials.length,
   );
+  if (!hasProductInfo)
+    requirements.push({
+      field: "商品资料",
+      hint: "填写商品名称、商品事实与卖点，或添加商品图片/资料文档，任选其一即可。",
+    });
+  if (
+    options.deliverable !== "documents" &&
+    !options.materials.some((item) => item.kind === "image")
+  )
+    requirements.push({
+      field: "真实商品图",
+      hint: "在下方「商品图片与文档」里添加一张真实商品图片；若只想先拿到脚本与提示词，可把交付方式改为「仅制作文档与提示词」。",
+    });
+  return requirements;
+}
+export function commerceInputReady(options: CommerceWorkflowOptions): boolean {
+  return requirementsMet(commerceRequirements(options));
 }
 export function commerceDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
   const commerce = checkpoint.commerce;

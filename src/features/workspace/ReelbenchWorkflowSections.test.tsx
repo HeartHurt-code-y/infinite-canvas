@@ -8,7 +8,9 @@ import {
   createReelbenchCheckpoint,
   createReelbenchOptions,
   reelbenchDraftSignature,
+  reelbenchInputReady,
   reelbenchInputSignature,
+  reelbenchRequirements,
 } from "./reelbenchWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
@@ -209,6 +211,42 @@ describe("Reelbench shot review", () => {
       target: { value: "firefox" },
     });
     expect(onSelectCookieBrowser).toHaveBeenCalledWith("firefox");
+  });
+
+  it("marks the original video as required and keeps every other setting optional", () => {
+    render(
+      <ReelbenchConfiguration
+        options={createReelbenchOptions()}
+        brief=""
+        disabled={false}
+        onChange={vi.fn()}
+        onBriefChange={vi.fn()}
+      />,
+    );
+    // 只有原片带红星：分析用途、重点要求、切点、最短镜头、报告语言全是「可选」。
+    expect(screen.getByText("*")).toHaveClass("workflow-required-mark__asterisk");
+    expect(screen.getAllByText("（可选）")).toHaveLength(5);
+
+    // 缺口清单的语义在模型层（节点 footer 统一渲染），界面标记与运行器拦截同源。
+    expect(reelbenchInputReady("", createReelbenchOptions())).toBe(false);
+    const [missingVideo] = reelbenchRequirements(createReelbenchOptions());
+    expect(missingVideo?.field).toBe("原片视频");
+    expect(missingVideo?.hint).toContain("分享链接");
+    // 数字输入被清空（NaN）时也要说清是哪一项，不能只把按钮变灰。
+    expect(
+      reelbenchRequirements({
+        ...createReelbenchOptions(),
+        sourceUrl: "https://www.bilibili.com/video/BV123",
+        sceneThreshold: Number.NaN,
+      }).map((item) => item.field),
+    ).toEqual(["切点敏感度"]);
+    // 选填项都用推荐默认值：只选了一条原片就已经可以开始。
+    expect(
+      reelbenchRequirements({
+        ...createReelbenchOptions(),
+        sourceUrl: "https://www.bilibili.com/video/BV123",
+      }),
+    ).toEqual([]);
   });
 
   it("invalidates validation and batch approval on any shot edit", () => {
