@@ -79,7 +79,6 @@ import {
   removeWorkflowHistoricalText,
 } from "./workflowMaterials";
 import {
-  OptionalMark,
   RequiredMark,
   WorkflowRequirementsHint,
   workflowRequirementsSummary,
@@ -196,9 +195,7 @@ function ModelSlot({
 
   return (
     <fieldset className="canvas-knowledge-workflow__model-slot">
-      <legend>
-        {required ? <RequiredMark>{label}</RequiredMark> : <OptionalMark>{label}</OptionalMark>}
-      </legend>
+      <legend>{required ? <RequiredMark>{label}</RequiredMark> : label}</legend>
       <label>
         <span>项目供应商</span>
         <select
@@ -941,8 +938,9 @@ export function KnowledgeVideoWorkflowNode({
             {!isReverse && !isReelbench && !isCommerce && !isComicDrama && !isProductScene ? (
               <label className="canvas-knowledge-workflow__brief">
                 <span>
+                  {/* 只有内容必填的工作流才带红星：MV 的说明可留空由歌曲决定，封面另有选题要求。 */}
                   {isMusicVideo || isCover ? (
-                    <OptionalMark>这次要制作什么？</OptionalMark>
+                    "这次要制作什么？"
                   ) : (
                     <RequiredMark>这次要制作什么？</RequiredMark>
                   )}
@@ -1163,9 +1161,7 @@ export function KnowledgeVideoWorkflowNode({
             </summary>
             <div className="canvas-knowledge-workflow__body">
               <label className="canvas-knowledge-workflow__brief">
-                <span>
-                  <OptionalMark>已有剧本、角色资料与本次修改要求</OptionalMark>
-                </span>
+                <span>已有剧本、角色资料与本次修改要求</span>
                 <ImeTextarea
                   aria-label="影视已有资料"
                   rows={4}
@@ -1181,7 +1177,7 @@ export function KnowledgeVideoWorkflowNode({
                 />
               </label>
               <label>
-                <OptionalMark>起始阶段</OptionalMark>
+                起始阶段
                 <select
                   aria-label="影视起始阶段"
                   disabled={configurationLocked}
@@ -1205,7 +1201,7 @@ export function KnowledgeVideoWorkflowNode({
                 </select>
               </label>
               <label>
-                <OptionalMark>交付方式</OptionalMark>
+                交付方式
                 <select
                   aria-label="影视交付方式"
                   disabled={configurationLocked}

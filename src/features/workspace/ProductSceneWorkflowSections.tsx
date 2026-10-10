@@ -29,7 +29,7 @@ import {
   type ProductSceneWorkflowOptions,
 } from "./productSceneWorkflowModel";
 import { ProductSceneProtectionEditor } from "./ProductSceneProtectionEditor";
-import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ProductSceneWorkflowSections.css";
 
@@ -475,7 +475,7 @@ export function ProductSceneConfiguration({
         />
       </label>
       <label>
-        <OptionalMark>生成方式</OptionalMark>
+        生成方式
         <select
           aria-label="产品场景生成方式"
           value={generationMode}
@@ -512,7 +512,7 @@ export function ProductSceneConfiguration({
             : "AI 生成空场景，已确认产品原图在本地合成，保留原图的产品结构。此模式仅使用原图已有角度。"}
       </p>
       <label>
-        <OptionalMark>AI 品牌摄影风格</OptionalMark>
+        AI 品牌摄影风格
         <select
           aria-label="AI 品牌摄影风格"
           value={options.brandCreative?.style ?? ""}
@@ -538,7 +538,7 @@ export function ProductSceneConfiguration({
       </label>
       {options.brandCreative && (
         <label>
-          <OptionalMark>品牌画面要求</OptionalMark>
+          品牌画面要求
           <ImeTextarea
             rows={3}
             value={options.brandCreative.brief}
@@ -596,7 +596,7 @@ export function ProductSceneConfiguration({
           ).map(([key, label]) => (
             <label key={key}>
               {/* 系列模板自带推荐默认值，改不改都能出图，所以标“可选”而不是必填。 */}
-              <OptionalMark>{label}</OptionalMark>
+              {label}
               <ImeInput
                 aria-label={label}
                 value={options.jewelry!.seriesStyle[key]}
@@ -661,9 +661,7 @@ export function ProductSceneConfiguration({
             ) : null}
             {generationMode !== "protected" ? (
               <label>
-                <OptionalMark>
-                  {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
-                </OptionalMark>
+                {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
                 <select
                   aria-label={`${view.label} 原图角度`}
                   value={view.angle}
@@ -692,7 +690,7 @@ export function ProductSceneConfiguration({
             ) : null}
             {generationMode === "protected" || options.brandCreative ? (
               <label>
-                <OptionalMark>照片用途</OptionalMark>
+                照片用途
                 <select
                   aria-label={`${view.label} 照片用途`}
                   value={view.photoRole ?? ""}
@@ -798,7 +796,7 @@ export function ProductSceneConfiguration({
       </small>
       <div className="product-scene__settings">
         <label>
-          <OptionalMark>总计划张数</OptionalMark>
+          总计划张数
           <input
             aria-label="总计划张数"
             type="number"
@@ -814,7 +812,7 @@ export function ProductSceneConfiguration({
           />
         </label>
         <label>
-          <OptionalMark>同时生成张数上限</OptionalMark>
+          同时生成张数上限
           <input
             aria-label="同时生成张数上限"
             type="number"
@@ -834,7 +832,7 @@ export function ProductSceneConfiguration({
         </label>
         {generationMode !== "protected" && !options.brandCreative ? (
           <label>
-            <OptionalMark>场景倾向</OptionalMark>
+            场景倾向
             <select
               aria-label="场景倾向"
               value={options.sceneBias}
@@ -853,7 +851,7 @@ export function ProductSceneConfiguration({
           </label>
         ) : null}
         <label>
-          <OptionalMark>图片比例</OptionalMark>
+          图片比例
           <select
             aria-label="产品场景图片比例"
             value={options.aspectRatio}
@@ -870,9 +868,7 @@ export function ProductSceneConfiguration({
           </select>
         </label>
         <label>
-          <OptionalMark>
-            {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
-          </OptionalMark>
+          {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
           <input
             aria-label={generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
             type="range"
@@ -891,7 +887,7 @@ export function ProductSceneConfiguration({
         </label>
         {generationMode !== "protected" ? (
           <label>
-            <OptionalMark>背景景深</OptionalMark>
+            背景景深
             <input
               aria-label="背景景深"
               type="range"
@@ -913,7 +909,7 @@ export function ProductSceneConfiguration({
         ) : null}
         {generationMode !== "protected" ? (
           <label>
-            <OptionalMark>场景种子</OptionalMark>
+            场景种子
             <input
               aria-label="场景种子"
               type="number"
@@ -960,11 +956,11 @@ export function ProductSceneConfiguration({
                 })
               }
             />
-            <OptionalMark>自动检测可见接口</OptionalMark>
+            自动检测可见接口
           </label>
           {options.quality?.inspectPorts ? (
             <label>
-              <OptionalMark>已确认接口规格</OptionalMark>
+              已确认接口规格
               <ImeTextarea
                 aria-label="已确认接口规格"
                 rows={3}

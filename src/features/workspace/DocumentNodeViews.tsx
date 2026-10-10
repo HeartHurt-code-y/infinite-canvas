@@ -12,7 +12,7 @@ import { MarkdownView } from "../../components/MarkdownView";
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import { AutoSizeThumb } from "./MediaNodeViews";
-import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "./workflowFieldRequirements";
 import type {
   AssetKind,
   CanvasNodeDimensions,
@@ -1396,7 +1396,7 @@ export function CanvasPromptNode({
                 />
               </label>
               <label className="canvas-prompt-node__field">
-                <OptionalMark>目标格式</OptionalMark>
+                目标格式
                 <select
                   aria-label="对白目标格式"
                   value={cinematicDialogueGuard.targetFormat}
@@ -1413,7 +1413,7 @@ export function CanvasPromptNode({
               </label>
             </div>
             <label className="canvas-prompt-node__field">
-              <OptionalMark>锁定原台词（逐字保留时填写，每行“角色：台词”）</OptionalMark>
+              锁定原台词（逐字保留时填写，每行“角色：台词”）
               <textarea
                 aria-label="锁定原台词"
                 placeholder={"甲：别走。\n乙：我会回来。"}

@@ -1,8 +1,8 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-/* 第 3 条用例断言的是**标签的 DOM 结构契约**（标签文字必须是独立文本节点、
- * 星号只能是它的同级兄弟），没有等价的 getByRole 写法。 */
+/* 第 3 条用例断言的是**标签的 DOM 结构契约**（星号必须与标签文字同处一个元素，
+ * 且该元素是标签容器的直接子元素），没有等价的 getByRole 写法。 */
 /* eslint-disable testing-library/no-container -- 见上 */
 
 import {
@@ -14,7 +14,7 @@ import {
 } from "./workflowFieldRequirements";
 
 describe("workflow field requirement markers", () => {
-  it("marks required fields with an accessible star that does not disturb the label text", () => {
+  it("marks a required field with a red asterisk and nothing else", () => {
     render(
       <label>
         <RequiredMark>供应商</RequiredMark>
@@ -25,13 +25,13 @@ describe("workflow field requirement markers", () => {
     );
 
     expect(screen.getByText("*")).toHaveClass("workflow-required-mark__asterisk");
-    // 「（必填）」对辅助技术可见：可访问名与可见文本一致，屏幕阅读器也听得到必填。
-    const select = screen.getByRole("combobox");
-    expect(select).toHaveAccessibleName(/供应商/);
-    expect(select).toHaveAccessibleName(/必填/);
+    // 卡片高度优先：不再附带「（必填）」文字，界面上只有星号。
+    expect(screen.queryByText("（必填）")).not.toBeInTheDocument();
+    // 必填语义不靠颜色单独承载：挂在控件上的 aria-required 才是 AT 的读法。
+    expect(screen.getByRole("combobox")).toBeRequired();
   });
 
-  it("marks optional fields without an asterisk", () => {
+  it("renders no marker at all for optional fields", () => {
     render(
       <label>
         <OptionalMark>封面风格</OptionalMark>
@@ -42,23 +42,25 @@ describe("workflow field requirement markers", () => {
     );
 
     expect(screen.queryByText("*")).not.toBeInTheDocument();
-    expect(screen.getByText("（可选）")).toHaveClass("workflow-required-mark__optional");
-    expect(screen.getByRole("combobox")).toHaveAccessibleName(/封面风格/);
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox")).not.toBeRequired();
   });
 
-  it("keeps the label text a direct text node so existing label typography selectors still match", () => {
+  it("keeps the star inside the label text element so grid labels stay on one row", () => {
     const { container } = render(
       <div className="canvas-prompt-node__field">
         <RequiredMark>目标时长（秒）</RequiredMark>
       </div>,
     );
 
-    // 关键结构约束：标签文字是独立文本节点，星号只是它的同级兄弟。多包一层元素
-    // 会让 `.canvas-prompt-node__field > span` 这类排版选择器失配。
+    // 关键结构约束：星号与标签文字必须在**同一个**子元素里。标签容器是
+    // `display: grid`，一旦拆成两个子元素，网格会把它们排成两行，卡片被撑长。
     const field = container.querySelector(".canvas-prompt-node__field")!;
-    expect(field.firstChild).toHaveTextContent("目标时长（秒）");
-    expect(field.firstElementChild).toHaveClass("workflow-required-mark__asterisk");
-    expect(field).toHaveTextContent("目标时长（秒）*（必填）");
+    expect(field.childElementCount).toBe(1);
+    expect(field.firstChild).toHaveTextContent("目标时长（秒）*");
+    expect(
+      (field.firstChild as HTMLElement).querySelector(".workflow-required-mark__asterisk"),
+    ).not.toBeNull();
   });
 
   it("lists every missing requirement at once instead of only the first", () => {
@@ -73,15 +75,11 @@ describe("workflow field requirement markers", () => {
 
     const hint = screen.getByRole("status");
     expect(hint).toHaveTextContent("还差 2 项必填内容");
-    for (const text of [
-      "封面内容",
-      "粘贴选题或文章",
-      "人物参考图",
-      "添加 1–3 张同一人物照片",
-      "其余参数已按推荐值预置，可以不改直接开始。",
-    ])
+    for (const text of ["封面内容", "粘贴选题或文章", "人物参考图", "添加 1–3 张同一人物照片"])
       expect(hint).toHaveTextContent(text);
     expect(within(hint).getAllByRole("listitem")).toHaveLength(2);
+    // 卡片高度优先：清单只有标题与逐项补法，不再追加收尾说明。
+    expect(hint.querySelector(".workflow-required-hint__foot")).toBeNull();
   });
 
   it("renders nothing when the input is ready", () => {

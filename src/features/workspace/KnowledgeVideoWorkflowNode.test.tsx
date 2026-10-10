@@ -448,11 +448,11 @@ describe("KnowledgeVideoWorkflowNode", () => {
     // 小白用户看到的是「还差几项、分别是什么」，而不是一个灰掉的按钮。
     expect(screen.getByText("还差 1 项必填内容")).toBeInTheDocument();
     expect(screen.getByText("动画描述或草图")).toBeInTheDocument();
-    expect(screen.getByText("其余参数已按推荐值预置，可以不改直接开始。")).toBeInTheDocument();
 
-    // 必填字段旁边有红色星号，选填字段写「可选」，不再靠用户猜。
+    // 必填字段旁边有红色星号；选填字段不带任何标记（不给每项重复「可选」）。
     expect(document.querySelector(".workflow-required-mark__asterisk")).not.toBeNull();
-    expect(screen.getAllByText("（可选）").length).toBeGreaterThan(0);
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
+    expect(screen.queryByText("（必填）")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toHaveAttribute(
       "title",
       expect.stringContaining("还差 1 项必填内容：动画描述或草图"),

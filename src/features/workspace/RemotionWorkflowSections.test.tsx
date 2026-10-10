@@ -70,9 +70,10 @@ describe("RemotionWorkflowSections", () => {
       />,
     );
     fireEvent.click(screen.getByText("动画与导出设置"));
-    // 模板、主题、尺寸、时长、格式都有推荐默认值：配置区里一个红星都没有。
+    // 模板、主题、尺寸、时长、格式都有推荐默认值：配置区里一个红星都没有，
+    // 也不为每个选填项重复「可选」（那会把卡片撑长）。
     expect(screen.queryByText("*")).not.toBeInTheDocument();
-    expect(screen.getAllByText("（可选）")).toHaveLength(5);
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
     // 唯一必填项是节点上的「动画描述」，缺口文案由节点 footer 统一渲染。
     const [missingBrief] = remotionRequirements("   ");
     expect(missingBrief?.field).toBe("动画描述或草图");

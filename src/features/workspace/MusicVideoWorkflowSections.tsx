@@ -13,7 +13,7 @@ import {
   type MusicVideoStage,
   type MusicVideoWorkflowOptions,
 } from "./musicVideoWorkflowModel";
-import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./MusicVideoWorkflowSections.css";
 
@@ -66,7 +66,7 @@ export function MusicVideoConfiguration({
         </div>
         <p>使用原曲作为最终音轨。歌词时间线和每段画面均由你确认后继续。</p>
         <label>
-          <OptionalMark>官方歌词</OptionalMark>
+          官方歌词
           <ImeTextarea
             aria-label="MV 官方歌词"
             rows={4}
@@ -76,7 +76,7 @@ export function MusicVideoConfiguration({
           />
         </label>
         <label>
-          <OptionalMark>带时间戳的 LRC 歌词</OptionalMark>
+          带时间戳的 LRC 歌词
           <ImeTextarea
             aria-label="MV 时间戳歌词"
             rows={4}
@@ -86,7 +86,7 @@ export function MusicVideoConfiguration({
           />
         </label>
         <label>
-          <OptionalMark>歌曲声学分析</OptionalMark>
+          歌曲声学分析
           <select
             aria-label="MV 歌曲声学分析"
             value={musicVideoSpeechAnalysisMode(options)}
@@ -131,7 +131,7 @@ export function MusicVideoConfiguration({
           历史手工文档模式不标记为已自动验证。
         </small>
         <label>
-          <OptionalMark>视觉风格</OptionalMark>
+          视觉风格
           <ImeTextarea
             aria-label="MV 视觉风格"
             rows={2}
@@ -142,7 +142,7 @@ export function MusicVideoConfiguration({
         </label>
         <div className="canvas-music-video__row">
           <label>
-            <OptionalMark>人物模式</OptionalMark>
+            人物模式
             <select
               aria-label="MV 人物模式"
               value={options.characterMode}
@@ -159,7 +159,7 @@ export function MusicVideoConfiguration({
             </select>
           </label>
           <label>
-            <OptionalMark>画幅</OptionalMark>
+            画幅
             <select
               aria-label="MV 画幅"
               value={options.aspectRatio}
@@ -171,7 +171,7 @@ export function MusicVideoConfiguration({
             </select>
           </label>
           <label>
-            <OptionalMark>交付</OptionalMark>
+            交付
             <select
               aria-label="MV 交付方式"
               value={options.deliverable}
@@ -216,7 +216,7 @@ export function MusicVideoConfiguration({
         ) : null}
         {options.characterMode !== "none" ? (
           <label>
-            <OptionalMark>正面演唱目标占比（%）</OptionalMark>
+            正面演唱目标占比（%）
             <input
               aria-label="MV 正面演唱占比"
               type="number"
@@ -706,7 +706,7 @@ export function MusicVideoDeliverables({
                   <p>片段或原曲尚未就绪。</p>
                 )}
                 <label>
-                  <OptionalMark>验收备注</OptionalMark>
+                  验收备注
                   <ImeTextarea
                     rows={2}
                     value={lipNotes[shot.id] ?? review?.note ?? ""}

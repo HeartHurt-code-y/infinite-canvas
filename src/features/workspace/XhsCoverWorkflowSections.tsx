@@ -5,7 +5,6 @@ import { ImeInput } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
 import { formatRawBackendError, isDesktopRuntime, toMediaSrc } from "../../lib/backend";
 import { copyTextToDesktopClipboard } from "./desktopActions";
-import { OptionalMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import { XHS_COVER_STYLES, type XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
 
@@ -91,9 +90,7 @@ export function XhsCoverConfiguration({
             key={role}
           >
             <div className="canvas-commerce-workflow__materials-heading">
-              <strong>
-                <OptionalMark>{title}</OptionalMark>
-              </strong>
+              <strong>{title}</strong>
               <button
                 type="button"
                 disabled={
@@ -149,7 +146,7 @@ export function XhsCoverConfiguration({
         </summary>
         <div className="canvas-xhs-cover__settings">
           <label className="canvas-xhs-cover__title">
-            <OptionalMark>指定标题</OptionalMark>
+            指定标题
             <ImeInput
               aria-label="封面标题"
               value={options.title}

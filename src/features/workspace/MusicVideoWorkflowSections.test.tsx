@@ -92,14 +92,14 @@ describe("MV workflow user controls", () => {
       screen.getByText("歌曲文件", { selector: ".workflow-required-hint__field" }),
     ).toBeInTheDocument();
     expect(
-      screen
-        .getByText("歌曲文件", { selector: ".canvas-music-video__file-label" })
-        .querySelector(".workflow-required-mark__asterisk"),
+      document
+        .querySelector(".canvas-music-video__file-label")
+        ?.querySelector(".workflow-required-mark__asterisk"),
     ).not.toBeNull();
     // 其余参数保持选填：画幅、交付、人物模式都有推荐默认，不该要求小白用户动手。
-    expect(
-      screen.getByText("画幅").querySelector(".workflow-required-mark__optional"),
-    ).not.toBeNull();
+    // 选填项现在**不带任何标记**（只给要填的项留红星），所以画幅旁没有星号。
+    const formatLabel = screen.getByText(/^画幅$/).closest("label")!;
+    expect(formatLabel.querySelectorAll(".workflow-required-mark__asterisk")).toHaveLength(0);
     rerender(
       <KnowledgeVideoWorkflowNode
         {...callbacks}

@@ -11,7 +11,7 @@ import {
   type ComicDramaReview,
   type ComicDramaWorkflowOptions,
 } from "./comicDramaWorkflowModel";
-import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 interface ComicDramaConfigurationProps {
@@ -116,9 +116,7 @@ export function ComicDramaConfiguration({
       </summary>
       <fieldset disabled={disabled || importing} className="canvas-comic-drama-workflow__settings">
         <label className="canvas-comic-drama-workflow__import">
-          <span>
-            <OptionalMark>导入分集剧本</OptionalMark>
-          </span>
+          <span>导入分集剧本</span>
           <input
             type="file"
             aria-label="导入漫剧分集剧本"
@@ -210,9 +208,7 @@ export function ComicDramaConfiguration({
           添加一集
         </button>
         <label className="canvas-knowledge-workflow__brief">
-          <span>
-            <OptionalMark>视觉风格</OptionalMark>
-          </span>
+          <span>视觉风格</span>
           <ImeTextarea
             aria-label="漫剧视觉风格"
             rows={2}
@@ -222,7 +218,7 @@ export function ComicDramaConfiguration({
         </label>
         <div className="canvas-comic-drama-workflow__format">
           <label>
-            <OptionalMark>画幅</OptionalMark>
+            画幅
             <select
               aria-label="漫剧画幅"
               value={options.aspectRatio}
@@ -234,7 +230,7 @@ export function ComicDramaConfiguration({
             </select>
           </label>
           <label>
-            <OptionalMark>交付方式</OptionalMark>
+            交付方式
             <select
               aria-label="漫剧交付方式"
               value={options.deliverable}
@@ -248,9 +244,7 @@ export function ComicDramaConfiguration({
           </label>
         </div>
         <label className="canvas-knowledge-workflow__brief">
-          <span>
-            <OptionalMark>补充制作要求</OptionalMark>
-          </span>
+          <span>补充制作要求</span>
           <ImeTextarea
             aria-label="漫剧制作要求"
             rows={2}

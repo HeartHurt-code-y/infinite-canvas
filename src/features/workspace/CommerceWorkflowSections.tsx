@@ -11,7 +11,7 @@ import {
   type CommerceFact,
   type CommerceWorkflowOptions,
 } from "./commerceWorkflowModel";
-import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 interface CommerceConfigurationProps {
@@ -60,7 +60,7 @@ export function CommerceConfiguration({
       <fieldset disabled={disabled || picking} className="canvas-commerce-workflow__settings">
         <div className="canvas-commerce-workflow__format">
           <label>
-            <OptionalMark>制作模式</OptionalMark>
+            制作模式
             <select
               aria-label="带货制作模式"
               value={options.mode}
@@ -73,7 +73,7 @@ export function CommerceConfiguration({
             </select>
           </label>
           <label>
-            <OptionalMark>剧情类型</OptionalMark>
+            剧情类型
             <select
               aria-label="带货剧情类型"
               value={options.storyType}
@@ -96,7 +96,7 @@ export function CommerceConfiguration({
             : "产品研究、剧情创意、带货剧本、分镜提示词和一致性资产依次完成，自动检查与修订。"}
         </small>
         <label>
-          <OptionalMark>商品名称</OptionalMark>
+          商品名称
           <ImeInput
             aria-label="带货商品名称"
             value={options.productName}
@@ -105,9 +105,7 @@ export function CommerceConfiguration({
           />
         </label>
         <label className="canvas-knowledge-workflow__brief">
-          <span>
-            <OptionalMark>商品或资料链接</OptionalMark>
-          </span>
+          <span>商品或资料链接</span>
           <ImeTextarea
             rows={2}
             aria-label="带货商品链接"
@@ -121,9 +119,7 @@ export function CommerceConfiguration({
           ) : null}
         </label>
         <label className="canvas-knowledge-workflow__brief">
-          <span>
-            <OptionalMark>商品事实与卖点</OptionalMark>
-          </span>
+          <span>商品事实与卖点</span>
           <ImeTextarea
             rows={4}
             aria-label="带货商品事实与卖点"
@@ -133,7 +129,7 @@ export function CommerceConfiguration({
           />
         </label>
         <label>
-          <OptionalMark>目标受众</OptionalMark>
+          目标受众
           <ImeInput
             aria-label="带货目标受众"
             value={options.audience}
@@ -144,10 +140,11 @@ export function CommerceConfiguration({
         <section className="canvas-commerce-workflow__materials" aria-label="商品图片与文档">
           <div className="canvas-commerce-workflow__materials-heading">
             <strong>
+              {/* 只有成片模式才必须给真实商品图；文档模式这一块是选填，不标红星。 */}
               {options.deliverable === "video" ? (
                 <RequiredMark>商品图片与文档</RequiredMark>
               ) : (
-                <OptionalMark>商品图片与文档</OptionalMark>
+                "商品图片与文档"
               )}
             </strong>
             <button type="button" disabled={!onPickMaterials} onClick={() => void pickMaterials()}>
@@ -194,7 +191,7 @@ export function CommerceConfiguration({
         </section>
         <div className="canvas-commerce-workflow__format">
           <label>
-            <OptionalMark>画幅</OptionalMark>
+            画幅
             <select
               aria-label="带货画幅"
               value={options.aspectRatio}
@@ -206,7 +203,7 @@ export function CommerceConfiguration({
             </select>
           </label>
           <label>
-            <OptionalMark>交付方式</OptionalMark>
+            交付方式
             <select
               aria-label="带货交付方式"
               value={options.deliverable}
@@ -220,9 +217,7 @@ export function CommerceConfiguration({
           </label>
         </div>
         <label className="canvas-knowledge-workflow__brief">
-          <span>
-            <OptionalMark>补充制作要求</OptionalMark>
-          </span>
+          <span>补充制作要求</span>
           <ImeTextarea
             aria-label="带货制作要求"
             rows={2}

@@ -11,7 +11,6 @@ import {
 } from "./jewelryLaunchPlan";
 import type { ProductSceneWorkflowOptions } from "./productSceneWorkflowModel";
 import { BrandDesignStudio, type BrandDesignCandidate } from "./BrandDesignStudio";
-import { OptionalMark } from "./workflowFieldRequirements";
 import "./ProductSceneJewelryLaunch.css";
 
 interface ProductSceneJewelryLaunchProps {
@@ -242,8 +241,8 @@ export function ProductSceneJewelryLaunch({
       <strong>淘宝十图制作单</strong>
       <p>整理五张主图与五张详情的来源、文案和制作说明，再进入品牌图文设计，预览并导出实际成图。</p>
       <label>
-        {/* 资料可以没有，方案照常生成：统一用共享的「（可选）」标注，不再手写括号。 */}
-        <OptionalMark>现有商品资料</OptionalMark>
+        {/* 资料可以没有，方案照常生成：选填项不渲染任何标记，只有必填项带红星。 */}
+        现有商品资料
         <ImeTextarea
           value={launch?.factsText ?? ""}
           onValueChange={updateFacts}

@@ -235,9 +235,13 @@ describe("comic drama node", () => {
     expect(
       screen.getByText("集名").querySelector(".workflow-required-mark__asterisk"),
     ).not.toBeNull();
-    const formatMark = screen.getByText("画幅");
-    expect(formatMark.querySelector(".workflow-required-mark__optional")).not.toBeNull();
-    expect(formatMark.querySelector(".workflow-required-mark__asterisk")).toBeNull();
+    // 选填项不带任何标记：只给要填的项留红星，卡片才不会被「可选」撑长。
+    const formatLabel = screen.queryByText(/^画幅$/);
+    expect(formatLabel).toBeInTheDocument();
+    expect(
+      formatLabel!.closest("label")!.querySelectorAll(".workflow-required-mark__asterisk"),
+    ).toHaveLength(0);
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
     // 清单逐条对应运行器的真实校验，而不是只给一个布尔。
     const withEpisodes = (episodes: ComicDramaWorkflowOptions["episodes"]) =>
       comicDramaRequirements({ ...createComicDramaOptions(), episodes }).map((item) => item.field);

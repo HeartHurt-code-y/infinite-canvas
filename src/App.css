@@ -13750,44 +13750,18 @@ details[open] > summary .history-disclosure__caret {
   outline-offset: 2px;
 }
 
-/* ── 工作流参数必填标识与缺口清单 ────────────────────────────────────────
- * 星号、可选、必填文字都由 RequiredMark / OptionalMark 渲染成标签文字的**同级兄弟**
- * （见组件注释：这样可见文本才与可访问名一致，且不破坏结构选择器的标签排版）。
+/* ── 工作流参数必填星号与缺口清单 ────────────────────────────────────────
+ * 只画一个红色星号：没有「（必填）」也没有「（可选）」文字。这些标签容器多为
+ * `display: grid`（或带 gap 的 flex），多一个子元素就多占一行/一格，会把工作流
+ * 卡片撑长；星号是通用约定，配合节点底部的缺口清单已经足够。
+ *
+ * 因此 RequiredMark **必须只产生一个元素**，且 `{children}` 与星号同处该元素内：
+ * 子元素一旦拆成两个，网格容器就会把它们排成两行（历史问题正是如此）。
  * 生成点见 src/features/workspace/workflowFieldRequirements.tsx。 */
 .workflow-required-mark__asterisk {
-  margin-inline-start: 0.1em;
+  margin-inline-start: 0.15em;
   color: var(--color-error);
   font-weight: 700;
-}
-
-.workflow-required-mark__required-text {
-  margin-inline-start: 0.15em;
-  color: var(--color-muted);
-  font-size: var(--text-2xs);
-  font-weight: 400;
-}
-
-.workflow-required-mark__optional {
-  margin-inline-start: 0.25em;
-  color: var(--color-muted);
-  font-size: var(--text-2xs);
-  font-weight: 400;
-}
-
-/*
- * 同一行里出现「标签文字 + 星号」两个行内元素时，`.xxx__field > span` 那类排版规则
- * 会按两个块排布，行高被大字号一侧撑开、间距也会重算。这里只对成对出现的容器收紧。
- */
-.canvas-gen-node__field:has(> .workflow-required-mark__asterisk),
-.canvas-prompt-node__field:has(> .workflow-required-mark__asterisk),
-.canvas-knowledge-workflow__brief:has(> .workflow-required-mark__asterisk) {
-  gap: 0;
-}
-
-.canvas-gen-node__field:has(> .workflow-required-mark__asterisk) > span,
-.canvas-prompt-node__field:has(> .workflow-required-mark__asterisk) > span,
-.canvas-knowledge-workflow__brief:has(> .workflow-required-mark__asterisk) > span {
-  line-height: 1.2;
 }
 
 .workflow-required-hint {
@@ -13832,8 +13806,4 @@ details[open] > summary .history-disclosure__caret {
 
 .workflow-required-hint__text {
   color: var(--color-ink-2);
-}
-
-.workflow-required-hint__foot {
-  color: var(--color-muted);
 }

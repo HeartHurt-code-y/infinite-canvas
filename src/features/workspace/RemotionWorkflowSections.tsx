@@ -1,7 +1,6 @@
 import { Icon } from "../../components/Icon";
 import { toMediaSrc } from "../../lib/backend";
 import { ANIMATION_TEMPLATES, type RemotionWorkflowOptions } from "./remotionWorkflowModel";
-import { OptionalMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 interface RemotionConfigurationProps {
@@ -23,7 +22,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
       </summary>
       <fieldset disabled={disabled} className="canvas-remotion-workflow__settings">
         <label>
-          <OptionalMark>动画模板</OptionalMark>
+          动画模板
           <select
             aria-label="动画模板"
             value={options.template}
@@ -43,7 +42,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
           </select>
         </label>
         <label>
-          <OptionalMark>视觉主题</OptionalMark>
+          视觉主题
           <select
             aria-label="动画视觉主题"
             value={options.theme}
@@ -60,7 +59,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
           </select>
         </label>
         <label>
-          <OptionalMark>画面尺寸</OptionalMark>
+          画面尺寸
           <select
             aria-label="动画画面尺寸"
             value={`${options.width}x${options.height}`}
@@ -75,7 +74,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
           </select>
         </label>
         <label>
-          <OptionalMark>时长（秒）</OptionalMark>
+          时长（秒）
           <input
             aria-label="动画时长"
             type="number"
@@ -95,7 +94,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
           />
         </label>
         <label>
-          <OptionalMark>导出格式</OptionalMark>
+          导出格式
           <select
             aria-label="动画导出格式"
             value={options.format}

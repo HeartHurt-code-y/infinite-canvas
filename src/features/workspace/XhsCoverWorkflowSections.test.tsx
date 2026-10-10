@@ -89,7 +89,8 @@ describe("XhsCoverConfiguration", () => {
       ),
     ).toBeVisible();
     expect(screen.queryByText("（必填）")).not.toBeInTheDocument();
-    expect(screen.getAllByText("（可选）")).toHaveLength(3);
+    // 选填项不带任何标记，卡片高度优先。
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
     expect(screen.getByText("封面偏好").closest("details")).not.toHaveAttribute("open");
     fireEvent.click(screen.getByRole("button", { name: "添加人物参考图" }));
     expect(await screen.findByRole("img", { name: portrait.displayName })).toBeInTheDocument();

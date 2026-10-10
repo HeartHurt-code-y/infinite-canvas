@@ -757,9 +757,7 @@ describe("ProductSceneWorkflowSections", () => {
       />,
     );
     expect(screen.getByRole("img", { name: "待贴回的源 Logo" })).toBeVisible();
-    fireEvent.click(
-      screen.getByRole("checkbox", { name: "确认此 Logo 内容与透明边缘正确（必填）" }),
-    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "确认此 Logo 内容与透明边缘正确" }));
     const changed = change.mock.calls[0]![0] as ProductSceneWorkflowOptions;
     expect(changed.quality?.logo?.approved).toBe(true);
     rerender(
@@ -1202,14 +1200,15 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    // 名称与原图都齐：不出现缺口清单；有推荐默认值的参数统一标「（可选）」。
+    // 名称与原图都齐：不出现缺口清单；必填项只有红星，选填项不带任何标记。
     expect(screen.queryByText(/还差 \d+ 项必填内容/)).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "产品名称" }).closest("label")).toHaveTextContent(
-      "产品名称*（必填）",
-    );
-    expect(screen.getByRole("combobox", { name: "场景倾向" }).closest("label")).toHaveTextContent(
-      "场景倾向（可选）",
-    );
+    const nameLabel = screen.getByRole("textbox", { name: "产品名称" }).closest("label")!;
+    expect(nameLabel).toHaveTextContent("产品名称");
+    expect(nameLabel.querySelector(".workflow-required-mark__asterisk")).not.toBeNull();
+    const biasLabel = screen.getByRole("combobox", { name: "场景倾向" }).closest("label")!;
+    expect(biasLabel).toHaveTextContent("场景倾向");
+    expect(biasLabel.querySelector(".workflow-required-mark__asterisk")).toBeNull();
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
     unmount();
     render(
       <ProductSceneConfiguration
@@ -1219,13 +1218,18 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    // 珠宝原片保护模式：实物身份必须逐件记录，系列模板自带推荐默认值所以可选。
+    // 珠宝原片保护模式：实物身份必须逐件记录带红星，系列模板自带推荐默认值不带标记。
     expect(
-      screen.getByRole("textbox", { name: "珠宝商品 SKU" }).closest("label"),
-    ).toHaveTextContent("商品 SKU*（必填）");
+      screen
+        .getByRole("textbox", { name: "珠宝商品 SKU" })
+        .closest("label")!
+        .querySelector(".workflow-required-mark__asterisk"),
+    ).not.toBeNull();
+    const templateLabel = screen.queryByRole("textbox", { name: "系列模板名称" });
+    expect(templateLabel).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "系列模板名称" }).closest("label"),
-    ).toHaveTextContent("系列模板名称（可选）");
+      templateLabel!.closest("label")!.querySelectorAll(".workflow-required-mark__asterisk"),
+    ).toHaveLength(0);
     // 缺口清单不在配置区重复渲染：配置区默认收起，清单由节点 footer 统一可见地展示，
     // 这里只保证「说得出缺什么」的模型函数仍然列出全部 4 项。
     expect(

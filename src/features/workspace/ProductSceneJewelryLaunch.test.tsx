@@ -64,7 +64,7 @@ describe("jewelry launch draft UI", () => {
     vi.mocked(saveMarkdownDocumentToDesktop).mockResolvedValue("C:/draft.md");
     render(<Harness />);
     fireEvent.click(screen.getByRole("button", { name: "生成淘宝十图方案" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "现有商品资料（可选）" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "现有商品资料" }), {
       target: { value: "材质：水晶" },
     });
     expect(screen.getByText(/资料或原图设置已改变/)).toBeInTheDocument();

@@ -223,9 +223,10 @@ describe("Reelbench shot review", () => {
         onBriefChange={vi.fn()}
       />,
     );
-    // 只有原片带红星：分析用途、重点要求、切点、最短镜头、报告语言全是「可选」。
+    // 只有原片带红星：分析用途、重点要求、切点、最短镜头、报告语言全是选填，
+    // 选填项不带任何标记，卡片才不会被撑长。
     expect(screen.getByText("*")).toHaveClass("workflow-required-mark__asterisk");
-    expect(screen.getAllByText("（可选）")).toHaveLength(5);
+    expect(screen.queryByText("（可选）")).not.toBeInTheDocument();
 
     // 缺口清单的语义在模型层（节点 footer 统一渲染），界面标记与运行器拦截同源。
     expect(reelbenchInputReady("", createReelbenchOptions())).toBe(false);
