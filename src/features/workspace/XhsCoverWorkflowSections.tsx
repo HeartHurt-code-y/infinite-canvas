@@ -5,6 +5,7 @@ import { ImeInput } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
 import { formatRawBackendError, isDesktopRuntime, toMediaSrc } from "../../lib/backend";
 import { copyTextToDesktopClipboard } from "./desktopActions";
+import { OptionalMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import { XHS_COVER_STYLES, type XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
 
@@ -91,8 +92,7 @@ export function XhsCoverConfiguration({
           >
             <div className="canvas-commerce-workflow__materials-heading">
               <strong>
-                {title}
-                {portraits ? "（必填）" : "（可选）"}
+                <OptionalMark>{title}</OptionalMark>
               </strong>
               <button
                 type="button"
@@ -106,7 +106,7 @@ export function XhsCoverConfiguration({
             </div>
             <small>
               {portraits
-                ? "上传 1–3 张同一人物照片。不露脸时，请提供手部、半脸或侧脸等局部参考。"
+                ? "上传 1–3 张同一人物照片即可沿用真人形象；不提供时会按选题自动设计人物，不露脸时也可用手部、半脸或侧脸局部参考。"
                 : "可添加最多 5 张产品图、截图或图标；没有素材时，自动设计相关装饰。"}
             </small>
             {items.length ? (
@@ -130,7 +130,7 @@ export function XhsCoverConfiguration({
                 ))}
               </ul>
             ) : portraits ? (
-              <p>请添加人物参考图后开始制作，人物身份将沿用参考图。</p>
+              <p>还没有人物参考图：工作流会按选题自动设计人物，想沿用真实人物形象时再添加。</p>
             ) : null}
           </section>
         );
@@ -138,7 +138,6 @@ export function XhsCoverConfiguration({
       <small>
         图片合计最多 8 张。当前 {images.length} 张 · {(totalBytes / 1024 / 1024).toFixed(2)} MB。
       </small>
-      {images.length > 8 ? <p role="alert">图片超过数量限制，请移除部分图片后继续。</p> : null}
       {imageError ? <p role="alert">{imageError}</p> : null}
       <details className="canvas-knowledge-workflow__models canvas-xhs-cover__preferences">
         <summary>
@@ -150,7 +149,7 @@ export function XhsCoverConfiguration({
         </summary>
         <div className="canvas-xhs-cover__settings">
           <label className="canvas-xhs-cover__title">
-            指定标题（可选）
+            <OptionalMark>指定标题</OptionalMark>
             <ImeInput
               aria-label="封面标题"
               value={options.title}

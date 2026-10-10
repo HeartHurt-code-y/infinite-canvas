@@ -17,6 +17,7 @@ import { coverImageClient } from "../../lib/coverImages";
 import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
+import { requirementsMet, workflowRequirementsSummary } from "./workflowFieldRequirements";
 import type {
   KnowledgeVideoWorkflowRunRequest,
   KnowledgeVideoWorkflowRunner,
@@ -30,7 +31,7 @@ import {
 import {
   createXhsCoverCheckpoint,
   XHS_COVER_STYLES,
-  xhsCoverInputReady,
+  xhsCoverRequirements,
   type XhsCoverPlan,
   type XhsCoverReview,
   type XhsCoverWorkflowCheckpoint,
@@ -229,9 +230,14 @@ export function createXhsCoverWorkflowRunner(
       try {
         abort();
         const options = node.config.xhsCover;
-        if (!options || !xhsCoverInputReady(node.config.brief, options))
+        if (!options) throw new Error("封面设置缺失，请重新打开节点后再制作。");
+        // 必填边界由模型层唯一给出：只有「内容」必填，人物参考图缺了会由工作流按选题设计人物。
+        const requirements = xhsCoverRequirements(node.config.brief, options);
+        if (!requirementsMet(requirements))
           throw new Error(
-            "请填写封面主题或标题，并上传 1～3 张同一人物参考图；额外素材最多 5 张，图片必须非空，不能重复上传。局部出镜也需要真实参考图。",
+            `${workflowRequirementsSummary(requirements)}。${requirements
+              .map((requirement) => requirement.hint)
+              .join(" ")}`,
           );
         if (
           (options.style !== "auto" && !Object.hasOwn(XHS_COVER_STYLES, options.style)) ||
@@ -319,14 +325,19 @@ export function createXhsCoverWorkflowRunner(
           return checkpoint;
         }
         const references = [...options.portraits, ...options.materials];
+        const hasPortrait = options.portraits.length > 0;
         const referenceMap = references
           .map(
             (reference, index) =>
               `参考图${index + 1}=${index < options.portraits.length ? "同一人物参考" : "额外素材"}（${reference.displayName}）`,
           )
           .join("；");
+        // 没有人物参考图是允许的：此时人物由工作流按选题编排，不再声称与真实参考一致。
+        const personRule = hasPortrait
+          ? "人物占画面35%～55%，与真实参考保持一致"
+          : "本次没有人物参考图，人物形象按选题设计，画面里不要求出现真人";
         const base = () =>
-          `用户主题或正文：\n${node.config.brief}\n用户固定标题：${JSON.stringify(options.title)}（非空时逐字保留，空时自动从三个候选中择优）\n制作设置：${stableJsonSignature({ ...options, portraits: undefined, materials: undefined })}\n图片顺序：${referenceMap}\n已确认的决定：${JSON.stringify(state().confirmedDecisions ?? [])}\n风格库：${JSON.stringify(XHS_COVER_STYLES)}\n最终交付必须是3:4竖版小红书封面，1080×1440；人物占画面35%～55%，与真实参考保持一致，所有黄色统一#FDFFA7，中文主标题超粗、清晰并有粗黑描边，脸部与文字处于安全区。材料不可用或人物身份冲突时提出一个必要问题；普通构图和标题择优自行决定。`;
+          `用户主题或正文：\n${node.config.brief}\n用户固定标题：${JSON.stringify(options.title)}（非空时逐字保留，空时自动从三个候选中择优）\n制作设置：${stableJsonSignature({ ...options, portraits: undefined, materials: undefined })}\n图片顺序：${referenceMap}\n已确认的决定：${JSON.stringify(state().confirmedDecisions ?? [])}\n风格库：${JSON.stringify(XHS_COVER_STYLES)}\n最终交付必须是3:4竖版小红书封面，1080×1440；${personRule}，所有黄色统一#FDFFA7，中文主标题超粗、清晰并有粗黑描边，脸部与文字处于安全区。材料不可用或人物身份冲突时提出一个必要问题；普通构图和标题择优自行决定。`;
         const call = async <T>(
           mode: TextSkillMode,
           prompt: string,
@@ -425,7 +436,11 @@ export function createXhsCoverWorkflowRunner(
                   throw new Error("完整图片提示词必须包含逐字主标题。");
                 return {
                   ...parsed,
-                  prompt: `${parsed.prompt}\n\n【必须遵守】3:4竖版小红书封面，1080×1440。主标题逐字为「${parsed.title}」。所有黄色使用柔和浅黄色 #FDFFA7；粗黑描边，标题最醒目。${referenceMap}。真人身份以人物参考图为准，不凭空更换人物。所有重要文字、人物脸部和清单位于安全区，标题不遮挡眼睛和嘴巴。`,
+                  prompt: `${parsed.prompt}\n\n【必须遵守】3:4竖版小红书封面，1080×1440。主标题逐字为「${parsed.title}」。所有黄色使用柔和浅黄色 #FDFFA7；粗黑描边，标题最醒目。${referenceMap}。${
+                    hasPortrait
+                      ? "真人身份以人物参考图为准，不凭空更换人物。"
+                      : "没有人物参考图：人物形象由你按选题设计，不要虚构真实名人身份。"
+                  }所有重要文字、人物脸部和清单位于安全区，标题不遮挡眼睛和嘴巴。`,
                 };
               },
             );
@@ -468,7 +483,9 @@ export function createXhsCoverWorkflowRunner(
               35,
               state().taskId
                 ? "正在恢复已有封面生成任务…"
-                : "正在将人物与素材参考传入项目图片模型…",
+                : hasPortrait
+                  ? "正在将人物与素材参考传入项目图片模型…"
+                  : "正在将选题与素材参考传入项目图片模型…",
             );
             if (!state().taskId) {
               const taskId = await dependencies.generationClient.start({
@@ -568,10 +585,20 @@ export function createXhsCoverWorkflowRunner(
           abort();
           if (!state().review) {
             commit({ phase: "qc", lastActivePhase: "qc" });
-            progress("qc", 80, "正在对照人物原图、素材与最终封面检查文字和构图…");
+            progress(
+              "qc",
+              80,
+              hasPortrait
+                ? "正在对照人物原图、素材与最终封面检查文字和构图…"
+                : "正在对照素材与最终封面检查文字和构图…",
+            );
             const review = await call(
               "xhs_cover_qc",
-              `${base()}\n视觉输入顺序：第1张为待验收的最终封面，之后${references.length}张为原始参考图片（编号仍按制作说明：${referenceMap}）。必须读取实际图片，逐项对照人物身份、所需原素材、主标题逐字正确性、可读性、布局安全区和黄色色号；不能只检查提示词。完整制作方案：${stableJsonSignature(state().plan)}`,
+              `${base()}\n视觉输入顺序：第1张为待验收的最终封面${
+                references.length
+                  ? `，之后${references.length}张为原始参考图片（编号仍按制作说明：${referenceMap}）`
+                  : "，本次没有随附原始参考图片"
+              }。必须读取实际图片，逐项对照人物身份、所需原素材、主标题逐字正确性、可读性、布局安全区和黄色色号；不能只检查提示词。完整制作方案：${stableJsonSignature(state().plan)}`,
               parseXhsCoverReview,
               state().finalPath!,
             );

@@ -15,6 +15,7 @@ import {
   createXhsCoverOptions,
   xhsCoverDeliveryMarkdown,
   xhsCoverInputReady,
+  xhsCoverRequirements,
   type XhsCoverPlan,
 } from "./xhsCoverWorkflowModel";
 import {
@@ -235,20 +236,36 @@ describe("single-node portrait cover workflow", () => {
     expect(normalizer.normalize).not.toHaveBeenCalled();
   });
 
-  it("requires real portraits and rejects unsupported image models before any paid requests", async () => {
+  it("requires cover content, delivers without any portrait and rejects unsupported image models before any paid requests", async () => {
     const { fake, runner, request } = setup();
     const empty = await runner.run({
       ...request,
       node: {
         ...request.node,
-        config: { ...request.node.config, xhsCover: createXhsCoverOptions() },
+        config: { ...request.node.config, brief: "  ", xhsCover: createXhsCoverOptions() },
       },
     });
-    expect(empty.error).toContain("人物参考图");
+    // 唯一必填的是内容；改成需求清单语义后错误里不再要求人物参考图。
+    expect(empty.error).toContain("封面内容或固定标题");
+    expect(empty.error).not.toContain("人物参考图");
     const unsupported = await runner.run({ ...request, providerCatalog: catalog });
     expect(unsupported.error).toContain("图生图");
+    // 以上拦截都发生在任何付费请求之前。
     expect(fake.promptClient.run).not.toHaveBeenCalled();
     expect(fake.generation.start).not.toHaveBeenCalled();
+    // 没有人物参考图也能做到交付：人物由工作流按选题设计。
+    const portraitFree = await runner.run({
+      ...request,
+      node: {
+        ...request.node,
+        config: {
+          ...request.node.config,
+          xhsCover: { ...request.node.config.xhsCover!, portraits: [] },
+        },
+      },
+    });
+    expect(portraitFree.phase).toBe("done");
+    expect(fake.generation.start).toHaveBeenCalledOnce();
   });
 
   it("prevents title rewriting and repairs malformed plans before image submission", async () => {
@@ -528,11 +545,24 @@ describe("single-node portrait cover workflow", () => {
 });
 
 describe("cover input and model contracts", () => {
-  it("keeps portrait, image type, nonempty file and count requirements without a byte ceiling", () => {
+  it("requires only the cover content and reports unusable or excessive images as requirements", () => {
     const options = { ...createXhsCoverOptions(), portraits: [portrait] };
+    const fields = (brief: string, value: typeof options) =>
+      xhsCoverRequirements(brief, value).map((requirement) => requirement.field);
     expect(xhsCoverInputReady("教程", options)).toBe(true);
     expect(xhsCoverInputReady("", { ...options, title: "固定标题" })).toBe(true);
+    // 没有人物参考图也能开始：缺图时由工作流按选题自动设计人物，因此不再产生缺口项。
+    expect(xhsCoverInputReady("教程", { ...options, portraits: [] })).toBe(true);
+    expect(xhsCoverRequirements("教程", { ...options, portraits: [] })).toEqual([]);
+    // 内容必填，并且缺口用「字段 + 补法」表达，界面可以直接渲染。
+    expect(xhsCoverRequirements("", createXhsCoverOptions())).toEqual([
+      {
+        field: "封面内容或固定标题",
+        hint: "粘贴选题、文章或产品资料；也可以只写一个固定标题。",
+      },
+    ]);
     expect(xhsCoverInputReady("教程", { ...options, materials: [portrait] })).toBe(false);
+    expect(fields("教程", { ...options, materials: [portrait] })).toEqual(["重复图片"]);
     expect(
       xhsCoverInputReady("教程", {
         ...options,
@@ -548,9 +578,20 @@ describe("cover input and model contracts", () => {
     expect(
       xhsCoverInputReady("教程", { ...options, portraits: [{ ...portrait, kind: "video" }] }),
     ).toBe(false);
-    expect(xhsCoverInputReady("教程", { ...options, portraits: [] })).toBe(false);
+    expect(fields("教程", { ...options, portraits: [{ ...portrait, kind: "video" }] })).toEqual([
+      "人物参考图（已选的图片不可用）",
+    ]);
     expect(
       xhsCoverInputReady("教程", { ...options, portraits: [{ ...portrait, byteSize: 0 }] }),
+    ).toBe(false);
+    expect(
+      xhsCoverInputReady("教程", {
+        ...options,
+        portraits: Array.from({ length: 4 }, (_, index) => ({
+          ...portrait,
+          localPath: `C:/portrait-${index}.png`,
+        })),
+      }),
     ).toBe(false);
     expect(
       xhsCoverInputReady("教程", {

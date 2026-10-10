@@ -8,6 +8,8 @@ import { XhsCoverConfiguration, XhsCoverDeliverables } from "./XhsCoverWorkflowS
 import {
   createXhsCoverCheckpoint,
   createXhsCoverOptions,
+  xhsCoverInputReady,
+  xhsCoverRequirements,
   type XhsCoverWorkflowOptions,
 } from "./xhsCoverWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
@@ -49,7 +51,7 @@ function completedCheckpoint(): KnowledgeVideoWorkflowCheckpoint {
 }
 
 describe("XhsCoverConfiguration", () => {
-  it("requires user portraits, supports image picking/removal and preserves automatic defaults", async () => {
+  it("keeps portraits optional, supports image picking/removal and preserves automatic defaults", async () => {
     const onPick = vi
       .fn<(role: "portrait" | "material") => Promise<void>>()
       .mockResolvedValue(undefined);
@@ -80,14 +82,19 @@ describe("XhsCoverConfiguration", () => {
       );
     }
     render(<Harness />);
-    expect(screen.getByText("请添加人物参考图后开始制作，人物身份将沿用参考图。")).toBeVisible();
+    // 人物参考图已降级为选填：缺图不再是待办，而是说明会自动设计人物。
+    expect(
+      screen.getByText(
+        "还没有人物参考图：工作流会按选题自动设计人物，想沿用真实人物形象时再添加。",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText("（必填）")).not.toBeInTheDocument();
+    expect(screen.getAllByText("（可选）")).toHaveLength(3);
     expect(screen.getByText("封面偏好").closest("details")).not.toHaveAttribute("open");
     fireEvent.click(screen.getByRole("button", { name: "添加人物参考图" }));
     expect(await screen.findByRole("img", { name: portrait.displayName })).toBeInTheDocument();
     expect(onPick).toHaveBeenCalledWith("portrait");
-    expect(
-      screen.queryByText("请添加人物参考图后开始制作，人物身份将沿用参考图。"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/还没有人物参考图/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: `移除人物参考图 ${portrait.displayName}` }));
     expect(screen.queryByRole("img")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("封面偏好"));
@@ -99,6 +106,29 @@ describe("XhsCoverConfiguration", () => {
     fireEvent.change(screen.getByLabelText("封面交付方式"), { target: { value: "prompt" } });
     expect(screen.getByLabelText("封面风格")).toHaveValue("ranking");
     expect(screen.getByLabelText("封面交付方式")).toHaveValue("prompt");
+  });
+
+  it("lists the missing required items through the shared model contract, not inside the collapsed settings", () => {
+    render(
+      <XhsCoverConfiguration
+        options={{ ...createXhsCoverOptions(), portraits: [{ ...portrait, byteSize: 0 }] }}
+        disabled={false}
+        onChange={vi.fn()}
+      />,
+    );
+    // 配置区默认收起，缺口清单由节点 footer 统一渲染，避免同一张卡片上出现两份。
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    const missing = xhsCoverRequirements("", {
+      ...createXhsCoverOptions(),
+      portraits: [{ ...portrait, byteSize: 0 }],
+    });
+    expect(missing.map((requirement) => requirement.field)).toEqual([
+      "封面内容或固定标题",
+      "人物参考图（已选的图片不可用）",
+    ]);
+    // 只提供内容、完全不提供参考图时没有任何缺口（参考图已降级为选填）。
+    expect(xhsCoverRequirements("教小白搭一套 AI 工作流", createXhsCoverOptions())).toEqual([]);
+    expect(xhsCoverInputReady("教小白搭一套 AI 工作流", createXhsCoverOptions())).toBe(true);
   });
 
   it("publishes a composed Chinese title once without persisting phonetic drafts", () => {
