@@ -54,8 +54,8 @@ describe("workflow-local version controls", () => {
       </>,
     );
     const controls = screen.getAllByRole("group", { name: "当前工作流版本控制" });
-    fireEvent.click(within(controls[0]!).getByRole("button", { name: "撤销当前工作流编辑" }));
-    fireEvent.click(within(controls[0]!).getByRole("button", { name: "重做当前工作流编辑" }));
+    fireEvent.click(within(controls[0]!).getByRole("button", { name: "回到上一个工作流版本" }));
+    fireEvent.click(within(controls[0]!).getByRole("button", { name: "回到下一个工作流版本" }));
     expect(first.onUndoVersion).toHaveBeenCalledWith("workflow-one");
     expect(first.onRedoVersion).toHaveBeenCalledWith("workflow-one");
     expect(second.onUndoVersion).not.toHaveBeenCalled();
@@ -88,8 +88,8 @@ describe("workflow-local version controls", () => {
       />,
     );
     for (const name of [
-      "撤销当前工作流编辑",
-      "重做当前工作流编辑",
+      "回到上一个工作流版本",
+      "回到下一个工作流版本",
       "查看当前工作流版本历史",
       "回到版本 1",
       "重做至此版本",

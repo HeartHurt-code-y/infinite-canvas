@@ -1,0 +1,65 @@
+﻿.brand-design {
+  min-width: 0;
+  border-top: var(--rule-thin) solid var(--color-rule-2);
+  padding-top: var(--space-sm);
+}
+
+.brand-design__body,
+.brand-design__fields,
+.brand-design__fields label {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.brand-design__body {
+  margin-top: var(--space-sm);
+}
+
+.brand-design__fields {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.brand-design__fields input,
+.brand-design__fields select,
+.brand-design__fields textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.brand-design__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.brand-design__actions button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.brand-design__hint {
+  padding-left: var(--space-sm);
+  border-left: var(--rule-active) solid var(--color-warning);
+  color: var(--color-ink-2);
+}
+
+.brand-design__preview {
+  display: grid;
+  gap: var(--space-sm);
+  overflow: auto;
+  max-height: 640px;
+  min-width: 0;
+  background: var(--color-surface-2);
+}
+
+.brand-design__preview img {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-width: 0;
+}

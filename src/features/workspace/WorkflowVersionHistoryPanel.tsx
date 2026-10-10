@@ -7,6 +7,7 @@ interface VersionSummary {
   readonly parentId: string | null;
   readonly createdAt: number;
   readonly label: string;
+  readonly updatedAt?: number;
 }
 
 export function WorkflowVersionHistoryPanel({
@@ -63,7 +64,10 @@ export function WorkflowVersionHistoryPanel({
           关闭
         </button>
       </header>
-      <p>当前工作流的每次编辑都保留新版本。回退后继续编辑会创建分支，原有历史始终保留。</p>
+      <p>
+        版本按生成阶段保留：参数、模式、文案与素材调整只更新当前版本，进入新的生成阶段才新增版本。
+        回退后继续编辑会创建分支，原有阶段版本始终保留。
+      </p>
       {busy ? <p role="status">制作任务运行中，请先暂停或等待完成，再切换版本。</p> : null}
       <ol reversed start={versions.length}>
         {versions
@@ -80,6 +84,9 @@ export function WorkflowVersionHistoryPanel({
                   </strong>
                   <span>
                     {new Date(version.createdAt).toLocaleString("zh-CN")}
+                    {version.updatedAt !== undefined && version.updatedAt !== version.createdAt
+                      ? ` · 编辑于 ${new Date(version.updatedAt).toLocaleString("zh-CN")}`
+                      : ""}
                     {version.parentId
                       ? ` · 源自版本 ${numbers.get(version.parentId) ?? "—"}`
                       : " · 初始版本"}

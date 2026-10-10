@@ -17,6 +17,10 @@ export interface WorkflowVersionSummary {
   readonly parentId: string | null;
   readonly createdAt: number;
   readonly label: string;
+  /** Working copies refresh this on every in-place rewrite; sealed versions keep it undefined. */
+  readonly updatedAt?: number;
+  /** True while this version is the mutable working copy of the stage in progress. */
+  readonly open?: boolean;
 }
 
 export interface WorkflowVersion extends WorkflowVersionSummary {
@@ -253,6 +257,104 @@ function invalidateRestoredShotOutputs(
   checkpoint["lastActivePhase"] = changedMedia ? "generating" : "composing";
 }
 
+/**
+ * 版本链记录的是「生成阶段」，不是「每一次编辑」。
+ *
+ * 参数、模式、文案或素材的微调只改变当前阶段的输入，就地改写当前工作副本即可；
+ * 只有工作流真正跨进下一个生成阶段（或用户重开一次制作）时才封版建档。
+ * 这样回退一次就回到一个有意义的阶段起点，而不是回到某个中间参数。
+ */
+export type WorkflowVersionStage = "draft" | "planned" | "generating" | "qc" | "composing" | "done";
+
+const WORKFLOW_VERSION_STAGE_RANK: Readonly<Record<WorkflowVersionStage, number>> = {
+  draft: 0,
+  planned: 1,
+  generating: 2,
+  qc: 3,
+  composing: 4,
+  done: 5,
+};
+
+const WORKFLOW_VERSION_STAGE_LABELS: Readonly<Record<WorkflowVersionStage, string>> = {
+  draft: "编辑草稿",
+  planned: "已生成计划",
+  generating: "生成阶段",
+  qc: "质检阶段",
+  composing: "合成阶段",
+  done: "制作完成",
+};
+
+/** 计划存在的证据；阶段字段才是主判据，这里只兜底「已出方案但阶段回到 idle」的载体。 */
+function hasWorkflowPlan(config: KnowledgeVideoWorkflowConfig): boolean {
+  if (config.executionPlan) return true;
+  const checkpoint = config.checkpoint;
+  if (
+    checkpoint.script.trim() ||
+    checkpoint.storyboard.trim() ||
+    checkpoint.manifest.trim() ||
+    checkpoint.shots.length > 0 ||
+    checkpoint.planRevision > 0
+  )
+    return true;
+  if (
+    checkpoint.productScene?.rows.length ||
+    checkpoint.remotion?.plan ||
+    checkpoint.reverseVideo?.analysis ||
+    checkpoint.reelbench?.draft ||
+    checkpoint.film?.artifacts.length ||
+    checkpoint.xhsCover?.plan
+  )
+    return true;
+  if (Object.keys(checkpoint.musicVideo?.stages ?? {}).length) return true;
+  if (Object.keys(checkpoint.commerce?.stages ?? {}).length) return true;
+  return Boolean(
+    checkpoint.comicDrama?.episodes.some((episode) => Object.keys(episode.stages).length),
+  );
+}
+
+/** 暂停与失败不是新的生成阶段：沿用真实停留过的那一个阶段。 */
+function pausedWorkflowStage(config: KnowledgeVideoWorkflowConfig): WorkflowVersionStage {
+  switch (config.checkpoint.lastActivePhase) {
+    case "composing":
+      return "composing";
+    case "qc":
+      return "qc";
+    case "generating":
+      return "generating";
+    case "planning":
+      return "planned";
+    case null:
+      return hasWorkflowPlan(config) ? "planned" : "draft";
+  }
+}
+
+/** 当前所处的生成阶段；暂停与失败保留真实停留阶段，本身不算阶段推进。 */
+export function workflowVersionStage(config: KnowledgeVideoWorkflowConfig): WorkflowVersionStage {
+  switch (config.checkpoint.phase) {
+    case "composing":
+      return "composing";
+    case "qc":
+      return "qc";
+    case "generating":
+      return "generating";
+    case "planning":
+    case "awaiting_approval":
+      return "planned";
+    case "done":
+      return "done";
+    case "paused":
+    case "failed":
+      return pausedWorkflowStage(config);
+    case "idle":
+      return hasWorkflowPlan(config) ? "planned" : "draft";
+  }
+}
+
+/** 输入身份：只有它变了，阶段回退才代表「上一轮成果必须留档」。 */
+function workflowInputSignature(config: KnowledgeVideoWorkflowConfig): string {
+  return workflowExecutionInputSignature(asNode({ ...config, brief: originalBrief(config) }));
+}
+
 // Config objects are replaced immutably across the app, so one reference's signature
 // never changes. Publishing a checkpoint recomputes this signature several times
 // (runner publish, canvas store, history enqueue) over a plan that can hold 500 rows;
@@ -278,8 +380,9 @@ export function workflowVersionContentSignature(config: KnowledgeVideoWorkflowCo
   return signature;
 }
 
-// Version records are created once and never mutated, so their full-JSON signatures
-// (used to detect conflicting history merges) are cacheable per reference.
+// Sealed version records are created once and never mutated; working copies are replaced by a
+// new record object instead of being written into. Full-JSON signatures (used to detect
+// conflicting history merges) are therefore cacheable per reference.
 const versionSignatureCache = new WeakMap<object, string>();
 
 function versionSignature(value: WorkflowVersion): string {
@@ -503,8 +606,75 @@ function newVersion(
   config: KnowledgeVideoWorkflowConfig,
   parentId: string | null,
   label: string,
+  open: boolean,
 ): WorkflowVersion {
-  return { id: versionId(), parentId, createdAt: Date.now(), label, config: snapshot(config) };
+  return {
+    id: versionId(),
+    parentId,
+    createdAt: Date.now(),
+    label,
+    ...(open ? { open: true } : {}),
+    config: snapshot(config),
+  };
+}
+
+/** 未封版的工作副本可以被同名改写；封版版本永远保持原样。 */
+function isOpenVersion(version: WorkflowVersion | undefined): boolean {
+  return version?.open === true;
+}
+
+function replaceVersion(
+  history: WorkflowVersionHistory,
+  id: string,
+  next: WorkflowVersion,
+): WorkflowVersionHistory {
+  return {
+    ...history,
+    versions: history.versions.map((version) => (version.id === id ? next : version)),
+  };
+}
+
+/** 就地改写当前工作副本：参数、模式、文案微调都在这里落账，不新增版本。 */
+function amendVersion(
+  history: WorkflowVersionHistory,
+  config: KnowledgeVideoWorkflowConfig,
+): WorkflowVersionHistory {
+  const current = history.versions.find((version) => version.id === history.currentVersionId);
+  if (!current) throw new Error(`找不到工作流版本：${history.currentVersionId}`);
+  return replaceVersion(history, current.id, {
+    ...current,
+    open: true,
+    updatedAt: Date.now(),
+    config: snapshot(config),
+  });
+}
+
+/** 阶段推进前先封版：工作副本保留为上一阶段的起点快照。 */
+function sealVersion(history: WorkflowVersionHistory, config: KnowledgeVideoWorkflowConfig) {
+  const current = history.versions.find((version) => version.id === history.currentVersionId);
+  if (!current) throw new Error(`找不到工作流版本：${history.currentVersionId}`);
+  if (!isOpenVersion(current)) return history;
+  const sealed: WorkflowVersion = { ...current, config: snapshot(config) };
+  delete (sealed as { open?: boolean }).open;
+  return replaceVersion(history, current.id, sealed);
+}
+
+function appendVersion(
+  history: WorkflowVersionHistory,
+  config: KnowledgeVideoWorkflowConfig,
+  label: string,
+  open: boolean,
+): WorkflowVersionHistory {
+  const version = newVersion(config, history.currentVersionId, label, open);
+  return {
+    ...history,
+    currentVersionId: version.id,
+    versions: [...history.versions, version],
+    preferredChildByVersion: {
+      ...history.preferredChildByVersion,
+      [history.currentVersionId]: version.id,
+    },
+  };
 }
 
 function assertHistory(value: unknown): asserts value is WorkflowVersionHistory {
@@ -534,6 +704,14 @@ function assertHistory(value: unknown): asserts value is WorkflowVersionHistory 
     const parentId = raw["parentId"];
     if (parentId !== null && (typeof parentId !== "string" || !known.has(parentId))) {
       throw new Error("工作流版本链包含循环或缺失的父版本。");
+    }
+    const open = raw["open"];
+    const updatedAt = raw["updatedAt"];
+    if (
+      (open !== undefined && typeof open !== "boolean") ||
+      (updatedAt !== undefined && (typeof updatedAt !== "number" || !Number.isFinite(updatedAt)))
+    ) {
+      throw new Error("工作流版本身份或元数据无效。");
     }
     const content = raw["config"];
     if (
@@ -578,7 +756,8 @@ export function initializeWorkflowVersions(
   config: KnowledgeVideoWorkflowConfig,
 ): KnowledgeVideoWorkflowConfig {
   if (historyOf(config)) return config;
-  const initial = newVersion(config, null, "初始版本");
+  // 初始版本就是一个工作副本：生成开始前的所有参数/模式调整都改写在它身上。
+  const initial = newVersion(config, null, "初始版本", true);
   return {
     ...config,
     versionHistory: {
@@ -596,22 +775,29 @@ function mergeHistories(
 ): WorkflowVersionHistory {
   if (!incoming || incoming === current) return current;
   const byId = new Map(current.versions.map((version) => [version.id, version]));
-  let additions: WorkflowVersion[] | undefined;
+  let merged = current;
   for (const version of incoming.versions) {
     const existing = byId.get(version.id);
     if (existing) {
-      if (versionSignature(existing) !== versionSignature(version)) {
-        throw new Error(`工作流版本 ${version.id} 存在不同内容，无法覆盖已有历史。`);
+      if (versionSignature(existing) === versionSignature(version)) continue;
+      // 工作副本本来就会被就地改写：画布旧快照、撤销栈与历史库里的同名副本允许不一致，
+      // 取调用方正在生效的这一份（返回值永远由 nextConfig 派生）。封版版本仍必须逐字一致，
+      // 否则说明历史被外部改坏，宁可报错也不静默覆盖用户的版本记录。
+      if (isOpenVersion(existing) || isOpenVersion(version)) {
+        merged = replaceVersion(merged, version.id, version);
+        byId.set(version.id, version);
+        continue;
       }
-      continue;
+      throw new Error(`工作流版本 ${version.id} 存在不同内容，无法覆盖已有历史。`);
     }
-    additions ??= [];
-    additions.push(version);
+    merged = {
+      ...merged,
+      versions: [...merged.versions, version],
+    };
     byId.set(version.id, version);
   }
   return {
-    ...current,
-    versions: additions ? [...current.versions, ...additions] : current.versions,
+    ...merged,
     ...(current.runtimeArchives?.length || incoming.runtimeArchives?.length
       ? { runtimeArchives: mergeRuntimeArchives(current.runtimeArchives, incoming.runtimeArchives) }
       : {}),
@@ -636,23 +822,6 @@ function moveCursor(history: WorkflowVersionHistory, id: string): WorkflowVersio
   return { ...history, currentVersionId: id, preferredChildByVersion: preferred };
 }
 
-function appendVersion(
-  history: WorkflowVersionHistory,
-  config: KnowledgeVideoWorkflowConfig,
-  label: string,
-): WorkflowVersionHistory {
-  const version = newVersion(config, history.currentVersionId, label);
-  return {
-    ...history,
-    currentVersionId: version.id,
-    versions: [...history.versions, version],
-    preferredChildByVersion: {
-      ...history.preferredChildByVersion,
-      [history.currentVersionId]: version.id,
-    },
-  };
-}
-
 function matchesVersion(
   current: KnowledgeVideoWorkflowConfig,
   incoming: KnowledgeVideoWorkflowConfig,
@@ -665,11 +834,34 @@ function matchesVersion(
   );
 }
 
+/**
+ * 只有两种情况需要新建版本：
+ * 1. 跨进下一个生成阶段（规划 → 生成 → 质检 → 合成 → 完成）；
+ * 2. 输入变更导致阶段回退——例如改了参数让已完成的计划作废，上一轮成果必须留档。
+ * 其余变化（参数、模式、文案、素材、重开制作、同一阶段内的进度）都就地改写当前工作副本，
+ * 或由封版规则自然派生出一个新的工作副本。这样一次回退就是回到一个生成阶段的起点，
+ * 而不是回到某个中间参数。
+ */
+function needsMilestone(
+  tip: WorkflowVersion,
+  previous: KnowledgeVideoWorkflowConfig,
+  next: KnowledgeVideoWorkflowConfig,
+): boolean {
+  const tipStage = workflowVersionStage(tip.config);
+  const nextStage = workflowVersionStage(next);
+  if (WORKFLOW_VERSION_STAGE_RANK[nextStage] > WORKFLOW_VERSION_STAGE_RANK[tipStage]) return true;
+  return Boolean(
+    WORKFLOW_VERSION_STAGE_RANK[tipStage] >= WORKFLOW_VERSION_STAGE_RANK.generating &&
+    WORKFLOW_VERSION_STAGE_RANK[nextStage] < WORKFLOW_VERSION_STAGE_RANK[tipStage] &&
+    workflowInputSignature(previous) !== workflowInputSignature(next),
+  );
+}
+
 /** Accept externally recorded checkpoints and explicit navigation without recording them twice. */
 export function recordWorkflowVersion(
   previousConfig: KnowledgeVideoWorkflowConfig,
   nextConfig: KnowledgeVideoWorkflowConfig,
-  label = "编辑工作流",
+  label?: string,
 ): KnowledgeVideoWorkflowConfig {
   const previous = initializeWorkflowVersions(previousConfig);
   const history = previous.versionHistory!;
@@ -688,10 +880,28 @@ export function recordWorkflowVersion(
     }
   }
   const changed =
-    workflowVersionContentSignature(previous) !== workflowVersionContentSignature(nextConfig);
+    workflowVersionContentSignature(previous) !== workflowVersionContentSignature(nextConfig) ||
+    workflowVersionStage(previous) !== workflowVersionStage(nextConfig);
+  if (!changed) return { ...nextConfig, versionHistory: merged };
+  const tip = merged.versions.find((version) => version.id === merged.currentVersionId);
+  if (!tip) throw new Error(`找不到工作流版本：${merged.currentVersionId}`);
+  if (needsMilestone(tip, previous, nextConfig)) {
+    const stage = workflowVersionStage(nextConfig);
+    return {
+      ...nextConfig,
+      versionHistory: appendVersion(
+        sealVersion(merged, previous),
+        nextConfig,
+        label ?? WORKFLOW_VERSION_STAGE_LABELS[stage],
+        false,
+      ),
+    };
+  }
   return {
     ...nextConfig,
-    versionHistory: changed ? appendVersion(merged, nextConfig, label) : merged,
+    versionHistory: isOpenVersion(tip)
+      ? amendVersion(merged, nextConfig)
+      : appendVersion(merged, nextConfig, label ?? "编辑工作流", true),
   };
 }
 
@@ -761,7 +971,8 @@ export function mergeWorkflowVersionHistory(
               workflowVersionContentSignature(incomingConfig),
           );
   if (matching) merged = moveCursor(merged, matching.id);
-  else merged = appendVersion(merged, incomingConfig, "恢复工作流配置");
+  // 画布上生效的内容还没有任何版本承载它：补一个工作副本，后续编辑继续改写它。
+  else merged = appendVersion(merged, incomingConfig, "恢复工作流配置", true);
   const contentMatches =
     workflowVersionContentSignature(current) === workflowVersionContentSignature(incomingConfig);
   if (!contentMatches) merged = archiveExecution(merged, current);
@@ -798,12 +1009,16 @@ export function workflowVersionState(config: KnowledgeVideoWorkflowConfig): Work
   }
   return {
     currentVersionId: history.currentVersionId,
-    versions: history.versions.map(({ id: versionId, parentId, createdAt, label }) => ({
-      id: versionId,
-      parentId,
-      createdAt,
-      label,
-    })),
+    versions: history.versions.map(
+      ({ id: versionId, parentId, createdAt, label, updatedAt, open }) => ({
+        id: versionId,
+        parentId,
+        createdAt,
+        label,
+        ...(updatedAt === undefined ? {} : { updatedAt }),
+        ...(open ? { open: true } : {}),
+      }),
+    ),
     redoVersionIds: history.versions
       .filter((version) => version.parentId === history.currentVersionId)
       .map((version) => version.id),

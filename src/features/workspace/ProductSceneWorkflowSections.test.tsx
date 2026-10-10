@@ -5,6 +5,7 @@ import { node } from "../../test/videoWorkflowFixtures";
 import { mediaClient } from "../../lib/backend";
 import * as backend from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
+import type * as ProductSceneModule from "../../lib/productSceneImages";
 import {
   ProductSceneConfiguration,
   ProductSceneDeliverables,
@@ -15,6 +16,7 @@ import {
   createJewelrySceneOptions,
   JEWELRY_REVIEW_CHECKS,
   generateProductScenePlan,
+  productSceneRequirements,
   type ProductSceneWorkflowOptions,
   type ProductSceneRow,
 } from "./productSceneWorkflowModel";
@@ -22,8 +24,11 @@ import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import type { ProductSceneInspection } from "./productSceneQuality";
 import { initializeWorkflowVersions, recordWorkflowVersion } from "./workflowVersionHistory";
 import { isSupportedConnection } from "../canvas/canvasStore";
+import { createBrandDesignDocument } from "./brandDesignModel";
+import { generateJewelryLaunchDraft } from "./jewelryLaunchPlan";
 
-vi.mock("../../lib/productSceneImages", () => ({
+vi.mock("../../lib/productSceneImages", async (importOriginal) => ({
+  ...(await importOriginal<typeof ProductSceneModule>()),
   productSceneImageClient: { prepare: vi.fn(), prepareLogo: vi.fn(), export: vi.fn() },
 }));
 
@@ -67,6 +72,7 @@ function jewelryOptions(): ProductSceneWorkflowOptions {
   const base = createJewelrySceneOptions();
   return {
     ...base,
+    aspectRatio: "3:4",
     totalCount: 1,
     jewelry: {
       ...base.jewelry!,
@@ -111,6 +117,132 @@ function jewelryCheckpoint(configured = jewelryOptions()): KnowledgeVideoWorkflo
 }
 
 describe("ProductSceneWorkflowSections", () => {
+  it("selects valid brand styles, retains the design project across modes and labels wearing references", () => {
+    const base = jewelryOptions();
+    const draft = generateJewelryLaunchDraft(base);
+    const design = createBrandDesignDocument(draft);
+    let latest = base;
+    function Harness() {
+      const [value, setValue] = useState<ProductSceneWorkflowOptions>({
+        ...base,
+        jewelry: { ...base.jewelry!, launch: { draft, design } },
+      });
+      latest = value;
+      return (
+        <ProductSceneConfiguration
+          options={value}
+          disabled={false}
+          onChange={setValue}
+          onBusyChange={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    fireEvent.change(screen.getByRole("combobox", { name: "AI 品牌摄影风格" }), {
+      target: { value: "retro" },
+    });
+    expect(latest.brandCreative?.style).toBe("retro");
+    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
+      target: { value: "reference" },
+    });
+    expect(latest.generationMode).toBe("reference");
+    expect(latest.views).toEqual([]);
+    expect(latest.jewelry?.launch?.design).toEqual(design);
+    expect(screen.getByLabelText("品牌图文设计")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "场景倾向" })).not.toBeInTheDocument();
+  });
+
+  it("prepares full brand reference photographs and preserves explicit wearing purpose", async () => {
+    vi.spyOn(backend, "pickPromptMultimodalFiles").mockResolvedValue([
+      {
+        localPath: "C:/photo/wearing.jpg",
+        displayName: "佩戴原片",
+        kind: "image",
+        mimeType: "image/jpeg",
+        byteSize: 32000,
+      },
+    ]);
+    const prepare = vi.spyOn(productSceneImageClient, "prepare").mockResolvedValue({
+      path: "C:/prepared/wearing.png",
+      contentHash: "d".repeat(64),
+      width: 2000,
+      height: 1600,
+    });
+    let latest: ProductSceneWorkflowOptions = options();
+    function Harness() {
+      const [value, setValue] = useState<ProductSceneWorkflowOptions>({
+        ...options(),
+        views: [],
+        generationMode: "reference",
+        brandCreative: { style: "quiet", brief: "" },
+      });
+      latest = value;
+      return (
+        <ProductSceneConfiguration
+          options={value}
+          disabled={false}
+          onChange={setValue}
+          onBusyChange={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    fireEvent.click(screen.getByRole("button", { name: "添加完整实拍 / 佩戴原片" }));
+    await screen.findByRole("combobox", { name: "佩戴原片 照片用途" });
+    expect(prepare).toHaveBeenCalledWith({
+      sourcePath: "C:/photo/wearing.jpg",
+      preservePhoto: true,
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "佩戴原片 照片用途" }), {
+      target: { value: "wearing" },
+    });
+    expect(latest.views[0]).toMatchObject({
+      photoRole: "wearing",
+      preparedPath: "C:/prepared/wearing.png",
+      approved: false,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "建立品牌图文制作单" }));
+    expect(latest.generationMode).toBe("reference");
+    expect(latest.views[0]?.preparedPath).toBe("C:/prepared/wearing.png");
+    expect(latest.jewelry).toBeDefined();
+  });
+
+  it("restores a previously processed brand reference from the original and revokes source approval", async () => {
+    const prepare = vi.spyOn(productSceneImageClient, "prepare").mockResolvedValue({
+      path: "C:/brand/full.png",
+      contentHash: "e".repeat(64),
+      width: 2400,
+      height: 1600,
+    });
+    const configured: ProductSceneWorkflowOptions = {
+      ...options(),
+      generationMode: "reference",
+      brandCreative: { style: "editorial", brief: "" },
+    };
+    const change = vi.fn<(next: ProductSceneWorkflowOptions) => void>();
+    render(
+      <ProductSceneConfiguration
+        options={configured}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重新准备 机身原图 完整原片" }));
+    await waitFor(() => expect(change).toHaveBeenCalledOnce());
+    expect(prepare).toHaveBeenCalledWith({
+      sourcePath: "C:/product/front.png",
+      preservePhoto: true,
+    });
+    expect(change.mock.calls[0]?.[0].views[0]).toMatchObject({
+      id: "front",
+      sourcePath: "C:/product/front.png",
+      preparedPath: "C:/brand/full.png",
+      contentHash: "e".repeat(64),
+      approved: false,
+    });
+  });
+
   it("prepares a complete jewelry photograph without background removal and requires source approval", async () => {
     vi.spyOn(backend, "pickPromptMultimodalFiles").mockResolvedValue([
       {
@@ -625,7 +757,9 @@ describe("ProductSceneWorkflowSections", () => {
       />,
     );
     expect(screen.getByRole("img", { name: "待贴回的源 Logo" })).toBeVisible();
-    fireEvent.click(screen.getByRole("checkbox", { name: "确认此 Logo 内容与透明边缘正确" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "确认此 Logo 内容与透明边缘正确（必填）" }),
+    );
     const changed = change.mock.calls[0]![0] as ProductSceneWorkflowOptions;
     expect(changed.quality?.logo?.approved).toBe(true);
     rerender(
@@ -1056,5 +1190,50 @@ describe("ProductSceneWorkflowSections", () => {
     });
     expect(next.versionHistory!.versions).toHaveLength(original.versionHistory!.versions.length);
     expect(next.checkpoint.productScene!.rows[0]!.taskId).toBe("paid-1");
+  });
+
+  it("marks required parameters with a red asterisk and lists every missing required item", () => {
+    const change = vi.fn();
+    const { unmount } = render(
+      <ProductSceneConfiguration
+        options={options()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 名称与原图都齐：不出现缺口清单；有推荐默认值的参数统一标「（可选）」。
+    expect(screen.queryByText(/还差 \d+ 项必填内容/)).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "产品名称" }).closest("label")).toHaveTextContent(
+      "产品名称*（必填）",
+    );
+    expect(screen.getByRole("combobox", { name: "场景倾向" }).closest("label")).toHaveTextContent(
+      "场景倾向（可选）",
+    );
+    unmount();
+    render(
+      <ProductSceneConfiguration
+        options={createJewelrySceneOptions()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 珠宝原片保护模式：实物身份必须逐件记录，系列模板自带推荐默认值所以可选。
+    expect(
+      screen.getByRole("textbox", { name: "珠宝商品 SKU" }).closest("label"),
+    ).toHaveTextContent("商品 SKU*（必填）");
+    expect(
+      screen.getByRole("textbox", { name: "系列模板名称" }).closest("label"),
+    ).toHaveTextContent("系列模板名称（可选）");
+    // 缺口清单不在配置区重复渲染：配置区默认收起，清单由节点 footer 统一可见地展示，
+    // 这里只保证「说得出缺什么」的模型函数仍然列出全部 4 项。
+    expect(
+      productSceneRequirements({
+        ...createJewelrySceneOptions(),
+        productName: "和田玉手串",
+        views: [],
+      }).map((requirement) => requirement.field),
+    ).toEqual(["产品参考原图", "商品 SKU", "单件实物编号 / 天然纹理身份", "必须保留的关键特征"]);
   });
 });

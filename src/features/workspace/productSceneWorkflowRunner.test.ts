@@ -6,7 +6,7 @@ import {
   resetProductSceneQuality,
   type ProductSceneInspection,
 } from "./productSceneQuality";
-import type { ProductSceneImageClient } from "../../lib/productSceneImages";
+import { productSceneOutputSize, type ProductSceneImageClient } from "../../lib/productSceneImages";
 import { catalog, completedTask, node } from "../../test/videoWorkflowFixtures";
 import { approveWorkflowExecutionPlan, createWorkflowExecutionPlan } from "./workflowExecutionPlan";
 import {
@@ -18,6 +18,7 @@ import {
   productSceneRecipeSignature,
   productSceneInputReady,
   productSceneInputSignature,
+  productSceneRequirements,
   updateProductSceneViewProtection,
   canRetryProductSceneRow,
   retryProductSceneRow,
@@ -95,6 +96,7 @@ function jewelryOptions(): ProductSceneWorkflowOptions {
   const defaults = createJewelrySceneOptions();
   return {
     ...defaults,
+    aspectRatio: "3:4",
     totalCount: 2,
     jewelry: {
       ...defaults.jewelry!,
@@ -142,7 +144,7 @@ function setup(config: ProductSceneWorkflowOptions = options) {
     applyLogo: vi.fn((command: Parameters<ProductSceneImageClient["applyLogo"]>[0]) =>
       Promise.resolve({
         path: `C:\\logo-applied\\${command.outputId}.png`,
-        width: config.aspectRatio === "3:4" ? 1536 : 1152,
+        width: productSceneOutputSize(config.aspectRatio).width,
         height: 2048,
         imageHash: "fedcba9876543210",
         logoHash: command.logoHash,
@@ -151,7 +153,7 @@ function setup(config: ProductSceneWorkflowOptions = options) {
     compose: vi.fn((command: Parameters<ProductSceneImageClient["compose"]>[0]) =>
       Promise.resolve({
         path: `C:\\composed\\${command.outputId}.png`,
-        width: command.aspectRatio === "3:4" ? 1536 : 1152,
+        width: productSceneOutputSize(command.aspectRatio).width,
         height: 2048,
         backgroundHash: "0123456789abcdef",
         foregroundHash: hash,
@@ -161,7 +163,7 @@ function setup(config: ProductSceneWorkflowOptions = options) {
       (command: Parameters<NonNullable<ProductSceneImageClient["composeProtected"]>>[0]) =>
         Promise.resolve({
           path: `C:\\protected\\${command.outputId}.png`,
-          width: command.aspectRatio === "3:4" ? 1536 : 1152,
+          width: productSceneOutputSize(command.aspectRatio).width,
           height: 2048,
           backgroundHash: "0123456789abcdef",
           foregroundHash: command.productHash,
@@ -180,7 +182,7 @@ function setup(config: ProductSceneWorkflowOptions = options) {
       (command: Parameters<ProductSceneImageClient["normalizeGenerated"]>[0]) =>
         Promise.resolve({
           path: `C:\\generated\\${command.outputId}.png`,
-          width: command.aspectRatio === "3:4" ? 1536 : 1152,
+          width: productSceneOutputSize(command.aspectRatio).width,
           height: 2048,
           imageHash: "0123456789abcdef",
           sourceWidth: 1024,
@@ -263,6 +265,23 @@ function setup(config: ProductSceneWorkflowOptions = options) {
 }
 
 describe("protected jewelry scenes", () => {
+  it("runs square protected composition without altering the original source identity", async () => {
+    const config = { ...jewelryOptions(), aspectRatio: "1:1" as const, totalCount: 1 };
+    const { runner, request, resume, imageClient, generation } = setup(config);
+    const plan = await runner.run(request);
+    expect(generation.start).not.toHaveBeenCalled();
+    expect(plan.productScene!.rows[0]!.recipe.prompt).toContain("Square 1:1");
+    const result = await runner.run(resume(plan, 1));
+    expect(imageClient.composeProtected).toHaveBeenCalledWith(
+      expect.objectContaining({
+        aspectRatio: "1:1",
+        productPath: config.views[0]!.preparedPath,
+        productHash: hash,
+      }),
+    );
+    expect(result.productScene!.rows[0]!.outputPath).toBeTruthy();
+    expect(result.productScene!.rows[0]!.status).toBe("needs_review");
+  });
   it("requires physical identity, features and an approved valid protection region without hardware quality", () => {
     const config = jewelryOptions();
     expect(createJewelrySceneOptions(options)).toMatchObject({
@@ -307,6 +326,25 @@ describe("protected jewelry scenes", () => {
         views: [{ ...view, protection: { ...view.protection!, feather: Infinity } }],
       }),
     ).toBe(false);
+  });
+
+  it("derives the missing-required list from the same conditions the runner blocks on", () => {
+    const config = jewelryOptions();
+    expect(productSceneInputReady(config)).toBe(true);
+    expect(productSceneRequirements(config)).toEqual([]);
+    const missing = productSceneRequirements(createJewelrySceneOptions());
+    expect(missing.map((item) => item.field)).toEqual([
+      "产品参考原图",
+      "商品 SKU",
+      "单件实物编号 / 天然纹理身份",
+      "必须保留的关键特征",
+    ]);
+    expect(missing.every((item) => item.hint.trim().length > 0)).toBe(true);
+    for (const field of ["skuId", "specimenId", "criticalFeatures"] as const) {
+      const broken = { ...config, jewelry: { ...config.jewelry!, [field]: " " } };
+      expect(productSceneInputReady(broken)).toBe(false);
+      expect(productSceneRequirements(broken)).not.toEqual([]);
+    }
   });
 
   it("invalidates source approval and plan signatures after source, region or frozen template changes", () => {
@@ -824,7 +862,7 @@ describe("product scene plan", () => {
     }
   });
 
-  it.each(["3:4", "9:16"] as const)(
+  it.each(["1:1", "3:4", "9:16"] as const)(
     "uses declared %s model geometry and always submits one image",
     (aspectRatio) => {
       const model = {
@@ -891,6 +929,53 @@ describe("product scene plan", () => {
 });
 
 describe("recoverable product scene batches", () => {
+  it("submits brand photography with ordered actual product and wearing references only after approval", async () => {
+    const brandOptions: ProductSceneWorkflowOptions = {
+      ...options,
+      generationMode: "reference",
+      productName: "杉间珍珠耳饰",
+      totalCount: 1,
+      batchSize: 1,
+      brandCreative: { style: "editorial", brief: "成年原创模特，冷白留白，实际耳饰尺寸" },
+      views: [
+        { ...options.views[0]!, label: "耳饰实物", photoRole: "full" },
+        {
+          ...options.views[0]!,
+          id: "wearing",
+          label: "实际佩戴图",
+          preparedPath: "C:/product/wearing.png",
+          contentHash: "b".repeat(64),
+          photoRole: "wearing",
+        },
+      ],
+    };
+    const { runner, request, resume, generation } = setup(brandOptions);
+    const plan = await runner.run(request);
+    expect(plan.phase).toBe("awaiting_approval");
+    expect(generation.start).not.toHaveBeenCalled();
+    const result = await runner.run(resume(plan, 1));
+    expect(generation.start).toHaveBeenCalledOnce();
+    const command = vi.mocked(generation.start).mock.calls[0]![0];
+    const text = command.prompt[0];
+    expect(text?.kind).toBe("text");
+    if (text?.kind !== "text") throw new Error("missing brand prompt");
+    expect(text.text).toContain("Actual product reference map:");
+    expect(text.text).toContain("role wearing");
+    expect(text.text).toContain("杉间珍珠耳饰");
+    expect(text.text).not.toContain("all are the same hardware");
+    expect(command.prompt.slice(1)).toEqual(
+      brandOptions.views.map((view, index) => ({
+        kind: "media_reference",
+        mentionId: `product-scene-reference-${view.id}`,
+        target: { kind: "local_file", path: view.preparedPath, mediaType: "image" },
+        displayNameSnapshot: view.label,
+        typePosition: index + 1,
+        contentIndex: index + 1,
+      })),
+    );
+    expect(result.productScene?.rows[0]?.taskId).toBe("image-1");
+  });
+
   it("inspects image plus ordered references, then perspective-places only the approved logo asset", async () => {
     const qualityOptions: ProductSceneWorkflowOptions = {
       ...options,

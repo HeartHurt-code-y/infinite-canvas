@@ -2,6 +2,7 @@ pub mod ai_media;
 pub mod ai_media_runtime;
 pub mod asset_library;
 pub mod blender;
+pub mod brand_design;
 mod browser_media;
 pub mod commands;
 pub mod commerce_sources;

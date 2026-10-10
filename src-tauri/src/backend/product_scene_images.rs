@@ -4,11 +4,13 @@
 use std::{
     collections::VecDeque,
     fs::{self, OpenOptions},
-    io::{BufWriter, Cursor, Read as _, Write as _},
+    io::{BufRead, BufWriter, Cursor, Read as _, Seek, Write as _},
     path::{Path, PathBuf},
 };
 
-use image::{DynamicImage, ImageFormat, ImageReader, Rgba, RgbaImage, imageops};
+use image::{
+    DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits, Rgba, RgbaImage, imageops,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -220,9 +222,10 @@ fn output_width(output_id: &str, aspect_ratio: &str) -> BackendResult<u32> {
         return Err(invalid("产品场景图输出标识无效。"));
     }
     match aspect_ratio {
+        "1:1" => Ok(2048),
         "3:4" => Ok(1536),
         "9:16" => Ok(1152),
-        _ => Err(invalid("产品场景图仅支持 3:4 或 9:16。")),
+        _ => Err(invalid("产品场景图仅支持 1:1、3:4 或 9:16。")),
     }
 }
 
@@ -250,10 +253,28 @@ fn hash_file(path: &Path) -> BackendResult<String> {
 
 fn decode(path: &Path) -> BackendResult<DynamicImage> {
     // No file byte-size restriction. Retain the image crate's decoder allocation guard.
-    ImageReader::open(path)?
-        .with_guessed_format()?
-        .decode()
-        .map_err(image_error)
+    decode_oriented(
+        ImageReader::open(path)?.with_guessed_format()?,
+        Limits::default(),
+    )
+}
+
+fn decode_oriented<R: BufRead + Seek>(
+    mut reader: ImageReader<R>,
+    mut limits: Limits,
+) -> BackendResult<DynamicImage> {
+    // `into_decoder` does not reserve the output buffer like `ImageReader::decode`.
+    // Keep that reservation as well as the decoder's own format-specific limits.
+    reader.limits(limits.clone());
+    let mut decoder = reader.into_decoder().map_err(image_error)?;
+    limits.reserve(decoder.total_bytes()).map_err(image_error)?;
+    decoder.set_limits(limits).map_err(image_error)?;
+    let orientation = decoder.orientation().map_err(image_error)?;
+    let mut image = DynamicImage::from_decoder(decoder).map_err(image_error)?;
+    // Normalize the working pixels before measuring, cropping, or choosing a
+    // protected region. Source bytes remain unchanged; PNG masters need no EXIF.
+    image.apply_orientation(orientation);
+    Ok(image)
 }
 
 fn write_png(path: &Path, image: RgbaImage) -> BackendResult<()> {
@@ -325,7 +346,7 @@ impl ProductSceneImageService {
             ));
         }
         // Do not remove white pixels: they may be the actual white wordmark.
-        let logo = prepare_logo_pixels(reader.decode().map_err(image_error)?.into_rgba8())?;
+        let logo = prepare_logo_pixels(decode_oriented(reader, Limits::default())?.into_rgba8())?;
         let (width, height) = logo.dimensions();
         let path = self
             .directory("Logo母版")?
@@ -370,8 +391,8 @@ impl ProductSceneImageService {
         }
         let mut scene = decode(&source)?.into_rgba8();
         let (width, height) = scene.dimensions();
-        if ![1536, 1152].contains(&width) || height != 2048 {
-            return Err(invalid("请先完成 3:4 或 9:16 场景图尺寸处理。"));
+        if ![2048, 1536, 1152].contains(&width) || height != 2048 {
+            return Err(invalid("请先完成 1:1、3:4 或 9:16 场景图尺寸处理。"));
         }
         let bytes = self.verified_logo_bytes(&ProductViewIdentity {
             path: command.logo_path,
@@ -379,11 +400,11 @@ impl ProductSceneImageService {
             region: None,
             feather: None,
         })?;
-        let logo = ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()?
-            .decode()
-            .map_err(image_error)?
-            .into_rgba8();
+        let logo = decode_oriented(
+            ImageReader::new(Cursor::new(bytes)).with_guessed_format()?,
+            Limits::default(),
+        )?
+        .into_rgba8();
         warp_logo(&mut scene, &logo, &command.quad)?;
         let image_hash = difference_hash(&DynamicImage::ImageRgba8(scene.clone()));
         let path = self.directory("成图")?.join(format!(
@@ -449,11 +470,11 @@ impl ProductSceneImageService {
                 for warning in warnings {
                     tauri_plugin_log::log::warn!("[原片保护检查] {warning}");
                 }
-                let photo = ImageReader::new(Cursor::new(bytes))
-                    .with_guessed_format()?
-                    .decode()
-                    .map_err(image_error)?
-                    .into_rgba8();
+                let photo = decode_oriented(
+                    ImageReader::new(Cursor::new(bytes)).with_guessed_format()?,
+                    Limits::default(),
+                )?
+                .into_rgba8();
                 require_opaque_core(
                     &photo,
                     protection_rect(region, photo.width(), photo.height())?,
@@ -487,11 +508,11 @@ impl ProductSceneImageService {
         if hex::encode(Sha256::digest(&product_bytes)) != command.product_hash {
             return Err(invalid("产品母版内容已变化，请重新确认。"));
         }
-        let foreground = ImageReader::new(Cursor::new(product_bytes))
-            .with_guessed_format()?
-            .decode()
-            .map_err(image_error)?
-            .into_rgba8();
+        let foreground = decode_oriented(
+            ImageReader::new(Cursor::new(product_bytes)).with_guessed_format()?,
+            Limits::default(),
+        )?
+        .into_rgba8();
         let background = decode(&source_path(&command.background_path)?)?;
         let background_hash = difference_hash(&background);
         let composite = composite_image(
@@ -525,11 +546,11 @@ impl ProductSceneImageService {
         let (product, product_bytes, product_hash, warnings) =
             self.current_protected_photo(&command.product_path, &command.product_hash)?;
         // Decode the same current byte snapshot used for the returned identity.
-        let foreground = ImageReader::new(Cursor::new(product_bytes))
-            .with_guessed_format()?
-            .decode()
-            .map_err(image_error)?
-            .into_rgba8();
+        let foreground = decode_oriented(
+            ImageReader::new(Cursor::new(product_bytes)).with_guessed_format()?,
+            Limits::default(),
+        )?
+        .into_rgba8();
         let background = decode(&source_path(&command.background_path)?)?;
         let background_hash = difference_hash(&background);
         let composition = composite_protected_image(
@@ -1454,6 +1475,133 @@ fn composite_image(
 mod tests {
     use super::*;
 
+    fn jpeg_with_exif_orientation(orientation: u16) -> Vec<u8> {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(32, 16, |x, y| {
+            image::Rgb([(x * 7) as u8, (y * 13) as u8, ((x + y) * 5) as u8])
+        }));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95)
+            .encode_image(&image)
+            .unwrap();
+        // A real APP1 Exif segment containing a little-endian TIFF IFD with
+        // one SHORT Orientation tag. Insert after SOI; leave JPEG pixels intact.
+        let mut exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0".to_vec();
+        exif.extend_from_slice(&orientation.to_le_bytes());
+        exif.extend_from_slice(&[0; 6]);
+        let mut tagged = jpeg[..2].to_vec();
+        tagged.extend_from_slice(&[0xff, 0xe1]);
+        tagged.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        tagged.extend_from_slice(&exif);
+        tagged.extend_from_slice(&jpeg[2..]);
+        tagged
+    }
+
+    #[test]
+    fn preserved_jpeg_photo_applies_exif_rotation_without_modifying_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        for orientation in [6, 8] {
+            let source = temp.path().join(format!("orientation-{orientation}.jpg"));
+            let bytes = jpeg_with_exif_orientation(orientation);
+            fs::write(&source, &bytes).unwrap();
+            let source_hash = hash_file(&source).unwrap();
+            // Decode unrotated JPEG pixels as the reference so JPEG compression
+            // does not weaken the exact pixel mapping assertion.
+            let raw = ImageReader::open(&source)
+                .unwrap()
+                .decode()
+                .unwrap()
+                .into_rgba8();
+            assert_eq!(raw.dimensions(), (32, 16));
+            let prepared = service
+                .prepare(PrepareProductViewCommand {
+                    source_path: source.to_string_lossy().into_owned(),
+                    preserve_photo: true,
+                })
+                .unwrap();
+            assert!(prepared.photo_preserved);
+            assert_eq!((prepared.width, prepared.height), (16, 32));
+            let master = decode(Path::new(&prepared.path)).unwrap().into_rgba8();
+            for (x, y, pixel) in master.enumerate_pixels() {
+                let (source_x, source_y) = if orientation == 6 {
+                    (y, 15 - x)
+                } else {
+                    (31 - y, x)
+                };
+                assert_eq!(pixel, raw.get_pixel(source_x, source_y));
+            }
+            assert_ne!(prepared.path, source.to_string_lossy());
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            assert_eq!(hash_file(&source).unwrap(), source_hash);
+            assert_eq!(
+                hash_file(Path::new(&prepared.path)).unwrap(),
+                prepared.content_hash
+            );
+        }
+    }
+
+    #[test]
+    fn oriented_decode_retains_output_allocation_guard() {
+        let bytes = jpeg_with_exif_orientation(6);
+        let reader = ImageReader::new(Cursor::new(bytes))
+            .with_guessed_format()
+            .unwrap();
+        let mut limits = Limits::default();
+        limits.max_alloc = Some(1);
+        assert!(decode_oriented(reader, limits).is_err());
+    }
+
+    /// Opt-in real-photo check; source files are read only and masters are temporary.
+    #[test]
+    #[ignore = "set PRODUCT_SCENE_PHOTO_SMOKE_INPUT to a local JPEG directory"]
+    fn real_product_photo_orientation_smoke() {
+        let root = PathBuf::from(std::env::var("PRODUCT_SCENE_PHOTO_SMOKE_INPUT").unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        let mut paths: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg")
+                })
+            })
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty());
+        for source in paths {
+            let source_hash = hash_file(&source).unwrap();
+            let raw = ImageReader::open(&source).unwrap().decode().unwrap();
+            let mut decoder = ImageReader::open(&source).unwrap().into_decoder().unwrap();
+            let orientation = decoder.orientation().unwrap();
+            let mut expected = raw.clone();
+            expected.apply_orientation(orientation);
+            let prepared = service
+                .prepare(PrepareProductViewCommand {
+                    source_path: source.to_string_lossy().into_owned(),
+                    preserve_photo: true,
+                })
+                .unwrap();
+            assert_eq!(
+                (prepared.width, prepared.height),
+                (expected.width(), expected.height())
+            );
+            assert_eq!(
+                decode(Path::new(&prepared.path)).unwrap().into_rgba8(),
+                expected.into_rgba8()
+            );
+            assert_eq!(hash_file(&source).unwrap(), source_hash);
+            println!(
+                "{}: {}x{} -> {}x{}, source unchanged",
+                source.display(),
+                raw.width(),
+                raw.height(),
+                prepared.width,
+                prepared.height
+            );
+        }
+    }
+
     fn protected_test_region() -> ProductProtectionRegion {
         ProductProtectionRegion {
             x: 0.1,
@@ -2016,7 +2164,99 @@ mod tests {
         assert!(!padded);
         assert_eq!(same_ratio, pixels);
         assert!(output_width("../escape", "3:4").is_err());
-        assert!(output_width("valid", "1:1").is_err());
+        assert_eq!(output_width("valid", "1:1").unwrap(), 2048);
+        assert!(output_width("valid", "4:3").is_err());
+    }
+
+    #[test]
+    fn square_scene_supports_normalization_composition_protection_and_logo() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        let photo_path = temp.path().join("photo.png");
+        let photo = RgbaImage::from_pixel(40, 20, Rgba([58, 79, 119, 255]));
+        write_png(&photo_path, photo).unwrap();
+        let prepared = service
+            .prepare(PrepareProductViewCommand {
+                source_path: photo_path.to_string_lossy().into_owned(),
+                preserve_photo: true,
+            })
+            .unwrap();
+        let background_path = temp.path().join("background.png");
+        write_png(
+            &background_path,
+            RgbaImage::from_pixel(80, 60, Rgba([220, 220, 220, 255])),
+        )
+        .unwrap();
+        let normalized = service
+            .normalize_generated(NormalizeProductSceneImageCommand {
+                source_path: background_path.to_string_lossy().into_owned(),
+                output_id: "square-normalize".into(),
+                aspect_ratio: "1:1".into(),
+            })
+            .unwrap();
+        assert_eq!((normalized.width, normalized.height), (2048, 2048));
+        let placement = ProductPlacement {
+            center_x: 0.5,
+            baseline_y: 0.75,
+            width_fraction: 0.5,
+        };
+        let composite = service
+            .compose(ComposeProductSceneCommand {
+                background_path: background_path.to_string_lossy().into_owned(),
+                product_path: prepared.path.clone(),
+                product_hash: prepared.content_hash.clone(),
+                output_id: "square-compose".into(),
+                aspect_ratio: "1:1".into(),
+                placement: placement.clone(),
+                depth_strength: 0.0,
+            })
+            .unwrap();
+        assert_eq!((composite.width, composite.height), (2048, 2048));
+        let protected = service
+            .compose_protected(ComposeProtectedProductSceneCommand {
+                background_path: background_path.to_string_lossy().into_owned(),
+                product_path: prepared.path,
+                product_hash: prepared.content_hash,
+                output_id: "square-protected".into(),
+                aspect_ratio: "1:1".into(),
+                placement,
+                region: protected_test_region(),
+                feather: 0.05,
+            })
+            .unwrap();
+        assert_eq!((protected.width, protected.height), (2048, 2048));
+        assert!(protected.protection.verified);
+        for path in [&normalized.path, &composite.path, &protected.path] {
+            assert_eq!(image::image_dimensions(path).unwrap(), (2048, 2048));
+        }
+        let source_logo = temp.path().join("logo.png");
+        let mut logo = RgbaImage::from_pixel(32, 16, Rgba([0, 0, 0, 0]));
+        for y in 2..14 {
+            for x in 2..30 {
+                logo.put_pixel(x, y, Rgba([20, 30, 40, 255]));
+            }
+        }
+        write_png(&source_logo, logo).unwrap();
+        let logo = service
+            .prepare_logo(PrepareProductViewCommand {
+                source_path: source_logo.to_string_lossy().into_owned(),
+                preserve_photo: false,
+            })
+            .unwrap();
+        let with_logo = service
+            .apply_logo(ApplyProductSceneLogoCommand {
+                source_path: normalized.path,
+                logo_path: logo.path,
+                logo_hash: logo.content_hash,
+                output_id: "square-logo".into(),
+                quad: test_logo_quad(),
+            })
+            .unwrap();
+        assert_eq!((with_logo.width, with_logo.height), (2048, 2048));
+        assert_eq!(
+            image::image_dimensions(with_logo.path).unwrap(),
+            (2048, 2048)
+        );
     }
 
     /// Opt-in local smoke with a real source; never calls an image provider.
@@ -2044,7 +2284,7 @@ mod tests {
         });
         write_png(&background, pixels).unwrap();
         let mut outputs = Vec::new();
-        for ratio in ["3:4", "9:16"] {
+        for ratio in ["1:1", "3:4", "9:16"] {
             let result = service
                 .compose(ComposeProductSceneCommand {
                     background_path: background.to_string_lossy().into_owned(),

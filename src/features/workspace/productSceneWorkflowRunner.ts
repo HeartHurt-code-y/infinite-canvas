@@ -7,7 +7,11 @@ import {
   type PromptNodeClient,
 } from "../../lib/backend";
 import { coverImageClient } from "../../lib/coverImages";
-import { productSceneImageClient, type ProductSceneComposite } from "../../lib/productSceneImages";
+import {
+  productSceneImageClient,
+  productSceneOutputSize,
+  type ProductSceneComposite,
+} from "../../lib/productSceneImages";
 import {
   productSceneJewelrySignature,
   productSceneProtectionWarnings,
@@ -99,7 +103,8 @@ export function productSceneImageParameters(
   );
   const parameters = generationParameters(capabilities, values, operation === "image_to_image");
   const declaredParameters = record(record(model.operationSchema[operation])?.["parameters"]);
-  const targetRatio = options.aspectRatio === "3:4" ? 0.75 : 9 / 16;
+  const targetSize = productSceneOutputSize(options.aspectRatio);
+  const targetRatio = targetSize.width / targetSize.height;
   for (const capability of capabilities) {
     const key = capability.key.toLowerCase().replaceAll(/[-_]/g, "");
     if (key === "n" || key === "batchsize" || key === "numimages") {
@@ -197,7 +202,7 @@ export function createProductSceneWorkflowRunner(
         const options = node.config.productScene;
         if (!options || !productSceneInputReady(options))
           throw new Error(
-            "请上传并确认同一产品的参考原图、来源角度和参数；数量为 1～500，画幅为 3:4 或 9:16。",
+            "请上传并确认同一产品的参考原图、来源角度和参数；数量为 1～500，画幅为 1:1、3:4 或 9:16。",
           );
         const mode = productSceneGenerationMode(options);
         const operation = mode === "reference" ? "image_to_image" : "text_to_image";
@@ -422,7 +427,7 @@ export function createProductSceneWorkflowRunner(
               if (
                 applied.logoHash !== logo.contentHash ||
                 !applied.path ||
-                applied.width !== (options.aspectRatio === "3:4" ? 1536 : 1152) ||
+                applied.width !== productSceneOutputSize(options.aspectRatio).width ||
                 applied.height !== 2048
               )
                 throw new Error("Logo 贴回的素材签名或画幅不匹配，已阻止选用。");
@@ -527,7 +532,9 @@ export function createProductSceneWorkflowRunner(
                     text:
                       row().recipe.prompt +
                       (mode === "reference"
-                        ? `\nReference identity map (all are the same hardware, these source angles do not limit the NEW target camera): ${options.views.map((reference, index) => `image ${index + 1} = ${reference.label}, source angle ${reference.angle}`).join("; ")}`
+                        ? options.brandCreative
+                          ? `\nProduct label (not a verified material or construction specification): ${options.productName}.\nActual product reference map: ${options.views.map((reference, index) => `image ${index + 1} = ${reference.label}, role ${reference.photoRole ?? "unclassified actual product photo"}, source angle ${reference.angle}`).join("; ")}. These are product or actual wearing sources, not style examples or permission to copy an unrelated person's identity. Keep visible product construction and any supplied wearing relationship; unseen geometry is not verified evidence.`
+                          : `\nReference identity map (all are the same hardware, these source angles do not limit the NEW target camera): ${options.views.map((reference, index) => `image ${index + 1} = ${reference.label}, source angle ${reference.angle}`).join("; ")}`
                         : ""),
                   },
                   ...(mode === "reference"
@@ -646,7 +653,7 @@ export function createProductSceneWorkflowRunner(
             const output = generated
               ? { ...generated, backgroundHash: generated.imageHash, foregroundHash: null }
               : { ...composed!, padded: false };
-            const width = options.aspectRatio === "3:4" ? 1536 : 1152;
+            const { width } = productSceneOutputSize(options.aspectRatio);
             if (!output.path || output.width !== width || output.height !== 2048)
               throw new Error("本地处理没有返回约定尺寸，请检查输出；原生成任务已保留。");
             if (mode === "composite" && output.foregroundHash !== view.contentHash)

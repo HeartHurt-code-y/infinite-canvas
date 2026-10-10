@@ -145,6 +145,18 @@ describe("protected product photograph IPC", () => {
     await expect(productSceneImageClient.composeProtected!(command)).rejects.toThrow("输出尺寸");
   });
 
+  it("accepts native square output and rejects a legacy portrait returned for a square request", async () => {
+    const square = { ...command, aspectRatio: "1:1" as const };
+    vi.mocked(invoke).mockResolvedValue({ ...result, width: 2048 });
+    await expect(productSceneImageClient.composeProtected!(square)).resolves.toMatchObject({
+      width: 2048,
+      height: 2048,
+    });
+    expect(invoke).toHaveBeenCalledWith("compose_product_scene_protected", { command: square });
+    vi.mocked(invoke).mockResolvedValue(result);
+    await expect(productSceneImageClient.composeProtected!(square)).rejects.toThrow("输出尺寸");
+  });
+
   it("exports existing images with unreviewed or historical metadata without a frontend evidence gate", async () => {
     vi.mocked(open).mockResolvedValue("C:/delivery");
     vi.mocked(invoke).mockResolvedValue({ directory: "C:/delivery/export", count: 1 });

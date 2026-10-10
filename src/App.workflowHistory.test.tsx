@@ -6,7 +6,9 @@ import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
 import type { RecordedWorkflowRunner } from "./features/workspace/workflowHistoryExecution";
 import {
   CANVAS_ID,
+  type KnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowNodeData,
+  type KnowledgeVideoWorkflowPhase,
 } from "./features/workspace/workspaceModel";
 import type {
   CanvasDocumentClient,
@@ -30,6 +32,29 @@ import {
   recordWorkflowVersion,
 } from "./features/workspace/workflowVersionHistory";
 import { createWorkflowExecutionPlan } from "./features/workspace/workflowExecutionPlan";
+
+const ACTIVE_PHASES = new Set<KnowledgeVideoWorkflowPhase>([
+  "planning",
+  "generating",
+  "qc",
+  "composing",
+]);
+/** 推进到某个生成阶段：工作流版本只在这种边界上新增。 */
+function atStage(
+  config: KnowledgeVideoWorkflowConfig,
+  phase: KnowledgeVideoWorkflowPhase,
+): KnowledgeVideoWorkflowConfig {
+  return recordWorkflowVersion(config, {
+    ...config,
+    checkpoint: {
+      ...config.checkpoint,
+      phase,
+      lastActivePhase: ACTIVE_PHASES.has(phase)
+        ? (phase as "planning" | "generating" | "qc" | "composing")
+        : config.checkpoint.lastActivePhase,
+    },
+  });
+}
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn<RecordedWorkflowRunner["run"]>(),
@@ -295,7 +320,12 @@ describe("workflow history canvas integration", () => {
   });
 
   it("versions each workflow independently and preserves branches across reload", async () => {
-    const firstNode = node();
+    // 预置两个生成阶段版本：初始草稿 → 生成阶段 → 制作完成。
+    const staged = atStage(
+      atStage(initializeWorkflowVersions(node().config), "generating"),
+      "done",
+    );
+    const firstNode = { ...node(), config: staged };
     const otherNode = { ...node(), key: "other-workflow", x: 870, y: 260 };
     loadCanvasNodes([firstNode, otherNode]);
     const view = render(<App />);
@@ -306,25 +336,26 @@ describe("workflow history canvas integration", () => {
     expect(screen.queryByRole("button", { name: "打开画布版本历史" })).not.toBeInTheDocument();
     fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
     const dialog = await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" });
-    const first = within(dialog).getByRole("listitem", { current: true });
-    const number = within(first)
-      .getByText(/版本 \d+ ·/)
-      .textContent.match(/版本 (\d+)/)![1];
+    // 三个阶段版本 + 封版后第一笔同阶段编辑派生的工作副本。
+    const count = within(dialog).getAllByRole("listitem").length;
+    expect(count).toBe(4);
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭工作流版本历史" }));
     fireEvent.change(briefs[0]!, { target: { value: "版本乙" } });
-    fireEvent.click(firstControls.getByRole("button", { name: "撤销当前工作流编辑" }));
-    expect(briefs[0]).toHaveValue("版本甲");
+    fireEvent.click(firstControls.getByRole("button", { name: "回到上一个工作流版本" }));
+    expect(briefs[0]).toHaveValue("面向销售新人制作一条 RAG 入门视频");
     expect(briefs[1]).toHaveValue("另一工作流的编辑");
-    fireEvent.click(firstControls.getByRole("button", { name: "重做当前工作流编辑" }));
+    fireEvent.click(firstControls.getByRole("button", { name: "回到下一个工作流版本" }));
     expect(briefs[0]).toHaveValue("版本乙");
     fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
     const reopened = await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" });
-    const count = within(reopened).getAllByRole("listitem").length;
-    fireEvent.click(within(reopened).getByRole("button", { name: `回到版本 ${number}` }));
+    // 同一生成阶段内继续改文案不会再堆版本。
+    expect(within(reopened).getAllByRole("listitem")).toHaveLength(count);
+    fireEvent.click(within(reopened).getByRole("button", { name: "回到版本 1" }));
     fireEvent.click(within(reopened).getByRole("button", { name: "关闭工作流版本历史" }));
-    expect(briefs[0]).toHaveValue("版本甲");
+    expect(briefs[0]).toHaveValue("面向销售新人制作一条 RAG 入门视频");
     fireEvent.change(briefs[0]!, { target: { value: "版本丙" } });
     fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
+    // 回退到已封版版本后继续编辑会建立新分支。
     expect(
       within(await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" })).getAllByRole(
         "listitem",

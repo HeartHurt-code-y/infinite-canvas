@@ -3,6 +3,7 @@ import { workflowMaterialsSignature } from "./workflowMaterials";
 import { comicDramaStageDependencies, COMIC_DRAMA_STAGE_LABELS } from "./comicDramaWorkflowModel";
 import {
   productSceneGenerationMode,
+  productSceneExecutionOptions,
   productSceneQualityEnabled,
 } from "./productSceneWorkflowModel";
 import type {
@@ -143,6 +144,9 @@ export function workflowExecutionInputSignature(node: KnowledgeVideoWorkflowNode
           ].includes(key),
       ),
     ),
+    ...(node.config.productScene
+      ? { productScene: productSceneExecutionOptions(node.config.productScene) }
+      : {}),
     materialsSignature: workflowMaterialsSignature(node.config),
   });
 }

@@ -3,6 +3,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
 
+export type ProductSceneAspectRatio = "1:1" | "3:4" | "9:16";
+export function productSceneOutputSize(aspectRatio: ProductSceneAspectRatio) {
+  return { width: { "1:1": 2048, "3:4": 1536, "9:16": 1152 }[aspectRatio], height: 2048 };
+}
+
 export interface PreparedProductView {
   readonly path: string;
   readonly width: number;
@@ -50,7 +55,7 @@ export interface ComposeProtectedProductSceneCommand {
   readonly productPath: string;
   readonly productHash: string;
   readonly outputId: string;
-  readonly aspectRatio: "3:4" | "9:16";
+  readonly aspectRatio: ProductSceneAspectRatio;
   readonly placement: {
     readonly centerX: number;
     readonly baselineY: number;
@@ -113,7 +118,7 @@ export interface ProductSceneImageClient {
     readonly productPath: string;
     readonly productHash: string;
     readonly outputId: string;
-    readonly aspectRatio: "3:4" | "9:16";
+    readonly aspectRatio: ProductSceneAspectRatio;
     readonly placement: {
       readonly centerX: number;
       readonly baselineY: number;
@@ -128,7 +133,7 @@ export interface ProductSceneImageClient {
   normalizeGenerated(command: {
     readonly sourcePath: string;
     readonly outputId: string;
-    readonly aspectRatio: "3:4" | "9:16";
+    readonly aspectRatio: ProductSceneAspectRatio;
   }): Promise<ProductSceneGeneratedImage>;
   export(command: {
     readonly paths: readonly string[];
@@ -210,7 +215,7 @@ export const productSceneImageClient: ProductSceneImageClient = {
       await invoke("apply_product_scene_logo", { command }),
     );
     if (
-      ![1536, 1152].includes(result.width) ||
+      ![2048, 1536, 1152].includes(result.width) ||
       result.height !== 2048 ||
       result.logoHash !== command.logoHash
     )
@@ -226,7 +231,7 @@ export const productSceneImageClient: ProductSceneImageClient = {
   async compose(command) {
     requireDesktop();
     const result = v.parse(compositeSchema, await invoke("compose_product_scene", { command }));
-    const width = command.aspectRatio === "3:4" ? 1536 : 1152;
+    const { width } = productSceneOutputSize(command.aspectRatio);
     if (result.width !== width || result.height !== 2048)
       throw new Error("产品场景图交付尺寸不匹配，请重新合成。");
     return result;
@@ -250,7 +255,10 @@ export const productSceneImageClient: ProductSceneImageClient = {
       protectedCompositeSchema,
       await invoke("compose_product_scene_protected", { command }),
     );
-    if (result.width !== (command.aspectRatio === "3:4" ? 1536 : 1152) || result.height !== 2048)
+    if (
+      result.width !== productSceneOutputSize(command.aspectRatio).width ||
+      result.height !== 2048
+    )
       throw new Error("原片合成返回的输出尺寸不匹配，请重新合成。");
     return result;
   },
@@ -260,7 +268,10 @@ export const productSceneImageClient: ProductSceneImageClient = {
       generatedImageSchema,
       await invoke("normalize_product_scene_image", { command }),
     );
-    if (result.width !== (command.aspectRatio === "3:4" ? 1536 : 1152) || result.height !== 2048)
+    if (
+      result.width !== productSceneOutputSize(command.aspectRatio).width ||
+      result.height !== 2048
+    )
       throw new Error("产品场景图交付尺寸不匹配，请重新处理原生成图片。");
     return result;
   },

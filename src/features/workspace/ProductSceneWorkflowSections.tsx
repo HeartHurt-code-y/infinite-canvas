@@ -8,7 +8,9 @@ import {
   pickPromptMultimodalFiles,
   toMediaSrc,
 } from "../../lib/backend";
-import { productSceneImageClient } from "../../lib/productSceneImages";
+import { productSceneImageClient, productSceneOutputSize } from "../../lib/productSceneImages";
+import { ProductSceneJewelryLaunch } from "./ProductSceneJewelryLaunch";
+import type { BrandDesignCandidate } from "./BrandDesignStudio";
 import {
   createJewelrySceneOptions,
   canRetryProductSceneRow,
@@ -21,11 +23,13 @@ import {
   resetProductSceneRow,
   retryProductSceneRow,
   updateProductSceneViewProtection,
+  PRODUCT_SCENE_BRAND_STYLES,
   type ProductSceneRow,
   type ProductSceneJewelryReview,
   type ProductSceneWorkflowOptions,
 } from "./productSceneWorkflowModel";
 import { ProductSceneProtectionEditor } from "./ProductSceneProtectionEditor";
+import { OptionalMark, RequiredMark } from "./workflowFieldRequirements";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ProductSceneWorkflowSections.css";
 
@@ -304,16 +308,23 @@ function ProductSceneImagePreview({
 export function ProductSceneConfiguration({
   options,
   disabled,
+  planningDisabled = disabled,
   onChange,
   onBusyChange,
+  designCandidates,
 }: {
   readonly options: ProductSceneWorkflowOptions;
   readonly disabled: boolean;
+  readonly planningDisabled?: boolean;
   readonly onChange: (options: ProductSceneWorkflowOptions) => void;
   readonly onBusyChange: (busy: boolean) => void;
+  readonly designCandidates?: readonly BrandDesignCandidate[];
 }) {
   const [busy, setBusy] = useState(false);
   const generationMode = productSceneGenerationMode(options);
+  const preserveReference =
+    generationMode === "protected" ||
+    (generationMode === "reference" && Boolean(options.brandCreative));
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [editingProtection, setEditingProtection] = useState<string | null>(null);
@@ -331,10 +342,9 @@ export function ProductSceneConfiguration({
     setError(null);
     try {
       const files = await pickPromptMultimodalFiles({
-        title:
-          generationMode === "protected"
-            ? "选择这件实物的完整摆拍或真实佩戴原片"
-            : "选择同一版本产品的白底或透明原图",
+        title: preserveReference
+          ? "选择这件实物的完整摆拍或真实佩戴原片"
+          : "选择同一版本产品的白底或透明原图",
         kinds: ["image"],
       });
       const added: ProductSceneWorkflowOptions["views"][number][] = [];
@@ -342,7 +352,7 @@ export function ProductSceneConfiguration({
         if (file.kind !== "image") continue;
         const prepared = await productSceneImageClient.prepare({
           sourcePath: file.localPath,
-          ...(generationMode === "protected" ? { preservePhoto: true } : {}),
+          ...(preserveReference ? { preservePhoto: true } : {}),
         });
         if (
           [...latest.current.views, ...added].some(
@@ -372,6 +382,44 @@ export function ProductSceneConfiguration({
         });
       }
       if (added.length) onChange({ ...latest.current, views: [...latest.current.views, ...added] });
+    } catch (failure) {
+      setError(formatRawBackendError(failure));
+    } finally {
+      picking.current = false;
+      setBusy(false);
+      onBusyChange(false);
+    }
+  }
+
+  async function restoreBrandReference(view: ProductSceneWorkflowOptions["views"][number]) {
+    if (disabled || picking.current || generationMode !== "reference" || !options.brandCreative)
+      return;
+    picking.current = true;
+    setBusy(true);
+    onBusyChange(true);
+    setError(null);
+    try {
+      const prepared = await productSceneImageClient.prepare({
+        sourcePath: view.sourcePath,
+        preservePhoto: true,
+      });
+      const current = latest.current;
+      if (productSceneGenerationMode(current) !== "reference" || !current.brandCreative) return;
+      onChange({
+        ...current,
+        views: current.views.map((item) =>
+          item.id === view.id && item.sourcePath === view.sourcePath
+            ? {
+                ...item,
+                preparedPath: prepared.path,
+                contentHash: prepared.contentHash,
+                width: prepared.width,
+                height: prepared.height,
+                approved: false,
+              }
+            : item,
+        ),
+      });
     } catch (failure) {
       setError(formatRawBackendError(failure));
     } finally {
@@ -414,10 +462,12 @@ export function ProductSceneConfiguration({
     }
   }
 
-  return (
+  const configuration = (
     <fieldset className="product-scene__configuration" disabled={disabled || busy}>
+      {/* 缺口清单由节点 footer 统一渲染（idle 状态始终可见、就在「查看执行计划」旁）。
+          这里再放一份会在同一张卡片上出现两条一模一样的清单。 */}
       <label>
-        产品名称
+        <RequiredMark>产品名称</RequiredMark>
         <ImeInput
           aria-label="产品名称"
           value={options.productName}
@@ -425,7 +475,7 @@ export function ProductSceneConfiguration({
         />
       </label>
       <label>
-        生成方式
+        <OptionalMark>生成方式</OptionalMark>
         <select
           aria-label="产品场景生成方式"
           value={generationMode}
@@ -434,7 +484,8 @@ export function ProductSceneConfiguration({
             setEditingProtection(null);
             setError(null);
             const normalOptions = { ...options };
-            delete normalOptions.jewelry;
+            // Keep the editable brand project when changing generation modes.
+            // Source preparation for the next paid operation remains explicit.
             onChange(
               nextMode === "protected"
                 ? createJewelrySceneOptions(options)
@@ -453,16 +504,57 @@ export function ProductSceneConfiguration({
       </label>
       <p>
         {generationMode === "reference"
-          ? "用已确认的同一产品图片作为参考，工作流随机组合目标机位和场景，交给图片模型生成完整画面。新机位可以由提示词引导，无需先补拍或提供 CAD；产品形体、接口与 Logo 必须逐张审核。"
+          ? options.brandCreative
+            ? "用同款商品与真实佩戴照片制作品牌摄影，按选定风格组合构图、灯光与场景。AI 可以生成新姿势与画面，实际商品结构、佩戴比例和人物一致性仍需逐张核对。"
+            : "用已确认的同一产品图片作为参考，工作流随机组合目标机位和场景，交给图片模型生成完整画面。新机位可以由提示词引导，无需先补拍或提供 CAD；产品形体、接口与 Logo 必须逐张审核。"
           : generationMode === "protected"
             ? "保留获批实拍母版的完整范围，AI 制作外围场景。透明珠子相关原背景和真实佩戴关系一并保留；适合忠实展示同一件实物，不产生新的商品角度或佩戴姿势。"
             : "AI 生成空场景，已确认产品原图在本地合成，保留原图的产品结构。此模式仅使用原图已有角度。"}
       </p>
+      <label>
+        <OptionalMark>AI 品牌摄影风格</OptionalMark>
+        <select
+          aria-label="AI 品牌摄影风格"
+          value={options.brandCreative?.style ?? ""}
+          onChange={(event) => {
+            const next = { ...options };
+            const style = event.target.value;
+            if (!style) delete next.brandCreative;
+            else
+              next.brandCreative = {
+                style: style as NonNullable<ProductSceneWorkflowOptions["brandCreative"]>["style"],
+                brief: options.brandCreative?.brief ?? "",
+              };
+            onChange(next);
+          }}
+        >
+          <option value="">沿用现有产品场景</option>
+          {PRODUCT_SCENE_BRAND_STYLES.map((style) => (
+            <option key={style.id} value={style.id}>
+              {style.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      {options.brandCreative && (
+        <label>
+          <OptionalMark>品牌画面要求</OptionalMark>
+          <ImeTextarea
+            rows={3}
+            value={options.brandCreative.brief}
+            placeholder="例如：黑衣与冷白背景，大面积留白，金属高光克制，保留实际商品结构。"
+            onValueChange={(brief) =>
+              onChange({ ...options, brandCreative: { ...options.brandCreative!, brief } })
+            }
+          />
+          <span>参考图使用本款真实商品或真实佩戴照片；品牌风格变化后需重新确认生成计划。</span>
+        </label>
+      )}
       {generationMode === "protected" && options.jewelry ? (
         <section className="product-scene__jewelry-settings" aria-label="珠宝实物与系列模板">
           <strong>实物身份与系列模板</strong>
           <label>
-            商品 SKU
+            <RequiredMark>商品 SKU</RequiredMark>
             <ImeInput
               aria-label="珠宝商品 SKU"
               value={options.jewelry.skuId}
@@ -472,7 +564,7 @@ export function ProductSceneConfiguration({
             />
           </label>
           <label>
-            单件实物编号 / 天然纹理身份
+            <RequiredMark>单件实物编号 / 天然纹理身份</RequiredMark>
             <ImeInput
               aria-label="单件实物编号"
               value={options.jewelry.specimenId}
@@ -483,7 +575,7 @@ export function ProductSceneConfiguration({
             <small>同 SKU 的不同手串也需分别记录，不能共用天然纹理、棉絮或包裹物身份。</small>
           </label>
           <label>
-            必须保留的关键特征
+            <RequiredMark>必须保留的关键特征</RequiredMark>
             <ImeTextarea
               aria-label="珠宝关键特征"
               rows={3}
@@ -503,7 +595,8 @@ export function ProductSceneConfiguration({
             ] as const
           ).map(([key, label]) => (
             <label key={key}>
-              {label}
+              {/* 系列模板自带推荐默认值，改不改都能出图，所以标“可选”而不是必填。 */}
+              <OptionalMark>{label}</OptionalMark>
               <ImeInput
                 aria-label={label}
                 value={options.jewelry!.seriesStyle[key]}
@@ -520,14 +613,14 @@ export function ProductSceneConfiguration({
             </label>
           ))}
           <small>
-            以上信息均需填写。构图与原片占比在同一系列内固定；修改实物、母版、范围或模板后需重新审批制作计划。
+            以上字段用于场景制作；十图方案可在资料未齐时先生成。构图与原片占比在同一系列内固定；修改实物、母版、范围或模板后需重新审批制作计划。
           </small>
         </section>
       ) : null}
       <button type="button" onClick={() => void pickProducts()}>
         {busy
           ? "正在处理产品图…"
-          : generationMode === "protected"
+          : preserveReference
             ? "添加完整实拍 / 佩戴原片"
             : "添加白底 / 透明产品原图"}
       </button>
@@ -543,24 +636,34 @@ export function ProductSceneConfiguration({
             >
               <img
                 src={toMediaSrc(view.preparedPath)}
-                alt={`${view.label} ${generationMode === "protected" ? "完整实拍原片" : "抠图预览"}`}
+                alt={`${view.label} ${generationMode === "protected" ? "完整实拍原片" : options.brandCreative && generationMode === "reference" ? "品牌摄影参考预览" : "抠图预览"}`}
                 loading="lazy"
               />
             </button>
             <strong>{view.label}</strong>
+            {generationMode === "reference" && options.brandCreative && (
+              <button type="button" onClick={() => void restoreBrandReference(view)}>
+                重新准备 {view.label} 完整原片
+              </button>
+            )}
             {view.width && view.height ? (
               <small>
                 {view.width} × {view.height}
-                {view.width < (options.aspectRatio === "3:4" ? 830 : 622)
+                {view.width <
+                productSceneOutputSize(options.aspectRatio).width * (options.productScale ?? 0.48)
                   ? generationMode === "reference"
-                    ? " · 参考图细节较少，请仔细审核生成的接口与文字"
+                    ? options.brandCreative
+                      ? " · 参考图细节较少，请核对商品细节与佩戴比例"
+                      : " · 参考图细节较少，请仔细审核生成的接口与文字"
                     : " · 本次合成可能放大，建议换用更高清原图"
                   : ""}
               </small>
             ) : null}
             {generationMode !== "protected" ? (
               <label>
-                {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
+                <OptionalMark>
+                  {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
+                </OptionalMark>
                 <select
                   aria-label={`${view.label} 原图角度`}
                   value={view.angle}
@@ -584,6 +687,38 @@ export function ProductSceneConfiguration({
                       {label}
                     </option>
                   ))}
+                </select>
+              </label>
+            ) : null}
+            {generationMode === "protected" || options.brandCreative ? (
+              <label>
+                <OptionalMark>照片用途</OptionalMark>
+                <select
+                  aria-label={`${view.label} 照片用途`}
+                  value={view.photoRole ?? ""}
+                  onChange={(event) => {
+                    const photoRole = event.target.value;
+                    onChange({
+                      ...options,
+                      views: options.views.map((item) => {
+                        if (item.id !== view.id) return item;
+                        const next = { ...item };
+                        if (
+                          photoRole === "full" ||
+                          photoRole === "detail" ||
+                          photoRole === "wearing"
+                        )
+                          next.photoRole = photoRole;
+                        else delete next.photoRole;
+                        return next;
+                      }),
+                    });
+                  }}
+                >
+                  <option value="">未标注 · 方案暂定分配</option>
+                  <option value="full">商品全貌</option>
+                  <option value="detail">局部细节</option>
+                  <option value="wearing">真实佩戴</option>
                 </select>
               </label>
             ) : null}
@@ -633,14 +768,20 @@ export function ProductSceneConfiguration({
                   })
                 }
               />
-              {generationMode === "protected"
-                ? "确认这件实物与母版一致，保护范围含完整商品、阴影、透射原背景及必要手腕"
-                : "确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整"}
+              {/* 勾选确认是付费制作前的硬门槛，因此同样标必填：不标会被当成可选。 */}
+              <RequiredMark>
+                {generationMode === "protected"
+                  ? "确认这件实物与母版一致，保护范围含完整商品、阴影、透射原背景及必要手腕"
+                  : "确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整"}
+              </RequiredMark>
             </label>
             <button
               type="button"
               onClick={() =>
-                onChange({ ...options, views: options.views.filter((item) => item.id !== view.id) })
+                onChange({
+                  ...options,
+                  views: options.views.filter((item) => item.id !== view.id),
+                })
               }
             >
               移除 {view.label}
@@ -651,11 +792,13 @@ export function ProductSceneConfiguration({
       <small>
         {generationMode === "protected"
           ? "原片完整保留，不做白底阈值抠图。先放大核对实物身份与保护边界，默认整张原片；需要制作外围时再缩小范围并重新确认。透明珠子透过的原背景不会自动换成新背景。"
-          : "请先放大核对透明区域、金色格栅及脚垫是否被误删。参考图原始角度用于识别产品；AI 多机位模式的拍摄角度由制作计划另行安排。"}
+          : preserveReference
+            ? "本模式新添加的照片完整保留，不做白底阈值抠图。请标注商品全貌、局部细节或真实佩戴；切换风格前已处理的旧图可点击“重新准备完整原片”，然后重新确认。"
+            : "请先放大核对透明区域、金色格栅及脚垫是否被误删。参考图原始角度用于识别产品；AI 多机位模式的拍摄角度由制作计划另行安排。"}
       </small>
       <div className="product-scene__settings">
         <label>
-          总计划张数
+          <OptionalMark>总计划张数</OptionalMark>
           <input
             aria-label="总计划张数"
             type="number"
@@ -671,7 +814,7 @@ export function ProductSceneConfiguration({
           />
         </label>
         <label>
-          同时生成张数上限
+          <OptionalMark>同时生成张数上限</OptionalMark>
           <input
             aria-label="同时生成张数上限"
             type="number"
@@ -689,9 +832,9 @@ export function ProductSceneConfiguration({
             一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。
           </small>
         </label>
-        {generationMode !== "protected" ? (
+        {generationMode !== "protected" && !options.brandCreative ? (
           <label>
-            场景倾向
+            <OptionalMark>场景倾向</OptionalMark>
             <select
               aria-label="场景倾向"
               value={options.sceneBias}
@@ -710,7 +853,7 @@ export function ProductSceneConfiguration({
           </label>
         ) : null}
         <label>
-          图片比例
+          <OptionalMark>图片比例</OptionalMark>
           <select
             aria-label="产品场景图片比例"
             value={options.aspectRatio}
@@ -721,12 +864,15 @@ export function ProductSceneConfiguration({
               })
             }
           >
+            <option value="1:1">1:1 · 2048 × 2048</option>
             <option value="3:4">3:4 · 1536 × 2048</option>
             <option value="9:16">9:16 · 1152 × 2048</option>
           </select>
         </label>
         <label>
-          {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
+          <OptionalMark>
+            {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
+          </OptionalMark>
           <input
             aria-label={generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
             type="range"
@@ -745,7 +891,7 @@ export function ProductSceneConfiguration({
         </label>
         {generationMode !== "protected" ? (
           <label>
-            背景景深
+            <OptionalMark>背景景深</OptionalMark>
             <input
               aria-label="背景景深"
               type="range"
@@ -767,7 +913,7 @@ export function ProductSceneConfiguration({
         ) : null}
         {generationMode !== "protected" ? (
           <label>
-            场景种子
+            <OptionalMark>场景种子</OptionalMark>
             <input
               aria-label="场景种子"
               type="number"
@@ -786,7 +932,10 @@ export function ProductSceneConfiguration({
       </div>
       {generationMode !== "protected" ? (
         <small>
-          手机随拍风格为 AI 展示图。导出清单会标明生成方式；不写入虚假的手机拍摄信息或买家身份。
+          {options.brandCreative
+            ? "品牌摄影风格用于 AI 展示图，成图需核对商品细节与佩戴关系。"
+            : "手机随拍风格为 AI 展示图。"}
+          导出清单会标明生成方式；不写入虚假的手机拍摄信息或买家身份。
         </small>
       ) : (
         <small>
@@ -811,11 +960,11 @@ export function ProductSceneConfiguration({
                 })
               }
             />
-            自动检测可见接口
+            <OptionalMark>自动检测可见接口</OptionalMark>
           </label>
           {options.quality?.inspectPorts ? (
             <label>
-              已确认接口规格（可选）
+              <OptionalMark>已确认接口规格</OptionalMark>
               <ImeTextarea
                 aria-label="已确认接口规格"
                 rows={3}
@@ -877,7 +1026,7 @@ export function ProductSceneConfiguration({
                       });
                   }}
                 />
-                确认此 Logo 内容与透明边缘正确
+                <RequiredMark>确认此 Logo 内容与透明边缘正确</RequiredMark>
               </label>
               <button
                 type="button"
@@ -905,6 +1054,31 @@ export function ProductSceneConfiguration({
         <ProductSceneImagePreview path={preview} onClose={() => setPreview(null)} />
       ) : null}
     </fieldset>
+  );
+  return (
+    <>
+      {configuration}
+      {options.jewelry ? (
+        <ProductSceneJewelryLaunch
+          options={options}
+          disabled={planningDisabled || busy}
+          onChange={onChange}
+          onBusyChange={onBusyChange}
+          {...(designCandidates ? { designCandidates } : {})}
+        />
+      ) : options.brandCreative ? (
+        <button
+          type="button"
+          disabled={planningDisabled || busy}
+          onClick={() => {
+            const jewelry = createJewelrySceneOptions(options).jewelry;
+            if (jewelry) onChange({ ...options, jewelry });
+          }}
+        >
+          建立品牌图文制作单
+        </button>
+      ) : null}
+    </>
   );
 }
 

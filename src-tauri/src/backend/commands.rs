@@ -8,6 +8,10 @@ use super::{
     ai_media::{AiMediaJobRecord, AiMediaMode, StartAiMediaCommand},
     ai_media_runtime::AiMediaRuntimeStatus,
     blender::{BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
+    brand_design::{
+        self, BrandDesignExportResult, BrandDesignImage, ExportBrandDesignBundleCommand,
+        ReadBrandDesignImageCommand,
+    },
     commerce_sources::{self, CommerceSource},
     component_manager::{ComponentManagerStatus, RuntimeFeatureStatus},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
@@ -277,6 +281,28 @@ pub async fn normalize_cover_image(
     command: NormalizeCoverImageCommand,
 ) -> CommandResult<NormalizedCoverImage> {
     state.cover_images.normalize(command).await.command()
+}
+
+#[tauri::command]
+pub async fn read_brand_design_image(
+    command: ReadBrandDesignImageCommand,
+) -> CommandResult<BrandDesignImage> {
+    tokio::task::spawn_blocking(move || brand_design::read_image(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("设计图片读取失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn export_brand_design_bundle(
+    command: ExportBrandDesignBundleCommand,
+) -> CommandResult<BrandDesignExportResult> {
+    tokio::task::spawn_blocking(move || brand_design::export_bundle(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("品牌设计交付失败：{error}")))
+        .and_then(|result| result)
+        .command()
 }
 
 #[tauri::command]

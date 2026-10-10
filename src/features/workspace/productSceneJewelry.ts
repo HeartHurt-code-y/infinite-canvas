@@ -1,4 +1,5 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import type { JewelryLaunchOptions } from "./jewelryLaunchPlan";
 import type {
   ProductSceneProtectionRect,
   ProductSceneProtectionReceipt,
@@ -21,6 +22,8 @@ export interface ProductSceneJewelryOptions {
   readonly skuId: string;
   readonly specimenId: string;
   readonly criticalFeatures: string;
+  /** Optional local planning documents; never authorization for paid image work. */
+  readonly launch?: JewelryLaunchOptions;
   readonly seriesStyle: {
     readonly name: string;
     readonly version: string;
@@ -86,8 +89,10 @@ export function productSceneJewelrySignature(
   view: ProductSceneView,
   placement: ProductSceneRecipe["placement"],
 ): string {
+  const identity = { ...options.jewelry };
+  delete identity.launch;
   return stableJsonSignature({
-    jewelry: options.jewelry,
+    jewelry: options.jewelry ? identity : undefined,
     view: {
       id: view.id,
       sourcePath: view.sourcePath,

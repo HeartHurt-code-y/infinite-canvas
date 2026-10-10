@@ -5,11 +5,13 @@ import { createCanvasDocumentRepository } from "./canvasDocumentRepository";
 import {
   createKnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowNodeData,
+  type KnowledgeVideoWorkflowPhase,
 } from "../workspace/workspaceModel";
 import {
   redoWorkflowVersion,
   restoreWorkflowVersion,
   undoWorkflowVersion,
+  workflowVersionState,
 } from "../workspace/workflowVersionHistory";
 import {
   approveWorkflowExecutionPlan,
@@ -40,6 +42,33 @@ const edit = (canvas: CanvasStateModule, key: string, brief: string) =>
   canvas.commands.patchNode("knowledgeVideoWorkflow", key, (node) => ({
     ...node,
     config: { ...node.config, brief },
+  }));
+const ACTIVE_PHASES = new Set<KnowledgeVideoWorkflowPhase>([
+  "planning",
+  "generating",
+  "qc",
+  "composing",
+]);
+/** 推进到某个生成阶段：工作流版本只在这种边界上新增。 */
+const stage = (
+  canvas: CanvasStateModule,
+  key: string,
+  phase: KnowledgeVideoWorkflowPhase,
+  brief: string,
+) =>
+  canvas.commands.patchNode("knowledgeVideoWorkflow", key, (node) => ({
+    ...node,
+    config: {
+      ...node.config,
+      brief,
+      checkpoint: {
+        ...node.config.checkpoint,
+        phase,
+        lastActivePhase: ACTIVE_PHASES.has(phase)
+          ? (phase as "planning" | "generating" | "qc" | "composing")
+          : node.config.checkpoint.lastActivePhase,
+      },
+    },
   }));
 const flush = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 afterEach(() => localStorage.clear());
@@ -99,7 +128,8 @@ describe("workflow versions inside the ordinary canvas store", () => {
     expect(canvas.commands.undo()).toBe("applied");
     expect(canvas.commands.undo()).toBe("applied");
     expect(read(canvas).config).toBe(generatingConfig);
-    expect(read(canvas).config.versionHistory?.versions).toHaveLength(2);
+    // 待确认计划 → 生成是两个生成阶段，各留一个版本。
+    expect(read(canvas).config.versionHistory?.versions).toHaveLength(3);
     expect(canvas.getSnapshot().nodeByKey.gen.has("image")).toBe(false);
   });
 
@@ -114,7 +144,8 @@ describe("workflow versions inside the ordinary canvas store", () => {
     canvas.commands.addNode("knowledgeVideoWorkflow", workflow("two"));
     expect(isWorkflowExecutionPlanApproved(executionPlan, read(canvas))).toBe(true);
     edit(canvas, "one", "第一工作流的新稿");
-    expect(read(canvas).config.versionHistory?.versions).toHaveLength(2);
+    // 同一生成阶段内的文案编辑就地改写当前版本，不新增版本。
+    expect(read(canvas).config.versionHistory?.versions).toHaveLength(1);
     expect(read(canvas, "two").config.versionHistory?.versions).toHaveLength(1);
     canvas.commands.applyNodeChanges([
       { type: "position", key: "one", position: { x: 90, y: 50 } },
@@ -127,13 +158,13 @@ describe("workflow versions inside the ordinary canvas store", () => {
         ...node.config,
         checkpoint: {
           ...node.config.checkpoint,
-          phase: "generating",
           runId: "active-run",
           updatedAt: 42,
         },
       },
     }));
-    expect(read(canvas).config.versionHistory?.versions).toHaveLength(2);
+    // 运行身份与进度停留在同一阶段，不产生版本。
+    expect(read(canvas).config.versionHistory?.versions).toHaveLength(1);
     expect(read(canvas, "two").config.versionHistory?.versions).toHaveLength(1);
     expect(canvas.commands.snapshotV2({})).not.toHaveProperty("versionHistory");
   });
@@ -142,15 +173,17 @@ describe("workflow versions inside the ordinary canvas store", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("knowledgeVideoWorkflow", workflow("one"));
     await flush();
-    edit(canvas, "one", "第一稿");
+    stage(canvas, "one", "awaiting_approval", "第一稿");
     await flush();
     const branchRoot = read(canvas).config.versionHistory!.currentVersionId;
-    edit(canvas, "one", "原来的第二稿");
+    stage(canvas, "one", "done", "原来的第二稿");
     await flush();
     const oldTip = read(canvas).config.versionHistory!.currentVersionId;
     expect(canvas.commands.undo()).toBe("applied");
     expect(read(canvas).config.brief).toBe("第一稿");
+    // 画布撤销把节点配置带回上一个阶段，同时保留已有的分支版本，游标回到该版本。
     expect(read(canvas).config.versionHistory?.versions).toHaveLength(3);
+    expect(workflowVersionState(read(canvas).config).currentVersionId).toBe(branchRoot);
     await flush();
     edit(canvas, "one", "另一条分支");
     await flush();
@@ -192,8 +225,8 @@ describe("workflow versions inside the ordinary canvas store", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("knowledgeVideoWorkflow", workflow("one"));
     canvas.commands.addNode("knowledgeVideoWorkflow", workflow("two"));
-    edit(canvas, "one", "第一稿");
-    edit(canvas, "one", "第二稿");
+    stage(canvas, "one", "awaiting_approval", "第一稿");
+    stage(canvas, "one", "done", "第二稿");
     const sibling = read(canvas, "two");
     canvas.commands.patchNode("knowledgeVideoWorkflow", "one", (node) => ({
       ...node,

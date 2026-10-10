@@ -1,0 +1,107 @@
+﻿.jewelry-launch {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+
+.jewelry-launch p,
+.jewelry-launch dl,
+.jewelry-launch ul,
+.jewelry-launch ol {
+  margin: 0;
+}
+
+.jewelry-launch,
+.jewelry-launch label,
+.jewelry-launch summary,
+.jewelry-launch p,
+.jewelry-launch dd,
+.jewelry-launch dt,
+.jewelry-launch li {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.jewelry-launch label,
+.jewelry-launch__draft,
+.jewelry-launch__slots,
+.jewelry-launch__slot-body,
+.jewelry-launch__copy,
+.jewelry-launch__variables {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.jewelry-launch textarea,
+.jewelry-launch button {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.jewelry-launch textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.jewelry-launch button {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.jewelry-launch__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.jewelry-launch__slot,
+.jewelry-launch__section {
+  min-width: 0;
+  padding: var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+
+.jewelry-launch summary {
+  cursor: pointer;
+}
+
+.jewelry-launch summary span {
+  display: block;
+  margin-top: var(--space-xs);
+  color: var(--color-ink-2);
+}
+
+.jewelry-launch details[open] > summary {
+  margin-bottom: var(--space-sm);
+}
+
+.jewelry-launch__section[open] > * + *,
+.jewelry-launch__prompt[open] > * + * {
+  margin-top: var(--space-sm);
+}
+
+.jewelry-launch dd {
+  margin-left: 0;
+}
+
+.jewelry-launch__muted {
+  color: var(--color-ink-2);
+}
+
+.jewelry-launch__stale {
+  padding: var(--space-sm);
+  border-left: var(--rule-active) solid var(--color-warning);
+  background: var(--color-warning-soft);
+}
+
+.jewelry-launch__prompt p {
+  white-space: pre-wrap;
+}

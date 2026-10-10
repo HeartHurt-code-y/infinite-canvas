@@ -231,6 +231,8 @@ pub fn run() {
             commands::compose_product_scene_protected,
             commands::normalize_product_scene_image,
             commands::export_product_scenes,
+            commands::read_brand_design_image,
+            commands::export_brand_design_bundle,
             commands::resume_cover_image_result,
             commands::resume_generation_result,
             commands::remotion_renderer_preflight,
