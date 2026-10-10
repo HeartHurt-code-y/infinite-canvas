@@ -84,3 +84,11 @@ src-tauri/resources/ai-media-quality-runtime/
 # Qoder Canvas 会话余量产物：每次会话都会重排 report.json 与新的 .canvas.tsx，
 # 且不在 tsconfig 内（此前只能靠 eslint/prettier 各自的忽略规则绕过）。
 .qoder-credits/
+
+# 误落在仓库根的生成产物副本：真身在下面这些已忽略的位置，根目录这几份只是本地
+# 打包/构建留下的重复文件（catalog 与 src-tauri/resources/ 版逐字节一致）。
+# 忽略它们是为了让 git status 保持干净，而不是承认它们是源码。
+/component-catalog.json
+/ffmpeg/
+/infinite-canvas.exe
+/uninstall.exe
