@@ -655,6 +655,42 @@ mod tests {
 
     const PREVIOUS_RECORD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
+    /// 前端注册表（src/features/workspace/workflowKinds.ts 的 WORKFLOW_KIND_IDS，
+    /// 由 workflowKinds.test.ts 锁定）与这里逐字对应；新增工作流两侧同步登记。
+    #[test]
+    fn workflow_kind_ids_stay_in_parity_with_the_frontend_registry() {
+        let expected = [
+            "knowledge",
+            "film",
+            "comicDrama",
+            "musicVideo",
+            "brandVideo",
+            "commerce",
+            "remotion",
+            "xhsCover",
+            "productScene",
+            "reverseVideo",
+            "reelbench",
+        ];
+        let actual: Vec<&str> = [
+            WorkflowKind::Knowledge,
+            WorkflowKind::Film,
+            WorkflowKind::ComicDrama,
+            WorkflowKind::MusicVideo,
+            WorkflowKind::BrandVideo,
+            WorkflowKind::Commerce,
+            WorkflowKind::Remotion,
+            WorkflowKind::XhsCover,
+            WorkflowKind::ProductScene,
+            WorkflowKind::ReverseVideo,
+            WorkflowKind::Reelbench,
+        ]
+        .iter()
+        .map(|kind| kind.as_str())
+        .collect();
+        assert_eq!(actual, expected);
+    }
+
     #[test]
     fn brand_video_history_kind_round_trips() {
         let kind: WorkflowKind = serde_json::from_value(json!("brandVideo")).unwrap();

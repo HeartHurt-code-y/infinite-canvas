@@ -1,15 +1,7 @@
-export type WorkflowGuideKind =
-  | "knowledge"
-  | "film"
-  | "comicDrama"
-  | "musicVideo"
-  | "commerce"
-  | "brandVideo"
-  | "remotion"
-  | "xhsCover"
-  | "productScene"
-  | "reverseVideo"
-  | "reelbench";
+import type { WorkflowKind } from "./workflowKinds";
+
+/** 新手指南按工作流类型取内容；类型清单与 workflowKinds 注册表同源。 */
+export type WorkflowGuideKind = WorkflowKind;
 
 export interface WorkflowGuideContent {
   readonly purpose: string;
