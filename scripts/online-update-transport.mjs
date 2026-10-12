@@ -28,6 +28,11 @@ import {
 const PART_SIZE = 8 * 1024 * 1024;
 const SHA256 = /^[a-f0-9]{64}$/;
 const MAX_SMALL_BYTES = 1024 * 1024;
+// 跨境链路（Actions runner → TOS）会出现数十秒的路由抖动：3 次 × 半秒的旧退避
+// 在 0.2.3 发布时被一次 ETIMEDOUT 整体打断，这里放宽到 5 次 × 指数退避（≤8s）。
+function retryBackoffMs(attempt) {
+  return Math.min(2 ** attempt * 500, 8000);
+}
 const ONLINE_PLATFORMS = Object.freeze({
   "windows-x86_64": "x64",
   "darwin-aarch64": "aarch64",
@@ -340,19 +345,19 @@ export async function createOnlineUpdateTransport({
           body,
           maxBytes,
         });
-        if (retry && [408, 429, 500, 503].includes(result.status) && attempt < 3) {
-          await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        if (retry && [408, 429, 500, 503].includes(result.status) && attempt < 5) {
+          await new Promise((resolve) => setTimeout(resolve, retryBackoffMs(attempt)));
           continue;
         }
         return result;
       } catch (error) {
         if (
           !retry ||
-          attempt >= 3 ||
+          attempt >= 5 ||
           !["ETIMEDOUT", "ECONNRESET", "EAI_AGAIN", "ENOTFOUND", "EPIPE"].includes(error.code)
         )
           throw error;
-        await new Promise((resolve) => setTimeout(resolve, 500 * attempt));
+        await new Promise((resolve) => setTimeout(resolve, retryBackoffMs(attempt)));
       }
     }
   }
