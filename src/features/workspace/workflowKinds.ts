@@ -21,6 +21,8 @@
  *   `detect` 的注释。
  * - `knowledge` 是缺省类型：没有任何专属字段命中的配置都落到它
  *   （见 `detectKnowledge`）。
+ * - 判定优先级由 DETECTION_ORDER 单独声明（保留旧级联顺序），
+ *   与注册顺序（仓库卡片顺序）刻意解耦。
  * - 各 `*Title` 是四套并存的产品文案（节点标题 / 历史名 / 插入 toast），
  *   刻意不合并；统一文案属于产品决策，不属于本模块。
  * - id 必须与 Rust 侧 `WorkflowKind`（src-tauri storage/workflow_history.rs）
@@ -102,7 +104,7 @@ export interface WorkflowRepositoryCard {
 export interface WorkflowKindDefinition {
   readonly id: WorkflowKind;
   /**
-   * 判定：该配置是否属于本类型。按 WORKFLOW_KINDS 注册顺序逐条尝试，
+   * 判定：该配置是否属于本类型。按 DETECTION_ORDER 逐个尝试，
    * 首个命中即成立。缺省类型 knowledge 的判定由 `detectKnowledge` 表达。
    */
   readonly detect: (config: KnowledgeVideoWorkflowConfig) => boolean;
@@ -131,8 +133,28 @@ const detectKnowledge = (config: KnowledgeVideoWorkflowConfig): boolean =>
 const KNOWLEDGE_VIDEO_STAGES: readonly string[] = ["智能策划", "自动生成", "质量检查", "成片交付"];
 
 /**
+ * 判定优先级（逐字取自原节点级联的顺序，knowledge 缺省居末）。
+ * 与卡片顺序刻意解耦：仓库卡片按用户浏览习惯排列，而多字段配置（现实不应
+ * 出现，历史数据与测试夹具可能存在）的判定结果必须与旧行为一致，
+ * 例如 remotion 与 film 同时设置时判 remotion。
+ */
+const DETECTION_ORDER: readonly WorkflowKind[] = [
+  "brandVideo",
+  "productScene",
+  "reelbench",
+  "musicVideo",
+  "reverseVideo",
+  "xhsCover",
+  "remotion",
+  "commerce",
+  "comicDrama",
+  "film",
+  "knowledge",
+];
+
+/**
  * 全部工作流类型的注册表。
- * 注册顺序 = 判定优先级 = 仓库卡片顺序（逐字保留原卡片排列）。
+ * 注册顺序 = 仓库卡片顺序（逐字保留原卡片排列）；判定优先级见 DETECTION_ORDER。
  */
 export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
   {
@@ -435,10 +457,14 @@ const WORKFLOW_KIND_DEFINITIONS = Object.fromEntries(
 
 /**
  * 配置 → 工作流类型的唯一判定入口。
- * 按注册顺序首个 `detect` 命中即成立；全部未命中落到缺省的 knowledge。
+ * 按 DETECTION_ORDER 逐个尝试，首个 `detect` 命中即成立；全部未命中落到
+ * 缺省的 knowledge。
  */
 export function workflowKindOf(config: KnowledgeVideoWorkflowConfig): WorkflowKind {
-  return WORKFLOW_KINDS.find((entry) => entry.detect(config))?.id ?? "knowledge";
+  for (const id of DETECTION_ORDER) {
+    if (WORKFLOW_KIND_DEFINITIONS[id].detect(config)) return id;
+  }
+  return "knowledge";
 }
 
 /** 工作流类型 → 注册条目。联合类型已穷尽，恒有返回。 */

@@ -12,7 +12,7 @@ import {
 } from "./workflowKinds";
 import type { RecordedClients } from "./workflowRunnerContract";
 
-/** 注册顺序 = 仓库卡片顺序 = 判定优先级，此处锁死以免卡片排列被无意重排。 */
+/** 注册顺序 = 仓库卡片顺序，此处锁死以免卡片排列被无意重排。 */
 const EXPECTED_ORDER = [
   "productScene",
   "reelbench",
@@ -26,6 +26,11 @@ const EXPECTED_ORDER = [
   "brandVideo",
   "remotion",
 ] as const;
+
+/**
+ * 判定优先级由注册表内 DETECTION_ORDER 声明（与卡片顺序解耦），
+ * 多字段行为在下方 workflowKindOf 用例中按旧级联语义锁定。
+ */
 
 /** 与 Rust `WorkflowKind::as_str`（src-tauri storage/workflow_history.rs）逐字对应。 */
 const RUST_WORKFLOW_KIND_AS_STR = [
@@ -74,14 +79,21 @@ describe("workflowKinds registry", () => {
     expect(workflowKindOf(configWith(""))).toBe("knowledge");
   });
 
-  it("resolves detection by registration order for multi-field configs", () => {
-    // 现实中一个配置只带一个工作流字段；此用例锁定「首个命中即成立」的语义。
+  it("resolves detection by the legacy priority for multi-field configs", () => {
+    // 现实中一个配置只带一个工作流字段；此用例锁定「首个命中即成立」的语义
+    // 与历史行为（remotion 与 film 同时设置时判 remotion）。
     const both = {
       brief: "",
       reelbench: {},
       productScene: {},
     } as unknown as KnowledgeVideoWorkflowConfig;
     expect(workflowKindOf(both)).toBe("productScene");
+    const animationWithFilm = {
+      brief: "",
+      remotion: {},
+      film: {},
+    } as unknown as KnowledgeVideoWorkflowConfig;
+    expect(workflowKindOf(animationWithFilm)).toBe("remotion");
   });
 
   it("exposes display copy and repository card data for every kind", () => {

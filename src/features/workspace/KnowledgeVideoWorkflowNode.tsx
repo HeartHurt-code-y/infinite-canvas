@@ -4,7 +4,6 @@ import { workflowStatusMessage } from "../../lib/workflowErrors";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
 import {
   musicVideoLipReviewSignature,
-  musicVideoRequirements,
   patchMusicVideoArtifact,
   setMusicVideoLipReview,
 } from "./musicVideoWorkflowModel";
@@ -33,17 +32,15 @@ import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWor
 import {
   comicDramaDubbedShotSignature,
   comicDramaLipReviewComplete,
-  comicDramaRequirements,
   reviewComicDramaDubbedShot,
 } from "./comicDramaWorkflowModel";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
-import { commerceInputReady, commerceRequirements } from "./commerceWorkflowModel";
-import { brandVideoInputReady, brandVideoRequirements } from "./brandVideoWorkflowModel";
+import { commerceInputReady } from "./commerceWorkflowModel";
+import { brandVideoInputReady } from "./brandVideoWorkflowModel";
 import { BrandVideoWorkflowSections } from "./BrandVideoWorkflowSections";
 import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowSections";
-import { remotionRequirements } from "./remotionWorkflowModel";
 import { XhsCoverConfiguration, XhsCoverDeliverables } from "./XhsCoverWorkflowSections";
-import { xhsCoverInputReady, xhsCoverRequirements } from "./xhsCoverWorkflowModel";
+import { xhsCoverInputReady } from "./xhsCoverWorkflowModel";
 import {
   ProductSceneConfiguration,
   ProductSceneDeliverables,
@@ -53,7 +50,6 @@ import {
   productSceneInputReady,
   productSceneInputSignature,
   productSceneQualityEnabled,
-  productSceneRequirements,
 } from "./productSceneWorkflowModel";
 import {
   ReverseVideoConfiguration,
@@ -61,21 +57,19 @@ import {
 } from "./ReverseVideoWorkflowSections";
 import {
   reverseVideoInputReady,
-  reverseVideoRequirements,
   reverseVideoSourceUrl,
 } from "./reverseVideoWorkflowModel";
 import { ReelbenchConfiguration, ReelbenchDeliverables } from "./ReelbenchWorkflowSections";
 import {
   reelbenchInputReady,
   reelbenchInputSignature,
-  reelbenchRequirements,
 } from "./reelbenchWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 import { WorkflowFieldHelp, WorkflowGuide } from "./WorkflowGuidance";
-import type { WorkflowGuideKind } from "./workflowGuidanceContent";
 import { WorkflowPlanReview } from "./WorkflowPlanReview";
 import { WorkflowVersionHistoryPanel } from "./WorkflowVersionHistoryPanel";
 import { workflowVersionState } from "./workflowVersionHistory";
+import { workflowKindDefinitionOf, workflowKindOf } from "./workflowKinds";
 import { getWorkflowExecutionPlan, isWorkflowExecutionPlanApproved } from "./workflowExecutionPlan";
 import { withCanvasWorkflowMaterials, type WorkflowCanvasInput } from "./workflowCanvasInputs";
 import type { ConnectedCanvasTextInput } from "./canvasInputs";
@@ -164,21 +158,6 @@ const IMAGE_MODEL_FILTER: ModelFilter = (model) => model.operations.includes("te
 const COVER_IMAGE_MODEL_FILTER: ModelFilter = (model) =>
   model.operations.includes("image_to_image");
 const VIDEO_MODEL_FILTER: ModelFilter = isVideoGenerationModel;
-
-/** 节点标题按模板种类唯一确定；键与 workflowGuidanceContent 的 WorkflowGuideKind 同构。 */
-const WORKFLOW_TITLES: Record<WorkflowGuideKind, string> = {
-  knowledge: "知识视频工作流",
-  film: "AI影视工作流",
-  comicDrama: "动漫短剧工作流 V2.3",
-  musicVideo: "音乐 MV 工作流 V1.0.6",
-  commerce: "剧情带货工作流",
-  brandVideo: "品牌视觉短片工作流",
-  remotion: "动画逻辑图工作流",
-  xhsCover: "小红书封面工作流",
-  productScene: "产品场景图工作流",
-  reverseVideo: "短视频反推工作流",
-  reelbench: "视频拉片与分镜合成",
-};
 
 interface ModelSlotProps {
   readonly label: string;
@@ -451,45 +430,17 @@ export function KnowledgeVideoWorkflowNode({
   const reverseOptions = node.config.reverseVideo;
   const reelbenchOptions = node.config.reelbench;
   const isReelbench = reelbenchOptions != null;
-  const isReverse = !isMusicVideo && reverseOptions != null;
-  const isCover = !isReverse && coverOptions != null;
-  const isRemotion = !isReverse && !isCover && remotionOptions != null;
-  const isCommerce = !isReverse && !isCover && !isRemotion && commerceOptions != null;
-  const isComicDrama =
-    !isReverse && !isCover && !isRemotion && !isCommerce && comicDramaOptions != null;
-  const isFilm =
-    !isBrandVideo &&
-    !isMusicVideo &&
-    !isReverse &&
-    !isCover &&
-    !isRemotion &&
-    !isCommerce &&
-    !isComicDrama &&
-    filmOptions != null;
-  // 模板种类的判定优先级全文件只出现这一次：节点标题与新手指南都由它推导。
-  // 新增工作流时在 WORKFLOW_TITLES 补一条即可，不会再长出第三条并行三元链。
-  const workflowKind: WorkflowGuideKind = isBrandVideo
-    ? "brandVideo"
-    : isProductScene
-      ? "productScene"
-      : isReelbench
-        ? "reelbench"
-        : isMusicVideo
-          ? "musicVideo"
-          : isReverse
-            ? "reverseVideo"
-            : isCover
-              ? "xhsCover"
-              : isRemotion
-                ? "remotion"
-                : isCommerce
-                  ? "commerce"
-                  : isComicDrama
-                    ? "comicDrama"
-                    : isFilm
-                      ? "film"
-                      : "knowledge";
-  const workflowTitle = WORKFLOW_TITLES[workflowKind];
+  const isReverse = reverseOptions != null;
+  const isCover = coverOptions != null;
+  const isRemotion = remotionOptions != null;
+  const isCommerce = commerceOptions != null;
+  const isComicDrama = comicDramaOptions != null;
+  const isFilm = filmOptions != null;
+  // 模板种类由 workflowKinds 注册表统一判定：标题、新手指南与必填缺口都由它推导，
+  // 这里不再维护第二份判定级联；isXxx 布尔只服务渲染分支的字段窄化。
+  const workflowKind = workflowKindOf(node.config);
+  const workflowDefinition = workflowKindDefinitionOf(workflowKind);
+  const workflowTitle = workflowDefinition.nodeTitle;
   const phase = runState?.phase ?? node.config.checkpoint.phase;
   const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
@@ -738,34 +689,11 @@ export function KnowledgeVideoWorkflowNode({
   /*
    * 尚缺的必填项。每个工作流模型导出的 `*Requirements()` 是唯一来源：界面列出的
    * 缺口和运行器拦截的条件由此对齐，不会出现「看着都填好了，点下去说设置无效」。
-   * 顺序按用户补录的自然顺序排，编辑器给的 hint 会直接显示在卡片上。
+   * 判定与接线统一走 workflowKinds 注册表；顺序按用户补录的自然顺序排，
+   * 编辑器给的 hint 会直接显示在卡片上。
    */
-  const missingRequirements: WorkflowRequirements = isBrandVideo
-    ? brandVideoRequirements(brandVideoOptions)
-    : isReelbench
-      ? reelbenchRequirements(reelbenchOptions)
-      : isProductScene
-        ? productSceneRequirements(productSceneOptions)
-        : isMusicVideo
-          ? musicVideoRequirements(musicVideoOptions)
-          : isReverse
-            ? reverseVideoRequirements(effectiveConfig.brief, reverseOptions)
-            : isCover
-              ? xhsCoverRequirements(effectiveConfig.brief, coverOptions)
-              : isRemotion
-                ? remotionRequirements(effectiveConfig.brief)
-                : commerceOptions
-                  ? commerceRequirements(commerceOptions)
-                  : comicDramaOptions
-                    ? comicDramaRequirements(comicDramaOptions)
-                    : effectiveConfig.brief.trim()
-                      ? []
-                      : [
-                          {
-                            field: "制作要求",
-                            hint: "用一句话说明要做什么；画幅、时长等细节可以留给工作流自动决定。",
-                          },
-                        ];
+  const missingRequirements: WorkflowRequirements =
+    workflowDefinition.requirements(effectiveConfig);
   /* 不算「字段」的拦截项也要说清楚，否则按钮灰着却看不到原因。 */
   const extraBlockers: WorkflowRequirements = [
     ...(materialsValid
