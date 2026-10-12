@@ -56,6 +56,7 @@ export function WorkflowReferenceMaterials({
 }: WorkflowReferenceMaterialsProps) {
   const [materialError, setMaterialError] = useState<unknown>(null);
   const materialErrorId = useId();
+  const materialHelpId = useId();
   const totalBytes = allMaterials.reduce((total, material) => total + material.byteSize, 0);
 
   async function pickMaterials() {
@@ -79,7 +80,7 @@ export function WorkflowReferenceMaterials({
         <button
           type="button"
           aria-label="添加工作流多模态参考素材"
-          aria-describedby={materialError ? materialErrorId : undefined}
+          aria-describedby={`${materialHelpId}${materialError ? ` ${materialErrorId}` : ""}`}
           disabled={disabled || picking || !onPick}
           onClick={() => void pickMaterials()}
         >
@@ -91,8 +92,12 @@ export function WorkflowReferenceMaterials({
           {picking ? "正在选择素材…" : "添加素材"}
         </button>
       </div>
-      <p>图片、音频、视频、PDF、TXT / Markdown、JSON，用于文本模型理解、规划与检查。</p>
+      <p id={materialHelpId}>
+        有说明书、事实依据或风格参考时再添加，可留空。支持图片、音频、视频、PDF、TXT /
+        Markdown、JSON，用于文本模型理解、规划与检查；需选择支持相应输入类型的模型。
+      </p>
       <p>可连接任意画布节点，按连线顺序读取可用媒体和文本，连接数量不限。</p>
+      <p>商品原图、人物参考图和原视频请放到各自专用设置，通用素材不会自动指定这些用途。</p>
       <p className="canvas-workflow-references__quota" aria-live="polite">
         已添加 {materials.length} 项 · 全部参考资料 {totalCount} 项 ·{" "}
         {connectedInputs.length || historicalReferences.length ? "已选本地文件 " : ""}

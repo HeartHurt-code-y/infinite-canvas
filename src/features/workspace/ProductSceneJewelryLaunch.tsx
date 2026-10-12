@@ -12,6 +12,7 @@ import {
 } from "./jewelryLaunchPlan";
 import type { ProductSceneWorkflowOptions } from "./productSceneWorkflowModel";
 import { BrandDesignStudio, type BrandDesignCandidate } from "./BrandDesignStudio";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import "./ProductSceneJewelryLaunch.css";
 
 interface ProductSceneJewelryLaunchProps {
@@ -246,12 +247,17 @@ export function ProductSceneJewelryLaunch({
         {/* 资料可以没有，方案照常生成：选填项不渲染任何标记，只有必填项带红星。 */}
         现有商品资料
         <ImeTextarea
+          aria-label="现有商品资料"
           value={launch?.factsText ?? ""}
           onValueChange={updateFacts}
           disabled={disabled || exporting}
           rows={4}
           placeholder="可粘贴已有商品卡。支持“材质：…”等字段及两列表格；未识别内容保留为资料。没有资料也能先做方案。"
         />
+        <WorkflowFieldHelp>
+          选填，粘贴已确认的商品参数，建议每行写“字段：值”，例如“材质：玻璃”“珠径：8
+          mm”“销售单位：条”，也支持两列表格。缺失事实会省略对应宣传；改资料后点击更新方案，普通说明文字保留为资料，不自动变成商品参数。
+        </WorkflowFieldHelp>
       </label>
       <div className="jewelry-launch__actions">
         <button

@@ -1,3 +1,4 @@
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ErrorAlert } from "../../components/ErrorAlert";
@@ -159,6 +160,9 @@ function ProductSceneJewelryReviewDetails({
             <option value="pass">人工核对通过</option>
             <option value="fail">不通过</option>
           </select>
+          <WorkflowFieldHelp>
+            对照本张实拍母版逐项核对；能确认一致选“通过”，有差异选“不通过”，看不清先保留“待核对”。
+          </WorkflowFieldHelp>
         </label>
       ))}
       <label>
@@ -171,6 +175,9 @@ function ProductSceneJewelryReviewDetails({
           onValueChange={(notes) => onChange({ ...review, notes })}
           placeholder="记录对照依据、需要精修的边缘或不通过原因。"
         />
+        <WorkflowFieldHelp>
+          记录看到了什么差异、发生位置和需要怎样修正，例如“左侧连接处多了一颗珠子”。
+        </WorkflowFieldHelp>
       </label>
     </section>
   );
@@ -491,6 +498,9 @@ export function ProductSceneConfiguration({
           value={options.productName}
           onValueChange={(productName) => onChange({ ...options, productName })}
         />
+        <WorkflowFieldHelp>
+          填写这次制作的具体商品名称或型号，用来区分商品与制作清单；请替换示例名称。
+        </WorkflowFieldHelp>
       </label>
       <label>
         生成方式
@@ -534,6 +544,10 @@ export function ProductSceneConfiguration({
           <option value="composite">原图保真合成</option>
           <option value="protected">珠宝原片保护</option>
         </select>
+        <WorkflowFieldHelp>
+          AI
+          多机位适合尝试新构图与角度，成图需核对商品细节；原图保真合成使用原有角度贴入新背景。珠宝原片保护保留实拍范围和真实佩戴关系，适合展示同一件实物。
+        </WorkflowFieldHelp>
       </label>
       <p>
         {generationMode === "reference"
@@ -569,11 +583,15 @@ export function ProductSceneConfiguration({
             </option>
           ))}
         </select>
+        <WorkflowFieldHelp>
+          沿用现有产品场景适合普通展示；冷白杂志偏清冷与留白，复古时装偏织物层次，暖白意境偏柔光。先选一种，再在品牌画面要求里补充细节。
+        </WorkflowFieldHelp>
       </label>
       {options.brandCreative && (
         <label>
           品牌画面要求
           <ImeTextarea
+            aria-label="品牌画面要求"
             rows={3}
             value={options.brandCreative.brief}
             placeholder="例如：黑衣与冷白背景，大面积留白，金属高光克制，保留实际商品结构。"
@@ -586,6 +604,9 @@ export function ProductSceneConfiguration({
               ? "参考图使用本款真实商品或真实佩戴照片；品牌风格变化后需重新确认生成计划。"
               : "本模式只用白底或透明底的产品原图（本地抠图合成）；真实实拍或佩戴照片请改用「AI 多机位」或「珠宝原片保护」。品牌风格变化后需重新确认生成计划。"}
           </span>
+          <WorkflowFieldHelp>
+            写背景、灯光、材质和留白位置，例如“暖白背景，右侧留位置放标题”；商品必须保留的结构也可写明。
+          </WorkflowFieldHelp>
         </label>
       )}
       {generationMode === "reference" && options.brandCreative && (
@@ -617,6 +638,9 @@ export function ProductSceneConfiguration({
                 onChange({ ...options, jewelry: { ...options.jewelry!, skuId } })
               }
             />
+            <WorkflowFieldHelp>
+              填写商品在库存或店铺中的款式编号，例如“BRACELET-A01”，用于区分不同款式。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <RequiredMark>单件实物编号 / 天然纹理身份</RequiredMark>
@@ -628,6 +652,9 @@ export function ProductSceneConfiguration({
               }
             />
             <small>同 SKU 的不同手串也需分别记录，不能共用天然纹理、棉絮或包裹物身份。</small>
+            <WorkflowFieldHelp>
+              为这一件实物单独编号，例如“A01-003”；同款有不同天然纹理时，分别建档制作。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <RequiredMark>必须保留的关键特征</RequiredMark>
@@ -640,6 +667,9 @@ export function ProductSceneConfiguration({
               }
               placeholder="例如珠子数量与顺序、爱心珠朝向、异形主珠轮廓、棉絮与包裹物位置。"
             />
+            <WorkflowFieldHelp>
+              写出人工核对时必须一致的细节：数量、排列、连接点、天然纹理及佩戴比例；不要填写原图无法确认的特征。
+            </WorkflowFieldHelp>
           </label>
           {(
             [
@@ -665,6 +695,19 @@ export function ProductSceneConfiguration({
                   })
                 }
               />
+              <WorkflowFieldHelp>
+                {
+                  {
+                    name: "给这套背景与光照方案起一个便于复用的名字，例如“暖白上新”；可沿用预置名称。",
+                    version:
+                      "填写模板修订编号，例如“1”或“2”，方便区分不同背景方案；与软件版本无关。",
+                    background:
+                      "描述商品外围的台面、颜色与留白；应能衔接原片背景，不要要求重画受保护商品。",
+                    lighting:
+                      "描述外围光线的方向和柔和程度，并与实拍母版保持衔接；可沿用按原片匹配的预置要求。",
+                  }[key]
+                }
+              </WorkflowFieldHelp>
             </label>
           ))}
           <small>
@@ -683,6 +726,11 @@ export function ProductSceneConfiguration({
             ? "添加完整实拍 / 佩戴原片"
             : "添加白底 / 透明产品原图"}
       </button>
+      <WorkflowFieldHelp>
+        {preserveReference
+          ? "添加同款实物清晰的完整照片；可用摆拍或真实佩戴图，保留原背景和完整商品轮廓。添加后标注用途，放大核对再确认。"
+          : "添加同一版本商品的白底或透明底原图，商品轮廓、Logo 和接口要完整；实拍或佩戴照片请选 AI 多机位并选择品牌摄影风格，或选珠宝原片保护。"}
+      </WorkflowFieldHelp>
       {error ? (
         <ErrorAlert
           workflow
@@ -760,6 +808,11 @@ export function ProductSceneConfiguration({
                     </option>
                   ))}
                 </select>
+                <WorkflowFieldHelp>
+                  {generationMode === "reference"
+                    ? "按这张原图实际拍摄方向选择，用于描述参考；新图的目标机位由计划安排。俯视是从上向下拍，平视是与商品同高。"
+                    : "按这张原图实际拍摄方向选择；合成会沿用它的角度，不会把平面原图变成另一侧。"}
+                </WorkflowFieldHelp>
               </label>
             ) : null}
             {generationMode === "protected" || options.brandCreative ? (
@@ -802,6 +855,11 @@ export function ProductSceneConfiguration({
                     原图保真合成只合成商品本体。「真实佩戴」请改用「AI 多机位」或「珠宝原片保护」。
                   </small>
                 )}
+                <WorkflowFieldHelp>
+                  {preserveReference
+                    ? "全貌图用于看完整结构，细节图用于看局部，真实佩戴用于看商品与身体关系；按照片内容选，未标注时先由方案分配。"
+                    : "全貌图用于展示完整商品，细节图用于展示局部；本模式使用白底或透明底商品图，佩戴照片请先更换生成方式。"}
+                </WorkflowFieldHelp>
               </label>
             ) : null}
             {generationMode === "protected" ? (
@@ -835,10 +893,18 @@ export function ProductSceneConfiguration({
                     编辑 {view.label} 保护范围
                   </button>
                 )}
+                <WorkflowFieldHelp>
+                  保护范围中的原片内容会保留，外围用于衔接新场景；初次可沿用整张原片。缩小时须包含完整商品、阴影、透明材质透过的背景及必要手腕，保存后重新确认母版。
+                </WorkflowFieldHelp>
               </>
             ) : null}
             <label className="product-scene__approval">
               <input
+                aria-label={
+                  generationMode === "protected"
+                    ? "确认这件实物与母版一致，保护范围含完整商品、阴影、透射原背景及必要手腕"
+                    : "确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整"
+                }
                 type="checkbox"
                 checked={view.approved}
                 onChange={(event) =>
@@ -856,6 +922,9 @@ export function ProductSceneConfiguration({
                   ? "确认这件实物与母版一致，保护范围含完整商品、阴影、透射原背景及必要手腕"
                   : "确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整"}
               </RequiredMark>
+              <WorkflowFieldHelp>
+                先点开放大原图，核对身份、边缘与标注，再勾选确认；更换图片或保护范围后需重新核对。
+              </WorkflowFieldHelp>
             </label>
             <button
               type="button"
@@ -894,6 +963,9 @@ export function ProductSceneConfiguration({
               })
             }
           />
+          <WorkflowFieldHelp>
+            填写本轮想安排多少张，范围 1–500；第一次可先做少量图片，审核方向后再规划更多。
+          </WorkflowFieldHelp>
         </label>
         <label>
           同时生成张数上限
@@ -913,6 +985,10 @@ export function ProductSceneConfiguration({
           <small>
             一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。
           </small>
+          <WorkflowFieldHelp>
+            决定同一时间最多处理多少张，范围 1–50，预置
+            10；服务额度较小时可调低，想增加并行量时可调高。总计划张数不受这里改变。
+          </WorkflowFieldHelp>
         </label>
         {productSceneSceneBiasApplies(options) ? (
           <label>
@@ -937,6 +1013,9 @@ export function ProductSceneConfiguration({
                 ? "只决定整幅画面的环境类型；拍摄机位由制作计划自动轮换，不在这里设置。"
                 : "只决定 AI 空背景的环境类型；产品仍按原图角度在本地合成。"}
             </small>
+            <WorkflowFieldHelp>
+              均衡混合会轮换环境；桌面极客适合个人设备桌，企业办公适合办公展示，开箱摆放适合拆包场景。先按使用场景选。
+            </WorkflowFieldHelp>
           </label>
         ) : null}
         <label>
@@ -955,6 +1034,10 @@ export function ProductSceneConfiguration({
             <option value="3:4">3:4 · 1536 × 2048</option>
             <option value="9:16">9:16 · 1152 × 2048</option>
           </select>
+          <WorkflowFieldHelp>
+            方形 1:1 适合方图位置，3:4 适合竖版图文，9:16
+            适合全屏竖图；按最终展示位置选择，尺寸见选项。
+          </WorkflowFieldHelp>
         </label>
         <label>
           {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
@@ -978,6 +1061,11 @@ export function ProductSceneConfiguration({
               ? `；当前原图较竖长，计划会自动收窄到约 ${Math.round(placementCeiling * 100)}% 保证产品完整入画`
               : ""}
           </small>
+          <WorkflowFieldHelp>
+            {generationMode === "protected"
+              ? "调整完整原片在成图中的宽度占比；拉高更突出原片，拉低给外围背景更多空间。预置 48%，它不改变实物尺寸或片内佩戴比例。"
+              : "调整商品宽度占整张图的比例；拉高突出商品，拉低增加环境。预置 48%，竖长商品会自动收窄以完整入画。"}
+          </WorkflowFieldHelp>
         </label>
         {productSceneDepthApplies(options) ? (
           <label>
@@ -999,6 +1087,10 @@ export function ProductSceneConfiguration({
                 ? "通过拍摄提示词控制景深"
                 : "调整背景虚化，产品保持清晰"}
             </small>
+            <WorkflowFieldHelp>
+              控制背景与商品的清晰度分离：低值让环境较清楚，高值让背景更柔；预置 20%。AI
+              多机位通过提示词引导，需看成图确认效果。
+            </WorkflowFieldHelp>
           </label>
         ) : null}
         {productSceneSeedApplies(options) ? (
@@ -1018,6 +1110,10 @@ export function ProductSceneConfiguration({
               }
             />
             <small>默认值可复现同一批场景；想换一批组合再改这里。</small>
+            <WorkflowFieldHelp>
+              这是场景组合的编号；保持其他设置相同并沿用编号，可复用同一组组合。换一个整数会重新排列，不能保证
+              AI 生成像素完全一致。
+            </WorkflowFieldHelp>
           </label>
         ) : null}
       </div>
@@ -1039,6 +1135,7 @@ export function ProductSceneConfiguration({
           <strong>自动检查与 Logo 贴回</strong>
           <label className="product-scene__approval">
             <input
+              aria-label="自动检测可见接口"
               type="checkbox"
               checked={options.quality?.inspectPorts ?? false}
               onChange={(event) =>
@@ -1053,6 +1150,9 @@ export function ProductSceneConfiguration({
               }
             />
             自动检测可见接口
+            <WorkflowFieldHelp>
+              适合接口数量、排列影响商品识别的产品；开启后由可看图的文本模型检查成图可见部分，仍需人工审核。
+            </WorkflowFieldHelp>
           </label>
           {options.quality?.inspectPorts ? (
             <label>
@@ -1070,6 +1170,10 @@ export function ProductSceneConfiguration({
                 placeholder="只填写你已确认的接口类型、数量、排列和位置；留空时依据产品参考图检查可见部分。"
               />
               <small>接口面未出现在图片中会标记“不可见”，不会视为全部接口已通过验证。</small>
+              <WorkflowFieldHelp>
+                按已确认事实写接口类型、数量及位置，例如“背面两枚
+                USB-C，上下排列”；留空会按原图核对可见部分。
+              </WorkflowFieldHelp>
             </label>
           ) : null}
           <button
@@ -1104,6 +1208,7 @@ export function ProductSceneConfiguration({
               </small>
               <label className="product-scene__approval">
                 <input
+                  aria-label="确认此 Logo 内容与透明边缘正确"
                   type="checkbox"
                   checked={options.quality.logo.approved}
                   onChange={(event) => {
@@ -1119,6 +1224,9 @@ export function ProductSceneConfiguration({
                   }}
                 />
                 <RequiredMark>确认此 Logo 内容与透明边缘正确</RequiredMark>
+                <WorkflowFieldHelp>
+                  放大查看文字、图形及透明边缘正确后再勾选；贴回定位不确定时还需要人工处理。
+                </WorkflowFieldHelp>
               </label>
               <button
                 type="button"
@@ -1519,6 +1627,9 @@ export function ProductSceneDeliverables({
           <option value="rejected">已拒绝</option>
           <option value="error">失败</option>
         </select>
+        <WorkflowFieldHelp>
+          按审核状态缩小当前列表；待审核用于挑选成图，失败用于找到需要处理的任务，切换筛选不会重新生成。
+        </WorkflowFieldHelp>
       </label>
       <div className="product-scene__rows">
         {visible.map((row) => (
@@ -1539,6 +1650,9 @@ export function ProductSceneDeliverables({
                   }
                 />
                 加入批量选用
+                <WorkflowFieldHelp>
+                  勾选只是加入当前批量选择；先放大核对，再点击“选用所选”确认采用这些图片。
+                </WorkflowFieldHelp>
               </label>
             ) : null}
             {row.outputPath ? (

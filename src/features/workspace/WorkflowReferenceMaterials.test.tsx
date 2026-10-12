@@ -72,7 +72,8 @@ describe("workflow reference materials", () => {
     }
     expect(alert).not.toHaveTextContent('"kind"');
     expect(alert).not.toHaveTextContent("C:/references/empty.pdf");
-    expect(button).toHaveAttribute("aria-describedby", alert.id);
+    expect(button.getAttribute("aria-describedby")?.split(/\s+/)).toContain(alert.id);
+    expect(button).toHaveAccessibleDescription(/有说明书、事实依据或风格参考时再添加/);
     const raw = screen.getByText(/"byteSize": 0/);
     expect(raw).not.toBeVisible();
     fireEvent.click(screen.getByText("展开完整报错"));

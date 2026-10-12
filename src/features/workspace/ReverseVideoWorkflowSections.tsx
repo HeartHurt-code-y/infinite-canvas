@@ -15,6 +15,7 @@ import {
   type ReverseVideoWorkflowOptions,
 } from "./reverseVideoWorkflowModel";
 import { RequiredMark } from "./workflowFieldRequirements";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ReverseVideoWorkflowSections.css";
 
@@ -93,6 +94,10 @@ export function ReverseVideoConfiguration({
               onChange({ ...options, sourceUrl, localVideoPath: "", localVideoName: "" })
             }
           />
+          <WorkflowFieldHelp>
+            粘贴一条完整 http(s) 视频分享链接，可连同分享文案一起粘贴；同一次只放一个链接。
+            需要真实视频才能分析，文字描述不能代替原片，也可用下方按钮选择本地视频。
+          </WorkflowFieldHelp>
         </label>
       )}
       <div className="canvas-reverse-video__actions">
@@ -112,20 +117,30 @@ export function ReverseVideoConfiguration({
         </button>
       </div>
       {!localSelected && options.sourceUrl.trim() && onOpenDownloadSettings ? (
-        <DownloadCookieSourceControls
-          status={cookieStatus}
-          busy={cookieBusy}
-          onSelectBrowser={onSelectCookieBrowser}
-          onImportCookies={onOpenDownloadSettings}
-          onClearCookies={onClearCookies}
-          importLabel="导入下载登录凭据"
-        />
+        <>
+          <DownloadCookieSourceControls
+            status={cookieStatus}
+            busy={cookieBusy}
+            onSelectBrowser={onSelectCookieBrowser}
+            onImportCookies={onOpenDownloadSettings}
+            onClearCookies={onClearCookies}
+            importLabel="导入下载登录凭据"
+          />
+          <WorkflowFieldHelp>
+            Cookies
+            是网站的登录凭据。公开视频可先直接尝试；提示登录时选择已登录的本机浏览器，或导入该网站的
+            cookies.txt。账号需要能观看原片，选择凭据后仍以实际下载结果为准。
+          </WorkflowFieldHelp>
+        </>
       ) : null}
       <small>
         {localSelected
           ? "无需下载，使用已选择的视频完成抽帧与分析。"
           : "链接由项目内的下载器处理。若平台要求登录，可选择本机浏览器或导入 cookies.txt 后重试。"}
       </small>
+      <WorkflowFieldHelp>
+        抽帧会自动完成，保留时间戳并对结尾加密采样，无需手动填写抽帧数量。先确认原片完整；后续可查看抽帧联系表与分析结果，再提出修订。
+      </WorkflowFieldHelp>
       {pickError ? <ErrorAlert workflow id={pickErrorId} error={pickError} /> : null}
       <label className="canvas-knowledge-workflow__brief">
         <span>补充方向</span>
@@ -136,6 +151,10 @@ export function ReverseVideoConfiguration({
           placeholder="例如：重点分析最后几秒的动作，二创改为宠物用品场景。"
           onValueChange={onBriefChange}
         />
+        <WorkflowFieldHelp>
+          选填，告诉分析要重点看哪里，以及二创要换成什么内容。例如「重点看最后 3
+          秒的转场，保留节奏，主体改为宠物用品」；留空则按完整视频分析。
+        </WorkflowFieldHelp>
       </label>
     </fieldset>
   );

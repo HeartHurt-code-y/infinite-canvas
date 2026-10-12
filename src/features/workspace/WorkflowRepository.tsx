@@ -1,5 +1,7 @@
 import { Icon } from "../../components/Icon";
 import { memo, useEffect, useId, useRef } from "react";
+import { WorkflowPreparation } from "./WorkflowGuidance";
+import { WORKFLOW_GUIDES } from "./workflowGuidanceContent";
 
 const KNOWLEDGE_VIDEO_WORKFLOW_STAGES = ["智能策划", "自动生成", "质量检查", "成片交付"] as const;
 
@@ -122,7 +124,9 @@ export const WorkflowRepository = memo(function WorkflowRepository({
         hidden={!expanded}
       >
         <div className="workflow-repository__content-heading">
-          <span className="workflow-repository__count">10 个自动工作流</span>
+          <span className="workflow-repository__count">
+            {Object.keys(WORKFLOW_GUIDES).length} 个自动工作流
+          </span>
           <button
             type="button"
             className="workflow-repository__close"
@@ -145,6 +149,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               上传同一产品参考图，以 AI
               多机位组合拍摄角度与场景；也可选择原图保真合成。分批制作、逐张审核后导出。
             </p>
+            <WorkflowPreparation kind="productScene" />
             <ol className="workflow-repository__stages" aria-label="产品场景图工作流能力">
               {["产品确认", "分批制作", "逐张审核", "图片导出"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -176,6 +181,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               读取本地视频，测量逐镜切点与运动，结合项目视觉模型标注镜头；审核后导出镜头报告与同步分镜视频。
             </p>
+            <WorkflowPreparation kind="reelbench" />
             <ol className="workflow-repository__stages" aria-label="视频拉片与分镜合成能力">
               {["本地切镜", "逐镜标注", "批量审核", "报告与视频"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -207,6 +213,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               以原曲为时间轴，确认歌词、风格、人物和分镜，首镜试产通过后生成全片，按音乐窗口合成并保留制作版本。
             </p>
+            <WorkflowPreparation kind="musicVideo" />
             <ol className="workflow-repository__stages" aria-label="音乐 MV 工作流能力">
               {["歌曲与歌词", "风格与分镜", "首镜与片段审核", "原曲合成交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -238,6 +245,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               粘贴分享链接或选择本地视频，由项目下载器获取原片，自动抽帧、反推提示词与二创路线，校验后保存案例和交付文档。
             </p>
+            <WorkflowPreparation kind="reverseVideo" />
             <ol className="workflow-repository__stages" aria-label="短视频反推工作流能力">
               {["下载与抽帧", "反推与二创", "检查与入库", "文档交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -270,6 +278,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               填写选题即可开始；想沿用真人形象时再添加人物参考图。自动提炼标题、匹配八种风格、生成与检查封面，交付
               3:4 竖版图片及提示词。
             </p>
+            <WorkflowPreparation kind="xhsCover" />
             <ol className="workflow-repository__stages" aria-label="小红书封面工作流能力">
               {["标题与风格", "参考图生成", "自动检查", "封面交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -302,6 +311,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               画布只增加一个节点。使用项目内已配置的模型，确认计划后按依赖执行，检查片段后合成交付。
             </p>
+            <WorkflowPreparation kind="knowledge" />
             <ol className="workflow-repository__stages" aria-label="知识教学视频自动工作流能力">
               {KNOWLEDGE_VIDEO_WORKFLOW_STAGES.map((stage, index) => (
                 <li key={stage} className="workflow-repository__stage">
@@ -335,6 +345,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               从故事概念到角色、剧本、资产、表演与视频，八个阶段自动衔接。支持已有资料接力和指定阶段修订。
             </p>
+            <WorkflowPreparation kind="film" />
             <ol className="workflow-repository__stages" aria-label="AI影视工作流能力">
               {["故事与剧本", "角色与场景", "表演与镜头", "成片交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -366,6 +377,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               剧本共创、风格锁定、服化道、导演分镜与执行提示词逐阶段确认。检查资产、首镜与全部片段后合成，交付制作四件套。
             </p>
+            <WorkflowPreparation kind="comicDrama" />
             <ol className="workflow-repository__stages" aria-label="漫剧自动工作流能力">
               {["剧本与风格", "资产与分镜", "首镜与批量审核", "成片与四件套"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -398,6 +410,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               添加商品资料与实物图，快速生成 15
               秒四镜头剧情，或完成五阶段制作。自动检查商品事实与包装一致性，交付文档和成片。
             </p>
+            <WorkflowPreparation kind="commerce" />
             <ol className="workflow-repository__stages" aria-label="剧情带货工作流能力">
               {["商品研究", "剧情与剧本", "分镜与资产", "成片交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -429,6 +442,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <p className="workflow-repository__description">
               围绕新品、系列或节日制作品牌短片，复用已定稿数字模特与商品原图。先审核概念与分镜，再看首镜试产，选用片段后合成。
             </p>
+            <WorkflowPreparation kind="brandVideo" />
             <ol className="workflow-repository__stages" aria-label="品牌视觉短片工作流能力">
               {["品牌概念", "分镜与身份参考", "首镜试产", "审核与成片"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
@@ -461,6 +475,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               输入描述或 ASCII 草图，自动匹配流程、卡片、时间线与数据图模板。在本机渲染 GIF 或
               MP4，并交付可编辑工程。
             </p>
+            <WorkflowPreparation kind="remotion" />
             <ol className="workflow-repository__stages" aria-label="动画逻辑图工作流能力">
               {["理解内容", "匹配与检查", "本地渲染", "动画交付"].map((label) => (
                 <li key={label} className="workflow-repository__stage">

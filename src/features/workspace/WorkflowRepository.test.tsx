@@ -125,7 +125,7 @@ describe("WorkflowRepository", () => {
         onInsertKnowledgeVideoWorkflow={insertKnowledge}
       />,
     );
-    expect(screen.getByText("10 个自动工作流")).toBeInTheDocument();
+    expect(screen.getByText("11 个自动工作流")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "AI影视工作流 V1.3" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加AI影视工作流节点" }));
     expect(insertFilm).toHaveBeenCalledTimes(1);

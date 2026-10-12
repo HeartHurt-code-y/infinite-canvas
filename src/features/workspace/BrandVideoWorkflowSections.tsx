@@ -1,3 +1,4 @@
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { useEffect, useId, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -92,6 +93,9 @@ export function BrandVideoWorkflowSections({
               onValueChange={(brandName) => onChange({ ...options, brandName })}
               placeholder="例如：杉间"
             />
+            <WorkflowFieldHelp>
+              填写片中代表的品牌名称；品牌名称和创意要求至少填写一项，想表达的场景可继续在创意要求里补充。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <span>系列名称</span>
@@ -101,6 +105,9 @@ export function BrandVideoWorkflowSections({
               onValueChange={(seriesTitle) => onChange({ ...options, seriesTitle })}
               placeholder="本次新品系列或视觉主题"
             />
+            <WorkflowFieldHelp>
+              给这次新品、活动或视觉主题起一个名称，便于识别制作方案；没有系列名称可留空。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <span>创意要求</span>
@@ -111,6 +118,9 @@ export function BrandVideoWorkflowSections({
               onValueChange={(brief) => onChange({ ...options, brief })}
               placeholder="希望传达的感觉、主角、场景、意象和必须出现的画面。品牌名称与创意要求至少填写一项。"
             />
+            <WorkflowFieldHelp>
+              按“给谁看、传达什么、哪些画面必须出现”填写，例如“给通勤女性看，突出轻盈，展示肩背细节”。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <span>商品事实与卖点</span>
@@ -121,6 +131,9 @@ export function BrandVideoWorkflowSections({
               onValueChange={(productFacts) => onChange({ ...options, productFacts })}
               placeholder="只填写已确认的材质、规格、功能和卖点；纯品牌意象片可留空。"
             />
+            <WorkflowFieldHelp>
+              只写已确认的材质、规格与卖点，用来约束分镜内容；纯品牌意象片可留空。成片需要展示商品时还需添加真实商品原图。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <span>视觉风格</span>
@@ -138,6 +151,9 @@ export function BrandVideoWorkflowSections({
               <option value="retro">复古时装</option>
               <option value="quiet">暖白意境</option>
             </select>
+            <WorkflowFieldHelp>
+              冷白杂志偏清冷与留白，复古时装偏织物与时装层次，暖白意境偏柔光与安静场景；预置冷白杂志。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <span>策划场合</span>
@@ -147,6 +163,9 @@ export function BrandVideoWorkflowSections({
               onValueChange={(occasion) => onChange({ ...options, occasion })}
               placeholder="新品系列、节日、品牌概念等"
             />
+            <WorkflowFieldHelp>
+              说明这支片服务于新品、节日还是品牌概念，帮助安排主题；没有特殊场合可沿用“新品系列”。
+            </WorkflowFieldHelp>
           </label>
           <div className="brand-video-workflow__format">
             <label>
@@ -161,6 +180,10 @@ export function BrandVideoWorkflowSections({
                   onChange({ ...options, durationSeconds: Number(event.target.value) })
                 }
               />
+              <WorkflowFieldHelp>
+                填写希望整支片多长，预置 20
+                秒；逐镜时长会按所选视频模型能力编排，确认方案时检查实际时长说明。
+              </WorkflowFieldHelp>
             </label>
             <label>
               <span>画幅</span>
@@ -177,6 +200,10 @@ export function BrandVideoWorkflowSections({
                 <option value="1:1">1:1 方形</option>
                 <option value="3:4">3:4 竖版</option>
               </select>
+              <WorkflowFieldHelp>
+                9:16 适合全屏手机播放，16:9 适合横屏，1:1 适合方形位置，3:4 适合竖版展示；预置
+                9:16。
+              </WorkflowFieldHelp>
             </label>
           </div>
           <label>
@@ -194,6 +221,9 @@ export function BrandVideoWorkflowSections({
               <option value="video">视频成片与制作文档</option>
               <option value="documents">仅创意与分镜文档</option>
             </select>
+            <WorkflowFieldHelp>
+              视频成片会继续制作并审核首镜、全部片段与合成结果；仅文档适合先确认概念和分镜，暂不制作视频。
+            </WorkflowFieldHelp>
           </label>
           <small>
             目标总时长用于编排分镜，逐镜时长按所选视频模型的实际能力匹配。方案完成后先确认首镜，再审核全部片段与成片。
@@ -207,9 +237,9 @@ export function BrandVideoWorkflowSections({
             >
               {picking ? "正在添加商品原图…" : "添加商品原图"}
             </button>
-            <p>
-              原图直接作为商品参考。人物参考由下方模特库管理；其他图片、视频和文档可放入工作流的参考素材。
-            </p>
+            <WorkflowFieldHelp>
+              上传本款实物清晰的全貌与细节图，原图直接作为商品参考；人物参考在下方模特库选择，其他图片、视频与文档放入工作流参考素材。
+            </WorkflowFieldHelp>
             {options.productImages.length ? (
               <ul>
                 {options.productImages.map((image) => (
@@ -248,6 +278,9 @@ export function BrandVideoWorkflowSections({
         ) : null}
         <WorkflowRequirementsHint requirements={brandVideoRequirements(options)} />
       </details>
+      <WorkflowFieldHelp>
+        希望多镜头沿用同一人物时，在模特库选择已批准版本；纯商品或意象片可不选。选定后绑定这个版本，后续新建模特版本不会自动替换它。
+      </WorkflowFieldHelp>
       <BrandModelLibrary
         {...(options.model ? { selected: options.model } : {})}
         brandName={options.brandName}

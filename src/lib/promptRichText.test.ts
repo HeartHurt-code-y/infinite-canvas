@@ -281,3 +281,47 @@ describe("decode 与样式字段", () => {
     expect(samePromptTextStyle({ marks: ["bold"] }, { marks: ["italic"] })).toBe(false);
   });
 });
+
+describe("附件条目", () => {
+  const attachmentItem = {
+    kind: "attachment",
+    attachmentId: "att-1",
+    target: { kind: "local_base64_asset", assetId: "asset-x", mediaType: "image" },
+    name: "参考图.png",
+    mediaType: "image",
+  } as const;
+
+  it("经 build/flatten 往返保留身份与来源", () => {
+    const items = promptDocumentFromTiptapJson(
+      promptDocumentToTiptapJson({
+        schema: "prompt-content",
+        version: 1,
+        items: [{ kind: "text", text: "看" }, attachmentItem],
+      }),
+    ).items;
+    expect(items[0]).toEqual({ kind: "text", text: "看" });
+    expect(items[1]).toMatchObject({
+      kind: "attachment",
+      attachmentId: "att-1",
+      name: "参考图.png",
+      mediaType: "image",
+    });
+    expect(items[1]).toMatchObject({ target: { kind: "local_base64_asset", assetId: "asset-x" } });
+  });
+
+  it("存档 decode 保留附件，缺 target 拒绝", () => {
+    const decoded = decodePromptContentDocument({
+      schema: "prompt-content",
+      version: 1,
+      items: [attachmentItem],
+    });
+    expect(decoded?.items[0]).toMatchObject({ kind: "attachment", attachmentId: "att-1" });
+    expect(
+      decodePromptContentDocument({
+        schema: "prompt-content",
+        version: 1,
+        items: [{ kind: "attachment", attachmentId: "att-2", name: "x.png", mediaType: "image" }],
+      }),
+    ).toBeNull();
+  });
+});

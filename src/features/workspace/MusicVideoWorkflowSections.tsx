@@ -1,3 +1,4 @@
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { useId, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
@@ -48,6 +49,9 @@ export function MusicVideoConfiguration({
           <button type="button" disabled={!onPick} onClick={() => onPick?.("song")}>
             {options.songPath ? "更换歌曲" : "选择歌曲"}
           </button>
+          <WorkflowFieldHelp>
+            选择最终要使用的本地原曲文件；时间线、片段长度和成片音轨都以它为准。先试听确认歌曲版本完整且正确，再补充歌词。
+          </WorkflowFieldHelp>
           {options.songPath ? (
             <>
               <button
@@ -75,6 +79,9 @@ export function MusicVideoConfiguration({
             onValueChange={(officialLyrics) => onChange({ ...options, officialLyrics })}
             placeholder="粘贴准确歌词，供听辨与唱词校正。"
           />
+          <WorkflowFieldHelp>
+            粘贴与所选原曲版本一致的准确歌词，保留重复句；用于校正听辨。没有官方歌词时可留空，但后续要核对识别结果。
+          </WorkflowFieldHelp>
         </label>
         <label>
           带时间戳的 LRC 歌词
@@ -85,6 +92,10 @@ export function MusicVideoConfiguration({
             onValueChange={(lrc) => onChange({ ...options, lrc })}
             placeholder={"[00:00.00][Instrumental]\n[00:08.20]第一句歌词\n[00:14.50]第二句歌词"}
           />
+          <WorkflowFieldHelp>
+            每行先写时间再写歌词，例如
+            [00:08.20]第一句；时间是距歌曲开头的分钟和秒。可留空；自动分析时这些时间只作参考。
+          </WorkflowFieldHelp>
         </label>
         <label>
           歌曲声学分析
@@ -103,6 +114,10 @@ export function MusicVideoConfiguration({
               手工时间线（仅制作文档）
             </option>
           </select>
+          <WorkflowFieldHelp>
+            制作成片用专用 ASR
+            识别唱词，再按原曲强制对齐时间；手工时间线适合只做文档，需要你试听核对。当前自动对齐链路按中文配置。
+          </WorkflowFieldHelp>
         </label>
         {musicVideoSpeechAnalysisMode(options) === "automatic" ? (
           <label>
@@ -123,6 +138,9 @@ export function MusicVideoConfiguration({
                 </option>
               ))}
             </select>
+            <WorkflowFieldHelp>
+              选已启用的豆包语音连接来识别歌曲；列表为空时先在项目连接里配置。歌词强制对齐另需火山音频技术凭据，不由这个选项代替。
+            </WorkflowFieldHelp>
           </label>
         ) : null}
         <small>
@@ -140,6 +158,9 @@ export function MusicVideoConfiguration({
             onValueChange={(visualStyle) => onChange({ ...options, visualStyle })}
             placeholder="例如：冷色城市夜景、胶片质感、克制叙事。留空由模型提案。"
           />
+          <WorkflowFieldHelp>
+            写希望看到的色调、场景、质感与叙事，例如“冷色夜景，胶片质感”；留空会由模型提出方案。
+          </WorkflowFieldHelp>
         </label>
         <div className="canvas-music-video__row">
           <label>
@@ -158,6 +179,9 @@ export function MusicVideoConfiguration({
               <option value="reference">使用人物参考图</option>
               <option value="generate">生成固定人物</option>
             </select>
+            <WorkflowFieldHelp>
+              无固定人物适合环境与叙事镜头；人物参考图适合沿用指定形象；生成固定人物会先制作人物资产供审核。
+            </WorkflowFieldHelp>
           </label>
           <label>
             画幅
@@ -170,6 +194,9 @@ export function MusicVideoConfiguration({
               <option>9:16</option>
               <option>1:1</option>
             </select>
+            <WorkflowFieldHelp>
+              16:9 适合横屏播放，9:16 适合手机竖屏，1:1 适合方形位置；按最终播放位置选。
+            </WorkflowFieldHelp>
           </label>
           <label>
             交付
@@ -183,6 +210,10 @@ export function MusicVideoConfiguration({
               <option value="video">文档与完整 MV</option>
               <option value="documents">仅制作文档</option>
             </select>
+            <WorkflowFieldHelp>
+              完整 MV
+              会继续制作与审核资产、视频片段并合成原曲；仅制作文档交付时间线、歌词与分镜提示词，适合先检查方案。
+            </WorkflowFieldHelp>
           </label>
         </div>
         {options.characterMode === "reference" ? (
@@ -193,6 +224,9 @@ export function MusicVideoConfiguration({
             <button type="button" disabled={!onPick} onClick={() => onPick?.("character")}>
               添加人物参考图
             </button>
+            <WorkflowFieldHelp>
+              选择同一人物清晰的正面或侧面照片，用来参考外貌与服装；多个视角有助于说明形象，生成后仍需核对一致性。
+            </WorkflowFieldHelp>
             {options.characterReferences.map((item) => (
               <figure key={item.localPath}>
                 <img src={toMediaSrc(item.localPath)} alt={item.displayName} loading="lazy" />
@@ -234,6 +268,10 @@ export function MusicVideoConfiguration({
                 });
               }}
             />
+            <WorkflowFieldHelp>
+              这是希望出现正面演唱镜头的比例，预置
+              45%；低值偏环境叙事，高值偏人物演唱。每个对口型镜头都要试听原曲并人工验收。
+            </WorkflowFieldHelp>
           </label>
         ) : null}
         <small>
@@ -275,6 +313,7 @@ function ArtifactEditor({
               <label key={field}>
                 {field === "startSeconds" ? "开始（秒）" : "结束（秒）"}
                 <input
+                  aria-label={field === "startSeconds" ? "开始（秒）" : "结束（秒）"}
                   type="number"
                   step="0.01"
                   min={0}
@@ -290,11 +329,17 @@ function ArtifactEditor({
                     })
                   }
                 />
+                <WorkflowFieldHelp>
+                  {field === "startSeconds"
+                    ? "填写本段从原曲第几秒开始，0 是歌曲开头；试听后对准完整歌词或音乐段落边界。"
+                    : "填写本段到原曲第几秒结束，应晚于开始且不超过原曲；相邻段要衔接，不能重叠或漏段。"}
+                </WorkflowFieldHelp>
               </label>
             ))}
             <label>
               类型
               <select
+                aria-label="类型"
                 value={segment.kind}
                 onChange={(e) =>
                   setDraft({
@@ -314,11 +359,15 @@ function ArtifactEditor({
                 <option value="vocal">演唱</option>
                 <option value="instrumental">纯音乐</option>
               </select>
+              <WorkflowFieldHelp>
+                有实际唱词选“演唱”；前奏、间奏、尾奏等无唱词部分选“纯音乐”，切换后会清空该段歌词。
+              </WorkflowFieldHelp>
             </label>
           </div>
           <label>
             歌词
             <ImeTextarea
+              aria-label="歌词"
               rows={2}
               value={segment.text}
               disabled={segment.kind === "instrumental"}
@@ -331,6 +380,9 @@ function ArtifactEditor({
                 })
               }
             />
+            <WorkflowFieldHelp>
+              填写这段时间内完整唱出的歌词行，保留重复句；纯音乐段不填，不要拆字来凑镜头长度。
+            </WorkflowFieldHelp>
           </label>
         </fieldset>
       ))}
@@ -338,18 +390,23 @@ function ArtifactEditor({
         <label>
           视觉与人物风格
           <ImeTextarea
+            aria-label="视觉与人物风格"
             rows={6}
             value={draft.style.description}
             onValueChange={(description) =>
               setDraft({ ...draft, style: { ...draft.style!, description } })
             }
           />
+          <WorkflowFieldHelp>
+            统一描述色调、场景、人物外貌及服装，便于各镜头保持一致；修改后本阶段与后续内容会重新审核。
+          </WorkflowFieldHelp>
         </label>
       ) : null}
       {draft.style?.assets.map((asset) => (
         <label key={asset.id}>
           {asset.name}
           <ImeTextarea
+            aria-label={asset.name}
             rows={3}
             value={asset.prompt}
             onValueChange={(prompt) =>
@@ -364,6 +421,9 @@ function ArtifactEditor({
               })
             }
           />
+          <WorkflowFieldHelp>
+            描述这项人物或场景资产需要呈现的外貌、服装、材质与环境；与已确认风格和人物参考保持一致。
+          </WorkflowFieldHelp>
         </label>
       ))}
       {draft.shots?.map((shot) => (
@@ -374,24 +434,33 @@ function ArtifactEditor({
           <label>
             画面
             <ImeTextarea
+              aria-label="画面"
               rows={3}
               value={shot.visual}
               disabled={stage === "prompts"}
               onValueChange={(visual) => updateShot(shot.id, { visual })}
             />
+            <WorkflowFieldHelp>
+              描述该时间窗口中的主体、地点和动作，例如“人物走过街口，抬头看灯牌”；提示词阶段沿用已确认分镜。
+            </WorkflowFieldHelp>
           </label>
           <label>
             视频提示词
             <ImeTextarea
+              aria-label="视频提示词"
               rows={5}
               value={shot.videoPrompt}
               onValueChange={(videoPrompt) => updateShot(shot.id, { videoPrompt })}
             />
+            <WorkflowFieldHelp>
+              写清主体动作、镜头移动、环境和风格，服从上方时间窗口；正面演唱镜头需明确与原曲对应的唱词。
+            </WorkflowFieldHelp>
           </label>
           <div className="canvas-music-video__row">
             <label>
               景别
               <select
+                aria-label="景别"
                 value={shot.framing}
                 disabled={stage === "prompts"}
                 onChange={(e) => updateShot(shot.id, { framing: e.target.value })}
@@ -400,10 +469,14 @@ function ArtifactEditor({
                 <option value="medium">中景</option>
                 <option value="wide">远景</option>
               </select>
+              <WorkflowFieldHelp>
+                近景看表情与细节，中景看人物动作，远景看环境与构图；正面演唱使用近景或中景。
+              </WorkflowFieldHelp>
             </label>
             <label>
               演唱策略
               <select
+                aria-label="演唱策略"
                 value={shot.lipSync}
                 disabled={stage === "prompts"}
                 onChange={(e) => updateShot(shot.id, { lipSync: e.target.value })}
@@ -412,6 +485,9 @@ function ArtifactEditor({
                 <option value="offscreen">画外演唱</option>
                 <option value="none">无演唱动作</option>
               </select>
+              <WorkflowFieldHelp>
+                正面演唱需看到嘴部并试听验收；画外演唱保留歌声但不展示同步嘴型；无演唱动作适合环境、动作和纯音乐段。
+              </WorkflowFieldHelp>
             </label>
           </div>
         </fieldset>
@@ -713,6 +789,7 @@ export function MusicVideoDeliverables({
                 <label>
                   验收备注
                   <ImeTextarea
+                    aria-label="验收备注"
                     rows={2}
                     value={lipNotes[shot.id] ?? review?.note ?? ""}
                     disabled={disabled || !clipPath}
@@ -720,6 +797,9 @@ export function MusicVideoDeliverables({
                       setLipNotes((previous) => ({ ...previous, [shot.id]: note }))
                     }
                   />
+                  <WorkflowFieldHelp>
+                    试听并预览本镜，记录具体错字、提前或落后的时间位置，以及画面问题；自动时长检查不能代替嘴型验收。
+                  </WorkflowFieldHelp>
                 </label>
                 <div className="canvas-music-video__row">
                   <button

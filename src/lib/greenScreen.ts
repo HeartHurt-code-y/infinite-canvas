@@ -128,6 +128,8 @@ function previewDocument(document: PromptContentDocumentV1): string {
           return formatMarkReferenceText(item.labelSnapshot, item.descriptionSnapshot);
         case "pending_reference":
           return item.displayText;
+        case "attachment":
+          return `[附件:${item.name}]`;
       }
     })
     .join("")

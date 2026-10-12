@@ -1,4 +1,13 @@
+import { appDataDir, join } from "@tauri-apps/api/path";
+import { mkdir, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { Icon, type IconSize } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { localBase64AssetClient } from "../../lib/backend";
+import {
+  PROMPT_ATTACHMENT_ACCEPT,
+  ingestPromptAttachments,
+  type PromptAttachmentIngestReport,
+} from "../../lib/promptAttachments";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
@@ -281,6 +290,49 @@ export function PromptMentionInput({
   const inputRef = useRef<HTMLDivElement | null>(null);
   const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
   const sessionRef = useRef(promptSession);
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  /** 附件摄取的用户可见结果：失败与被忽略文件各给一句人话和补救动作。 */
+  const [attachmentNotice, setAttachmentNotice] = useState<{
+    readonly message: string;
+    readonly hint: string;
+  } | null>(null);
+  // 粘贴/拖拽/选择器共用的摄取：扩展名口径、临时文件与素材导入都在
+  // lib/promptAttachments；这里只接线，并把结果翻译成用户能读懂的提示。
+  const ingestAttachmentFiles = useCallback(async (files: readonly File[]) => {
+    setAttachmentNotice(null);
+    let report: PromptAttachmentIngestReport;
+    try {
+      report = await ingestPromptAttachments(files, {
+        saveTempFile: async (fileName, bytes) => {
+          const directory = await join(await appDataDir(), "prompt-attachments");
+          await mkdir(directory, { recursive: true }).catch(() => {});
+          const tempPath = await join(directory, `${globalThis.crypto.randomUUID()}-${fileName}`);
+          await writeFile(tempPath, bytes);
+          return tempPath;
+        },
+        importLocalAsset: (command) => localBase64AssetClient.importAsset(command),
+        deleteFile: (path) => remove(path),
+      });
+    } catch {
+      setAttachmentNotice({
+        message: "附件读取失败，这次没有文件被导入。",
+        hint: "请重新粘贴或选择文件再试一次；仍失败可先把文件保存到本机再拖入。",
+      });
+      return;
+    }
+    if (report.attachments.length > 0) sessionRef.current?.insertAttachments(report.attachments);
+    if (report.failed.length > 0) {
+      setAttachmentNotice({
+        message: `${report.failed.join("、")} 导入失败，其余文件已正常插入。`,
+        hint: "请单独重试这个文件；仍失败可先在素材库上传，再把素材节点连到本节点。",
+      });
+    } else if (report.skipped.length > 0) {
+      setAttachmentNotice({
+        message: `已忽略不支持的文件：${report.skipped.join("、")}。`,
+        hint: "提示词附件目前支持图片、视频和音频；文档类资料请放进节点的通用参考素材。",
+      });
+    }
+  }, []);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -1021,7 +1073,27 @@ export function PromptMentionInput({
         ) : null}
 
         <div ref={fieldRef} className="prompt-mention__field">
-          <PromptRichTextToolbar session={promptSession} />
+          <PromptRichTextToolbar
+            session={promptSession}
+            onPickFiles={() => attachmentInputRef.current?.click()}
+          />
+          <input
+            ref={attachmentInputRef}
+            type="file"
+            multiple
+            accept={PROMPT_ATTACHMENT_ACCEPT}
+            className="prompt-attachment__picker"
+            aria-hidden="true"
+            tabIndex={-1}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              void ingestAttachmentFiles(files);
+            }}
+          />
+          {attachmentNotice != null && (
+            <ErrorAlert error={attachmentNotice.message} hint={attachmentNotice.hint} />
+          )}
           <div
             ref={attachInput}
             className="prompt-mention__editor"
@@ -1054,6 +1126,13 @@ export function PromptMentionInput({
               scheduleAutoDetect();
             }}
             onPaste={(event) => {
+              // 剪贴板里有文件（截图/复制的文件）时优先作为附件摄取。
+              const files = Array.from(event.clipboardData?.files ?? []);
+              if (files.length > 0) {
+                event.preventDefault();
+                void ingestAttachmentFiles(files);
+                return;
+              }
               // 统一插入纯文本并解析显式 @ 引用；普通素材名保留为正文。
               // 同时杜绝富文本 HTML 直接混入提示词。
               const text = event.clipboardData?.getData("text/plain") ?? "";
@@ -1061,6 +1140,12 @@ export function PromptMentionInput({
               const resolution = sessionRef.current?.pastePlainText(text);
               if (resolution?.pending) openFirstPendingAmbiguity();
               runAutoDetect("explicit", resolution);
+            }}
+            onDrop={(event) => {
+              const files = Array.from(event.dataTransfer?.files ?? []);
+              if (files.length === 0) return;
+              event.preventDefault();
+              void ingestAttachmentFiles(files);
             }}
             onClick={(event) => {
               const pending = sessionRef.current?.pendingAt(event.target) ?? null;

@@ -26,6 +26,7 @@ import {
   type ReelbenchWorkflowOptions,
 } from "./reelbenchWorkflowModel";
 import { RequiredMark } from "./workflowFieldRequirements";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ReelbenchWorkflowSections.css";
 
@@ -167,6 +168,10 @@ export function ReelbenchConfiguration({
             placeholder="粘贴一条视频链接，或改用本地视频。"
             onValueChange={(sourceUrl) => onChange({ ...options, sourceUrl })}
           />
+          <WorkflowFieldHelp>
+            粘贴一条完整 http(s)
+            视频链接，可带分享文案；一次只分析一个视频。也可选择本地文件，视频来源二选一，文字要求不能代替原片。
+          </WorkflowFieldHelp>
         </label>
       )}
       <div className="reelbench__actions">
@@ -179,15 +184,26 @@ export function ReelbenchConfiguration({
           {picking ? "正在选择…" : localSelected ? "更换本地视频" : "选择本地视频"}
         </button>
       </div>
+      {localSelected ? (
+        <WorkflowFieldHelp>
+          直接使用所选本地文件测量切点和抽取画面，无需下载。先播放确认这是完整原片，选错时点「更换本地视频」。
+        </WorkflowFieldHelp>
+      ) : null}
       {!localSelected && options.sourceUrl.trim() && onOpenDownloadSettings ? (
-        <DownloadCookieSourceControls
-          status={cookieStatus}
-          busy={cookieBusy}
-          onSelectBrowser={onSelectCookieBrowser}
-          onImportCookies={onOpenDownloadSettings}
-          onClearCookies={onClearCookies}
-          importLabel="导入下载登录凭据"
-        />
+        <>
+          <DownloadCookieSourceControls
+            status={cookieStatus}
+            busy={cookieBusy}
+            onSelectBrowser={onSelectCookieBrowser}
+            onImportCookies={onOpenDownloadSettings}
+            onClearCookies={onClearCookies}
+            importLabel="导入下载登录凭据"
+          />
+          <WorkflowFieldHelp>
+            Cookies 是网站的登录凭据。公开视频可先直接尝试，要求登录时选已登录的浏览器或导入该网站的
+            cookies.txt；账号需要能观看原片，凭据能否访问以实际下载结果为准。
+          </WorkflowFieldHelp>
+        </>
       ) : null}
       {pickError ? <ErrorAlert workflow id={pickErrorId} error={pickError} /> : null}
       <label>
@@ -206,6 +222,9 @@ export function ReelbenchConfiguration({
           <option value="editing">剪辑节奏</option>
           <option value="inventory">投放素材盘点</option>
         </select>
+        <WorkflowFieldHelp>
+          仿写参考侧重可复现的画面与运镜，剪辑节奏侧重镜头的叙事作用，素材盘点侧重产品出镜和字卡。按你要学习的内容选择，只改变分析重点，不改变实测切点。
+        </WorkflowFieldHelp>
       </label>
       <label>
         <span>重点要求</span>
@@ -216,6 +235,10 @@ export function ReelbenchConfiguration({
           placeholder="例如：重点记录产品出镜、字卡和开头节奏。"
           onValueChange={onBriefChange}
         />
+        <WorkflowFieldHelp>
+          选填，补充要特别记录的内容，例如「逐镜记录产品何时出现、字幕写什么、前 5
+          秒如何吸引注意」。留空则按所选分析用途处理。
+        </WorkflowFieldHelp>
       </label>
       <div className="reelbench__settings">
         <label>
@@ -231,7 +254,10 @@ export function ReelbenchConfiguration({
               onChange({ ...options, sceneThreshold: event.currentTarget.valueAsNumber })
             }
           />
-          <small>较小数值会检出更多镜头。</small>
+          <WorkflowFieldHelp>
+            决定多大的画面变化算新镜头，范围 0.05～0.9，先用默认
+            0.3。漏掉切镜时调小；把同一镜的动作误切成多镜时调大，分析后也可手动补刀或合并。
+          </WorkflowFieldHelp>
         </label>
         <label>
           <span>最短镜头（秒）</span>
@@ -246,6 +272,10 @@ export function ReelbenchConfiguration({
               onChange({ ...options, minShotSeconds: event.currentTarget.valueAsNumber })
             }
           />
+          <WorkflowFieldHelp>
+            过滤过短的镜头，范围 0.1～5 秒，默认 0.25
+            秒。快剪原片可调小以保留短镜头；闪动导致碎镜过多时调大，但可能合并真实的短镜头。
+          </WorkflowFieldHelp>
         </label>
         <label>
           <span>报告语言</span>
@@ -259,10 +289,14 @@ export function ReelbenchConfiguration({
             <option value="zh">中文</option>
             <option value="en">English</option>
           </select>
+          <WorkflowFieldHelp>
+            选择镜头说明与报告的输出语言，方便自己或协作者阅读；不会改变原片中的字幕或台词。
+          </WorkflowFieldHelp>
         </label>
       </div>
       <label className="reelbench__checkbox">
         <input
+          aria-label="同时导出画面与镜头信息同步的视频"
           type="checkbox"
           checked={options.includeSyncVideo}
           onChange={(event) =>
@@ -270,6 +304,9 @@ export function ReelbenchConfiguration({
           }
         />
         同时导出画面与镜头信息同步的视频
+        <WorkflowFieldHelp>
+          勾选后额外在本机生成原片与镜头说明同步展示的视频，方便边看边核对；只需要报告和镜头表时保持不勾选即可。
+        </WorkflowFieldHelp>
       </label>
       {options.includeSyncVideo ? (
         <label>
@@ -285,6 +322,10 @@ export function ReelbenchConfiguration({
             <option value={2}>2×</option>
             <option value={3}>3×</option>
           </select>
+          <WorkflowFieldHelp>
+            调整同步视频里原片画面的显示尺寸，默认 1×；低分辨率原片可按阅读需要选 2× 或
+            3×。放大不会补回细节，实际尺寸也受导出上限约束。
+          </WorkflowFieldHelp>
         </label>
       ) : null}
       <small>切点、时长和本地文件由项目内 FFmpeg 测量；文本模型只分析实际抽出的画面。</small>
@@ -490,6 +531,10 @@ export function ReelbenchDeliverables({
                 value={splitAt}
                 onChange={(event) => setSplitAt(event.currentTarget.value)}
               />
+              <WorkflowFieldHelp>
+                发现漏切时，填入原片从开头算起的秒数，例如
+                3.25。时间要在片头与片尾之间；先记录补刀，再点「应用切点修改并重新分析」。
+              </WorkflowFieldHelp>
             </label>
             <button type="button" disabled={disabled || !splitAt} onClick={() => recut("split")}>
               记录补刀
@@ -510,6 +555,9 @@ export function ReelbenchDeliverables({
                     </option>
                   ))}
               </select>
+              <WorkflowFieldHelp>
+                发现同一连续镜头被多切时，选择要移除的分界时间，让前后镜头合并。先记录合并，再应用修改；新镜头表需要重新检查和批准。
+              </WorkflowFieldHelp>
             </label>
             <button type="button" disabled={disabled || !mergeAt} onClick={() => recut("merge")}>
               记录合并
@@ -610,6 +658,7 @@ export function ReelbenchDeliverables({
                     <label>
                       景别
                       <select
+                        aria-label="景别"
                         value={draftShot.size ?? ""}
                         onChange={(event) =>
                           setDraftShot({
@@ -625,10 +674,14 @@ export function ReelbenchDeliverables({
                           </option>
                         ))}
                       </select>
+                      <WorkflowFieldHelp>
+                        描述主体在画面中有多近：全景看环境与全身，中景看半身，特写看脸或局部。大远景更远、大特写更近；纯字卡等不适用时选「无景别」。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       类别
                       <select
+                        aria-label="类别"
                         value={draftShot.category ?? ""}
                         onChange={(event) =>
                           setDraftShot({
@@ -644,10 +697,14 @@ export function ReelbenchDeliverables({
                           </option>
                         ))}
                       </select>
+                      <WorkflowFieldHelp>
+                        按这一镜的用途分类，例如介绍环境选定场，突出商品选产品展示，主要展示文字选字卡。字卡要填写画面文字，对话要有可确认台词，反应要有主体，空镜不填人物主体。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       运镜
                       <select
+                        aria-label="运镜"
                         value={draftShot.camera ?? ""}
                         onChange={(event) =>
                           setDraftShot({
@@ -663,10 +720,14 @@ export function ReelbenchDeliverables({
                           </option>
                         ))}
                       </select>
+                      <WorkflowFieldHelp>
+                        按真实画面选择镜头运动：不动选固定，靠近或远离选推/拉，转动方向选摇，平移选移，跟着主体走选跟拍。变焦改变放大程度，变焦点改变清晰焦点；不确定时先播放原片核对。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       转场
                       <select
+                        aria-label="转场"
                         value={draftShot.transitionIn ?? "cut"}
                         onChange={(event) =>
                           setDraftShot({
@@ -681,38 +742,54 @@ export function ReelbenchDeliverables({
                           </option>
                         ))}
                       </select>
+                      <WorkflowFieldHelp>
+                        记录上一镜如何进入本镜：直接切换选硬切，两画面重叠选叠化，从黑场出现选淡入。甩切、匹配剪辑等只在原片确实有对应效果时选择。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       画面描述
                       <textarea
+                        aria-label="画面描述"
                         value={draftShot.frame ?? ""}
                         rows={3}
                         onChange={(event) =>
                           setDraftShot({ ...draftShot, frame: event.currentTarget.value })
                         }
                       />
+                      <WorkflowFieldHelp>
+                        用完整句子写可核对的主体、位置、动作与环境，例如「白色运动鞋置于木桌中央，手从左侧拿起鞋，背景是灰墙」。避免只写「画面精美」或与其他镜完全重复。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       画面文字
                       <input
+                        aria-label="画面文字"
                         value={draftShot.onscreenText ?? ""}
                         onChange={(event) =>
                           setDraftShot({ ...draftShot, onscreenText: event.currentTarget.value })
                         }
                       />
+                      <WorkflowFieldHelp>
+                        抄录画面中实际可见的字卡、标题或卖点文字；看不清的内容标明不清楚，没有文字就留空，避免推测品牌或宣传结论。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       可见字幕或可确认台词
                       <input
+                        aria-label="可见字幕或可确认台词"
                         value={draftShot.audio ?? ""}
                         onChange={(event) =>
                           setDraftShot({ ...draftShot, audio: event.currentTarget.value })
                         }
                       />
+                      <WorkflowFieldHelp>
+                        填写可见字幕，或你亲自播放原片后确认的台词。模型只看抽帧图，不能据此听到声音；无法确认时留空。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       主体（逗号分隔）
                       <input
+                        aria-label="主体（逗号分隔）"
                         value={draftShot.subjects?.join("，") ?? ""}
                         onChange={(event) =>
                           setDraftShot({
@@ -724,10 +801,14 @@ export function ReelbenchDeliverables({
                           })
                         }
                       />
+                      <WorkflowFieldHelp>
+                        填写本镜可见的人物或主体，多个用中文或英文逗号分隔，例如「女主，白色运动鞋」。同一主体跨镜保持同一个名称，空镜可留空。
+                      </WorkflowFieldHelp>
                     </label>
                     <label>
                       节奏角色
                       <select
+                        aria-label="节奏角色"
                         value={draftShot.rhythm ?? ""}
                         onChange={(event) => {
                           if (event.currentTarget.value)
@@ -745,26 +826,37 @@ export function ReelbenchDeliverables({
                           </option>
                         ))}
                       </select>
+                      <WorkflowFieldHelp>
+                        标注这一镜在节奏中的作用：钩子吸引注意，铺垫交代信息，递进加强期待，转折改变走向，兑现给出结果，收口结束。节奏要全片全部标注或全部留空，选择后需填写具体理由。
+                      </WorkflowFieldHelp>
                     </label>
                     {draftShot.rhythm ? (
                       <label>
                         节奏理由
                         <input
+                          aria-label="节奏理由"
                           value={draftShot.rhythmNote ?? ""}
                           onChange={(event) =>
                             setDraftShot({ ...draftShot, rhythmNote: event.currentTarget.value })
                           }
                         />
+                        <WorkflowFieldHelp>
+                          说明这镜凭什么承担所选作用，例如「先展示鞋底开裂，引出后续修复结果的期待」。把判断连到可见画面，避免只重复「这是钩子」。
+                        </WorkflowFieldHelp>
                       </label>
                     ) : null}
                     <label>
                       备注
                       <input
+                        aria-label="备注"
                         value={draftShot.note ?? ""}
                         onChange={(event) =>
                           setDraftShot({ ...draftShot, note: event.currentTarget.value })
                         }
                       />
+                      <WorkflowFieldHelp>
+                        选填，记录需要人工核对的疑点或仿写注意事项，例如「手遮住商标，需看原片确认」。保存修改后要重新运行质量检查，再批准导出。
+                      </WorkflowFieldHelp>
                     </label>
                     <div className="reelbench__actions">
                       <button type="button" disabled={disabled} onClick={saveShot}>

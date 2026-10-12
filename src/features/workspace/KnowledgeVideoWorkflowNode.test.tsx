@@ -97,6 +97,30 @@ function commonProps(node: KnowledgeVideoWorkflowNodeData) {
 }
 
 describe("KnowledgeVideoWorkflowNode", () => {
+  it("updates model requirement marks and guidance when switching to documents", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const film = createAiFilmWorkflowOptions();
+    const videoNode = createNode({ ...base, brief: "保留这份用户自己的制作要求", film });
+    const props = commonProps(videoNode);
+    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByRole("region", { name: "工作流使用指南" })).toHaveTextContent("已有剧本");
+    expect(screen.getByLabelText("图片生成模型")).toBeRequired();
+    expect(screen.getByLabelText("视频生成模型")).toBeRequired();
+    const documentsNode = createNode({
+      ...videoNode.config,
+      film: { ...film, deliverable: "documents" },
+    });
+    rerender(<KnowledgeVideoWorkflowNode {...props} node={documentsNode} />);
+    expect(screen.getByLabelText("图片生成模型")).not.toBeRequired();
+    expect(screen.getByLabelText("视频生成模型")).not.toBeRequired();
+    expect(screen.getByLabelText("图片生成模型")).toHaveAccessibleDescription(
+      /仅交付文档，可暂不配置/,
+    );
+    expect(screen.getByLabelText("影视制作要求")).toHaveValue("保留这份用户自己的制作要求");
+    expect(props.onChange).not.toHaveBeenCalled();
+    expect(props.onExecute).not.toHaveBeenCalled();
+  });
+
   it.each([2, 20])(
     "preserves the provider-planned %s-second brand shot when editing only its prompt",
     (durationSeconds) => {

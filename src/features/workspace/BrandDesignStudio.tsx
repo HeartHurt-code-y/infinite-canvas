@@ -12,6 +12,7 @@ import {
 } from "./brandDesignModel";
 import { renderBrandDesignBundle, renderBrandDesignPage } from "./brandDesignRenderer";
 import type { JewelryLaunchDraft, JewelryLaunchSlotId } from "./jewelryLaunchPlan";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import "./BrandDesignStudio.css";
 
 export interface BrandDesignCandidate {
@@ -270,20 +271,29 @@ export function BrandDesignStudio({
               <label>
                 品牌名称
                 <ImeInput
+                  aria-label="品牌名称"
                   value={design.brandName}
                   onValueChange={(brandName) => update({ brandName })}
                 />
+                <WorkflowFieldHelp>
+                  填写要在设计中展示的品牌名，例如店铺品牌；需要放正式标识时，再添加真实 Logo 文件。
+                </WorkflowFieldHelp>
               </label>
               <label>
                 系列名称
                 <ImeInput
+                  aria-label="系列名称"
                   value={design.seriesTitle}
                   onValueChange={(seriesTitle) => update({ seriesTitle })}
                 />
+                <WorkflowFieldHelp>
+                  用一句短名称概括这组商品或活动，例如「秋日玻璃珠系列」，用于统一系列展示文案。
+                </WorkflowFieldHelp>
               </label>
               <label>
                 视觉风格
                 <select
+                  aria-label="视觉风格"
                   value={design.preset}
                   onChange={(event) =>
                     update({ preset: event.target.value as BrandDesignDocument["preset"] })
@@ -293,14 +303,22 @@ export function BrandDesignStudio({
                   <option value="retro">复古时装</option>
                   <option value="quiet">暖白意境</option>
                 </select>
+                <WorkflowFieldHelp>
+                  选择整套页面的配色方向：冷白杂志用浅底深字，复古时装用深底浅字，暖白意境用暖色背景。按品牌调性选择，并更新预览核对。
+                </WorkflowFieldHelp>
               </label>
               <label>
                 系列说明
                 <ImeTextarea
+                  aria-label="系列说明"
                   value={design.seriesDescription}
                   rows={3}
                   onValueChange={(seriesDescription) => update({ seriesDescription })}
                 />
+                <WorkflowFieldHelp>
+                  写系列的主题与展示方向。点击「将风格用于 AI
+                  场景图」时，这段说明会成为场景图的品牌画面要求；保留已确认事实，避免补写未知材质或功效。
+                </WorkflowFieldHelp>
               </label>
               <div className="brand-design__actions">
                 <button
@@ -324,9 +342,14 @@ export function BrandDesignStudio({
                   </button>
                 )}
               </div>
+              <WorkflowFieldHelp>
+                品牌 Logo
+                请使用真实图片文件；商品与系列文字可在下方逐图编辑。修改后点击「更新设计预览」，查看最新排版。
+              </WorkflowFieldHelp>
               <label>
                 编辑图位
                 <select
+                  aria-label="编辑图位"
                   value={pageId}
                   onChange={(event) => setPageId(event.target.value as typeof pageId)}
                 >
@@ -338,27 +361,40 @@ export function BrandDesignStudio({
                   ))}
                   <option value="DETAIL">连续详情预览</option>
                 </select>
+                <WorkflowFieldHelp>
+                  选择正在编辑的页面：首页主视觉、某张主图或详情图。连续详情会组合
+                  D01～D05，需分别给这五个图位配置图片。
+                </WorkflowFieldHelp>
               </label>
               {pageId === "HOME" && (
                 <>
                   <label>
                     首页标题
                     <ImeInput
+                      aria-label="首页标题"
                       value={design.homepage.title}
                       onValueChange={(title) => update({ homepage: { ...design.homepage, title } })}
                     />
+                    <WorkflowFieldHelp>
+                      填写首页主视觉的短标题，例如系列名或核心主题，优先让观众一眼看懂，不要塞入全部商品参数。
+                    </WorkflowFieldHelp>
                   </label>
                   <label>
                     首页说明
                     <ImeTextarea
+                      aria-label="首页说明"
                       rows={3}
                       value={design.homepage.body}
                       onValueChange={(body) => update({ homepage: { ...design.homepage, body } })}
                     />
+                    <WorkflowFieldHelp>
+                      用简短文字补充系列内容与已确认卖点。文案较长时先缩短，再更新预览检查是否完整显示。
+                    </WorkflowFieldHelp>
                   </label>
                   <label>
                     首页图片图位
                     <select
+                      aria-label="首页图片图位"
                       value={design.homepage.heroSlotId}
                       onChange={(event) =>
                         update({
@@ -375,6 +411,9 @@ export function BrandDesignStudio({
                         </option>
                       ))}
                     </select>
+                    <WorkflowFieldHelp>
+                      首页会使用这里选定图位的图片，通常选择最能代表商品的主图。先为该图位指定图片，再预览或导出首页。
+                    </WorkflowFieldHelp>
                   </label>
                 </>
               )}
@@ -383,6 +422,7 @@ export function BrandDesignStudio({
                   <label>
                     图位图片
                     <select
+                      aria-label="图位图片"
                       value={slot.source?.path ?? ""}
                       onChange={(event) => {
                         const selected = sourceChoices.find(
@@ -404,6 +444,9 @@ export function BrandDesignStudio({
                         </option>
                       ))}
                     </select>
+                    <WorkflowFieldHelp>
+                      为当前这张图选择原始照片或已保存成图，也可用下方按钮导入本地图片。先核对图片对应的商品与角度，缺图时无法导出该页成品。
+                    </WorkflowFieldHelp>
                   </label>
                   <div className="brand-design__actions">
                     <button
@@ -418,6 +461,7 @@ export function BrandDesignStudio({
                     <label>
                       图片放置
                       <select
+                        aria-label="图片放置"
                         value={slot.fit}
                         onChange={(event) =>
                           updateSlot({ fit: event.target.value as BrandDesignSlot["fit"] })
@@ -426,12 +470,16 @@ export function BrandDesignStudio({
                         <option value="contain">完整放置，保留商品边缘</option>
                         <option value="cover">填满区域，允许裁切</option>
                       </select>
+                      <WorkflowFieldHelp>
+                        「完整放置」保留整张图与商品边缘；「填满区域」会裁切四周以填满版式。商品细节重要时优先完整放置，选择裁切后先核对预览。
+                      </WorkflowFieldHelp>
                     </label>
                   )}
                   {slot.source && (
                     <label>
                       图片来源类型
                       <select
+                        aria-label="图片来源类型"
                         value={slot.source.kind}
                         onChange={(event) =>
                           updateSlot({
@@ -445,6 +493,10 @@ export function BrandDesignStudio({
                         <option value="source">原始照片</option>
                         <option value="generated">已生成图片</option>
                       </select>
+                      <WorkflowFieldHelp>
+                        按实际来源标记：相机拍摄的图片选原始照片，AI
+                        生成的图片选已生成图片。这用于记录来源，切换选项不会改变图片内容或将成图变为实拍。
+                      </WorkflowFieldHelp>
                     </label>
                   )}
                   {slot.fit === "cover" && (
@@ -454,19 +506,27 @@ export function BrandDesignStudio({
                     <label>
                       图上标题
                       <ImeInput
+                        aria-label="图上标题"
                         value={slot.copy.title}
                         onValueChange={(title) => updateSlot({ copy: { ...slot.copy, title } })}
                       />
+                      <WorkflowFieldHelp>
+                        给当前图写一个短标题，只突出一个主题或已确认卖点；改动后更新预览，检查标题与商品是否抢占空间。
+                      </WorkflowFieldHelp>
                     </label>
                   )}
                   {slot.id !== "M05" && (
                     <label>
                       图上正文
                       <ImeTextarea
+                        aria-label="图上正文"
                         rows={4}
                         value={slot.copy.body}
                         onValueChange={(body) => updateSlot({ copy: { ...slot.copy, body } })}
                       />
+                      <WorkflowFieldHelp>
+                        填写配合本图的简短说明与真实参数，可分行写。没有资料支持的材质、认证或功效先省略；文字过长时缩短后重新预览。
+                      </WorkflowFieldHelp>
                     </label>
                   )}
                   {slot.id === "M05" && (

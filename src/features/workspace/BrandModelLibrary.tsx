@@ -15,6 +15,7 @@ import {
   type BrandModelSelection,
 } from "../../lib/brandModels";
 import { RequiredMark, WorkflowRequirementsHint } from "./workflowFieldRequirements";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import "./BrandModelLibrary.css";
 
 export interface BrandModelCandidate {
@@ -321,6 +322,9 @@ export function BrandModelLibrary({
                 </option>
               ))}
             </select>
+            <WorkflowFieldHelp>
+              想复用同一人物就选择已有档案，想建立另一位人物就选「新建模特」。归档档案可查看，需要先恢复才能用于新任务。
+            </WorkflowFieldHelp>
           </label>
           {profile ? (
             <label>
@@ -336,6 +340,9 @@ export function BrandModelLibrary({
                   </option>
                 ))}
               </select>
+              <WorkflowFieldHelp>
+                查看这个人物的不同版本。新任务只能使用已批准的版本；修改后先保存为新版本并批准，再点「使用当前版本」。
+              </WorkflowFieldHelp>
             </label>
           ) : null}
           <label>
@@ -347,6 +354,9 @@ export function BrandModelLibrary({
               aria-describedby={describedBy}
               placeholder="例如：杉间"
             />
+            <WorkflowFieldHelp>
+              填写模特所属的品牌，用于整理档案，例如店铺或系列的品牌名；需要与当前品牌保持一致时沿用同一个名称。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <RequiredMark>模特名称</RequiredMark>
@@ -357,6 +367,9 @@ export function BrandModelLibrary({
               aria-describedby={describedBy}
               placeholder="用于区分品牌模特"
             />
+            <WorkflowFieldHelp>
+              给这位人物一个便于辨认的档案名称，例如「春季主模特 A」，用于从模特库中区分和选用人物。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <RequiredMark>人物描述</RequiredMark>
@@ -368,6 +381,9 @@ export function BrandModelLibrary({
               aria-describedby={describedBy}
               placeholder="年龄为成年人、气质、发型和整体形象"
             />
+            <WorkflowFieldHelp>
+              描述人物的整体形象，例如「成年女性，短发，干净自然的气质」。与参考照片保持一致，拍摄场景和商品要求放在工作流的制作要求中。
+            </WorkflowFieldHelp>
           </label>
           <label>
             <RequiredMark>固定特征</RequiredMark>
@@ -379,6 +395,9 @@ export function BrandModelLibrary({
               aria-describedby={describedBy}
               placeholder="跨图、跨镜头必须保持的脸型、眼睛、发色等特征"
             />
+            <WorkflowFieldHelp>
+              写跨图片和视频都要保持的身份特征，例如「圆脸、棕色眼睛、黑色齐肩发」。选择可从参考照片核对的特征，便于后续检查人物一致性。
+            </WorkflowFieldHelp>
           </label>
           <section aria-label="模特参考照片" className="brand-model-library__references">
             <strong>
@@ -387,6 +406,9 @@ export function BrandModelLibrary({
             <button type="button" aria-describedby={describedBy} onClick={importReferences}>
               添加人物图片
             </button>
+            <WorkflowFieldHelp>
+              至少添加一张已保存到本机的清晰人物图，推荐同一成年人物的不同角度。核对照片后依次保存草稿、批准版本，再用于当前任务；保存档案不会训练模型。
+            </WorkflowFieldHelp>
             {candidates.length ? (
               <div className="brand-model-library__candidate">
                 <label>
@@ -403,6 +425,9 @@ export function BrandModelLibrary({
                       </option>
                     ))}
                   </select>
+                  <WorkflowFieldHelp>
+                    选择已保存的人物成图后，点击「加入参考照片」才会加入档案。先核对成图的人物特征，再作为后续任务的参考。
+                  </WorkflowFieldHelp>
                 </label>
                 <button
                   type="button"
@@ -456,6 +481,9 @@ export function BrandModelLibrary({
                             )
                           }
                         />
+                        <WorkflowFieldHelp>
+                          填写便于辨认这张参考图的名称，例如「正面自然光」或「侧面短发」，便于后续核对图片与用途。
+                        </WorkflowFieldHelp>
                       </label>
                       <label>
                         <span>照片用途</span>
@@ -478,6 +506,9 @@ export function BrandModelLibrary({
                             </option>
                           ))}
                         </select>
+                        <WorkflowFieldHelp>
+                          按实际内容选择：正对镜头选正面，脸部轮廓选侧面，斜侧脸选四分之三侧面；完整身体选全身，笑容等选表情，局部五官选特征细节。它标记参考用途，不会改变原图。
+                        </WorkflowFieldHelp>
                       </label>
                       {item.taskId ? <small>已保留 AI 成图来源</small> : null}
                       <button

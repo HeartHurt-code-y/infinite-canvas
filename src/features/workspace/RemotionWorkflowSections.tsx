@@ -2,6 +2,7 @@ import { Icon } from "../../components/Icon";
 import { toMediaSrc } from "../../lib/backend";
 import { ANIMATION_TEMPLATES, type RemotionWorkflowOptions } from "./remotionWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 
 interface RemotionConfigurationProps {
   readonly options: RemotionWorkflowOptions;
@@ -40,6 +41,9 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
               </option>
             ))}
           </select>
+          <WorkflowFieldHelp>
+            第一次使用可保留「自动匹配」，系统按描述选择布局。流程关系选流程图，事件先后选时间线，份额数据选饼图，人物介绍选人物卡片；有明确排布需求再选自定义逻辑布局。
+          </WorkflowFieldHelp>
         </label>
         <label>
           视觉主题
@@ -57,6 +61,9 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
             <option value="light">明亮</option>
             <option value="dark">深色</option>
           </select>
+          <WorkflowFieldHelp>
+            调整背景与配色方向。莫兰迪适合柔和展示，明亮适合浅色页面，深色适合暗色背景；先按实际展示环境选择。
+          </WorkflowFieldHelp>
         </label>
         <label>
           画面尺寸
@@ -72,6 +79,10 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
             <option value="1280x720">1280 × 720 · 横屏</option>
             <option value="720x1280">720 × 1280 · 竖屏</option>
           </select>
+          <WorkflowFieldHelp>
+            决定导出画面的宽高。普通图示可用默认 800 × 600；横向演示用 1280 × 720，手机竖屏用 720 ×
+            1280。内容较多时优先检查预览中的文字是否易读。
+          </WorkflowFieldHelp>
         </label>
         <label>
           时长（秒）
@@ -92,6 +103,10 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
                 onChange({ ...options, durationSeconds });
             }}
           />
+          <WorkflowFieldHelp>
+            填写 6～30 秒的整数，默认 8
+            秒。流程简单可先用默认值，节点或文字较多可延长，让观众有时间看清内容。
+          </WorkflowFieldHelp>
         </label>
         <label>
           导出格式
@@ -109,6 +124,10 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
             <option value="mp4">MP4 视频</option>
             <option value="both">GIF 动图 + MP4 视频</option>
           </select>
+          <WorkflowFieldHelp>
+            GIF 适合放进支持动图的页面或文档，MP4 适合视频播放与剪辑；两个场景都需要就选 GIF +
+            MP4。导出后另有可编辑工程供后续调整。
+          </WorkflowFieldHelp>
         </label>
         <small>自动匹配布局、检查内容并在本机渲染，导出文件与可编辑工程。</small>
       </fieldset>

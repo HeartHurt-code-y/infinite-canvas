@@ -37,6 +37,7 @@ import {
 import {
   createPromptTiptapExtensions,
   plainTextToTiptapContent,
+  promptAttachmentToTiptapNode,
   PROMPT_TIPTAP_MARK_REFERENCE_NODE,
   promptDocumentFromTiptapJson,
   promptDocumentToTiptapJson,
@@ -93,7 +94,19 @@ export type PromptContentItem =
   | PromptContentTextItem
   | PromptContentMediaReferenceItem
   | PromptContentMarkReferenceItem
-  | PromptContentPendingReferenceItem;
+  | PromptContentPendingReferenceItem
+  | PromptContentAttachmentItem;
+
+/** 直接插入编辑器的媒体/文件附件；不挂在画布节点上，提交时随显式媒体输入发出。 */
+export interface PromptContentAttachmentItem {
+  readonly kind: "attachment";
+  readonly attachmentId: string;
+  /** local_asset / local_base64_asset / local_file 之一；不带 canvasNodeKey。 */
+  readonly target: MediaReferenceTarget;
+  readonly name: string;
+  /** "document" 目前仅向前兼容存储：生成通道尚不支持文档 target，摄取侧暂只收媒体文件。 */
+  readonly mediaType: "image" | "video" | "audio" | "document";
+}
 
 export interface PromptContentTextItem extends PromptTextStyle {
   readonly kind: "text";
@@ -197,6 +210,7 @@ export interface PromptContentView {
   readonly characterCount: number;
   readonly referenceCount: number;
   readonly pendingCount: number;
+  readonly attachmentCount: number;
   readonly issues: readonly PromptContentIssue[];
 }
 
@@ -290,6 +304,8 @@ export interface PromptContentEditorSession {
   };
   /** 订阅格式状态变化（选择区或内容事务）；返回退订函数。 */
   subscribeFormatChanges(listener: () => void): () => void;
+  /** 在光标处插入媒体/文件附件；摄取方负责先完成暂存，这里只落文档。 */
+  insertAttachments(attachments: readonly PromptContentAttachmentItem[]): PromptContentView;
 }
 
 export interface PromptContentModule {
@@ -461,6 +477,28 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
       continue;
     }
     if (
+      raw["kind"] === "attachment" &&
+      typeof raw["attachmentId"] === "string" &&
+      raw["attachmentId"] &&
+      typeof raw["name"] === "string" &&
+      (raw["mediaType"] === "image" ||
+        raw["mediaType"] === "video" ||
+        raw["mediaType"] === "audio" ||
+        raw["mediaType"] === "document")
+    ) {
+      // 附件不属于任何画布实例：decode 强制要求实例键，这里给合成键穿透。
+      const target = decodeMediaReferenceTarget(raw["target"], `attachment:${raw["attachmentId"]}`);
+      if (target == null) return null;
+      items.push({
+        kind: "attachment",
+        attachmentId: raw["attachmentId"],
+        target,
+        name: raw["name"],
+        mediaType: raw["mediaType"],
+      });
+      continue;
+    }
+    if (
       raw["kind"] === "mark_reference" &&
       typeof raw["mentionId"] === "string" &&
       raw["mentionId"] &&
@@ -539,6 +577,15 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
       first.candidateCount === second.candidateCount
     );
   }
+  if (first.kind === "attachment") {
+    return (
+      second.kind === "attachment" &&
+      first.attachmentId === second.attachmentId &&
+      first.name === second.name &&
+      first.mediaType === second.mediaType &&
+      sameMediaReferenceTarget(first.target, second.target)
+    );
+  }
   if (first.kind === "mark_reference") {
     return (
       second.kind === "mark_reference" &&
@@ -580,6 +627,7 @@ function viewFromDocument(
   const byKey = new Map(connections.map((connection) => [connection.key, connection] as const));
   let referenceCount = 0;
   let pendingCount = 0;
+  let attachmentCount = 0;
   // 有序列表的 markdown 投影编号：遇到任何非 ordered 条目即重新从 1 计数。
   let orderedCounter = 0;
   for (const item of document.items) {
@@ -600,6 +648,10 @@ function viewFromDocument(
         displayText: item.displayText,
         candidateCount: item.candidateCount,
       });
+      continue;
+    }
+    if (item.kind === "attachment") {
+      attachmentCount += 1;
       continue;
     }
     // 标注引用没有可断言的来源身份（不依赖连线，也不会失效），按正文计入即可。
@@ -642,6 +694,7 @@ function viewFromDocument(
     characterCount: plainText.length,
     referenceCount,
     pendingCount,
+    attachmentCount,
     issues,
   };
 }
@@ -1325,6 +1378,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     const hasContent =
       view.segments.some((segment) => segment.kind === "text" && Boolean(segment.text.trim())) ||
       view.referenceCount > 0 ||
+      view.attachmentCount > 0 ||
       (context.connections.length > 0 && context.allowMediaOnly);
     if (!hasContent) return { ok: false, issues: [{ kind: "empty_prompt" }] };
 
@@ -1374,6 +1428,16 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
           : {}),
       };
     });
+    // 附件不经过连线：直接追加进显式媒体输入，排在连线素材之后。
+    for (const item of this.document.items) {
+      if (item.kind !== "attachment") continue;
+      explicitMedia.push({
+        target: structuredClone(item.target),
+        role: item.mediaType === "document" ? "document" : "",
+        displayNameSnapshot: item.name,
+        contentIndex: explicitMedia.length + 1,
+      });
+    }
     return {
       ok: true,
       frozen: {
@@ -1448,6 +1512,26 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     return () => {
       this.formatListeners.delete(listener);
     };
+  }
+
+  insertAttachments(attachments: readonly PromptContentAttachmentItem[]): PromptContentView {
+    if (attachments.length === 0 || this.isComposing()) return this.read();
+    if (this.editor != null) {
+      this.editor
+        .chain()
+        .focus()
+        .insertContent(attachments.map((item) => promptAttachmentToTiptapNode(item)))
+        .run();
+      this.syncFromEditor();
+    } else {
+      this.document = {
+        schema: "prompt-content",
+        version: 1,
+        items: [...this.document.items, ...attachments],
+      };
+    }
+    this.notify();
+    return this.read();
   }
 }
 

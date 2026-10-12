@@ -1,3 +1,4 @@
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useId, useState } from "react";
@@ -74,6 +75,10 @@ export function CommerceConfiguration({
               <option value="quick">快速模式 · 15 秒四镜头</option>
               <option value="full">完整模式 · 五阶段制作</option>
             </select>
+            <WorkflowFieldHelp>
+              快速模式围绕卖点安排 15
+              秒四镜头，适合先尝试一个短剧情；完整模式依次做产品研究、创意、剧本、分镜与资产。
+            </WorkflowFieldHelp>
           </label>
           <label>
             剧情类型
@@ -91,6 +96,9 @@ export function CommerceConfiguration({
                 </option>
               ))}
             </select>
+            <WorkflowFieldHelp>
+              决定用什么故事带出商品；不确定先用智能推荐。职场、宿舍或家庭适合对应生活场景，无对白视觉流适合靠画面表达。
+            </WorkflowFieldHelp>
           </label>
         </div>
         <small>
@@ -106,6 +114,9 @@ export function CommerceConfiguration({
             placeholder="例如：便携咖啡杯"
             onValueChange={(value) => onChange({ ...options, productName: value })}
           />
+          <WorkflowFieldHelp>
+            填写具体品名或型号，帮助识别主推商品，例如“500 mL 便携咖啡杯”；其他资料充分时可留空。
+          </WorkflowFieldHelp>
         </label>
         <label className="canvas-knowledge-workflow__brief">
           <span>商品或资料链接</span>
@@ -118,6 +129,10 @@ export function CommerceConfiguration({
             onValueChange={(value) => onChange({ ...options, productUrl: value })}
           />
           <small>自动读取公开商品资料；链接读取失败时可补充下方文字或文档。</small>
+          <WorkflowFieldHelp>
+            每行一个公开 HTTP(S) 商品页或资料页，最多 4
+            个；只会读取这些页面。需要登录或读取失败的内容请补充文字或文档。
+          </WorkflowFieldHelp>
         </label>
         {urls.length > 4 ? (
           <ErrorAlert workflow id={urlsErrorId} error="最多填写 4 个资料链接，请移除多余链接。" />
@@ -131,6 +146,10 @@ export function CommerceConfiguration({
             placeholder="填写已确认的材质、规格、用途和卖点；价格、优惠或功效请提供依据。"
             onValueChange={(value) => onChange({ ...options, productFacts: value })}
           />
+          <WorkflowFieldHelp>
+            写清材质、规格、用途和有依据的卖点，例如“500
+            mL，杯盖可拆洗”；价格、优惠与功效只填已确认信息。
+          </WorkflowFieldHelp>
         </label>
         <label>
           目标受众
@@ -140,6 +159,9 @@ export function CommerceConfiguration({
             placeholder="例如：通勤上班族"
             onValueChange={(value) => onChange({ ...options, audience: value })}
           />
+          <WorkflowFieldHelp>
+            描述谁会买、在哪使用、有什么需要，例如“每天通勤、想减少漏水的上班族”；留空由现有商品资料推断。
+          </WorkflowFieldHelp>
         </label>
         <section className="canvas-commerce-workflow__materials" aria-label="商品图片与文档">
           <div className="canvas-commerce-workflow__materials-heading">
@@ -163,6 +185,9 @@ export function CommerceConfiguration({
           <small>
             支持图片、PDF、TXT / Markdown。制作成片需要真实商品图，生成时保留原图作为参考。
           </small>
+          <WorkflowFieldHelp>
+            上传本款商品清晰的全貌、细节或使用照片，资料文档可补充规格依据；请避免混入其他型号。仅做文档时可用文字资料先规划。
+          </WorkflowFieldHelp>
           {options.materials.length ? (
             <ul>
               {options.materials.map((material) => (
@@ -212,6 +237,9 @@ export function CommerceConfiguration({
               <option value="16:9">横屏 16:9</option>
               <option value="1:1">方形 1:1</option>
             </select>
+            <WorkflowFieldHelp>
+              竖屏 9:16 适合手机短视频，横屏 16:9 适合横屏播放，方形 1:1 适合方形位置；预置竖屏。
+            </WorkflowFieldHelp>
           </label>
           <label>
             交付方式
@@ -225,6 +253,9 @@ export function CommerceConfiguration({
               <option value="video">制作完整成片</option>
               <option value="documents">仅制作文档与提示词</option>
             </select>
+            <WorkflowFieldHelp>
+              完整成片会继续制作图片资产、视频片段并合成，需要真实商品图；仅文档与提示词适合先检查剧情和事实。
+            </WorkflowFieldHelp>
           </label>
         </div>
         <label className="canvas-knowledge-workflow__brief">
@@ -236,6 +267,9 @@ export function CommerceConfiguration({
             placeholder="例如：突出反差喜剧，保持商品包装与实物一致。"
             onValueChange={onBriefChange}
           />
+          <WorkflowFieldHelp>
+            补充故事语气、必须展示的动作和不能改的外观，例如“轻喜剧，保留包装字样”；没有额外要求可留空。
+          </WorkflowFieldHelp>
         </label>
       </fieldset>
     </details>

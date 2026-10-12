@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { toMediaSrc } from "../../lib/backend";
 import type { ProductSceneView } from "./productSceneWorkflowModel";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import "./ProductSceneProtectionEditor.css";
 
 type Protection = NonNullable<ProductSceneView["protection"]>;
@@ -98,12 +99,28 @@ export function ProductSceneProtectionEditor({
       <div className="product-scene-protection__fields">
         {(
           [
-            ["x", "左侧位置"],
-            ["y", "顶部位置"],
-            ["width", "保护宽度"],
-            ["height", "保护高度"],
+            [
+              "x",
+              "左侧位置",
+              "填写 0%～100% 内的数值，表示保护框左边距原图左边的比例。0% 从最左边开始；左侧位置与保护宽度相加不能超过 100%，可先拖框再微调。",
+            ],
+            [
+              "y",
+              "顶部位置",
+              "填写 0%～100% 内的数值，表示保护框上边距原图顶部的比例。0% 从最顶部开始；顶部位置与保护高度相加不能超过 100%，可先拖框再微调。",
+            ],
+            [
+              "width",
+              "保护宽度",
+              "保护框占原图宽度的比例，可填 0.1%～100%，还需扣除左侧位置。框住完整商品与必要阴影，不要只框商品中心。",
+            ],
+            [
+              "height",
+              "保护高度",
+              "保护框占原图高度的比例，可填 0.1%～100%，还需扣除顶部位置。保留完整商品、细链及必要手腕，超出原图时会自动收回边界。",
+            ],
           ] as const
-        ).map(([key, label]) => (
+        ).map(([key, label, help]) => (
           <label key={key}>
             {label}（%）
             <input
@@ -115,6 +132,7 @@ export function ProductSceneProtectionEditor({
               value={Math.round(draft.rect[key] * 1000) / 10}
               onChange={(event) => updateRect(key, Number(event.target.value) / 100)}
             />
+            <WorkflowFieldHelp>{help}</WorkflowFieldHelp>
           </label>
         ))}
         <label>
@@ -133,6 +151,10 @@ export function ProductSceneProtectionEditor({
               }))
             }
           />
+          <WorkflowFieldHelp>
+            填写 0%～10%，初始
+            2.5%，按原片较短边计算框外融合距离。接缝明显时可适当增加；融合只在框外进行，关键商品细节仍应完整框住。
+          </WorkflowFieldHelp>
         </label>
         <label>
           原片用途
@@ -146,6 +168,9 @@ export function ProductSceneProtectionEditor({
             <option value="product">商品摆拍 · 保留阴影与透射背景</option>
             <option value="wearing">真实佩戴 · 同时保留手腕与遮挡</option>
           </select>
+          <WorkflowFieldHelp>
+            商品放在台面等环境中选「商品摆拍」；已经戴在人身上选「真实佩戴」，同时保留手腕与遮挡。按原片实际内容选择，再应用保护范围并重新确认原图。
+          </WorkflowFieldHelp>
         </label>
       </div>
       <small>

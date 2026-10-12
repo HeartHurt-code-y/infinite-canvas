@@ -71,6 +71,8 @@ import {
   reelbenchRequirements,
 } from "./reelbenchWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
+import { WorkflowFieldHelp, WorkflowGuide } from "./WorkflowGuidance";
+import type { WorkflowGuideKind } from "./workflowGuidanceContent";
 import { WorkflowPlanReview } from "./WorkflowPlanReview";
 import { WorkflowVersionHistoryPanel } from "./WorkflowVersionHistoryPanel";
 import { workflowVersionState } from "./workflowVersionHistory";
@@ -163,8 +165,24 @@ const COVER_IMAGE_MODEL_FILTER: ModelFilter = (model) =>
   model.operations.includes("image_to_image");
 const VIDEO_MODEL_FILTER: ModelFilter = isVideoGenerationModel;
 
+/** 节点标题按模板种类唯一确定；键与 workflowGuidanceContent 的 WorkflowGuideKind 同构。 */
+const WORKFLOW_TITLES: Record<WorkflowGuideKind, string> = {
+  knowledge: "知识视频工作流",
+  film: "AI影视工作流",
+  comicDrama: "动漫短剧工作流 V2.3",
+  musicVideo: "音乐 MV 工作流 V1.0.6",
+  commerce: "剧情带货工作流",
+  brandVideo: "品牌视觉短片工作流",
+  remotion: "动画逻辑图工作流",
+  xhsCover: "小红书封面工作流",
+  productScene: "产品场景图工作流",
+  reverseVideo: "短视频反推工作流",
+  reelbench: "视频拉片与分镜合成",
+};
+
 interface ModelSlotProps {
   readonly label: string;
+  readonly help: string;
   readonly selection: NodeModelSelection;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly filter: ModelFilter;
@@ -180,6 +198,7 @@ interface ModelSlotProps {
 
 function ModelSlot({
   label,
+  help,
   selection,
   providerCatalog,
   filter,
@@ -204,6 +223,7 @@ function ModelSlot({
         <span>项目供应商</span>
         <select
           aria-label={`${label}供应商`}
+          aria-required={required}
           disabled={disabled}
           value={selection.providerId}
           onChange={(event) => {
@@ -224,11 +244,15 @@ function ModelSlot({
             </option>
           ))}
         </select>
+        <WorkflowFieldHelp>
+          选择已配置连接的模型服务。列表为空时，先打开顶部「全局设置」，添加并启用供应商连接，再拉取和绑定模型。
+        </WorkflowFieldHelp>
       </label>
       <label>
         <span>模型</span>
         <select
           aria-label={`${label}模型`}
+          aria-required={required}
           disabled={disabled}
           value={selection.modelDefinitionId}
           onChange={(event) => onChange({ ...selection, modelDefinitionId: event.target.value })}
@@ -247,6 +271,7 @@ function ModelSlot({
             </option>
           ))}
         </select>
+        <WorkflowFieldHelp>{help}</WorkflowFieldHelp>
       </label>
     </fieldset>
   );
@@ -441,27 +466,30 @@ export function KnowledgeVideoWorkflowNode({
     !isCommerce &&
     !isComicDrama &&
     filmOptions != null;
-  const workflowTitle = isBrandVideo
-    ? "品牌视觉短片工作流"
+  // 模板种类的判定优先级全文件只出现这一次：节点标题与新手指南都由它推导。
+  // 新增工作流时在 WORKFLOW_TITLES 补一条即可，不会再长出第三条并行三元链。
+  const workflowKind: WorkflowGuideKind = isBrandVideo
+    ? "brandVideo"
     : isProductScene
-      ? "产品场景图工作流"
+      ? "productScene"
       : isReelbench
-        ? "视频拉片与分镜合成"
+        ? "reelbench"
         : isMusicVideo
-          ? "音乐 MV 工作流 V1.0.6"
+          ? "musicVideo"
           : isReverse
-            ? "短视频反推工作流"
+            ? "reverseVideo"
             : isCover
-              ? "小红书封面工作流"
+              ? "xhsCover"
               : isRemotion
-                ? "动画逻辑图工作流"
+                ? "remotion"
                 : isCommerce
-                  ? "剧情带货工作流"
+                  ? "commerce"
                   : isComicDrama
-                    ? "动漫短剧工作流 V2.3"
+                    ? "comicDrama"
                     : isFilm
-                      ? "AI影视工作流"
-                      : "知识视频工作流";
+                      ? "film"
+                      : "knowledge";
+  const workflowTitle = WORKFLOW_TITLES[workflowKind];
   const phase = runState?.phase ?? node.config.checkpoint.phase;
   const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
@@ -926,6 +954,7 @@ export function KnowledgeVideoWorkflowNode({
       </header>
 
       <div className="canvas-knowledge-workflow__body">
+        <WorkflowGuide kind={workflowKind} />
         <div className="workflow-version-controls" role="group" aria-label="当前工作流版本控制">
           <span>{versions.versions.length} 个工作流版本</span>
           <button
@@ -998,6 +1027,17 @@ export function KnowledgeVideoWorkflowNode({
                   }
                   onValueChange={(brief) => onChange({ ...node.config, brief })}
                 />
+                <WorkflowFieldHelp>
+                  {isMusicVideo
+                    ? "补充希望呈现的故事、情绪和画面；留空时按歌曲与歌词规划。歌词和人物参考请填到下方专用设置。"
+                    : isCover
+                      ? "粘贴选题或正文，让模型提炼封面标题；写清读者和核心看点。也可在下方选题与要求中补充。"
+                      : isRemotion
+                        ? "写清要解释的步骤、先后关系和重点文字；可直接贴文字流程草图，例如：注册 → 登录 → 开始使用。"
+                        : isFilm
+                          ? "写清故事主角、发生的事和想要的结局；如只改一个阶段，注明阶段名与修改范围。已有剧本放在「已有资料与制作范围」。"
+                          : "写清讲给谁听、解释什么、看完要明白什么。例如：给新手讲清光圈如何影响照片；时长、画幅和风格有要求时再补充。"}
+                </WorkflowFieldHelp>
               </label>
             ) : null}
             {unsupportedProductReferences ? (
@@ -1217,6 +1257,9 @@ export function KnowledgeVideoWorkflowNode({
                     })
                   }
                 />
+                <WorkflowFieldHelp>
+                  把已有剧本、角色设定或定稿片段粘贴在这里，注明哪些内容必须保留、哪些要改；从零创作可留空。
+                </WorkflowFieldHelp>
               </label>
               <label>
                 起始阶段
@@ -1241,6 +1284,9 @@ export function KnowledgeVideoWorkflowNode({
                     </option>
                   ))}
                 </select>
+                <WorkflowFieldHelp>
+                  不确定就选自动判断。已有定稿时选择接着制作的阶段，并在资料中提供前置成果，例如已有完整剧本可从资产阶段继续。
+                </WorkflowFieldHelp>
               </label>
               <label>
                 交付方式
@@ -1261,6 +1307,9 @@ export function KnowledgeVideoWorkflowNode({
                   <option value="video">自动制作成片（含配套文档）</option>
                   <option value="documents">仅制作文档与提示词</option>
                 </select>
+                <WorkflowFieldHelp>
+                  想先审故事和分镜，选仅文档与提示词，只需文本模型；需要实际视频时选成片，再配置图片和视频模型。
+                </WorkflowFieldHelp>
               </label>
               <p>指定“只做某阶段”时交付该阶段；执行前审核计划，制作片段后确认合成。</p>
             </div>
@@ -1300,6 +1349,15 @@ export function KnowledgeVideoWorkflowNode({
           <div className="canvas-knowledge-workflow__model-grid">
             {!isProductScene || productSceneQuality ? (
               <ModelSlot
+                help={
+                  isCover
+                    ? "负责标题、构图与提示词。添加图片参考或需要审核成图时，选择能识别图片的文本模型；只做纯文字提示词时可用普通文本模型。"
+                    : isProductScene || isReverse || isReelbench
+                      ? "选择能识别图片的文本模型，用于理解参考图或视频采样画面并给出检查与分析。只支持文字的模型无法完成看图。"
+                      : isRemotion || documentsOnly
+                        ? "文本模型负责理解内容、策划和写作。添加了图片、音频或视频参考时，需选择支持对应输入类型的模型。"
+                        : "负责策划、写作和审核，成片的画面质检需要能识别图片的文本模型。添加了音频或视频参考时，还需支持对应输入类型。"
+                }
                 label={
                   isProductScene
                     ? "产品视觉检查"
@@ -1323,6 +1381,13 @@ export function KnowledgeVideoWorkflowNode({
                 {!isBrandVideo && (
                   <ModelSlot
                     label="图片生成"
+                    help={
+                      documentsOnly || (isCover && coverOptions.deliverable === "prompt")
+                        ? "当前仅交付文档，可暂不配置。改为制作成片后，用它生成角色、场景或封面图片。"
+                        : isCover || isProductReference
+                          ? "选择支持参考图片的图片模型，让已有形象或商品参与生成；只支持文字生图的模型不会出现在列表中。"
+                          : "用于生成封面、资产或空背景。先使用已熟悉的图片模型；产品原图保真与珠宝保护模式由本地保留确认的原图区域。"
+                    }
                     selection={node.config.models.image}
                     providerCatalog={providerCatalog}
                     filter={
@@ -1330,18 +1395,23 @@ export function KnowledgeVideoWorkflowNode({
                     }
                     disabled={configurationLocked}
                     /* 封面只交付提示词时不需要出图模型。 */
-                    required={!(isCover && coverOptions.deliverable === "prompt")}
+                    required={!documentsOnly && !(isCover && coverOptions.deliverable === "prompt")}
                     onChange={(selection) => patchModels("image", selection)}
                   />
                 )}
                 {!isCover && !isProductScene ? (
                   <ModelSlot
                     label="视频生成"
+                    help={
+                      documentsOnly
+                        ? "当前仅交付文档，可暂不配置。改为成片时再选择，它负责把分镜生成实际视频片段。"
+                        : "负责生成分镜视频。按是否需要参考图、人物或声音选择；可用时长与画幅取决于模型，执行前核对计划。"
+                    }
                     selection={node.config.models.video}
                     providerCatalog={providerCatalog}
                     filter={VIDEO_MODEL_FILTER}
                     disabled={configurationLocked}
-                    required={!isBrandVideo || !documentsOnly}
+                    required={!documentsOnly}
                     onChange={(selection) => patchModels("video", selection)}
                   />
                 ) : null}
@@ -1371,7 +1441,9 @@ export function KnowledgeVideoWorkflowNode({
             </p>
           ) : null}
           {isCover ? (
-            <p>策划与审核请选择能识别图片的文本模型，图片生成请选择支持参考图的模型。</p>
+            <p>
+              添加图片参考或审核成图时，文本模型需支持看图；图片生成请选择支持参考图的模型。只做纯文字提示词时无需图片生成模型。
+            </p>
           ) : null}
         </details>
 
@@ -1494,6 +1566,7 @@ export function KnowledgeVideoWorkflowNode({
                 <label className="canvas-knowledge-workflow__decision-answer">
                   <span>你的回答（可选）</span>
                   <ImeInput
+                    aria-label="你的回答（可选）"
                     type="text"
                     name="knowledge-video-decision-resolution"
                     autoComplete="off"
@@ -1516,6 +1589,9 @@ export function KnowledgeVideoWorkflowNode({
                     }
                     onValueChange={(value) => setDecisionDraft({ key: decisionKey, value })}
                   />
+                  <WorkflowFieldHelp>
+                    同意当前推荐时可留空；有不同决定时，写清选哪一个方向、改哪里以及必须保留的条件，确认后据此继续。
+                  </WorkflowFieldHelp>
                 </label>
               ) : null}
             </div>
@@ -1957,38 +2033,53 @@ export function KnowledgeVideoWorkflowNode({
                         <label>
                           <span>视频提示词</span>
                           <textarea
+                            aria-label="视频提示词"
                             value={shotDraft.videoPrompt}
                             onChange={(event) =>
                               setShotDraft({ ...shotDraft, videoPrompt: event.target.value })
                             }
                             rows={4}
                           />
+                          <WorkflowFieldHelp>
+                            写给视频模型的具体要求：主体做什么、镜头怎么移动、光线与风格；需要保持的人物和商品特征要明确写出。
+                          </WorkflowFieldHelp>
                         </label>
                         <label>
                           <span>分镜画面描述</span>
                           <textarea
+                            aria-label="分镜画面描述"
                             value={shotDraft.visual}
                             onChange={(event) =>
                               setShotDraft({ ...shotDraft, visual: event.target.value })
                             }
                             rows={2}
                           />
+                          <WorkflowFieldHelp>
+                            用人话概括这一镜头看见什么，便于检查故事是否连贯；例如「主角推门进入店里，看到桌上的旧表」。
+                          </WorkflowFieldHelp>
                         </label>
                         <label>
                           <span>旁白台词</span>
                           <textarea
+                            aria-label="旁白台词"
                             value={shotDraft.narration}
                             onChange={(event) =>
                               setShotDraft({ ...shotDraft, narration: event.target.value })
                             }
                             rows={2}
                           />
+                          <WorkflowFieldHelp>
+                            填写这个镜头希望说出的旁白或对白，无台词可留空。此处记录内容，实际声音取决于工作流和所选模型，需播放片段核对。
+                          </WorkflowFieldHelp>
                         </label>
                         <label>
                           <span>
                             {isBrandVideo ? "时长（秒，按当前模型能力）" : "时长（秒，4–15）"}
                           </span>
                           <input
+                            aria-label={
+                              isBrandVideo ? "时长（秒，按当前模型能力）" : "时长（秒，4–15）"
+                            }
                             type="number"
                             min={isBrandVideo ? 0.001 : 4}
                             max={isBrandVideo ? undefined : 15}
@@ -2003,6 +2094,11 @@ export function KnowledgeVideoWorkflowNode({
                               });
                             }}
                           />
+                          <WorkflowFieldHelp>
+                            {isBrandVideo
+                              ? "使用执行计划里已经适配模型的单镜时长；改动前核对该模型允许的秒数，只改提示词时可保留原时长。"
+                              : "填写这一镜头的秒数，当前编辑范围为 4–15 秒；首次保留规划值，避免改动后节奏或总时长不合适。"}
+                          </WorkflowFieldHelp>
                         </label>
                         <div className="canvas-knowledge-workflow__shot-editor-actions">
                           <button

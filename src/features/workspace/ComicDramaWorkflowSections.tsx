@@ -13,6 +13,7 @@ import {
   type ComicDramaWorkflowOptions,
 } from "./comicDramaWorkflowModel";
 import { RequiredMark } from "./workflowFieldRequirements";
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
 interface ComicDramaConfigurationProps {
@@ -132,7 +133,10 @@ export function ComicDramaConfiguration({
               void importFiles(files);
             }}
           />
-          <small>支持多个 TXT / Markdown 文件，按文件名排序，每个文件对应一集，最多 10 集。</small>
+          <WorkflowFieldHelp>
+            每个 TXT / Markdown 文件对应一集，按文件名排序后追加，最多 10 集。建议命名为
+            01-开端、02-转折；导入后先核对集名与剧本顺序。
+          </WorkflowFieldHelp>
         </label>
         {importing ? <p role="status">正在读取剧本…</p> : null}
         {importError ? <ErrorAlert workflow id={importErrorId} error={importError} /> : null}
@@ -156,6 +160,10 @@ export function ComicDramaConfiguration({
                     })
                   }
                 />
+                <WorkflowFieldHelp>
+                  用于区分分集文档与制作进度。填写便于辨认的标题，例如「第 1
+                  集：意外来客」，不能留空。
+                </WorkflowFieldHelp>
               </label>
               <button
                 type="button"
@@ -189,6 +197,9 @@ export function ComicDramaConfiguration({
                   })
                 }
               />
+              <WorkflowFieldHelp>
+                填写这一集的小说、故事创意或已有剧本，尽量写清人物、剧情、场景与对白。必须保留的台词请注明；后续会分阶段共创与审阅。
+              </WorkflowFieldHelp>
             </label>
           </fieldset>
         ))}
@@ -219,6 +230,9 @@ export function ComicDramaConfiguration({
             value={options.visualStyle}
             onValueChange={(value) => onChange({ ...options, visualStyle: value })}
           />
+          <WorkflowFieldHelp>
+            决定各集画面的整体方向。可保留默认国漫风格，或写「水彩插画、暖色、柔和光线」等；保持同一套描述更便于跨集统一。
+          </WorkflowFieldHelp>
         </label>
         <div className="canvas-comic-drama-workflow__format">
           <label>
@@ -232,6 +246,10 @@ export function ComicDramaConfiguration({
               <option value="16:9">横屏 16:9</option>
               <option value="1:1">方形 1:1</option>
             </select>
+            <WorkflowFieldHelp>
+              按发布位置选择：手机短视频用竖屏 9:16，横向播放用 16:9，方形展示用
+              1:1。默认竖屏；选定后按这一画幅规划镜头。
+            </WorkflowFieldHelp>
           </label>
           <label>
             交付方式
@@ -245,6 +263,9 @@ export function ComicDramaConfiguration({
               <option value="video">制作完整成片</option>
               <option value="documents">仅制作分集文档</option>
             </select>
+            <WorkflowFieldHelp>
+              想继续制作画面、配音与成片，选「制作完整成片」并配置所需模型和音色。只需剧本、分镜等制作资料，选「仅制作分集文档」。
+            </WorkflowFieldHelp>
           </label>
         </div>
         <label className="canvas-knowledge-workflow__brief">
@@ -256,6 +277,9 @@ export function ComicDramaConfiguration({
             placeholder="例如：保留逐字对白，强调人物关系和悬念。"
             onValueChange={onBriefChange}
           />
+          <WorkflowFieldHelp>
+            选填，补充所有集都要遵守的约定，例如受众、对白保留规则、剧情禁区或悬念风格。具体剧情放在各集剧本中，避免要求互相矛盾。
+          </WorkflowFieldHelp>
         </label>
       </fieldset>
       {options.deliverable === "video" ? (
@@ -296,6 +320,9 @@ export function ComicDramaConfiguration({
                   </option>
                 ))}
               </select>
+              <WorkflowFieldHelp>
+                选择已在项目中启用语音合成能力的供应商。列表为空时，先在供应商设置中绑定语音模型；切换供应商后需要重新填写角色音色。
+              </WorkflowFieldHelp>
             </label>
             <label>
               <span>
@@ -329,6 +356,9 @@ export function ComicDramaConfiguration({
                   </option>
                 ))}
               </select>
+              <WorkflowFieldHelp>
+                用这个模型逐句生成角色配音。选择当前账号可使用、支持所需语言与音色的模型；切换模型后音色绑定会清空，需要重新核对。
+              </WorkflowFieldHelp>
             </label>
           </fieldset>
           {requiredSpeakers.length ? (
@@ -363,6 +393,10 @@ export function ComicDramaConfiguration({
                         })
                       }
                     />
+                    <WorkflowFieldHelp>
+                      从所选供应商控制台复制这个角色可用的音色 ID，填写 ID 而非音色昵称。
+                      不同说话角色需要不同 ID，并确认当前账号已开通这些音色。
+                    </WorkflowFieldHelp>
                   </label>
                 );
               })}

@@ -20,6 +20,117 @@ import type {
 export const PROMPT_TIPTAP_MEDIA_REFERENCE_NODE = "mediaReference";
 export const PROMPT_TIPTAP_PENDING_REFERENCE_NODE = "pendingReference";
 export const PROMPT_TIPTAP_MARK_REFERENCE_NODE = "markReference";
+export const PROMPT_TIPTAP_ATTACHMENT_NODE = "attachment";
+
+/** 附件 chip 的类型图标；纯字形渲染，不依赖图标库。 */
+const ATTACHMENT_KIND_GLYPH: Record<string, string> = {
+  image: "🖼",
+  video: "🎞",
+  audio: "🎧",
+  document: "📄",
+};
+
+function attachmentDataset(target: MediaReferenceTarget): Record<string, string> {
+  if (target.kind === "local_base64_asset")
+    return { "data-attachment-target": "local_base64_asset", "data-asset-id": target.assetId };
+  if (target.kind === "local_asset")
+    return { "data-attachment-target": "local_asset", "data-staging-job-id": target.stagingJobId };
+  if (target.kind === "local_file")
+    return { "data-attachment-target": "local_file", "data-file-path": target.path };
+  return {};
+}
+
+function attachmentTargetFromElement(element: HTMLElement): MediaReferenceTarget | null {
+  const kind = element.dataset["attachmentTarget"];
+  const mediaKind = element.dataset["mediaKind"];
+  if (!kind || !isMediaType(mediaKind)) return null;
+  if (kind === "local_base64_asset") {
+    const assetId = element.dataset["assetId"] ?? "";
+    return assetId ? { kind: "local_base64_asset", assetId, mediaType: mediaKind } : null;
+  }
+  if (kind === "local_asset") {
+    const stagingJobId = element.dataset["stagingJobId"] ?? "";
+    return stagingJobId ? { kind: "local_asset", stagingJobId, mediaType: mediaKind } : null;
+  }
+  const path = element.dataset["filePath"] ?? "";
+  return path ? { kind: "local_file", path, mediaType: mediaKind } : null;
+}
+
+const Attachment = Node.create({
+  name: PROMPT_TIPTAP_ATTACHMENT_NODE,
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  draggable: false,
+
+  addAttributes() {
+    return {
+      attachmentId: { default: "" },
+      name: { default: "" },
+      mediaType: { default: "image" },
+      target: { default: null, rendered: false },
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "span[data-attachment-id]",
+        getAttrs: (node) => {
+          if (!(node instanceof HTMLElement)) return false;
+          const target = attachmentTargetFromElement(node);
+          const attachmentId = node.dataset["attachmentId"] ?? "";
+          const name = node.dataset["attachmentName"] ?? "";
+          if (!target || !attachmentId || !name) return false;
+          return {
+            attachmentId,
+            name,
+            mediaType: target.mediaType,
+            target,
+          };
+        },
+      },
+    ];
+  },
+
+  renderHTML({ node }) {
+    const target = decodeMediaReferenceTarget(node.attrs["target"]);
+    const name = String(node.attrs["name"] ?? "");
+    const mediaType = String(node.attrs["mediaType"] ?? "image");
+    const attrs: Record<string, string> = {
+      class: "prompt-attachment",
+      contenteditable: "false",
+      "data-attachment-id": String(node.attrs["attachmentId"] ?? ""),
+      "data-attachment-name": name,
+      "data-media-kind": mediaType,
+      title: `${name} · 直接附加的${ATTACHMENT_KIND_GLYPH[mediaType] ? "媒体文件" : "文件"}`,
+    };
+    if (target) Object.assign(attrs, attachmentDataset(target));
+    return ["span", attrs, `${ATTACHMENT_KIND_GLYPH[mediaType] ?? "📄"} ${name}`];
+  },
+
+  renderText({ node }) {
+    return `[附件:${String(node.attrs["name"] ?? "")}]`;
+  },
+});
+
+export function promptAttachmentToTiptapNode(item: {
+  readonly attachmentId: string;
+  readonly target: MediaReferenceTarget;
+  readonly name: string;
+  readonly mediaType: string;
+}): JSONContent {
+  return {
+    type: PROMPT_TIPTAP_ATTACHMENT_NODE,
+    attrs: {
+      attachmentId: item.attachmentId,
+      name: item.name,
+      mediaType: item.mediaType,
+      target: structuredClone(item.target),
+    },
+  };
+}
 
 /** 标注引用的展示信息：编号与所属帧只影响渲染，文档里保存的是插入时的快照。 */
 export interface PromptMarkReferencePresentation {
@@ -380,6 +491,7 @@ export function createPromptTiptapExtensions(placeholder: string): Extensions {
     MediaReference,
     PendingReference,
     MarkReference,
+    Attachment,
     Placeholder.configure({ placeholder }),
     UndoRedo,
   ];
@@ -492,6 +604,8 @@ function inlineItemsToTiptapContent(
       content.push(promptReferenceToTiptapNode(item, presentation));
     } else if (item.kind === "mark_reference") {
       content.push(promptMarkReferenceToTiptapNode(item, presentation));
+    } else if (item.kind === "attachment") {
+      content.push(promptAttachmentToTiptapNode(item));
     } else {
       content.push({
         type: PROMPT_TIPTAP_PENDING_REFERENCE_NODE,
@@ -714,6 +828,35 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
           descriptionSnapshot: typeof descriptionSnapshot === "string" ? descriptionSnapshot : "",
           color: typeof color === "string" ? color : "",
         });
+        continue;
+      }
+      if (node.type === PROMPT_TIPTAP_ATTACHMENT_NODE) {
+        const attrs = jsonContentAttributes(node);
+        const attachmentId = attrs["attachmentId"];
+        const name = attrs["name"];
+        const mediaType = attrs["mediaType"];
+        const parsedTarget =
+          typeof attachmentId === "string" && attachmentId
+            ? decodeMediaReferenceTarget(attrs["target"], `attachment:${attachmentId}`)
+            : null;
+        if (
+          typeof attachmentId === "string" &&
+          attachmentId &&
+          typeof name === "string" &&
+          (mediaType === "image" ||
+            mediaType === "video" ||
+            mediaType === "audio" ||
+            mediaType === "document") &&
+          parsedTarget != null
+        ) {
+          sink.push({
+            kind: "attachment",
+            attachmentId,
+            target: parsedTarget,
+            name,
+            mediaType,
+          });
+        }
         continue;
       }
       if (node.type === PROMPT_TIPTAP_PENDING_REFERENCE_NODE) {

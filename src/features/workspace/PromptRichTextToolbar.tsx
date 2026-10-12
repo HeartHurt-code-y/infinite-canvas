@@ -42,8 +42,11 @@ const CONTROLS: readonly (InlineControl | BlockControl)[] = [
  */
 export function PromptRichTextToolbar({
   session,
+  onPickFiles,
 }: {
   readonly session: PromptContentEditorSession;
+  /** 提供时渲染「插入媒体文件」按钮（粘贴/拖拽之外的第三个入口）。 */
+  readonly onPickFiles?: () => void;
 }) {
   const [formats, setFormats] = useState(() => session.activeFormats());
   useEffect(
@@ -52,6 +55,18 @@ export function PromptRichTextToolbar({
   );
   return (
     <div className="prompt-rich-toolbar" role="toolbar" aria-label="提示词格式">
+      {onPickFiles != null && (
+        <button
+          type="button"
+          className="prompt-rich-toolbar__button"
+          aria-label="插入媒体文件"
+          title="插入图片 / 视频 / 音频（也可直接粘贴或拖入）"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={onPickFiles}
+        >
+          📎
+        </button>
+      )}
       {CONTROLS.map((control) => {
         const active =
           control.kind === "inline"

@@ -1,3 +1,4 @@
+import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useId, useState } from "react";
@@ -156,6 +157,10 @@ export function XhsCoverConfiguration({
               placeholder="留空自动生成 3 个候选标题并择优"
               onValueChange={(title) => onChange({ ...options, title })}
             />
+            <WorkflowFieldHelp>
+              填写希望印在封面上的短标题；留空会生成 3
+              个候选并择优。尽量只表达一个重点，避免把整段正文塞进封面。
+            </WorkflowFieldHelp>
           </label>
           <label>
             封面风格
@@ -176,6 +181,9 @@ export function XhsCoverConfiguration({
                 </option>
               ))}
             </select>
+            <WorkflowFieldHelp>
+              不确定先用自动匹配；问答适合解释问题，清单适合步骤教程，榜单适合比较产品，大字或拆字适合强调一个结论。
+            </WorkflowFieldHelp>
           </label>
           {(
             [
@@ -198,6 +206,19 @@ export function XhsCoverConfiguration({
                   </option>
                 ))}
               </select>
+              <WorkflowFieldHelp>
+                {
+                  {
+                    expression:
+                      "控制人物传递的情绪和动作；疑问内容可选托腮，讲教程可选讲解，不确定选自动。",
+                    background:
+                      "控制画面环境与色调；科技内容可选科技或软件界面，生活内容可选暖光，不确定选自动。",
+                    font: "控制标题字的视觉气质；预置超粗黑体强调易读，科技或漫画字体适合对应主题；选项是生成风格要求。",
+                    color:
+                      "控制标题颜色与描边；浅黄用于突出重点，白字配深底，混排用于区分关键词。预置浅黄与粗黑描边，可先沿用。",
+                  }[field]
+                }
+              </WorkflowFieldHelp>
             </label>
           ))}
           <label>
@@ -215,6 +236,9 @@ export function XhsCoverConfiguration({
               <option value="image">生成封面图片与制作文档</option>
               <option value="prompt">仅生成提示词与制作文档</option>
             </select>
+            <WorkflowFieldHelp>
+              生成封面图片会继续调用图片模型并保留制作文档；只生成提示词适合先审阅标题和构图，再去制作图片。
+            </WorkflowFieldHelp>
           </label>
           <small className="canvas-xhs-cover__title">
             自动提炼标题、编排画面并检查；关键内容需要你决定时才暂停。
