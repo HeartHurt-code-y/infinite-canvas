@@ -222,7 +222,7 @@ test("edition names keep signed installer bytes and updater filename convention"
   }
 });
 
-test("Mac archive preserves signed updater bytes, excludes the app tree and records its signed executable", async (t) => {
+test("Mac archive generates embedded-install DMG and PKG before staging, preserving signed updater bytes and executable provenance", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "ic-mac-online-staging-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await sourceFixture(root);
@@ -249,16 +249,39 @@ test("Mac archive preserves signed updater bytes, excludes the app tree and reco
     JSON.stringify({ platform: plan.platform, components: [] }),
   );
   const snapshot = await collectEditionSourceFingerprint({ root, edition: "online" });
+  const deliveryCalls = [];
+  const createInstallDmg = async (options) => {
+    deliveryCalls.push("dmg");
+    assert.equal(options.appPath, path.join(bundle, "macos/无限画布.app"));
+    assert.equal(options.root, root);
+    assert.equal(options.filename, path.join(bundle, "dmg/无限画布_0.2.1_aarch64.dmg"));
+    await writeFile(options.filename, "disk image with embedded installation helpers");
+  };
+  const createInstallPackage = async (options) => {
+    deliveryCalls.push("pkg");
+    assert.equal(options.appPath, path.join(bundle, "macos/无限画布.app"));
+    assert.equal(options.applicationVersion, "0.2.1");
+    assert.equal(options.identifier, "com.infinitecanvas.desktop");
+    assert.equal(options.filename, path.join(bundle, "pkg/无限画布_0.2.1_aarch64-online.pkg"));
+    await writeFile(
+      options.filename,
+      "native installer with signed application and postinstall script",
+    );
+  };
   const artifacts = await archiveEditionBundles(plan, {
     root,
     applicationVersion: "0.2.1",
     sourceSnapshot: snapshot,
+    createInstallDmg,
+    createInstallPackage,
   });
+  assert.deepEqual(deliveryCalls, ["dmg", "pkg"]);
   assert.deepEqual(artifacts.map(({ path: filename }) => filename).sort(), [
     "dmg/无限画布_0.2.1_aarch64-online.dmg",
     "helper/install-macos.sh",
     "macos/无限画布_0.2.1_aarch64-online.app.tar.gz",
     "macos/无限画布_0.2.1_aarch64-online.app.tar.gz.sig",
+    "pkg/无限画布_0.2.1_aarch64-online.pkg",
   ]);
   const output = path.join(root, ".cache/tauri-editions/online/artifacts/0.2.1");
   const feed = JSON.parse(await readFile(path.join(output, "latest.json")));
@@ -275,6 +298,12 @@ test("Mac archive preserves signed updater bytes, excludes the app tree and reco
   assert.equal(helper.localPath, path.join(output, "helper/install-macos.sh"));
   assert.match(helper.objectKey, /darwin-aarch64-online\/install-macos-0\.2\.1\.sh$/);
   assert.ok(helper.url.endsWith("/darwin-aarch64-online/install-macos-0.2.1.sh"));
+  const nativePackage = publish.artifacts.find(({ path: filename }) => filename.endsWith(".pkg"));
+  assert.match(
+    nativePackage.objectKey,
+    /darwin-aarch64-online\/无限画布_0\.2\.1_aarch64-online\.pkg$/,
+  );
+  assert.equal(nativePackage.sha256, await componentFileSha256(nativePackage.localPath));
   assert.equal(
     await componentFileSha256(path.join(output, "macos/无限画布_0.2.1_aarch64-online.app.tar.gz")),
     await componentFileSha256(path.join(bundle, "macos/无限画布.app.tar.gz")),
@@ -288,6 +317,27 @@ test("Mac archive preserves signed updater bytes, excludes the app tree and reco
   assert.equal(
     JSON.parse(await readFile(path.join(output, "distribution.json"))).platform,
     plan.platform,
+  );
+  await assert.rejects(
+    archiveEditionBundles(plan, {
+      root,
+      applicationVersion: "0.2.1",
+      createInstallDmg,
+      createInstallPackage: async () => {
+        throw new Error("PKG native generation failed");
+      },
+    }),
+    /PKG native generation failed/,
+  );
+  await rm(path.join(bundle, "pkg/无限画布_0.2.1_aarch64-online.pkg"));
+  await assert.rejects(
+    archiveEditionBundles(plan, {
+      root,
+      applicationVersion: "0.2.1",
+      createInstallDmg,
+      createInstallPackage: async () => {},
+    }),
+    /ENOENT/,
   );
 });
 

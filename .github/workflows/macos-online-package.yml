@@ -62,7 +62,7 @@ jobs:
         run: |
           export IC_COMPONENT_PYTHON="$(command -v python3)"
           "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
-          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs scripts/prepare-ai-media-runtime.test.mjs
+          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/create-macos-install-dmg.test.mjs scripts/create-macos-install-package.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs scripts/prepare-ai-media-runtime.test.mjs
       - name: Prepare optional signing identity
         run: bash scripts/prepare-macos-online-signing.sh
       - name: Build and verify online DMG and updater
@@ -92,6 +92,7 @@ jobs:
       - name: Report installation boundary
         run: |
           {
-            echo 'macOS online DMG, updater signature and component archives verified.'
-            echo 'Apple notarization is not performed. Gatekeeper may block first installation; use helper/install-macos.sh supplied with the DMG.'
+            echo 'macOS online PKG, DMG, updater signature and component archives verified. The PKG was actually installed with the system installer.'
+            echo 'Installation scripts are embedded. Install the PKG with: sudo installer -pkg <downloaded.pkg> -target /'
+            echo 'Apple notarization is not performed. Gatekeeper may block first installation; the PKG embeds install-macos.sh and runs it automatically.'
           } >> "$GITHUB_STEP_SUMMARY"

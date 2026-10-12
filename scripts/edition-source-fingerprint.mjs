@@ -37,6 +37,12 @@ const OPTIONAL_FILES = [
   "scripts/tauri-build-edition.mjs",
   "scripts/edition-source-fingerprint.mjs",
   "scripts/install-macos.sh",
+  "scripts/install-macos.command",
+  "scripts/install-macos-postinstall.sh",
+  "scripts/create-macos-install-dmg.mjs",
+  "scripts/create-macos-install-package.mjs",
+  "scripts/verify-macos-edition.mjs",
+  "scripts/build-macos-online.sh",
   "scripts/unlock-installed-macos-app.sh",
 ];
 const OPTIONAL_TREES = [

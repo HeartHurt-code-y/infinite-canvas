@@ -63,6 +63,7 @@ async function fixture(t, version = "0.2.1", platform = PLATFORM) {
   if (isMac)
     paths.push(
       [`dmg/无限画布_${version}_${arch}-online.dmg`, Buffer.from("verified disk image")],
+      [`pkg/无限画布_${version}_${arch}-online.pkg`, Buffer.from("verified native installer")],
       ["helper/install-macos.sh", Buffer.from("verified installation helper")],
     );
   for (const [relative, body] of paths) {
@@ -127,7 +128,17 @@ async function fixture(t, version = "0.2.1", platform = PLATFORM) {
               dmgVerified: true,
               applicationBytesVerified: true,
               codeSignatureVerified: true,
+              installationHelpersVerified: true,
               sha256: artifacts[2].sha256,
+            },
+            pkg: {
+              pkgVerified: true,
+              applicationBytesVerified: true,
+              codeSignatureVerified: true,
+              postinstallVerified: true,
+              packageIdentifier: "com.infinitecanvas.desktop.online-installer",
+              packageVersion: version,
+              sha256: artifacts[3].sha256,
             },
           },
         }
@@ -245,7 +256,7 @@ test("dry-run verifies complete local objects without creating a transport or re
   assert.equal(f.verificationCalls(), 1);
 });
 
-test("both Mac channels publish their DMG, updater/signature, installation helper and seven components before the feed", async (t) => {
+test("both Mac channels publish their PKG, DMG, updater/signature, installation helper and seven components before the feed", async (t) => {
   for (const platform of ["darwin-aarch64", "darwin-x86_64"]) {
     const f = await fixture(t, "0.2.2", platform);
     const transport = mockTransport();
@@ -253,12 +264,20 @@ test("both Mac channels publish their DMG, updater/signature, installation helpe
     assert.equal(report.published, true);
     assert.equal(report.platform, platform);
     assert.equal(report.channel, `${platform}-online`);
-    assert.equal(report.objects.length, 11);
+    assert.equal(report.objects.length, 12);
     assert.equal(report.publicObjectsVerified, true);
     const mutations = writes(transport);
-    assert.equal(mutations.length, 12);
+    assert.equal(mutations.length, 13);
     assert.equal(mutations.at(-1).objectKey, tosUpdatesObjectKey(`${platform}-online/latest.json`));
     assert.ok(report.objects.some(({ objectKey }) => objectKey.endsWith(".dmg")));
+    const pkg = report.objects.find(({ objectKey }) => objectKey.endsWith(".pkg"));
+    assert.ok(pkg);
+    assert.equal(pkg.sha256, f.verification.macos.pkg.sha256);
+    assert.ok(
+      transport.calls.some(
+        ({ method, objectKey }) => method === "public-get" && objectKey === pkg.objectKey,
+      ),
+    );
     assert.ok(
       report.objects.some(({ objectKey }) => objectKey.endsWith("/install-macos-0.2.2.sh")),
     );
@@ -383,7 +402,7 @@ test("both Mac releases pass the real TOS transport scope, public digest checks,
     assert.equal(calls[0].method, "HEAD");
     assert.equal(calls[0].objectKey, feedKey);
     const mutations = calls.filter(({ method }) => method === "PUT");
-    assert.equal(mutations.length, 13); // Eleven payloads, old-feed backup, then the feed.
+    assert.equal(mutations.length, 14); // Twelve payloads, old-feed backup, then the feed.
     const feedCommit = mutations.at(-1);
     assert.equal(feedCommit.objectKey, feedKey);
     assert.equal(feedCommit.headers["if-match"], previousEtag);
@@ -397,7 +416,7 @@ test("both Mac releases pass the real TOS transport scope, public digest checks,
     );
     assert.deepEqual(objects.get(backupKey).body, previousFeed);
     assert.deepEqual(objects.get(feedKey).body, encode(f.feed));
-    assert.equal(calls.filter(({ hash }) => hash).length, 13);
+    assert.equal(calls.filter(({ hash }) => hash).length, 14);
     assert.equal(
       calls.some(({ objectKey }) => objectKey.includes("windows-x86_64")),
       false,
@@ -412,6 +431,24 @@ test("Mac publication refuses incomplete native/DMG/resource validation and comp
     { macos: { ...f.verification.macos, architectureVerified: false } },
     { macos: { ...f.verification.macos, updateArchiveBytesVerified: false } },
     { macos: { ...f.verification.macos, dmg: { dmgVerified: true } } },
+    {
+      macos: {
+        ...f.verification.macos,
+        pkg: { ...f.verification.macos.pkg, postinstallVerified: false },
+      },
+    },
+    {
+      macos: {
+        ...f.verification.macos,
+        pkg: { ...f.verification.macos.pkg, packageVersion: "0.0.1" },
+      },
+    },
+    {
+      macos: {
+        ...f.verification.macos,
+        pkg: { ...f.verification.macos.pkg, packageIdentifier: "wrong.application" },
+      },
+    },
     { bundleResourceCount: 0 },
   ])
     await assert.rejects(
@@ -430,6 +467,45 @@ test("Mac publication refuses incomplete native/DMG/resource validation and comp
   );
   await f.writeManifest();
   await assert.rejects(prepareOnlinePublication(f.options), /trusted catalog\/cache contract/);
+});
+
+test("Mac publication refuses a missing, changed or renamed PKG before credentials", async (t) => {
+  const f = await fixture(t, "0.2.3", "darwin-aarch64");
+  const pkg = f.manifest.artifacts.find(({ path: filename }) => filename.endsWith(".pkg"));
+  const body = await readFile(pkg.localPath);
+  await writeFile(pkg.localPath, "changed package payload");
+  await assert.rejects(prepareOnlinePublication(f.options), /Local upload object changed/);
+  await writeFile(pkg.localPath, body);
+  const original = structuredClone(pkg);
+  pkg.path = pkg.path.replace("_aarch64-", "_x64-");
+  await f.writeManifest();
+  await assert.rejects(prepareOnlinePublication(f.options), /outside the dedicated online channel/);
+  Object.assign(pkg, original);
+  f.manifest.artifacts = f.manifest.artifacts.filter((artifact) => artifact !== pkg);
+  await f.writeManifest();
+  await assert.rejects(prepareOnlinePublication(f.options), /native edition artifacts/);
+});
+
+test("a PKG changed during upload prevents committing the Mac feed", async (t) => {
+  const f = await fixture(t, "0.2.3", "darwin-aarch64");
+  const transport = mockTransport();
+  let checks = 0;
+  await assert.rejects(
+    publishOnlineEdition({
+      ...f.options,
+      transportFactory: () => transport,
+      verifyRelease: async () => {
+        const report = structuredClone(f.verification);
+        if (++checks === 2) report.macos.pkg.sha256 = "f".repeat(64);
+        return report;
+      },
+    }),
+    /Release changed during upload/,
+  );
+  assert.equal(
+    writes(transport).some(({ objectKey }) => objectKey === f.manifest.feed.objectKey),
+    false,
+  );
 });
 
 test("failed signature/compiled pin verification stops before transport construction", async (t) => {

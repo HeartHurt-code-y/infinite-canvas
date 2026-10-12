@@ -1,6 +1,6 @@
 // Native macOS checks remain local and accept the project's ad-hoc signing baseline.
 import { createReadStream } from "node:fs";
-import { lstat, mkdtemp, open, readdir, rm } from "node:fs/promises";
+import { lstat, mkdtemp, open, readFile, readdir, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -317,8 +317,119 @@ export async function verifyMacNativeApp(
   };
 }
 
-export async function verifyMacDmgApplication(filename, appName, expectedInventory) {
+export async function verifyMacDmgInstallHelpers(mount, sourceRoot) {
+  for (const name of ["install-macos.command", "install-macos.sh"]) {
+    const filename = path.join(mount, name);
+    const info = await lstat(filename);
+    requireValue(
+      info.isFile() && !info.isSymbolicLink() && (info.mode & 0o777) === 0o755,
+      `DMG installation helper must be a regular executable file: ${name}`,
+    );
+    requireValue(
+      (await readFile(filename)).equals(await readFile(path.join(sourceRoot, "scripts", name))),
+      `DMG installation helper differs from verified project source: ${name}`,
+    );
+  }
+  return true;
+}
+
+export async function verifyMacInstallerPackage(
+  filename,
+  appName,
+  expectedInventory,
+  { applicationVersion, identifier, sourceRoot, platform = process.platform, execute = run } = {},
+) {
+  requireValue(platform === "darwin", "Native macOS PKG verification must run on macOS");
+  requireValue(
+    typeof sourceRoot === "string" && appName === "无限画布.app",
+    "PKG verification needs its helper source root and expected app",
+  );
+  const packageFile = await lstat(filename);
+  requireValue(
+    packageFile.isFile() && !packageFile.isSymbolicLink(),
+    "PKG must be a regular installation artifact",
+  );
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "ic-mac-pkg-"));
+  const expanded = path.join(temporary, "expanded");
+  try {
+    await execute("/usr/sbin/pkgutil", ["--expand-full", filename, expanded]);
+    const infoPath = path.join(expanded, "PackageInfo");
+    const info = await lstat(infoPath);
+    requireValue(info.isFile() && !info.isSymbolicLink(), "PKG PackageInfo must be a regular file");
+    const xml = await readFile(infoPath, "utf8");
+    const attrs = xml.match(/<pkg-info\b([^>]+)>/)?.[1] ?? "";
+    const attribute = (name) => attrs.match(new RegExp(`(?:^|\\s)${name}="([^"]*)"`))?.[1];
+    const packageIdentifier = `${identifier}.online-installer`;
+    requireValue(
+      attribute("identifier") === packageIdentifier &&
+        attribute("version") === applicationVersion &&
+        attribute("install-location") === "/",
+      "PKG identity/version/install location does not match this release",
+    );
+    requireValue(
+      /<postinstall\b[^>]*\bfile="\.\/postinstall"/.test(xml),
+      "PKG must run its embedded postinstall entry",
+    );
+    const payload = path.join(expanded, "Payload");
+    const expectedPayload = expectedInventory.map((entry) => ({
+      ...entry,
+      path: `Applications/${appName}/${entry.path}`,
+    }));
+    assertMacAppInventories(await inventoryMacApp(payload), expectedPayload, "PKG payload");
+    const appPath = path.join(payload, "Applications", appName);
+    await execute("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath]);
+    const scripts = path.join(expanded, "Scripts");
+    const scriptsInfo = await lstat(scripts);
+    requireValue(
+      scriptsInfo.isDirectory() && !scriptsInfo.isSymbolicLink(),
+      "PKG scripts must be a materialized directory",
+    );
+    requireValue(
+      JSON.stringify((await readdir(scripts)).sort()) ===
+        JSON.stringify(["install-macos.sh", "postinstall"]),
+      "PKG must contain exactly its two embedded installation scripts",
+    );
+    for (const [name, sourceName] of [
+      ["install-macos.sh", "install-macos.sh"],
+      ["postinstall", "install-macos-postinstall.sh"],
+    ]) {
+      const scriptPath = path.join(scripts, name);
+      const scriptInfo = await lstat(scriptPath);
+      requireValue(
+        scriptInfo.isFile() && !scriptInfo.isSymbolicLink() && (scriptInfo.mode & 0o777) === 0o755,
+        `PKG script must be a regular executable file: ${name}`,
+      );
+      requireValue(
+        (await readFile(scriptPath)).equals(
+          await readFile(path.join(sourceRoot, "scripts", sourceName)),
+        ),
+        `PKG installation script differs from verified source: ${name}`,
+      );
+    }
+    return {
+      pkgVerified: true,
+      applicationBytesVerified: true,
+      codeSignatureVerified: true,
+      postinstallVerified: true,
+      packageIdentifier,
+      packageVersion: applicationVersion,
+    };
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+export async function verifyMacDmgApplication(
+  filename,
+  appName,
+  expectedInventory,
+  { sourceRoot } = {},
+) {
   requireValue(process.platform === "darwin", "Native macOS DMG verification must run on macOS");
+  requireValue(
+    typeof sourceRoot === "string",
+    "DMG verification needs the installation helper source root",
+  );
   const temporary = await mkdtemp(path.join(os.tmpdir(), "ic-mac-edition-"));
   const mount = path.join(temporary, "mounted");
   let attached = false;
@@ -341,7 +452,13 @@ export async function verifyMacDmgApplication(filename, appName, expectedInvento
     const appPath = path.join(mount, appName);
     await run("/usr/bin/codesign", ["--verify", "--deep", "--strict", appPath]);
     assertMacAppInventories(await inventoryMacApp(appPath), expectedInventory, "DMG");
-    return { dmgVerified: true, applicationBytesVerified: true, codeSignatureVerified: true };
+    await verifyMacDmgInstallHelpers(mount, sourceRoot);
+    return {
+      dmgVerified: true,
+      applicationBytesVerified: true,
+      codeSignatureVerified: true,
+      installationHelpersVerified: true,
+    };
   } finally {
     if (attached) await run("/usr/bin/hdiutil", ["detach", mount]);
     await rm(temporary, { recursive: true, force: true });

@@ -203,7 +203,7 @@ test("object scope accepts the Windows installer and both matching Mac DMGs/upda
       assert.equal(assertOnlineObjectKey(`${prefix}${suffix}`), `${prefix}${suffix}`);
     if (platform.startsWith("darwin-")) {
       const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
-      for (const suffix of [".dmg", ".app.tar.gz", ".app.tar.gz.sig"])
+      for (const suffix of [".dmg", ".pkg", ".app.tar.gz", ".app.tar.gz.sig"])
         assertOnlineObjectKey(`${prefix}无限画布_0.2.1_${arch}-online${suffix}`);
       assertOnlineObjectKey(`${prefix}install-macos.sh`);
       assertOnlineObjectKey(`${prefix}install-macos-0.2.1.sh`);
@@ -236,6 +236,9 @@ test("object scope accepts the Windows installer and both matching Mac DMGs/upda
     `${TOS_UPDATES_PREFIX}/darwin-aarch64/latest.json`,
     `${TOS_UPDATES_PREFIX}/darwin-x86_64/latest.json`,
     `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_x64-online.dmg`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_x64-online.pkg`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_aarch64-online.pkg.sig`,
+    `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/pkg/无限画布_0.2.1_aarch64-online.pkg`,
     `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/无限画布_0.2.1_aarch64-online.app.tar.gz`,
     `${TOS_UPDATES_PREFIX}/darwin-aarch64-online/无限画布_0.2.1_aarch64-full.app.tar.gz`,
     `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/无限画布_0.2.1_x64-delta.app.tar.gz`,
@@ -248,6 +251,7 @@ test("object scope accepts the Windows installer and both matching Mac DMGs/upda
     `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/install-macos-0.2.1.sh.sig`,
     `${TOS_UPDATES_PREFIX}/darwin-x86_64-online/extra.app.tar.gz`,
     `${PREFIX}无限画布_0.2.1_x64-online.dmg`,
+    `${PREFIX}无限画布_0.2.1_x64-online.pkg`,
     `${PREFIX}install-macos.sh`,
     `${PREFIX}install-macos-0.2.1.sh`,
     `${PREFIX}%2e%2e/latest.json`,

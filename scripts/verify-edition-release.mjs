@@ -581,6 +581,8 @@ export async function verifyEditionRelease({
   readCompiledPins = readWindowsCompiledEditionPins,
   verifyMacApp = verifyMacNativeApp,
   verifyMacDmg = verifyMacDmgApplication,
+  verifyMacPackage = async (...args) =>
+    (await import("./verify-macos-edition.mjs")).verifyMacInstallerPackage(...args),
   inventoryMacArchive = inventoryMacUpdateArchive,
   requireSourceFreshness = false,
 } = {}) {
@@ -638,7 +640,7 @@ export async function verifyEditionRelease({
       componentPathIsValid(artifact.path) &&
         (isMac
           ? edition === "online" &&
-            (/\.(dmg|app\.tar\.gz)(?:\.sig)?$/.test(artifact.path) ||
+            (/\.(dmg|pkg|app\.tar\.gz)(?:\.sig)?$/.test(artifact.path) ||
               artifact.path === "helper/install-macos.sh")
           : /\.(exe|msi)(?:\.sig)?$/i.test(artifact.path) ||
             (edition === "offline" && artifact.path.endsWith(".zip"))) &&
@@ -718,14 +720,17 @@ export async function verifyEditionRelease({
     : await verifyResourceTable(root, edition, catalog);
   const { config: editionConfig, executablePath } = nativeResources;
   let macDmg = null;
+  let macPackage = null;
   if (isMac) {
     const dmgPath = `dmg/${tauriConfig.productName}_${version}_${macArch}-${edition}.dmg`;
+    const packagePath = `pkg/${tauriConfig.productName}_${version}_${macArch}-${edition}.pkg`;
     requireValue(
       installer.path === `macos/${installerName}` &&
         sameArray(
           [...artifactPaths].sort(),
           [
             dmgPath,
+            packagePath,
             `macos/${installerName}`,
             `macos/${installerName}.sig`,
             "helper/install-macos.sh",
@@ -733,7 +738,7 @@ export async function verifyEditionRelease({
             .map((filename) => filename.toLowerCase())
             .sort(),
         ),
-      "macOS distribution requires exactly the versioned DMG, updater archive/signature and installation helper",
+      "macOS distribution requires exactly the versioned DMG, PKG, updater archive/signature and installation helper",
     );
     assertMacAppInventories(
       await inventoryMacArchive(path.join(directory, installer.path), nativeResources.appName),
@@ -744,11 +749,13 @@ export async function verifyEditionRelease({
       path.join(directory, dmgPath),
       nativeResources.appName,
       nativeResources.inventory,
+      { sourceRoot: root },
     );
     requireValue(
       dmgVerification?.dmgVerified === true &&
         dmgVerification.applicationBytesVerified === true &&
-        dmgVerification.codeSignatureVerified === true,
+        dmgVerification.codeSignatureVerified === true &&
+        dmgVerification.installationHelpersVerified === true,
       "macOS DMG verification is incomplete",
     );
     const helperPath = path.join(directory, "helper/install-macos.sh");
@@ -761,6 +768,25 @@ export async function verifyEditionRelease({
     macDmg = {
       ...marker.artifacts.find(({ path: filename }) => filename === dmgPath),
       ...dmgVerification,
+    };
+    const packageVerification = await verifyMacPackage(
+      path.join(directory, packagePath),
+      nativeResources.appName,
+      nativeResources.inventory,
+      { applicationVersion: version, identifier: tauriConfig.identifier, sourceRoot: root },
+    );
+    requireValue(
+      packageVerification?.pkgVerified === true &&
+        packageVerification.applicationBytesVerified === true &&
+        packageVerification.codeSignatureVerified === true &&
+        packageVerification.postinstallVerified === true &&
+        packageVerification.packageIdentifier === `${tauriConfig.identifier}.online-installer` &&
+        packageVerification.packageVersion === version,
+      "macOS installation PKG verification is incomplete",
+    );
+    macPackage = {
+      ...marker.artifacts.find(({ path: filename }) => filename === packagePath),
+      ...packageVerification,
     };
   }
   const compiledPins = await readCompiledPins(executablePath);
@@ -942,6 +968,7 @@ export async function verifyEditionRelease({
             architectureVerified: true,
             updateArchiveBytesVerified: true,
             dmg: macDmg,
+            pkg: macPackage,
           },
         }
       : { nsisResourceCount: nativeResources.count }),

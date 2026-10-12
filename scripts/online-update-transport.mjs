@@ -59,7 +59,7 @@ export function assertOnlineObjectKey(key) {
     const artifact =
       platform === "windows-x86_64"
         ? `^无限画布_${VERSION}_${arch}-online-setup\\.exe(?:\\.sig)?$`
-        : `^无限画布_${VERSION}_${arch}-online(?:\\.app\\.tar\\.gz(?:\\.sig)?|\\.dmg)$`;
+        : `^无限画布_${VERSION}_${arch}-online(?:\\.app\\.tar\\.gz(?:\\.sig)?|\\.dmg|\\.pkg)$`;
     if (
       new RegExp(artifact).test(relative) ||
       (platform.startsWith("darwin-") &&

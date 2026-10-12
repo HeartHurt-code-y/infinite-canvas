@@ -32,7 +32,9 @@ export function editionArtifactBasename(
       ? ".app.tar.gz.sig"
       : filename.endsWith(".app.tar.gz")
         ? ".app.tar.gz"
-        : ".dmg";
+        : filename.endsWith(".pkg")
+          ? ".pkg"
+          : ".dmg";
     return `${productName}_${applicationVersion}_${arch}-${edition}${extension}`;
   }
   if (/\.(exe|exe\.sig)$/i.test(filename))
@@ -186,7 +188,15 @@ export async function writeEditionTargetMarker(
 
 export async function archiveEditionBundles(
   plan,
-  { applicationVersion, root = COMPONENT_REPO_ROOT, sourceSnapshot } = {},
+  {
+    applicationVersion,
+    root = COMPONENT_REPO_ROOT,
+    sourceSnapshot,
+    createInstallDmg = async (options) =>
+      (await import("./create-macos-install-dmg.mjs")).createMacInstallDmg(options),
+    createInstallPackage = async (options) =>
+      (await import("./create-macos-install-package.mjs")).createMacInstallPackage(options),
+  } = {},
 ) {
   const output = path.join(
     root,
@@ -222,7 +232,8 @@ export async function archiveEditionBundles(
           isMac &&
           !(
             (prefix === "macos" && /\.app\.tar\.gz(?:\.sig)?$/.test(name)) ||
-            (prefix === "dmg" && name.endsWith(".dmg"))
+            (prefix === "dmg" && name.endsWith(".dmg")) ||
+            (prefix === "pkg" && name.endsWith(".pkg"))
           )
         )
           continue;
@@ -257,8 +268,46 @@ export async function archiveEditionBundles(
     "bundle",
   );
   if (isMac) {
+    const appPath = path.join(bundleRoot, "macos", `${config.productName}.app`);
+    await assertComponentRoot(appPath, root);
+    const dmgs = (await readdir(path.join(bundleRoot, "dmg"))).filter((name) =>
+      name.endsWith(".dmg"),
+    );
+    if (dmgs.length !== 1)
+      throw new Error(
+        "Mac edition requires exactly one Tauri DMG before embedding installation helpers",
+      );
+    await createInstallDmg({
+      filename: path.join(bundleRoot, "dmg", dmgs[0]),
+      appPath,
+      root,
+      platform: "darwin",
+    });
+    const packageName = editionArtifactBasename("application.pkg", plan.edition, {
+      platform: plan.platform,
+      applicationVersion,
+      productName: config.productName,
+    });
+    const packageDirectory = path.join(bundleRoot, "pkg");
+    await mkdir(packageDirectory, { recursive: true });
+    await assertComponentRoot(packageDirectory, root);
+    const packages = (await readdir(packageDirectory)).filter((name) => name.endsWith(".pkg"));
+    if (packages.some((name) => name !== packageName))
+      throw new Error("Mac edition package directory contains an unexpected stale installer");
+    await createInstallPackage({
+      filename: path.join(packageDirectory, packageName),
+      appPath,
+      applicationVersion,
+      identifier: config.identifier,
+      root,
+      platform: "darwin",
+    });
+    const packageInfo = await lstat(path.join(packageDirectory, packageName));
+    if (!packageInfo.isFile() || packageInfo.isSymbolicLink() || packageInfo.size === 0)
+      throw new Error("Mac edition requires a materialized nonempty installation PKG");
     await visit(path.join(bundleRoot, "macos"), "macos");
     await visit(path.join(bundleRoot, "dmg"), "dmg");
+    await visit(packageDirectory, "pkg");
   } else await visit(bundleRoot);
   if (artifacts.length) {
     if (isMac) {
@@ -568,7 +617,15 @@ export async function buildTauriEdition(edition, passthrough = [], options = {})
   const sourceAfter = await collectEditionSourceFingerprint({ root, edition });
   assertEditionSourcesUnchanged(sourceBefore, sourceAfter);
   if (!passthrough.includes("--no-bundle"))
-    await archiveEditionBundles(plan, { applicationVersion, root, sourceSnapshot: sourceBefore });
+    await archiveEditionBundles(plan, {
+      applicationVersion,
+      root,
+      sourceSnapshot: sourceBefore,
+      ...(options.createInstallDmg ? { createInstallDmg: options.createInstallDmg } : {}),
+      ...(options.createInstallPackage
+        ? { createInstallPackage: options.createInstallPackage }
+        : {}),
+    });
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

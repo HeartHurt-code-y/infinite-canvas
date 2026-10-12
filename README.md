@@ -52,7 +52,7 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 
 Windows x64 与 macOS Apple Silicon 提供轻量联网版。轻量版保留日常媒体处理所需的 FFmpeg，Blender、动画和网页解析、动捕、图片风格库及 AI 媒体运行时通过顶部「功能组件」安装；对应功能首次使用时会打开所需组件列表。支持中断续传、修复及离线 ZIP 导入，安装后返回原功能主动继续操作，保留草稿与已有任务。构建机仍须预先准备并校验全部七种组件，生成本版本程序信任的目录、摘要和各原生架构的压缩包。显式选择外部 Blender 继续作为高级可选设置。
 
-Windows 完整离线套件的安装包内置 Blender、Remotion、FFmpeg、动捕和风格库五种组件，两种 AI 组件以 ZIP 随套件提供；安装应用后在「功能组件」分别导入随附 ZIP，即可离线准备全部七种组件，无需下载。交付时须保留安装包、签名、两种 AI ZIP 与离线组件收据的完整套件，单独安装 EXE 不会同时安装两种 AI 组件。macOS 联网版首次安装交付 DMG，更新交付签名的 `.app.tar.gz`，使用独立 `darwin-aarch64-online/latest.json` 频道；目前仅构建 Apple Silicon。macOS 完整版继续使用原构建入口。分发与校验流程见 [功能组件与轻量版](docs/integrations/runtime-components.md) 和 [Blender 桥接](tools/blender/README.md)。
+Windows 完整离线套件的安装包内置 Blender、Remotion、FFmpeg、动捕和风格库五种组件，两种 AI 组件以 ZIP 随套件提供；安装应用后在「功能组件」分别导入随附 ZIP，即可离线准备全部七种组件，无需下载。交付时须保留安装包、签名、两种 AI ZIP 与离线组件收据的完整套件，单独安装 EXE 不会同时安装两种 AI 组件。macOS 联网版首次安装交付内置安装脚本的 PKG 和 DMG：PKG 可用一条系统安装命令完成，DMG 内置 `install-macos.command` 安装入口；更新交付签名的 `.app.tar.gz`，使用独立 `darwin-aarch64-online/latest.json` 频道。目前仅构建 Apple Silicon。macOS 完整版继续使用原构建入口。分发与校验流程见 [功能组件与轻量版](docs/integrations/runtime-components.md) 和 [Blender 桥接](tools/blender/README.md)。
 
 发行资源准备会精简运行时不需要的开发内容：Windows Blender 排除 PDB 调试符号；Remotion 按实际依赖关系合并可兼容的重复副本，并排除旧的 `.ignored_*` 依赖目录；独立 AI 组件排除指定开发静态链接库与 C/C++ 头文件。引擎动态库、Python/Node、浏览器、模型、参考原图、许可证与对应源码继续保留。完整性清单在精简后重新生成，程序须根据这些清单重新构建；不能手动删除资源后继续复用旧程序或旧签名清单。
 
@@ -109,7 +109,17 @@ Apple 的 TN3127《Inside Code Signing: Requirements》描述了同一机制：a
 
 **前提（重要）**：`bundle.macOS.signingIdentity` 必须是 `"-"`（本项目已配置）。不设它的话 Tauri 会**整段跳过签名**，产出的未签名 bundle 在 macOS 上会被报成「**已损坏，无法打开**」——这不是 Gatekeeper 的可绕过提示，而是 bundle 签名不自洽。设成 `"-"` 后 Tauri 会执行 **ad-hoc 签名**（`codesign -f -s -`），bundle 签名自洽，app 可以正常运行。
 
-ad-hoc 签名后，首次从下载的 DMG 安装仍需清除 macOS 的隔离属性。双击挂载 DMG，把「无限画布.app」拖进「应用程序」，然后在终端运行内置脚本：
+Apple Silicon 联网版从 `0.2.3` 起提供内置安装脚本的原生 PKG。将 PKG 下载到“下载”文件夹，在 Mac 终端执行一条命令：
+
+```bash
+sudo installer -pkg "$HOME/Downloads/无限画布_0.2.3_aarch64-online.pkg" -target /
+```
+
+系统安装器把应用放到 `/Applications`，自动执行包内的 `scripts/install-macos.sh` 安装逻辑，检验并保留已有代码签名、清除隔离属性，再复验签名。无需单独下载脚本，也无需手动拖拽应用。包未经 Apple 公证，双击包时可能被 Gatekeeper 拦截；上述终端安装方式仍须在真实 Mac 上通过本版安装验收后交付。
+
+联网版 DMG 也内置同版 `install-macos.command` 和 `install-macos.sh`。打开 DMG 后，运行卷内安装入口即可完成复制和签名校验；入口会请求安装所需的管理员权限。DMG 是应用和脚本的容器，挂载本身不会自动执行脚本。
+
+既有完整 DMG 的安装方式仍可使用：双击挂载 DMG，把「无限画布.app」拖进「应用程序」，然后在终端运行 app 内置脚本：
 
 ```bash
 sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-macos-app.sh"
@@ -117,7 +127,7 @@ sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-ma
 
 脚本随 DMG 中的 app 一起交付，无需另行下载。它先校验已安装 app 的签名，只移除该 app 的 `com.apple.quarantine`，再复验签名；完成后从「应用程序」打开即可。它不会覆盖或重新签名 app，因此不会改变包级差分更新所需的文件内容。
 
-旧版 DMG 没有内置脚本时，仍可使用 `sudo xattr -dr com.apple.quarantine "/Applications/无限画布.app"` 解锁已安装、签名校验通过的 app。联网版首次安装也可使用交付目录的 `helper/install-macos.sh`（源码为 `scripts/install-macos.sh`）：`sudo bash install-macos.sh /path/to/无限画布_<版本>_aarch64-online.dmg`。脚本检验并保留联网版已有签名及组件固定摘要，清除隔离属性并安装到 `/Applications`；原有签名损坏时须重新下载。公开分发的脚本使用 `install-macos-<版本>.sh` 文件名，与对应应用版本绑定。
+旧版 DMG 没有内置脚本时，仍可使用 `sudo xattr -dr com.apple.quarantine "/Applications/无限画布.app"` 解锁已安装、签名校验通过的 app。交付目录的 `helper/install-macos.sh`（源码为 `scripts/install-macos.sh`）及版本化公开脚本保留旧包兼容用途。新的 PKG/DMG 内置脚本先校验联网版来源签名，再安装应用；不重新签名可信联网包，不改变组件固定摘要。来源签名损坏时拒绝覆盖并提示重新下载。
 
 **为什么 ad-hoc 是必须的**（网上「只需清 quarantine」的建议不完整）：Apple Silicon 上 **arm64 可执行文件必须有有效签名才能被内核执行**。没有 `signingIdentity: "-"` 时 Tauri 什么都不签，未签名的 bundle 甚至不给你绕过 Gatekeeper 的机会，直接报「已损坏」。
 
@@ -138,7 +148,7 @@ sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-ma
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-macOS 联网版使用 GitHub Actions 的 `macOS Online Package` 手动工作流，选择 `arm64`，启用 `publish` 后发布经验证的 Apple Silicon DMG、Tauri 更新包、安装脚本及七种独立组件。流程校验应用代码签名、版本、架构、更新签名、目录固定摘要及 DMG/更新归档的实际内容，并从真实 DMG 安装到临时目录校验安装后字节和权限。程序与组件先上传并通过匿名完整下载校验，最后切换独立 `darwin-aarch64-online/latest.json` 清单。首次安装脚本保留联网版的原始签名；未经公证的包可能被 Gatekeeper 拦截，须按前述安装指引处理。
+macOS 联网版使用 GitHub Actions 的 `macOS Online Package` 手动工作流，选择 `arm64`，启用 `publish` 后发布经验证的 Apple Silicon PKG、DMG、Tauri 更新包、兼容安装脚本及七种独立组件。流程校验应用代码签名、版本、架构、更新签名、目录固定摘要，以及 PKG/DMG/更新归档中的实际应用与内置脚本。PKG 校验后必须在原生 Mac 上执行 `sudo installer -pkg <交付包> -target /`，复验 `/Applications` 中的全部应用文件字节、权限、代码签名和已编译组件固定摘要，确认隔离属性已清除。无 Developer ID Installer 证书时 PKG 外壳不签名，内部应用继续使用有效的 ad-hoc 签名，不增加 Apple 公证前提。程序与组件先上传并通过匿名完整下载校验，最后切换独立 `darwin-aarch64-online/latest.json` 清单。未经公证的包可能被 Gatekeeper 拦截，首次安装按前述一条命令指引处理。
 
 macOS 完整版更新继续使用 `codemagic.yaml` 的 `macos-package` 工作流；`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据。Apple 证书与公证凭据不是项目发布前提，缺少证书时使用 ad-hoc 签名。原 `.github/workflows/macos-package.yml` 手动工作流仅构建、暂存完整包。旧共享更新清单不再发布，各平台和联网版使用各自频道。
 

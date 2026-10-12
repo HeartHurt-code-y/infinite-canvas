@@ -13,8 +13,8 @@
 #   sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
 #   sudo bash install-macos.sh /Volumes/无限画布/无限画布.app
 #
-# 注意：这个脚本**不在 DMG 里**。如果你手上只有 DMG 而没有这个脚本，请改用 README
-# 「方案 A」里那条自包含的单行命令，它不依赖任何额外文件。
+# 新版联网 PKG 已内置本脚本与 postinstall：sudo installer -pkg <包路径> -target /
+# 即可安装。DMG 根目录也包含本脚本和 install-macos.command，无需单独下载脚本。
 #
 # 可选参数：
 #   --target <dir>   安装到指定目录（默认 /Applications）
@@ -100,10 +100,10 @@ work_dir="$(mktemp -d "${TMPDIR:-/tmp}/infinite-canvas-install.XXXXXX")"
 
 # 单一清理出口：临时目录 + DMG 卸载。任何路径退出都不会留下挂载卷或临时文件。
 cleanup() {
-  rm -rf "$work_dir"
   if [ -n "$mount_point" ] && [ -d "$mount_point" ]; then
     hdiutil detach "$mount_point" -quiet >/dev/null 2>&1 || true
   fi
+  rm -rf "$work_dir"
 }
 trap cleanup EXIT
 
@@ -118,13 +118,15 @@ case "$source_path" in
     xattr -dr com.apple.quarantine "$source_path" 2>/dev/null || true
 
     log "挂载 DMG…"
-    # -nobrowse 避免在 Finder 里弹出；-readonly 明确只读。
-    mount_point="$(hdiutil attach "$source_path" -nobrowse -readonly |
-      grep -o '/Volumes/.*' | head -n1)"
-    [ -n "$mount_point" ] || fail "挂载失败：$source_path"
-
-    app_in_dmg="$(find "$mount_point" -maxdepth 1 -name '*.app' -print -quit)"
-    [ -n "$app_in_dmg" ] || fail "DMG 里没有找到 .app：$mount_point"
+    # 每次指定独立挂载点，避免依赖卷名、终端输出解析或已挂载的同名卷。
+    mount_point="$work_dir/mounted"
+    hdiutil attach "$source_path" -nobrowse -readonly -mountpoint "$mount_point" >/dev/null ||
+      fail "挂载失败：$source_path"
+    shopt -s nullglob
+    apps=("$mount_point/"*.app)
+    [ "${#apps[@]}" -eq 1 ] && [ -d "${apps[0]}" ] && [ ! -L "${apps[0]}" ] ||
+      fail "DMG 里必须有且只有一个完整 .app：$mount_point"
+    app_in_dmg="${apps[0]}"
     log "DMG 中的 app：$app_in_dmg"
     source_app="$app_in_dmg"
     ;;
@@ -136,6 +138,16 @@ case "$source_path" in
     fail "无法识别的文件类型（需要 .dmg 或 .app）：$source_path"
     ;;
 esac
+
+# 联网版源包先验证，再覆盖已安装应用。损坏的新下载不能删除仍然可用的旧版。
+preserve_pinned_signature=0
+component_catalog="$source_app/Contents/Resources/component-catalog.json"
+if [ -e "$component_catalog" ] || [ -L "$component_catalog" ]; then
+  preserve_pinned_signature=1
+  log "联网版组件目录存在，校验源包构建时的原始签名…"
+  codesign --verify --deep --strict "$source_app" >/dev/null 2>&1 ||
+    fail "联网版原有签名校验失败；重新签名会破坏组件信任摘要，请重新下载可信安装包。"
+fi
 
 # ---- 2. 决定最终位置 ---------------------------------------------------------
 app_name="$(basename "$source_app")"
@@ -150,17 +162,6 @@ if [ "$install" -eq 1 ]; then
 else
   dest_app="$source_app"
   log "就地修复（不复制）：$dest_app"
-fi
-
-# 联网版组件目录和原生清单固定了准备阶段的文件摘要。重签 Mach-O 会改变文件内容，
-# 不能用旧包的签名修复路径绕过信任校验，即使原有签名已经损坏也必须拒绝。
-preserve_pinned_signature=0
-component_catalog="$dest_app/Contents/Resources/component-catalog.json"
-if [ -e "$component_catalog" ] || [ -L "$component_catalog" ]; then
-  preserve_pinned_signature=1
-  log "联网版组件目录存在，校验构建时的原始签名…"
-  codesign --verify --deep --strict "$dest_app" >/dev/null 2>&1 ||
-    fail "联网版原有签名校验失败；重新签名会破坏组件信任摘要，请重新下载可信安装包。"
 fi
 
 # ---- 3. 清除隔离属性 ---------------------------------------------------------

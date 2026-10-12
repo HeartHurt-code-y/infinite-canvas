@@ -414,7 +414,14 @@ async function macFixture(t, platform = "darwin-aarch64", explicitTarget = false
   const arch = platform === "darwin-aarch64" ? "aarch64" : "x64";
   f.installerPath = `macos/无限画布_${VERSION}_${arch}-online.app.tar.gz`;
   const dmgPath = `dmg/无限画布_${VERSION}_${arch}-online.dmg`;
-  const paths = [f.installerPath, `${f.installerPath}.sig`, dmgPath, "helper/install-macos.sh"];
+  const pkgPath = `pkg/无限画布_${VERSION}_${arch}-online.pkg`;
+  const paths = [
+    f.installerPath,
+    `${f.installerPath}.sig`,
+    dmgPath,
+    pkgPath,
+    "helper/install-macos.sh",
+  ];
   f.marker.artifacts = [];
   f.marker.catalogSha256 = catalogSha256;
   f.marker.platform = platform;
@@ -527,11 +534,35 @@ async function macFixture(t, platform = "darwin-aarch64", explicitTarget = false
       assert.equal(name, "无限画布.app");
       return structuredClone(appInventory);
     },
-    verifyMacDmg: (filename, name, inventory) => {
+    verifyMacDmg: (filename, name, inventory, options) => {
       assert.equal(filename, path.join(f.distributionDirectory, dmgPath));
       assert.equal(name, "无限画布.app");
       assert.deepEqual(inventory, appInventory);
-      return { dmgVerified: true, applicationBytesVerified: true, codeSignatureVerified: true };
+      assert.deepEqual(options, { sourceRoot: f.root });
+      return {
+        dmgVerified: true,
+        applicationBytesVerified: true,
+        codeSignatureVerified: true,
+        installationHelpersVerified: true,
+      };
+    },
+    verifyMacPackage: (filename, name, inventory, options) => {
+      assert.equal(filename, path.join(f.distributionDirectory, pkgPath));
+      assert.equal(name, "无限画布.app");
+      assert.deepEqual(inventory, appInventory);
+      assert.deepEqual(options, {
+        sourceRoot: f.root,
+        applicationVersion: VERSION,
+        identifier: config.identifier,
+      });
+      return {
+        pkgVerified: true,
+        applicationBytesVerified: true,
+        codeSignatureVerified: true,
+        postinstallVerified: true,
+        packageIdentifier: `${config.identifier}.online-installer`,
+        packageVersion: VERSION,
+      };
     },
   };
   return f;
@@ -551,8 +582,11 @@ test("both Mac architectures verify their native app, DMG, signed updater and in
     assert.equal(report.macos.codeSignatureVerified, true);
     assert.equal(report.macos.updateArchiveBytesVerified, true);
     assert.equal(report.macos.dmg.applicationBytesVerified, true);
+    assert.equal(report.macos.dmg.installationHelpersVerified, true);
+    assert.equal(report.macos.pkg.postinstallVerified, true);
+    assert.equal(report.macos.pkg.packageVersion, VERSION);
     assert.equal(report.installer.path, f.installerPath);
-    assert.equal(report.artifactCount, 4);
+    assert.equal(report.artifactCount, 5);
     assert.equal(report.nsisResourceCount, undefined);
     assert.equal(report.sourceFreshnessVerified, true);
   }
@@ -576,6 +610,47 @@ test("Mac verification refuses changed updater contents, incomplete DMG checks, 
   await writeJson(f.editionConfigPath, config);
   await writeFile(path.join(f.root, "scripts/install-macos.sh"), "changed helper after build");
   await assert.rejects(verifyEditionRelease(f.options), /helper differs/);
+});
+
+test("Mac release requires its exact versioned PKG, full package validation and an unchanged package digest", async (t) => {
+  const f = await macFixture(t);
+  const pkg = f.marker.artifacts.find(({ path: filename }) => filename.endsWith(".pkg"));
+  const filename = path.join(f.distributionDirectory, pkg.path);
+  const body = await readFile(filename);
+  await writeFile(filename, "tampered native installer");
+  await assert.rejects(verifyEditionRelease(f.options), /Artifact hash\/size mismatch/);
+  await writeFile(filename, body);
+  for (const field of [
+    "pkgVerified",
+    "applicationBytesVerified",
+    "codeSignatureVerified",
+    "postinstallVerified",
+  ]) {
+    await assert.rejects(
+      verifyEditionRelease({
+        ...f.options,
+        verifyMacPackage: (...args) => ({ ...f.options.verifyMacPackage(...args), [field]: false }),
+      }),
+      /PKG verification is incomplete/,
+    );
+  }
+  for (const change of [
+    { packageVersion: "0.0.1" },
+    { packageIdentifier: "other.application.online-installer" },
+  ]) {
+    await assert.rejects(
+      verifyEditionRelease({
+        ...f.options,
+        verifyMacPackage: (...args) => ({ ...f.options.verifyMacPackage(...args), ...change }),
+      }),
+      /PKG verification is incomplete/,
+    );
+  }
+  await rm(filename);
+  await assert.rejects(verifyEditionRelease(f.options), /ENOENT/);
+  f.marker.artifacts = f.marker.artifacts.filter(({ path: entry }) => entry !== pkg.path);
+  await writeJson(f.markerPath, f.marker);
+  await assert.rejects(verifyEditionRelease(f.options), /requires exactly.*PKG/);
 });
 
 test("Mac release verification binds the public installation helper to the application version", async (t) => {

@@ -281,10 +281,18 @@ test("a real run is gated on macOS", skipWithoutBash, () =>
 
 // 执行完整安装脚本，只替换 macOS 平台工具。复制、Mach-O 扫描和退出处理都走真实 Bash。
 // 所有路径位于独立临时目录；mock codesign 的 --force 会真实改变假 Mach-O 文件的内容。
-function mockedInstall(dir, { online, signatureValid, noInstall = false }) {
+function mockedInstall(
+  dir,
+  { online, signatureValid, noInstall = false, existingInstallation = false },
+) {
   const commands = path.join(dir, "commands");
   const app = path.join(dir, "source", "Pinned Fixture.app");
   const target = path.join(dir, "installed");
+  const previousMarker = path.join(target, path.basename(app), "previous-installation.txt");
+  if (existingInstallation) {
+    mkdirSync(path.dirname(previousMarker), { recursive: true });
+    writeFileSync(previousMarker, "previous working installation");
+  }
   const resources = path.join(app, "Contents", "Resources");
   mkdirSync(commands, { recursive: true });
   mkdirSync(resources, { recursive: true });
@@ -358,7 +366,14 @@ exec bash "$script" "$source_app" --target "$target_dir"
   const installedExecutable = noInstall
     ? executable
     : path.join(target, path.basename(app), "Contents", "Resources", "ffmpeg.exe");
-  return { ...result, calls, installedExecutable, originalExecutable: executable, payload };
+  return {
+    ...result,
+    calls,
+    installedExecutable,
+    originalExecutable: executable,
+    payload,
+    previousMarker,
+  };
 }
 
 test(
@@ -422,4 +437,92 @@ test("legacy complete bundles still repair executable and app signatures", skipW
       "verify the repaired bundle before Gatekeeper assessment",
     );
   }),
+);
+
+test(
+  "a damaged online download preserves the previous installed application",
+  skipWithoutBash,
+  () =>
+    withTempDir((dir) => {
+      const result = mockedInstall(dir, {
+        online: true,
+        signatureValid: false,
+        existingInstallation: true,
+      });
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /原有签名校验失败/);
+      assert.equal(readFileSync(result.previousMarker, "utf8"), "previous working installation");
+      assert.ok(!existsSync(result.installedExecutable));
+      assert.deepEqual(
+        result.calls.map(([tool, flag]) => [tool, flag]),
+        [["codesign", "--verify"]],
+      );
+    }),
+);
+
+function runEmbeddedScript(script, args) {
+  return spawnSync(
+    bash,
+    [
+      "-c",
+      `
+script="$1"; shift
+if command -v cygpath >/dev/null 2>&1; then
+  script="$(cygpath -u "$script")"
+  normalized=()
+  for argument in "$@"; do normalized+=("$(cygpath -u -- "$argument")"); done
+  set -- "\${normalized[@]}"
+fi
+exec /bin/bash "$script" "$@"
+`,
+      "embedded-script-test",
+      script,
+      ...args,
+    ],
+    { encoding: "utf8" },
+  );
+}
+
+test(
+  "the DMG entry self-locates a single app without a separately downloaded helper",
+  skipWithoutBash,
+  () =>
+    withTempDir((dir) => {
+      const volume = path.join(dir, "volume with spaces");
+      mkdirSync(path.join(volume, "无限画布.app"), { recursive: true });
+      const command = path.join(volume, "install-macos.command");
+      writeFileSync(
+        command,
+        readFileSync(path.join(path.dirname(SCRIPT), "install-macos.command")),
+      );
+      writeFileSync(path.join(volume, "install-macos.sh"), source);
+      const result = runEmbeddedScript(command, ["--target", "/tmp/custom place", "--dry-run"]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /kind=app/);
+      assert.match(result.stdout, /target=\/tmp\/custom place/);
+      mkdirSync(path.join(volume, "Unexpected.app"));
+      const ambiguous = runEmbeddedScript(command, ["--dry-run"]);
+      assert.notEqual(ambiguous.status, 0);
+      assert.match(ambiguous.stderr, /只有一个完整应用/);
+    }),
+);
+
+test(
+  "PKG postinstall locates its embedded helper and honours the installer target volume",
+  skipWithoutBash,
+  () =>
+    withTempDir((dir) => {
+      const volume = path.join(dir, "target volume");
+      mkdirSync(path.join(volume, "Applications", "无限画布.app"), { recursive: true });
+      const postinstall = path.join(dir, "postinstall");
+      writeFileSync(
+        postinstall,
+        readFileSync(path.join(path.dirname(SCRIPT), "install-macos-postinstall.sh")),
+      );
+      writeFileSync(path.join(dir, "install-macos.sh"), "#!/bin/bash\nprintf '%s\\n' \"$@\"\n");
+      const result = runEmbeddedScript(postinstall, ["package.pkg", "/", volume]);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Applications\/无限画布\.app/);
+      assert.ok(result.stdout.trimEnd().endsWith("--no-install"));
+    }),
 );

@@ -171,7 +171,16 @@ export async function prepareOnlinePublication({
           verification.macos.dmg?.dmgVerified === true &&
           verification.macos.dmg.applicationBytesVerified === true &&
           verification.macos.dmg.codeSignatureVerified === true &&
-          SHA256.test(verification.macos.dmg.sha256)
+          verification.macos.dmg.installationHelpersVerified === true &&
+          SHA256.test(verification.macos.dmg.sha256) &&
+          verification.macos.pkg?.pkgVerified === true &&
+          verification.macos.pkg.applicationBytesVerified === true &&
+          verification.macos.pkg.codeSignatureVerified === true &&
+          verification.macos.pkg.postinstallVerified === true &&
+          verification.macos.pkg.packageVersion === version &&
+          verification.macos.pkg.packageIdentifier ===
+            "com.infinitecanvas.desktop.online-installer" &&
+          SHA256.test(verification.macos.pkg.sha256)
         : Number.isSafeInteger(verification.nsisResourceCount) &&
           verification.nsisResourceCount > 0) &&
       verification.componentArchiveCount === RUNTIME_COMPONENTS.length &&
@@ -217,7 +226,7 @@ export async function prepareOnlinePublication({
   );
   requireValue(
     Array.isArray(manifest.artifacts) &&
-      manifest.artifacts.length === (isMac ? 4 : 2) &&
+      manifest.artifacts.length === (isMac ? 5 : 2) &&
       Array.isArray(manifest.componentArchives) &&
       manifest.componentArchives.length === RUNTIME_COMPONENTS.length,
     "Publish exactly the native edition artifacts and seven ZIP components",
@@ -259,6 +268,7 @@ export async function prepareOnlinePublication({
         `macos/${installerName}`,
         `macos/${installerName}.sig`,
         `dmg/无限画布_${version}_${platform === "darwin-aarch64" ? "aarch64" : "x64"}-online.dmg`,
+        `pkg/无限画布_${version}_${platform === "darwin-aarch64" ? "aarch64" : "x64"}-online.pkg`,
         "helper/install-macos.sh",
       ]
     : [`nsis/${installerName}`, `nsis/${installerName}.sig`];
@@ -475,7 +485,16 @@ export async function publishOnlineEdition({
           finalVerification.macos.dmg?.dmgVerified === true &&
           finalVerification.macos.dmg.applicationBytesVerified === true &&
           finalVerification.macos.dmg.codeSignatureVerified === true &&
-          finalVerification.macos.dmg.sha256 === plan.verification.macos.dmg.sha256)) &&
+          finalVerification.macos.dmg.installationHelpersVerified === true &&
+          finalVerification.macos.dmg.sha256 === plan.verification.macos.dmg.sha256 &&
+          finalVerification.macos.pkg?.pkgVerified === true &&
+          finalVerification.macos.pkg.applicationBytesVerified === true &&
+          finalVerification.macos.pkg.codeSignatureVerified === true &&
+          finalVerification.macos.pkg.postinstallVerified === true &&
+          finalVerification.macos.pkg.packageVersion === plan.applicationVersion &&
+          finalVerification.macos.pkg.packageIdentifier ===
+            plan.verification.macos.pkg.packageIdentifier &&
+          finalVerification.macos.pkg.sha256 === plan.verification.macos.pkg.sha256)) &&
       finalVerification.catalogSha256 === plan.catalogSha256 &&
       finalVerification.installer?.sha256 === plan.verification.installer.sha256 &&
       finalVerification.installer?.updaterSignatureVerified === true &&

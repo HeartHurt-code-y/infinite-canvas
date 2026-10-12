@@ -31,12 +31,8 @@ IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test
 IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib runtime_components::tests
 IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib product_scene_images
 node scripts/verify-edition-release.mjs --distribution-dir "$online_root/artifacts/$release_version"
-# Exercise the exact first-install helper on a temporary target. A component
-# catalog pins native bytes, so clearing Gatekeeper attributes must preserve them.
-install_check_root="$(mktemp -d "$online_root/install-check.XXXXXX")"
-case "$install_check_root" in "$online_root"/install-check.*) ;; *) echo 'Unexpected installation check path' >&2; exit 1 ;; esac
-trap 'sudo /bin/rm -rf -- "$install_check_root"' EXIT
-export IC_MAC_INSTALL_CHECK_ROOT="$install_check_root"
+# Exercise the public one-command PKG installation on this disposable runner.
+# The embedded postinstall must clear quarantine without changing any signed bytes.
 export IC_MAC_DISTRIBUTION_DIR="$online_root/artifacts/$release_version"
 node --input-type=module <<'NODE'
 import { execFileSync } from 'node:child_process';
@@ -49,17 +45,19 @@ const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
 const executable = path.resolve(receipt.nativeExecutable.path);
 const sourceApp = path.dirname(path.dirname(path.dirname(executable)));
 const expected = await inventoryMacApp(sourceApp);
-const dmgs = readdirSync(path.join(directory, 'dmg')).filter(name => name.endsWith('.dmg'));
-if (dmgs.length !== 1) throw new Error('Installation check needs exactly one verified DMG');
-const target = path.join(process.env.IC_MAC_INSTALL_CHECK_ROOT, 'Applications');
-execFileSync('sudo', ['bash', 'scripts/install-macos.sh', path.join(directory, 'dmg', dmgs[0]), '--target', target], {stdio: 'inherit'});
-const installed = path.join(target, `${config.productName}.app`);
+const packages = readdirSync(path.join(directory, 'pkg')).filter(name => name.endsWith('.pkg'));
+if (packages.length !== 1) throw new Error('Installation check needs exactly one verified PKG');
+const packageFile = path.join(directory, 'pkg', packages[0]);
+// Simulate a browser download. Installation itself must need only the documented command.
+execFileSync('/usr/bin/xattr', ['-w', 'com.apple.quarantine', '0083;5f000000;Safari;00000000-0000-0000-0000-000000000000', packageFile], {stdio: 'inherit'});
+execFileSync('sudo', ['/usr/sbin/installer', '-pkg', packageFile, '-target', '/'], {stdio: 'inherit'});
+const installed = path.join('/Applications', `${config.productName}.app`);
 assertMacAppInventories(await inventoryMacApp(installed), expected, 'First installation');
 execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed], {stdio: 'inherit'});
+const attributes = execFileSync('/usr/bin/xattr', ['-r', installed], {encoding: 'utf8'});
+if (attributes.includes('com.apple.quarantine')) throw new Error('PKG postinstall left the application quarantined');
 execFileSync(path.join(installed, 'Contents/MacOS/infinite-canvas'), ['--print-component-catalog-pins'], {stdio: 'inherit'});
-console.log('First installation preserves signed application and component bytes.');
+console.log('Native one-command PKG installation runs its embedded helper, clears quarantine and preserves signed application and component bytes.');
 NODE
-sudo /bin/rm -rf -- "$install_check_root"
-trap - EXIT
-echo "Verified macOS $release_version $native_arch online DMG and updater archive."
-echo 'This package is not Apple notarized. First installation may be blocked by Gatekeeper; use the included install-macos.sh.'
+echo "Verified macOS $release_version $native_arch online PKG, DMG and updater archive."
+echo 'This package is not Apple notarized. First installation may be blocked by Gatekeeper; the DMG includes install-macos.command and install-macos.sh.'
