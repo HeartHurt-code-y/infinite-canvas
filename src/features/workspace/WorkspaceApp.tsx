@@ -289,6 +289,7 @@ import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown, comicDramaDeliveryBundle } from "./comicDramaWorkflowModel";
 import { musicVideoDeliveryMarkdown, musicVideoDeliveryBundle } from "./musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
+import { brandVideoDeliveryMarkdown } from "./brandVideoWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
 import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
 import type {
@@ -4812,6 +4813,7 @@ export function WorkspaceApp({
         | "comicDrama"
         | "musicVideo"
         | "commerce"
+        | "brandVideo"
         | "remotion"
         | "xhsCover"
         | "productScene"
@@ -4835,6 +4837,7 @@ export function WorkspaceApp({
           comicDrama: templateModule.createComicDramaWorkflow,
           musicVideo: templateModule.createMusicVideoWorkflow,
           commerce: templateModule.createCommerceWorkflow,
+          brandVideo: templateModule.createBrandVideoWorkflow,
           remotion: templateModule.createRemotionWorkflow,
           xhsCover: templateModule.createXhsCoverWorkflow,
           productScene: templateModule.createProductSceneWorkflow,
@@ -4847,6 +4850,7 @@ export function WorkspaceApp({
           comicDrama: "漫剧自动",
           musicVideo: "音乐 MV",
           commerce: "剧情带货",
+          brandVideo: "品牌视觉短片",
           remotion: "动画逻辑图",
           xhsCover: "小红书封面",
           productScene: "产品场景图",
@@ -4873,21 +4877,23 @@ export function WorkspaceApp({
           description:
             kind === "productScene"
               ? "添加同一版本的产品参考图，使用 AI 多机位分批制作 3:4 或 9:16 场景图，并逐张审核。"
-              : kind === "musicVideo"
-                ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
-                : kind === "reverseVideo"
-                  ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
-                  : kind === "reelbench"
-                    ? "选择本地视频，确认计划后测量切点、标注镜头，批量审核并导出报告和同步分镜视频。"
-                    : kind === "xhsCover"
-                      ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
-                      : kind === "remotion"
-                        ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
-                        : kind === "commerce"
-                          ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
-                          : kind === "comicDrama"
-                            ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
-                            : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+              : kind === "brandVideo"
+                ? "填写系列或节日创意，选择已定稿模特及商品参考，审核首镜后制作品牌短片。"
+                : kind === "musicVideo"
+                  ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
+                  : kind === "reverseVideo"
+                    ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
+                    : kind === "reelbench"
+                      ? "选择本地视频，确认计划后测量切点、标注镜头，批量审核并导出报告和同步分镜视频。"
+                      : kind === "xhsCover"
+                        ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
+                        : kind === "remotion"
+                          ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
+                          : kind === "commerce"
+                            ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
+                            : kind === "comicDrama"
+                              ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
+                              : "填写制作要求并点击开始，其余步骤由节点自动完成。",
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -4917,6 +4923,9 @@ export function WorkspaceApp({
   const insertCommerceWorkflow = useCallback(() => {
     void insertWorkflow("commerce");
   }, [insertWorkflow]);
+  const insertBrandVideoWorkflow = useCallback(() => {
+    void insertWorkflow("brandVideo");
+  }, [insertWorkflow]);
   const insertRemotionWorkflow = useCallback(() => {
     void insertWorkflow("remotion");
   }, [insertWorkflow]);
@@ -4944,7 +4953,7 @@ export function WorkspaceApp({
   const updateKnowledgeVideoWorkflowConfig = useCallback(
     (key: string, config: KnowledgeVideoWorkflowConfig) => {
       const previousNode =
-        config.productScene || config.reelbench
+        config.brandVideo || config.productScene || config.reelbench
           ? snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key)
           : undefined;
       if (
@@ -4960,7 +4969,7 @@ export function WorkspaceApp({
       }
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
       if (
-        (config.musicVideo || config.productScene || config.reelbench) &&
+        (config.brandVideo || config.musicVideo || config.productScene || config.reelbench) &&
         !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
       ) {
         setKnowledgeVideoWorkflowRuns((current) => {
@@ -5218,11 +5227,13 @@ export function WorkspaceApp({
                         ? "动画逻辑图制作完成"
                         : node.config.commerce
                           ? "剧情带货制作完成"
-                          : node.config.comicDrama
-                            ? "漫剧制作完成"
-                            : node.config.film
-                              ? "影视制作完成"
-                              : "知识视频制作完成",
+                          : node.config.brandVideo
+                            ? "品牌视觉短片制作完成"
+                            : node.config.comicDrama
+                              ? "漫剧制作完成"
+                              : node.config.film
+                                ? "影视制作完成"
+                                : "知识视频制作完成",
               {
                 description: node.config.productScene
                   ? "逐张审核记录已保存，可从节点导出已选用图片。"
@@ -6000,6 +6011,7 @@ export function WorkspaceApp({
       const isDrama = Boolean(node.config.comicDrama);
       const isMusicVideo = Boolean(node.config.musicVideo);
       const isCommerce = Boolean(node.config.commerce);
+      const isBrandVideo = Boolean(node.config.brandVideo);
       const isRemotion = Boolean(node.config.remotion);
       const isCover = Boolean(node.config.xhsCover);
       if (
@@ -6008,32 +6020,37 @@ export function WorkspaceApp({
         !isDrama &&
         !isMusicVideo &&
         !isCommerce &&
+        !isBrandVideo &&
         !node.config.checkpoint.film?.artifacts.length
       )
         return;
-      const content = isMusicVideo
-        ? musicVideoDeliveryMarkdown(node.config.checkpoint)
-        : isCover
-          ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
-          : isRemotion
-            ? remotionDeliveryMarkdown(node.config.checkpoint)
-            : isCommerce
-              ? commerceDeliveryMarkdown(node.config.checkpoint)
-              : isDrama
-                ? comicDramaDeliveryMarkdown(node.config.checkpoint)
-                : aiFilmDeliveryMarkdown(node.config.checkpoint);
+      const content = isBrandVideo
+        ? brandVideoDeliveryMarkdown(node.config.checkpoint)
+        : isMusicVideo
+          ? musicVideoDeliveryMarkdown(node.config.checkpoint)
+          : isCover
+            ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
+            : isRemotion
+              ? remotionDeliveryMarkdown(node.config.checkpoint)
+              : isCommerce
+                ? commerceDeliveryMarkdown(node.config.checkpoint)
+                : isDrama
+                  ? comicDramaDeliveryMarkdown(node.config.checkpoint)
+                  : aiFilmDeliveryMarkdown(node.config.checkpoint);
       if (!content) return;
-      const title = isMusicVideo
-        ? "MV 制作文档"
-        : isCover
-          ? "小红书封面制作文档"
-          : isRemotion
-            ? "动画逻辑图制作文档"
-            : isCommerce
-              ? "剧情带货制作文档"
-              : isDrama
-                ? "漫剧制作文档"
-                : "影视制作文档";
+      const title = isBrandVideo
+        ? "品牌短片制作文档"
+        : isMusicVideo
+          ? "MV 制作文档"
+          : isCover
+            ? "小红书封面制作文档"
+            : isRemotion
+              ? "动画逻辑图制作文档"
+              : isCommerce
+                ? "剧情带货制作文档"
+                : isDrama
+                  ? "漫剧制作文档"
+                  : "影视制作文档";
       const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
         try {
@@ -13506,6 +13523,7 @@ export function WorkspaceApp({
               onInsertAiFilmWorkflow={insertAiFilmWorkflow}
               onInsertComicDramaWorkflow={insertComicDramaWorkflow}
               onInsertCommerceWorkflow={insertCommerceWorkflow}
+              onInsertBrandVideoWorkflow={insertBrandVideoWorkflow}
               onInsertRemotionWorkflow={insertRemotionWorkflow}
               onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
               onInsertProductSceneWorkflow={insertProductSceneWorkflow}

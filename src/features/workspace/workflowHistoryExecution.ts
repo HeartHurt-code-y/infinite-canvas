@@ -34,6 +34,7 @@ import { validateWorkflowMaterialsResume, workflowMaterialsSignature } from "./w
 import { createAiFilmWorkflowRunner } from "./aiFilmWorkflowRunner";
 import { createComicDramaWorkflowRunner } from "./comicDramaWorkflowRunner";
 import { createMusicVideoWorkflowRunner } from "./musicVideoWorkflowRunner";
+import { createBrandVideoWorkflowRunner } from "./brandVideoWorkflowRunner";
 import { createCommerceWorkflowRunner } from "./commerceWorkflowRunner";
 import {
   createKnowledgeVideoWorkflowRunner,
@@ -87,6 +88,7 @@ export interface RecordedWorkflowDependencies extends RecordedClients {
 export function workflowKindForNode(node: KnowledgeVideoWorkflowNodeData): WorkflowHistoryKind {
   if (node.config.productScene) return "productScene";
   if (node.config.musicVideo) return "musicVideo";
+  if (node.config.brandVideo) return "brandVideo";
   if (node.config.reverseVideo) return "reverseVideo";
   if (node.config.reelbench) return "reelbench";
   if (node.config.xhsCover) return "xhsCover";
@@ -102,6 +104,7 @@ const TITLES: Record<WorkflowHistoryKind, string> = {
   film: "影视制作",
   comicDrama: "漫剧制作",
   musicVideo: "音乐 MV",
+  brandVideo: "品牌视频",
   commerce: "带货创作",
   remotion: "动画制作",
   xhsCover: "小红书封面",
@@ -119,6 +122,8 @@ function defaultRunnerFactory(
       return createProductSceneWorkflowRunner(clients);
     case "musicVideo":
       return createMusicVideoWorkflowRunner(clients);
+    case "brandVideo":
+      return createBrandVideoWorkflowRunner(clients);
     case "film":
       return createAiFilmWorkflowRunner(clients);
     case "comicDrama":
@@ -217,11 +222,14 @@ function modelSnapshots(
           kind === "reverseVideo" ||
           kind === "reelbench" ||
           (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
+          (kind === "brandVideo" && request.node.config.brandVideo?.deliverable === "documents") ||
           (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
         ? (["text"] as const)
         : kind === "xhsCover"
           ? (["text", "image"] as const)
-          : (["text", "image", "video"] as const);
+          : kind === "brandVideo"
+            ? (["text", "video"] as const)
+            : (["text", "image", "video"] as const);
   return roles.map((role) => {
     const selected = request.node.config.models[role];
     const provider = request.providerCatalog.find(

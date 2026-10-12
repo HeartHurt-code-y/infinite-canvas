@@ -12,6 +12,7 @@ import {
   type VideoCompositionJobRecord,
   type VideoFrameExtractionClient,
   type ExplicitMediaInput,
+  type PromptVisionImageInput,
 } from "../../lib/backend";
 import {
   generationParameters,
@@ -169,7 +170,13 @@ export interface VideoWorkflowDefinition {
   ) => void | Promise<void>;
   readonly requiresMediaReview?: boolean;
   readonly forceComposition?: boolean;
-  readonly validateMedia?: (context: WorkflowPlanningContext) => void;
+  readonly validateMedia?: (context: WorkflowPlanningContext) => void | Promise<void>;
+  /** Fixed product/person files are prepared by the workflow instead of generated assets. */
+  readonly handlesShotImageReferences?: boolean;
+  readonly shotQcContext?: (
+    context: WorkflowPlanningContext,
+    shot: KnowledgeVideoWorkflowShot,
+  ) => Promise<{ readonly references: readonly PromptVisionImageInput[]; readonly prompt: string }>;
   readonly prepareShotMedia?: (
     context: WorkflowPlanningContext,
     shot: KnowledgeVideoWorkflowShot,
@@ -262,9 +269,10 @@ function resolveWorkflowModels(
     model.operations.includes("video_generation"),
   );
   if (text == null) throw new Error("请在节点中选择项目内可用的文本模型。");
-  if (image == null) throw new Error("请在节点中选择项目内可用的文生图模型。");
+  if (image == null && !node.config.brandVideo)
+    throw new Error("请在节点中选择项目内可用的文生图模型。");
   if (video == null) throw new Error("请在节点中选择项目内可用的视频模型。");
-  return { text, image, video };
+  return { text, image: image ?? text, video };
 }
 
 function findBalancedJsonObject(text: string): string | null {
@@ -888,6 +896,15 @@ export function createKnowledgeVideoWorkflowRunner(
             "全部漫剧片段已完成，请逐段检查画面、角色台词与配音音色，确认采用后合成。";
           messages.final = "配音成片已生成，请逐句试听并检查人物口型后确认最终交付。";
         }
+        if (node.config.brandVideo) {
+          messages.assets =
+            "商品原图与定稿模特已绑定，请核对这次使用的身份版本和素材后确认首镜试产。";
+          messages.first_shot =
+            "品牌首镜已完成，请对照原图检查商品细节、模特身份、材质与风格；确认后才批量制作。";
+          messages.composition =
+            "全部品牌片段已完成，请逐镜预览并核对人物、商品、节奏与声音，确认采用后合成。";
+          messages.final = "品牌成片已合成，请完整播放并确认最终交付；自动检查只记录可见证据。";
+        }
         commit((current) => ({
           ...current,
           executionPlan: createWorkflowMediaReviewPlan(currentNode, kind),
@@ -1003,7 +1020,8 @@ export function createKnowledgeVideoWorkflowRunner(
           !node.config.brief.trim() &&
           !node.config.comicDrama?.episodes.some((episode) => episode.script.trim()) &&
           !node.config.commerce &&
-          !node.config.musicVideo
+          !node.config.musicVideo &&
+          !node.config.brandVideo
         )
           throw new Error("请先填写制作要求或原文。");
         if (!enabledModel(node.config.models.text, providerCatalog, isTextGenerationModel)) {
@@ -1019,7 +1037,8 @@ export function createKnowledgeVideoWorkflowRunner(
             checkpoint.film == null &&
             checkpoint.comicDrama == null &&
             checkpoint.commerce == null &&
-            checkpoint.musicVideo == null);
+            checkpoint.musicVideo == null &&
+            checkpoint.brandVideo == null);
         validateWorkflowMaterials(node.config);
         if (!startsNewRun) {
           validateWorkflowMaterialsResume(node.config, checkpoint);
@@ -1202,7 +1221,8 @@ export function createKnowledgeVideoWorkflowRunner(
           node.config.film?.deliverable === "documents" ||
           node.config.comicDrama?.deliverable === "documents" ||
           node.config.commerce?.deliverable === "documents" ||
-          node.config.musicVideo?.deliverable === "documents"
+          node.config.musicVideo?.deliverable === "documents" ||
+          node.config.brandVideo?.deliverable === "documents"
         ) {
           commit((current) => ({
             ...current,
@@ -1214,7 +1234,7 @@ export function createKnowledgeVideoWorkflowRunner(
           progress("done", 100, "制作文档已完成并保存在节点中。");
           return checkpoint;
         }
-        definition?.validateMedia?.(context());
+        await definition?.validateMedia?.(context());
         const models = resolveWorkflowModels(node, providerCatalog);
         // The initial review authorizes planning only. Actual generated shot prompts and dependencies
         // receive a separate review before the first paid image/video submission.
@@ -1497,7 +1517,9 @@ export function createKnowledgeVideoWorkflowRunner(
                   ? `${shot.videoPrompt}\n\n自动质检修复要求：${run.repairPrompt}`
                   : shot.videoPrompt;
                 const explicitMedia: ExplicitMediaInput[] = (
-                  checkpoint.film ? (shot.referenceAssetIds ?? []) : []
+                  checkpoint.film && !definition?.handlesShotImageReferences
+                    ? (shot.referenceAssetIds ?? [])
+                    : []
                 ).map((id, index) => {
                   const asset = currentAiFilmAssets(checkpoint.film).find((item) => item.id === id);
                   if (!asset?.path)
@@ -1693,7 +1715,7 @@ export function createKnowledgeVideoWorkflowRunner(
               }));
               // Generated evidence has its own vision channel, leaving the eight reference slots
               // available to the user's materials. Preserve legacy commands for archived retries.
-              const visionImages = [
+              const visionImages: PromptVisionImageInput[] = [
                 ...productReferences.map((asset) => ({
                   target: {
                     kind: "local_file" as const,
@@ -1713,6 +1735,23 @@ export function createKnowledgeVideoWorkflowRunner(
                     }))
                   : []),
               ];
+              const shotQc = await definition?.shotQcContext?.(context(), shot);
+              if (shotQc) {
+                // Dedicated references precede all five actual sampled frames, regardless of general materials.
+                visionImages.splice(
+                  0,
+                  visionImages.length,
+                  ...shotQc.references,
+                  ...sampleMaterials.map((material) => ({
+                    target: {
+                      kind: "local_file" as const,
+                      path: material.localPath,
+                      mediaType: "image" as const,
+                    },
+                    displayName: material.displayName,
+                  })),
+                );
+              }
               const qcResponse = await dependencies.promptClient.run({
                 canvasId: CANVAS_ID,
                 sourceNodeId: node.key,
@@ -1720,9 +1759,11 @@ export function createKnowledgeVideoWorkflowRunner(
                 modelDefinitionId: node.config.models.text.modelDefinitionId,
                 mode: definition?.qcMode ?? "knowledge_video_qc",
                 task: "generate",
-                userPrompt: `${qcPrompt(shot)}${node.config.commerce ? `\n产品保真核对：前 ${productReferences.length} 张图片为真实产品原图：${productReferences.map((asset, referenceIndex) => `图片${referenceIndex + 1}=${asset.id}（${asset.name}）`).join("；")}。后续五张为按时间顺序的成片采样帧。对照原图核验 Logo、色块、包装结构、比例、现有文字及使用动作；不可见细节不能宣称已验证，发现产品变形或身份改变应返工。产品已知资料：${node.config.commerce.productFacts}\n镜头产品锁定与引用：${shot.videoPrompt}` : ""}`,
+                userPrompt: `${qcPrompt(shot)}${shotQc ? `\n${shotQc.prompt}` : ""}${node.config.commerce ? `\n产品保真核对：前 ${productReferences.length} 张图片为真实产品原图：${productReferences.map((asset, referenceIndex) => `图片${referenceIndex + 1}=${asset.id}（${asset.name}）`).join("；")}。后续五张为按时间顺序的成片采样帧。对照原图核验 Logo、色块、包装结构、比例、现有文字及使用动作；不可见细节不能宣称已验证，发现产品变形或身份改变应返工。产品已知资料：${node.config.commerce.productFacts}\n镜头产品锁定与引用：${shot.videoPrompt}` : ""}`,
                 ...(visionImages.length ? { visionImages } : {}),
-                ...(node.config.materials?.length ? {} : { multimodalInputs: sampleMaterials }),
+                ...(node.config.materials?.length || shotQc
+                  ? {}
+                  : { multimodalInputs: sampleMaterials }),
               });
               const qc = parseKnowledgeVideoQc(qcResponse.optimizedPrompt);
               if (qc.result === "PASS") {

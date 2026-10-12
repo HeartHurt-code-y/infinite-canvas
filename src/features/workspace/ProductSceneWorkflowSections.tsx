@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
 import {
-  formatRawBackendError,
+  backendErrorMessage,
   isDesktopRuntime,
   mediaClient,
   pickPromptMultimodalFiles,
@@ -10,15 +11,23 @@ import {
 } from "../../lib/backend";
 import { productSceneImageClient, productSceneOutputSize } from "../../lib/productSceneImages";
 import { ProductSceneJewelryLaunch } from "./ProductSceneJewelryLaunch";
+import { BrandModelLibrary } from "./BrandModelLibrary";
 import type { BrandDesignCandidate } from "./BrandDesignStudio";
 import {
   createJewelrySceneOptions,
   canRetryProductSceneRow,
   JEWELRY_REVIEW_CHECKS,
+  productSceneCameraRotates,
+  productSceneDepthApplies,
+  productSceneFittingWidthFraction,
   productSceneGenerationMode,
   productSceneJewelryReviewWarnings,
+  productScenePlacementCeiling,
+  productScenePreservesSourcePhotos,
   productSceneQualityEnabled,
   productSceneRowCanAccept,
+  productSceneSceneBiasApplies,
+  productSceneSeedApplies,
   resetProductSceneQuality,
   resetProductSceneRow,
   retryProductSceneRow,
@@ -40,6 +49,14 @@ const ANGLES = {
   top45: "俯视 45°",
   top90: "正俯视 90°",
 } as const;
+/** 原图导入失败的提示锚点：添加按钮用 aria-describedby 指向它。 */
+const PRODUCT_SOURCE_ERROR_ID = "product-scene-source-error";
+/** 导入原图失败时的补救建议：只说「这张图不合格」，用户不知道该换什么。 */
+function productSceneSourceRemedy(options: ProductSceneWorkflowOptions): string {
+  return productScenePreservesSourcePhotos(options)
+    ? "换一张同一实物的完整原片：画面需包含完整商品轮廓，背景越干净越利于后续制作。"
+    : "原图保真合成要把产品抠出来贴到生成的空背景上，只能用白底或透明底的产品原图；真实实拍或佩戴照片请改用「AI 多机位」或「珠宝原片保护」。";
+}
 const STATUS = {
   queued: "待制作",
   running: "制作中",
@@ -253,7 +270,7 @@ function ProductSceneQualityDetails({
           </details>
         </>
       ) : null}
-      {quality?.error ? <p role="alert">{quality.error}</p> : null}
+      {quality?.error ? <ErrorAlert error={quality.error} /> : null}
       <small>可重新检查当前基图；不会重新生成图片。</small>
     </section>
   );
@@ -322,10 +339,11 @@ export function ProductSceneConfiguration({
 }) {
   const [busy, setBusy] = useState(false);
   const generationMode = productSceneGenerationMode(options);
-  const preserveReference =
-    generationMode === "protected" ||
-    (generationMode === "reference" && Boolean(options.brandCreative));
-  const [error, setError] = useState<string | null>(null);
+  // 竖长原图会让计划自动收窄占比：先按原图尺寸算出来，界面上说明白，用户不必自己试。
+  const placementCeiling = useMemo(() => productScenePlacementCeiling(options), [options]);
+  const preserveReference = productScenePreservesSourcePhotos(options);
+  // 保存原始错误对象：摘要由 ErrorAlert 统一提取，JSON / 堆栈只在展开后才看得到。
+  const [error, setError] = useState<{ failure: unknown; remedy?: string } | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [editingProtection, setEditingProtection] = useState<string | null>(null);
   const picking = useRef(false);
@@ -383,7 +401,7 @@ export function ProductSceneConfiguration({
       }
       if (added.length) onChange({ ...latest.current, views: [...latest.current.views, ...added] });
     } catch (failure) {
-      setError(formatRawBackendError(failure));
+      setError({ failure, remedy: productSceneSourceRemedy(latest.current) });
     } finally {
       picking.current = false;
       setBusy(false);
@@ -421,7 +439,7 @@ export function ProductSceneConfiguration({
         ),
       });
     } catch (failure) {
-      setError(formatRawBackendError(failure));
+      setError({ failure });
     } finally {
       picking.current = false;
       setBusy(false);
@@ -454,7 +472,7 @@ export function ProductSceneConfiguration({
         },
       });
     } catch (failure) {
-      setError(formatRawBackendError(failure));
+      setError({ failure });
     } finally {
       picking.current = false;
       setBusy(false);
@@ -484,15 +502,30 @@ export function ProductSceneConfiguration({
             setEditingProtection(null);
             setError(null);
             const normalOptions = { ...options };
+            if (nextMode !== "reference" && normalOptions.brandCreative?.model) {
+              const creative = { ...normalOptions.brandCreative };
+              delete creative.model;
+              normalOptions.brandCreative = creative;
+            }
             // Keep the editable brand project when changing generation modes.
             // Source preparation for the next paid operation remains explicit.
+            const nextOptions = { ...normalOptions, generationMode: nextMode };
+            /*
+             * 母版是按「当前模式」准备的，切模式可能让它直接失效：
+             * 保留整张原片的母版是不透明的，原图保真合成贴上去会把原背景一起
+             * 盖在 AI 生成的画面上——用户付了钱才看到一张贴片。已准备的原片
+             * 只能按新模式重新添加，所以这里直接清空，不留着等它失败。
+             */
+            const mastersBecameUnusable =
+              preserveReference && !productScenePreservesSourcePhotos(nextOptions);
             onChange(
               nextMode === "protected"
-                ? createJewelrySceneOptions(options)
+                ? createJewelrySceneOptions(normalOptions)
                 : {
-                    ...normalOptions,
-                    generationMode: nextMode,
-                    ...(generationMode === "protected" ? { views: [] } : {}),
+                    ...nextOptions,
+                    ...(generationMode === "protected" || mastersBecameUnusable
+                      ? { views: [] }
+                      : {}),
                   },
             );
           }}
@@ -522,6 +555,7 @@ export function ProductSceneConfiguration({
             if (!style) delete next.brandCreative;
             else
               next.brandCreative = {
+                ...options.brandCreative,
                 style: style as NonNullable<ProductSceneWorkflowOptions["brandCreative"]>["style"],
                 brief: options.brandCreative?.brief ?? "",
               };
@@ -547,8 +581,29 @@ export function ProductSceneConfiguration({
               onChange({ ...options, brandCreative: { ...options.brandCreative!, brief } })
             }
           />
-          <span>参考图使用本款真实商品或真实佩戴照片；品牌风格变化后需重新确认生成计划。</span>
+          <span>
+            {preserveReference
+              ? "参考图使用本款真实商品或真实佩戴照片；品牌风格变化后需重新确认生成计划。"
+              : "本模式只用白底或透明底的产品原图（本地抠图合成）；真实实拍或佩戴照片请改用「AI 多机位」或「珠宝原片保护」。品牌风格变化后需重新确认生成计划。"}
+          </span>
         </label>
+      )}
+      {generationMode === "reference" && options.brandCreative && (
+        <BrandModelLibrary
+          disabled={disabled || busy}
+          brandName={options.jewelry?.launch?.design?.brandName ?? ""}
+          onBusyChange={onBusyChange}
+          {...(options.brandCreative.model ? { selected: options.brandCreative.model } : {})}
+          {...(designCandidates ? { candidates: designCandidates } : {})}
+          onSelect={(model) => {
+            const current = latest.current;
+            if (!current.brandCreative) return;
+            const brandCreative = { ...current.brandCreative };
+            if (model) brandCreative.model = model;
+            else delete brandCreative.model;
+            onChange({ ...current, brandCreative });
+          }}
+        />
       )}
       {generationMode === "protected" && options.jewelry ? (
         <section className="product-scene__jewelry-settings" aria-label="珠宝实物与系列模板">
@@ -617,14 +672,20 @@ export function ProductSceneConfiguration({
           </small>
         </section>
       ) : null}
-      <button type="button" onClick={() => void pickProducts()}>
+      <button
+        type="button"
+        onClick={() => void pickProducts()}
+        aria-describedby={error ? PRODUCT_SOURCE_ERROR_ID : undefined}
+      >
         {busy
           ? "正在处理产品图…"
           : preserveReference
             ? "添加完整实拍 / 佩戴原片"
             : "添加白底 / 透明产品原图"}
       </button>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? (
+        <ErrorAlert id={PRODUCT_SOURCE_ERROR_ID} error={error.failure} hint={error.remedy} />
+      ) : null}
       <div className="product-scene__views">
         {options.views.map((view) => (
           <article key={view.id} className="product-scene__view">
@@ -649,8 +710,16 @@ export function ProductSceneConfiguration({
             {view.width && view.height ? (
               <small>
                 {view.width} × {view.height}
+                {/* 阈值用「计划实际画到的宽度」：占比会按原图比例自动收窄，
+                    拿用户填的期望值比较，会给竖长原图报一次不会发生的不够清晰。 */}
                 {view.width <
-                productSceneOutputSize(options.aspectRatio).width * (options.productScale ?? 0.48)
+                productSceneOutputSize(options.aspectRatio).width *
+                  productSceneFittingWidthFraction(
+                    options.aspectRatio,
+                    view,
+                    { centerX: 0.5, baselineY: 0.77 },
+                    options.productScale ?? 0.48,
+                  )
                   ? generationMode === "reference"
                     ? options.brandCreative
                       ? " · 参考图细节较少，请核对商品细节与佩戴比例"
@@ -693,7 +762,11 @@ export function ProductSceneConfiguration({
                 照片用途
                 <select
                   aria-label={`${view.label} 照片用途`}
-                  value={view.photoRole ?? ""}
+                  value={
+                    /* 保真合成没有「真实佩戴」这一项：历史标注回显成「未标注」，
+                       不让 select 的 value 与选项列表脱节。 */
+                    !preserveReference && view.photoRole === "wearing" ? "" : (view.photoRole ?? "")
+                  }
                   onChange={(event) => {
                     const photoRole = event.target.value;
                     onChange({
@@ -716,8 +789,14 @@ export function ProductSceneConfiguration({
                   <option value="">未标注 · 方案暂定分配</option>
                   <option value="full">商品全貌</option>
                   <option value="detail">局部细节</option>
-                  <option value="wearing">真实佩戴</option>
+                  {/* 保真合成只能贴抠图后的商品本体：给不了真人佩戴照，就别给这个选项。 */}
+                  {!preserveReference ? null : <option value="wearing">真实佩戴</option>}
                 </select>
+                {preserveReference ? null : (
+                  <small>
+                    原图保真合成只合成商品本体。「真实佩戴」请改用「AI 多机位」或「珠宝原片保护」。
+                  </small>
+                )}
               </label>
             ) : null}
             {generationMode === "protected" ? (
@@ -830,7 +909,7 @@ export function ProductSceneConfiguration({
             一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。
           </small>
         </label>
-        {generationMode !== "protected" && !options.brandCreative ? (
+        {productSceneSceneBiasApplies(options) ? (
           <label>
             场景倾向
             <select
@@ -848,6 +927,11 @@ export function ProductSceneConfiguration({
               <option value="office">企业办公</option>
               <option value="unboxing">开箱摆放</option>
             </select>
+            <small>
+              {productSceneCameraRotates(options)
+                ? "只决定整幅画面的环境类型；拍摄机位由制作计划自动轮换，不在这里设置。"
+                : "只决定 AI 空背景的环境类型；产品仍按原图角度在本地合成。"}
+            </small>
           </label>
         ) : null}
         <label>
@@ -883,9 +967,14 @@ export function ProductSceneConfiguration({
             {generationMode === "protected"
               ? "完整原片宽度占画面宽度，保持片内佩戴关系；不是毫米尺寸标定"
               : "产品宽度占画面宽度"}
+            {placementCeiling != null &&
+            generationMode !== "protected" &&
+            placementCeiling < (options.productScale ?? 0.48)
+              ? `；当前原图较竖长，计划会自动收窄到约 ${Math.round(placementCeiling * 100)}% 保证产品完整入画`
+              : ""}
           </small>
         </label>
-        {generationMode !== "protected" ? (
+        {productSceneDepthApplies(options) ? (
           <label>
             背景景深
             <input
@@ -907,7 +996,7 @@ export function ProductSceneConfiguration({
             </small>
           </label>
         ) : null}
-        {generationMode !== "protected" ? (
+        {productSceneSeedApplies(options) ? (
           <label>
             场景种子
             <input
@@ -923,6 +1012,7 @@ export function ProductSceneConfiguration({
                 })
               }
             />
+            <small>默认值可复现同一批场景；想换一批组合再改这里。</small>
           </label>
         ) : null}
       </div>
@@ -932,6 +1022,7 @@ export function ProductSceneConfiguration({
             ? "品牌摄影风格用于 AI 展示图，成图需核对商品细节与佩戴关系。"
             : "手机随拍风格为 AI 展示图。"}
           导出清单会标明生成方式；不写入虚假的手机拍摄信息或买家身份。
+          以上数量、并发、画幅、占比、景深与种子已按推荐值预置，不改也能出图。
         </small>
       ) : (
         <small>
@@ -1318,7 +1409,7 @@ export function ProductSceneDeliverables({
           `已导出 ${result.count} 张${allOutputs ? "成图" : "选用图片"}：${result.directory}`,
         );
     } catch (error) {
-      setMessage(`导出失败：${formatRawBackendError(error)}`);
+      setMessage(`导出失败：${backendErrorMessage(error)}`);
     } finally {
       exportPending.current = false;
       setExporting(false);
@@ -1478,7 +1569,7 @@ export function ProductSceneDeliverables({
                 ? `产品参考：${options.views.map((view) => view.label).join("、")}`
                 : `原图视角：${options.views.find((view) => view.id === row.recipe.viewId)?.label ?? row.recipe.viewId}`}
             </small>
-            {row.error ? <p role="alert">{row.error}</p> : null}
+            {row.error ? <ErrorAlert error={row.error} /> : null}
             {row.reviewNotes.map((note, index) => (
               <small key={index}>{note}</small>
             ))}

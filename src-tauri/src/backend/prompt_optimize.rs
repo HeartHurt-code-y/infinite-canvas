@@ -128,6 +128,8 @@ pub enum PromptOptimizationMode {
     KnowledgeVideoDirector,
     #[serde(rename = "knowledge_video_qc")]
     KnowledgeVideoQc,
+    #[serde(rename = "brand_video_plan")]
+    BrandVideoPlan,
     #[serde(rename = "ai_film_router")]
     AiFilmRouter,
     #[serde(rename = "ai_film_synopsis")]
@@ -243,6 +245,7 @@ impl PromptOptimizationMode {
             Self::Storyboard => "storyboard",
             Self::KnowledgeVideoDirector => "knowledge_video_director",
             Self::KnowledgeVideoQc => "knowledge_video_qc",
+            Self::BrandVideoPlan => "brand_video_plan",
             Self::AiFilmRouter => "ai_film_router",
             Self::AiFilmSynopsis => "ai_film_synopsis",
             Self::AiFilmCharacters => "ai_film_characters",
@@ -310,6 +313,7 @@ impl PromptOptimizationMode {
             // 知识视频导演只使用编译进应用的供应商无关编排合同。
             Self::KnowledgeVideoDirector => "builtin://knowledge-video-director-v2.4",
             Self::KnowledgeVideoQc => "builtin://knowledge-video-qc-v1",
+            Self::BrandVideoPlan => "builtin://brand-video-workflow/plan",
             Self::AiFilmRouter => "builtin://ai-film-workflow/router",
             Self::AiFilmSynopsis => "builtin://ai-film-workflow/synopsis",
             Self::AiFilmCharacters => "builtin://ai-film-workflow/characters",
@@ -616,6 +620,9 @@ pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<S
     }
     if mode == PromptOptimizationMode::KnowledgeVideoQc {
         return Ok(load_builtin_knowledge_video_qc_system_prompt());
+    }
+    if mode == PromptOptimizationMode::BrandVideoPlan {
+        return Ok(include_str!("../../skills/brand-video-workflow/plan.md").to_string());
     }
     if let Some(prompt) = load_builtin_ai_film_system_prompt(mode) {
         return Ok(prompt);
@@ -1962,6 +1969,7 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::Storyboard
         | PromptOptimizationMode::KnowledgeVideoDirector
         | PromptOptimizationMode::KnowledgeVideoQc
+        | PromptOptimizationMode::BrandVideoPlan
         | PromptOptimizationMode::AiFilmRouter
         | PromptOptimizationMode::AiFilmSynopsis
         | PromptOptimizationMode::AiFilmCharacters
@@ -2075,7 +2083,10 @@ fn build_system_and_user_prompts(
         }
         merged.push(message);
     }
-    let user = if command.mode == PromptOptimizationMode::CanvasAgent {
+    let user = if matches!(
+        command.mode,
+        PromptOptimizationMode::CanvasAgent | PromptOptimizationMode::BrandVideoPlan
+    ) {
         command.user_prompt.clone()
     } else if command.mode == PromptOptimizationMode::ViralRemix {
         format!(
@@ -4085,6 +4096,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn brand_video_plan_contract_is_native_and_preserves_json() {
+        let mode: PromptOptimizationMode = serde_json::from_str("\"brand_video_plan\"").unwrap();
+        assert_eq!(mode, PromptOptimizationMode::BrandVideoPlan);
+        let method = load_skill_system_prompt(mode).unwrap();
+        for required in [
+            "brand-video-plan.v1",
+            "referenceAssetIds",
+            "soundDirection",
+            "product",
+            "model",
+            "imagery",
+        ] {
+            assert!(method.contains(required));
+        }
+        let json = r#"{"schemaVersion":"brand-video-plan.v1","concept":{},"shots":[]}"#;
+        assert_eq!(
+            extract_optimized_prompt(mode, &format!("```json\n{json}\n```")),
+            json
+        );
+        assert_eq!(mode.skill_dir(), "builtin://brand-video-workflow/plan");
+    }
+
     /// 兜底：枚举全部模式，逐个断言 `skill_dir()` 走 `builtin://` 哨兵
     /// 且 `load_skill_system_prompt()` 不触磁盘即可返回非空系统提示词。
     /// 编译期强制穷尽：`assert_mode_skill_dir_in_sync` 收到新增变体会编译失败。
@@ -4109,6 +4143,7 @@ mod tests {
                 | PromptOptimizationMode::Storyboard
                 | PromptOptimizationMode::KnowledgeVideoDirector
                 | PromptOptimizationMode::KnowledgeVideoQc
+                | PromptOptimizationMode::BrandVideoPlan
                 | PromptOptimizationMode::AiFilmRouter
                 | PromptOptimizationMode::AiFilmSynopsis
                 | PromptOptimizationMode::AiFilmCharacters
@@ -4170,6 +4205,7 @@ mod tests {
             PromptOptimizationMode::Storyboard,
             PromptOptimizationMode::KnowledgeVideoDirector,
             PromptOptimizationMode::KnowledgeVideoQc,
+            PromptOptimizationMode::BrandVideoPlan,
             PromptOptimizationMode::AiFilmRouter,
             PromptOptimizationMode::AiFilmSynopsis,
             PromptOptimizationMode::AiFilmCharacters,
@@ -4213,7 +4249,7 @@ mod tests {
             PromptOptimizationMode::ReelbenchAnalysis,
             PromptOptimizationMode::ViralRemix,
         ];
-        assert_eq!(MODES.len(), 58, "MODES 列表登记数量与 enum 变体数不一致");
+        assert_eq!(MODES.len(), 59, "MODES 列表登记数量与 enum 变体数不一致");
         for mode in MODES {
             // 编译期 helper 已被引用，触发穷尽检查。
             let _ = assert_mode_skill_dir_in_sync(*mode);

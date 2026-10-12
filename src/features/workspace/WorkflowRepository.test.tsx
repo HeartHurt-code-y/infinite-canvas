@@ -6,6 +6,20 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkflowRepository } from "./WorkflowRepository";
 
 describe("WorkflowRepository", () => {
+  it("inserts the brand visual video workflow through its own action", () => {
+    const insert = vi.fn();
+    render(
+      <WorkflowRepository
+        expanded
+        onToggle={vi.fn()}
+        onInsertKnowledgeVideoWorkflow={vi.fn()}
+        onInsertBrandVideoWorkflow={insert}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "添加品牌视觉短片工作流节点" }));
+    expect(insert).toHaveBeenCalledOnce();
+    expect(screen.getByRole("heading", { name: "品牌视觉短片工作流" })).toBeInTheDocument();
+  });
   it("inserts product scenes through its own single-node entry", () => {
     const insert = vi.fn();
     render(
@@ -161,7 +175,7 @@ describe("WorkflowRepository", () => {
     expect(content).toHaveAttribute("hidden");
   });
 
-  it("opens all ten templates and restores focus when dismissed with Escape or close", async () => {
+  it("opens all eleven templates and restores focus when dismissed with Escape or close", async () => {
     const user = userEvent.setup();
     function Harness() {
       const [expanded, setExpanded] = useState(false);
@@ -183,7 +197,7 @@ describe("WorkflowRepository", () => {
     const toggle = screen.getByRole("button", { name: "工作流仓库" });
     await user.click(toggle);
     const dialog = screen.getByRole("dialog", { name: "工作流仓库" });
-    expect(within(dialog).getAllByRole("heading")).toHaveLength(10);
+    expect(within(dialog).getAllByRole("heading")).toHaveLength(11);
     expect(within(dialog).getByRole("button", { name: "添加短视频反推工作流节点" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

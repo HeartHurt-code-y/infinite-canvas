@@ -14,6 +14,7 @@ import { aiFilmDeliveryMarkdown } from "../workspace/aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown } from "../workspace/comicDramaWorkflowModel";
 import { musicVideoDeliveryMarkdown } from "../workspace/musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "../workspace/commerceWorkflowModel";
+import { brandVideoDeliveryMarkdown } from "../workspace/brandVideoWorkflowModel";
 import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "../workspace/desktopActions";
 import { remotionDeliveryMarkdown } from "../workspace/remotionWorkflowModel";
 import type {
@@ -44,6 +45,7 @@ const KIND_LABELS: Record<string, string> = {
   comicDrama: "漫剧自动",
   musicVideo: "音乐 MV",
   commerce: "剧情带货",
+  brandVideo: "品牌视觉短片",
   remotion: "动画逻辑图",
   xhsCover: "小红书封面",
   productScene: "产品场景图",
@@ -137,6 +139,7 @@ function deliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string 
   if (checkpoint.xhsCover) return xhsCoverDeliveryMarkdown(checkpoint);
   if (checkpoint.remotion) return remotionDeliveryMarkdown(checkpoint);
   if (checkpoint.commerce) return commerceDeliveryMarkdown(checkpoint);
+  if (checkpoint.brandVideo) return brandVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.comicDrama) return comicDramaDeliveryMarkdown(checkpoint);
   if (checkpoint.film) return aiFilmDeliveryMarkdown(checkpoint);
   return [

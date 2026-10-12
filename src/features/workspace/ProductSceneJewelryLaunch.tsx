@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
-import { formatRawBackendError, isDesktopRuntime } from "../../lib/backend";
+import { backendErrorMessage, isDesktopRuntime } from "../../lib/backend";
 import { saveMarkdownDocumentToDesktop } from "./desktopActions";
 import {
   generateJewelryLaunchDraft,
@@ -183,7 +184,7 @@ export function ProductSceneJewelryLaunch({
       setError(null);
       setNotice("淘宝十图方案已保存，可逐项查看或导出。");
     } catch (cause) {
-      setError(`生成方案失败：${formatRawBackendError(cause)}`);
+      setError(`生成方案失败：${backendErrorMessage(cause)}`);
     }
   }
 
@@ -229,7 +230,7 @@ export function ProductSceneJewelryLaunch({
       }
       setNotice("淘宝十图方案已导出。");
     } catch (cause) {
-      setError(`导出方案失败：${formatRawBackendError(cause)}`);
+      setError(`导出方案失败：${backendErrorMessage(cause)}`);
     } finally {
       setExporting(false);
       onBusyChange?.(false);
@@ -266,7 +267,7 @@ export function ProductSceneJewelryLaunch({
           资料或原图设置已改变，建议更新方案。旧方案仍可查看和导出。
         </p>
       )}
-      {error && <p role="alert">{error}</p>}
+      {error ? <ErrorAlert error={error} /> : null}
       {notice && <p role="status">{notice}</p>}
       {draft && <LaunchDraft draft={draft} />}
       {draft && (
@@ -286,7 +287,7 @@ export function ProductSceneJewelryLaunch({
           }}
           onApplyAiStyle={(style, brief) => {
             const current = latestOptions.current;
-            onChange({ ...current, brandCreative: { style, brief } });
+            onChange({ ...current, brandCreative: { ...current.brandCreative, style, brief } });
             setNotice("品牌风格已用于 AI 场景图设置，下一次生成按新风格重新确认计划。");
           }}
         />

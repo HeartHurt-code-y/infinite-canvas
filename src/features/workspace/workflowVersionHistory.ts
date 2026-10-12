@@ -307,6 +307,7 @@ function hasWorkflowPlan(config: KnowledgeVideoWorkflowConfig): boolean {
     return true;
   if (Object.keys(checkpoint.musicVideo?.stages ?? {}).length) return true;
   if (Object.keys(checkpoint.commerce?.stages ?? {}).length) return true;
+  if (checkpoint.brandVideo?.concept) return true;
   return Boolean(
     checkpoint.comicDrama?.episodes.some((episode) => Object.keys(episode.stages).length),
   );

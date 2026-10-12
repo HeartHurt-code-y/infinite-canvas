@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GenerationTaskClient, PromptNodeClient } from "../../lib/backend";
+import type { BrandModelSelection } from "../../lib/brandModels";
 import {
   parseProductSceneInspection,
   productSceneRowCanAccept,
@@ -18,6 +19,7 @@ import {
   productSceneRecipeSignature,
   productSceneInputReady,
   productSceneInputSignature,
+  productScenePlacementCeiling,
   productSceneRequirements,
   updateProductSceneViewProtection,
   canRetryProductSceneRow,
@@ -195,11 +197,24 @@ function setup(config: ProductSceneWorkflowOptions = options) {
     resume: vi.fn((taskId: string) => Promise.resolve(completedTask(taskId).results[0]!)),
   };
   const promptClient: PromptNodeClient = { run: vi.fn(() => inspectionResponse(clearInspection)) };
+  const validateBrandModel = vi.fn((model: BrandModelSelection) =>
+    Promise.resolve({
+      id: model.versionId,
+      version: 1,
+      status: "approved" as const,
+      createdAt: 1,
+      description: model.description,
+      invariants: model.invariants,
+      references: model.references,
+      signature: model.signature,
+    }),
+  );
   const runner = createProductSceneWorkflowRunner({
     generationClient: generation,
     imageClient,
     resultRecovery,
     promptClient,
+    validateBrandModel,
     createId: () => "product-run",
     now: () => 123,
     sleep: vi.fn(() => Promise.resolve()),
@@ -261,7 +276,16 @@ function setup(config: ProductSceneWorkflowOptions = options) {
       },
     };
   }
-  return { generation, imageClient, resultRecovery, promptClient, runner, request, resume };
+  return {
+    generation,
+    imageClient,
+    resultRecovery,
+    promptClient,
+    validateBrandModel,
+    runner,
+    request,
+    resume,
+  };
 }
 
 describe("protected jewelry scenes", () => {
@@ -888,6 +912,70 @@ describe("product scene plan", () => {
     expect(productSceneHashDistance(hash, hash)).toBeNull();
   });
 
+  it("scopes scene bias and seed to the modes that actually consume them", () => {
+    // 保真合成（本文件的 options）确实按倾向筛环境池：三组各 4 个场景、互不重叠。
+    const pools = (["geek", "office", "unboxing"] as const).map(
+      (sceneBias) =>
+        new Set(
+          generateProductScenePlan({ ...options, totalCount: 12, sceneBias }).map(
+            (row) => row.recipe.scene,
+          ),
+        ),
+    );
+    for (const pool of pools) expect(pool.size).toBe(4);
+    expect(new Set(pools.flatMap((pool) => [...pool])).size).toBe(12);
+    // 场景倾向只换环境池，不动机位：机位是 AI 多机位独有的创作参数，其余模式没有目标机位。
+    for (const row of generateProductScenePlan({ ...options, totalCount: 12, sceneBias: "geek" }))
+      expect(row.recipe.targetCamera).toBeUndefined();
+    // 场景倾向对「多机位」同样有效（这次它决定的是整幅画面的环境）；机位只在多机位轮换。
+    const reference = generateProductScenePlan({
+      ...options,
+      generationMode: "reference",
+      totalCount: 12,
+      sceneBias: "geek",
+    });
+    expect(new Set(reference.map((row) => row.recipe.scene)).size).toBe(4);
+    expect(new Set(reference.map((row) => row.recipe.targetCamera?.id)).size).toBeGreaterThan(1);
+    // 原片保护的计划是「第 i 张沿用第 i%n 张原片」的确定序列：倾向与种子都不参与。
+    const jewelry = jewelryOptions();
+    expect(generateProductScenePlan({ ...jewelry, seed: 1, sceneBias: "geek" })).toEqual(
+      generateProductScenePlan({ ...jewelry, seed: 999, sceneBias: "unboxing" }),
+    );
+  });
+
+  it("narrows the product width so a tall master still fits the paid frame", () => {
+    const tall: ProductSceneWorkflowOptions = {
+      ...options,
+      totalCount: 6,
+      views: [{ ...options.views[0]!, width: 600, height: 1600 }],
+    };
+    const { width: canvasWidth, height: canvasHeight } = productSceneOutputSize(tall.aspectRatio);
+    const plan = generateProductScenePlan(tall);
+    for (const row of plan) {
+      const { centerX, baselineY, widthFraction } = row.recipe.placement;
+      const productWidth = Math.round(canvasWidth * widthFraction);
+      const productHeight = Math.round((productWidth * 1600) / 600);
+      const x = Math.round(canvasWidth * centerX - productWidth / 2);
+      const y = Math.round(canvasHeight * baselineY) - productHeight;
+      // 与 src-tauri 的 composite_image 同一套整数规则：任何一条不成立，本地合成就报错，
+      // 而此时背景已经付费生成完了。计划必须先自己收窄。
+      expect(productWidth).toBeGreaterThan(0);
+      expect(x).toBeGreaterThanOrEqual(0);
+      expect(x + productWidth).toBeLessThanOrEqual(canvasWidth);
+      expect(y).toBeGreaterThanOrEqual(0);
+    }
+    expect(Math.max(...plan.map((row) => row.recipe.placement.widthFraction))).toBeLessThan(0.48);
+    expect(productScenePlacementCeiling(tall)).toBeLessThan(0.48);
+    expect(productScenePlacementCeiling(options)).toBeNull();
+    // 常见比例（高宽比 1.33）不受影响：有尺寸记录与无尺寸记录的计划逐字相同。
+    expect(
+      generateProductScenePlan({
+        ...options,
+        views: [{ ...options.views[0]!, width: 1200, height: 1600 }],
+      }),
+    ).toEqual(generateProductScenePlan(options));
+  });
+
   it("controls product frame width with bounded variation and an empty-background safety margin", () => {
     for (const productScale of [0.3, 0.48, 0.65]) {
       const plan = generateProductScenePlan({ ...options, totalCount: 20, productScale });
@@ -929,6 +1017,57 @@ describe("product scene plan", () => {
 });
 
 describe("recoverable product scene batches", () => {
+  it("sends frozen model references after actual product images and stops on model-file change", async () => {
+    const model: BrandModelSelection = {
+      profileId: "brand-model",
+      versionId: "approved-v1",
+      signature: "c".repeat(64),
+      name: "品牌模特",
+      description: "原创成年模特",
+      invariants: "雀斑与自然肤质",
+      references: [
+        {
+          id: "front",
+          role: "front",
+          label: "正面",
+          path: "C:/managed/model.png",
+          contentHash: "d".repeat(64),
+          width: 1200,
+          height: 1600,
+          taskId: "identity-task",
+          resultIndex: 0,
+        },
+      ],
+    };
+    const config: ProductSceneWorkflowOptions = {
+      ...options,
+      generationMode: "reference",
+      totalCount: 1,
+      batchSize: 1,
+      brandCreative: { style: "editorial", brief: "", model },
+    };
+    const good = setup(config);
+    const plan = await good.runner.run(good.request);
+    expect(good.generation.start).not.toHaveBeenCalled();
+    await good.runner.run(good.resume(plan, 1));
+    expect(good.validateBrandModel).toHaveBeenCalledTimes(3);
+    const command = vi.mocked(good.generation.start).mock.calls[0]![0];
+    expect(command.prompt[2]).toMatchObject({
+      kind: "media_reference",
+      mentionId: "brand-model-approved-v1-front",
+      target: { kind: "local_file", path: "C:/managed/model.png", mediaType: "image" },
+      contentIndex: 2,
+    });
+    const prompt = command.prompt[0];
+    if (prompt?.kind !== "text") throw new Error("Missing model identity prompt");
+    expect(prompt.text).toContain("frozen version approved-v1");
+    const bad = setup(config);
+    const before = await bad.runner.run(bad.request);
+    bad.validateBrandModel.mockRejectedValueOnce(new Error("定稿参考图已改变"));
+    const stopped = await bad.runner.run(bad.resume(before, 1));
+    expect(stopped.phase).toBe("failed");
+    expect(bad.generation.start).not.toHaveBeenCalled();
+  });
   it("submits brand photography with ordered actual product and wearing references only after approval", async () => {
     const brandOptions: ProductSceneWorkflowOptions = {
       ...options,

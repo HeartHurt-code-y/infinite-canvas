@@ -1,0 +1,121 @@
+.brand-video-workflow,
+.brand-video-workflow__fields,
+.brand-video-workflow__fields label {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.brand-video-workflow__configuration > summary,
+.brand-video-workflow__concept > summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: space-between;
+  cursor: pointer;
+}
+
+.brand-video-workflow__fields {
+  border: 0;
+  padding: 0;
+  margin: var(--space-sm) 0 0;
+}
+
+.brand-video-workflow__fields legend {
+  margin-bottom: var(--space-sm);
+}
+
+.brand-video-workflow input,
+.brand-video-workflow select,
+.brand-video-workflow textarea {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.brand-video-workflow p,
+.brand-video-workflow span,
+.brand-video-workflow strong,
+.brand-video-workflow dd {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.brand-video-workflow button {
+  white-space: normal;
+  max-width: 100%;
+}
+
+.brand-video-workflow__format {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+}
+
+.brand-video-workflow__products {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-sm);
+}
+
+.brand-video-workflow__products ul,
+.brand-video-workflow__sources {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.brand-video-workflow__products li {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.brand-video-workflow__products img,
+.brand-video-workflow__sources img {
+  width: 100%;
+  height: 64px;
+  object-fit: contain;
+  background: var(--color-surface-2);
+}
+
+.brand-video-workflow__concept {
+  border-top: var(--rule-thin) solid var(--color-rule-2);
+  padding-top: var(--space-sm);
+  min-width: 0;
+}
+
+.brand-video-workflow__concept dl {
+  display: grid;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0;
+}
+
+.brand-video-workflow__concept dt {
+  font-weight: 600;
+}
+
+.brand-video-workflow__concept dd {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.brand-video-workflow__sources li {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.brand-video-workflow__sources small {
+  display: block;
+}
+
+.brand-video-workflow__notice {
+  border-left: var(--rule-active) solid var(--color-warning);
+  padding-left: var(--space-sm);
+}

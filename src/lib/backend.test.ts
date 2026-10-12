@@ -4,6 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assetLibraryClient,
   BackendContractError,
+  backendErrorDetails,
+  backendErrorMessage,
   localBase64AssetClient,
   providerSettingsClient,
   refreshMediaUrlWithStagingFallback,
@@ -646,5 +648,62 @@ describe("localBase64AssetClient groups and deletion", () => {
     expect(calls[1]?.[1]).toEqual({
       command: { localPath: "C:/tmp/素材.png", name: "素材.png", groupId: "local-group-1" },
     });
+  });
+});
+
+/*
+ * 报错必须能在不看技术细节的情况下读懂（WCAG 3.3.1 错误识别）。
+ * Tauri reject 出来的是后端 payload；把它整坨 JSON 印到界面上，用户看到的不是
+ * 「这张图为什么不能用」，而是一段没人能读懂的 `{"details":null,…}`。
+ */
+class DesktopInvocationErrorShape extends Error {
+  readonly kind = "desktop";
+  readonly details = { command: "prepare_product_scene_view" };
+
+  constructor() {
+    super("该连接操作只能在桌面应用中执行。");
+    this.name = "DesktopInvocationError";
+  }
+}
+
+describe("backendErrorMessage", () => {
+  it("reads the backend payload message without the internal kind prefix", () => {
+    expect(
+      backendErrorMessage({
+        details: null,
+        kind: "validation",
+        message:
+          "validation error: 当前图片不是透明底或纯白底。请先提供透明 PNG，避免自动抠掉机身或接口。",
+      }),
+    ).toBe("当前图片不是透明底或纯白底。请先提供透明 PNG，避免自动抠掉机身或接口。");
+    expect(
+      backendErrorMessage({ kind: "transport", message: "HTTP transport error: 连接被拒绝" }),
+    ).toBe("连接被拒绝");
+  });
+
+  it("keeps plain strings and Error messages readable, and never shows undefined", () => {
+    expect(backendErrorMessage("保存失败，请重试。")).toBe("保存失败，请重试。");
+    expect(backendErrorMessage(new Error("validation error: 产品母版已替换。"))).toBe(
+      "产品母版已替换。",
+    );
+    expect(backendErrorMessage(undefined)).toBe("操作失败，请重试。");
+    expect(backendErrorMessage({ kind: "conflict" })).toBe("操作失败，请重试。");
+  });
+
+  it("offers raw details only when the summary is not the whole story", () => {
+    // 只有一句话的错误不提供「展开完整报错」：点开只有一句废话（或一串堆栈）。
+    expect(backendErrorDetails("保存失败，请重试。")).toBeNull();
+    expect(backendErrorDetails(new Error("保存失败，请重试。"))).toBeNull();
+    expect(backendErrorDetails(undefined)).toBeNull();
+    // payload 里除摘要之外还有结构化信息，展开后保留完整原始错误供排查。
+    const details = backendErrorDetails({
+      kind: "transport",
+      message: "validation error: 网络中断",
+      details: { source: "connection refused" },
+    });
+    expect(details).toContain('"kind": "transport"');
+    expect(details).toContain("connection refused");
+    // 自带结构化字段的 Error（桌面调用 / 契约错误）同样值得展开。
+    expect(backendErrorDetails(new DesktopInvocationErrorShape())).toContain("desktop");
   });
 });

@@ -7,6 +7,7 @@ import {
   createAiFilmWorkflow,
   createComicDramaWorkflow,
   createCommerceWorkflow,
+  createBrandVideoWorkflow,
   createRemotionWorkflow,
   createXhsCoverWorkflow,
   createReverseVideoWorkflow,
@@ -100,6 +101,33 @@ describe("createKnowledgeVideoDirectorWorkflow", () => {
     });
     expect(entry.data.config.checkpoint.reelbench).toMatchObject({ step: "source", draft: null });
   });
+  it("creates a brand-video node with project models, empty identity and a fresh checkpoint", () => {
+    const workflow = createBrandVideoWorkflow({
+      anchor: { x: 500, y: 500 },
+      occupied: [],
+      nodeModelSelections: staleSelections,
+      providerCatalog: catalog,
+      providerCatalogLoaded: true,
+    });
+    expect(workflow.nodes).toHaveLength(1);
+    expect(workflow.edges).toEqual([]);
+    const entry = workflow.nodes[0];
+    if (entry?.type !== "knowledgeVideoWorkflow") throw new Error("Missing brand node");
+    expect(entry.data.config.brandVideo).toMatchObject({
+      durationSeconds: 20,
+      style: "editorial",
+      deliverable: "video",
+      productImages: [],
+    });
+    expect(entry.data.config.brandVideo?.model).toBeUndefined();
+    expect(entry.data.config.checkpoint.brandVideo).toMatchObject({
+      concept: null,
+      planningComplete: false,
+      sourceImages: [],
+    });
+    expect(entry.data.config.models.video.providerId).toBe("project-provider");
+  });
+
   it("creates AI product camera generation and selects a reference-image model", () => {
     const workflow = createProductSceneWorkflow({
       anchor: { x: 500, y: 500 },

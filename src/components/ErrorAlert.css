@@ -1,0 +1,75 @@
+.error-alert {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+/* 红色高亮：描边 + 红字 + 图标三重编码，不靠颜色单独传达错误。 */
+.error-alert__summary {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-error);
+  background: var(--color-error-soft);
+  border: var(--rule-thin) solid var(--color-error);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.error-alert__summary svg {
+  flex: 0 0 auto;
+  margin-block-start: var(--space-3xs);
+}
+
+.error-alert__text {
+  display: grid;
+  gap: var(--space-3xs);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 补救建议跟随错误一起朗读，但用中性色：颜色只标注错误本身。 */
+.error-alert__hint {
+  color: var(--color-text-2);
+  line-height: 1.5;
+}
+
+/* 原始报错是排查用的，不进 alert live region：展开由用户主动触发。 */
+.error-alert__details {
+  justify-self: start;
+  max-width: 100%;
+  color: var(--color-text-3);
+  font-size: var(--text-2xs);
+}
+
+.error-alert__details summary {
+  width: fit-content;
+  padding: 2px 0;
+  font-weight: 700;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.error-alert__details summary:hover {
+  color: var(--color-error);
+  text-decoration: underline;
+}
+
+.error-alert__raw {
+  max-height: 12rem;
+  margin: var(--space-2xs) 0 0;
+  padding: var(--space-xs);
+  overflow: auto;
+  color: var(--color-text-2);
+  background: var(--color-field);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

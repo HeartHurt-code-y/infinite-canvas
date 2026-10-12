@@ -158,6 +158,7 @@ function deliveryContentSignature(checkpoint: KnowledgeVideoWorkflowCheckpoint):
     script: checkpoint.script,
     storyboard: checkpoint.storyboard,
     shots: checkpoint.shots,
+    ...(checkpoint.brandVideo ? { brandVideo: checkpoint.brandVideo } : {}),
     ...(checkpoint.musicVideo
       ? {
           musicVideo: {
@@ -376,6 +377,22 @@ export function createWorkflowExecutionPlan(
           ]),
     ]);
   }
+  if (config.brandVideo) {
+    steps = serialSteps([
+      "核对商品原图、数字模特定稿版本与当前文件内容",
+      "设计品牌概念、系列视觉、节假日表达与可编辑分镜",
+      ...(config.brandVideo.deliverable === "documents"
+        ? ["导出概念、身份版本、来源与分镜提示词文档"]
+        : [
+            "确认具体分镜、供应商合法单镜时长与实际参考身份",
+            "核对固定商品及模特资产，确认首镜试产",
+            "首镜试产、五帧对照检查与人工审核",
+            "按已确认计划批量制作与逐镜商品、人物检查",
+            "人工选用片段后合成品牌系列视频",
+            "完整播放并确认最终交付",
+          ]),
+    ]);
+  }
   if (config.comicDrama) {
     const drama = config.comicDrama;
     const stages = comicDramaStageDependencies(drama.episodes).map((stage) => ({
@@ -436,8 +453,22 @@ export function createVideoWorkflowExecutionSteps(
   const videoIds = checkpoint.shots.map((shot) => `video:${shot.id}`);
   const qcIds = checkpoint.shots.map((shot) => `qc:${shot.id}`);
   return [
-    { id: "assets", title: "准备角色、场景与产品参考资产", dependsOn: [], action: "assets" },
-    { id: "cover", title: "生成封面与首帧参考图", dependsOn: ["assets"], action: "cover" },
+    {
+      id: "assets",
+      title: checkpoint.brandVideo
+        ? "绑定已定稿人物与真实商品原图，保留原资产"
+        : "准备角色、场景与产品参考资产",
+      dependsOn: [],
+      action: "assets",
+    },
+    {
+      id: "cover",
+      title: checkpoint.brandVideo
+        ? "核对固定参考与意象方案，确认首镜试产"
+        : "生成封面与首帧参考图",
+      dependsOn: ["assets"],
+      action: "cover",
+    },
     ...checkpoint.shots.map((shot) => ({
       id: `video:${shot.id}`,
       title: `生成镜头 ${shot.sequence} · ${shot.title}（${shot.durationSeconds} 秒）`,

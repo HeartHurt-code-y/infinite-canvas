@@ -1,9 +1,9 @@
-import { useState } from "react";
+﻿import { useState } from "react";
 
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
 import {
-  formatRawBackendError,
   toMediaSrc,
   type VideoDownloaderCookieBrowser,
   type VideoDownloaderEngineStatus,
@@ -49,7 +49,7 @@ export function ReverseVideoConfiguration({
   onClearCookies,
 }: ReverseVideoConfigurationProps) {
   const [picking, setPicking] = useState(false);
-  const [pickError, setPickError] = useState<string | null>(null);
+  const [pickError, setPickError] = useState<unknown>(null);
   const localSelected = Boolean(options.localVideoPath);
 
   async function pickVideo() {
@@ -59,7 +59,7 @@ export function ReverseVideoConfiguration({
     try {
       await onPickVideo();
     } catch (error) {
-      setPickError(formatRawBackendError(error));
+      setPickError(error);
     } finally {
       setPicking(false);
     }
@@ -120,7 +120,7 @@ export function ReverseVideoConfiguration({
           ? "无需下载，使用已选择的视频完成抽帧与分析。"
           : "链接由项目内的下载器处理。若平台要求登录，可选择本机浏览器或导入 cookies.txt 后重试。"}
       </small>
-      {pickError ? <p role="alert">{pickError}</p> : null}
+      {pickError ? <ErrorAlert error={pickError} /> : null}
       <label className="canvas-knowledge-workflow__brief">
         <span>补充方向</span>
         <ImeTextarea
@@ -142,7 +142,7 @@ interface ReverseVideoDeliverablesProps {
 const REVIEW_LABELS = { PASS: "通过", REVISE: "需要修订", NEEDS_DECISION: "需要确认" } as const;
 
 export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverablesProps) {
-  const [openError, setOpenError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<unknown>(null);
   const state = checkpoint.reverseVideo;
   if (!state) return null;
   const { evidence, analysis, review, learning, delivery } = state;
@@ -154,7 +154,7 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
     try {
       await revealDesktopItem(path);
     } catch (error) {
-      setOpenError(formatRawBackendError(error));
+      setOpenError(error);
     }
   }
 
@@ -281,7 +281,7 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
           </div>
         </details>
       ) : null}
-      {openError ? <p role="alert">{openError}</p> : null}
+      {openError ? <ErrorAlert error={openError} /> : null}
     </section>
   );
 }

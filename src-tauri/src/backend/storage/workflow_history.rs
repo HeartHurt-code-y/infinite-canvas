@@ -65,6 +65,7 @@ pub enum WorkflowKind {
     Film,
     ComicDrama,
     MusicVideo,
+    BrandVideo,
     Commerce,
     Remotion,
     XhsCover,
@@ -80,6 +81,7 @@ impl WorkflowKind {
             Self::Film => "film",
             Self::ComicDrama => "comicDrama",
             Self::MusicVideo => "musicVideo",
+            Self::BrandVideo => "brandVideo",
             Self::Commerce => "commerce",
             Self::Remotion => "remotion",
             Self::XhsCover => "xhsCover",
@@ -652,6 +654,14 @@ mod tests {
     };
 
     const PREVIOUS_RECORD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+
+    #[test]
+    fn brand_video_history_kind_round_trips() {
+        let kind: WorkflowKind = serde_json::from_value(json!("brandVideo")).unwrap();
+        assert_eq!(kind, WorkflowKind::BrandVideo);
+        assert_eq!(kind.as_str(), "brandVideo");
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!("brandVideo"));
+    }
 
     fn record(id: &str, status: &str) -> WorkflowHistoryRecord {
         WorkflowHistoryRecord {

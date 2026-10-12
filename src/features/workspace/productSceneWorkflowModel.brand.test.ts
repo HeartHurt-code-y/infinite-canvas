@@ -9,6 +9,7 @@ import {
   generateProductScenePlan,
   productSceneInputReady,
   productSceneInputSignature,
+  productScenePreservesSourcePhotos,
   productSceneRecipeSignature,
   resetProductSceneRow,
   type ProductSceneWorkflowOptions,
@@ -202,5 +203,41 @@ describe("brand art direction in the existing product scene workflow", () => {
         brandCreative: { style: "quiet", brief: null },
       } as unknown as ProductSceneWorkflowOptions),
     ).toBe(false);
+  });
+});
+
+/*
+ * 「参考图是否按原样保留」是三种模式在素材上的唯一分界：界面文案、照片用途选项、
+ * 后端 prepare 的 preserve_photo 都从这里取答案。三处对不齐时，用户按界面提示传了
+ * 真实佩戴照片，保存前才被拒绝，还看不懂为什么。
+ */
+describe("productScenePreservesSourcePhotos", () => {
+  it("keeps whole photographs only where the pipeline uses them as-is", () => {
+    expect(
+      productScenePreservesSourcePhotos({
+        ...options(),
+        generationMode: "protected",
+        jewelry: createJewelrySceneOptions(options()).jewelry!,
+      }),
+    ).toBe(true);
+    expect(
+      productScenePreservesSourcePhotos({
+        ...options(),
+        generationMode: "reference",
+        brandCreative: { style: "quiet", brief: "" },
+      }),
+    ).toBe(true);
+    // 原图保真合成要把产品抠出来贴到生成的空背景上，实拍照只能被拒绝。
+    expect(
+      productScenePreservesSourcePhotos({
+        ...options(),
+        generationMode: "composite",
+        brandCreative: { style: "quiet", brief: "" },
+      }),
+    ).toBe(false);
+    // 多机位未选品牌风格时同样走抠图口径：整张原图并不是它的输入。
+    expect(productScenePreservesSourcePhotos({ ...options(), generationMode: "reference" })).toBe(
+      false,
+    );
   });
 });

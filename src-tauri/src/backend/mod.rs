@@ -3,6 +3,7 @@ pub mod ai_media_runtime;
 pub mod asset_library;
 pub mod blender;
 pub mod brand_design;
+pub mod brand_models;
 mod browser_media;
 pub mod commands;
 pub mod commerce_sources;
@@ -59,6 +60,7 @@ use std::sync::Arc;
 use ai_media::AiMediaService;
 use asset_library::AssetLibrary;
 use blender::BlenderRenderService;
+use brand_models::BrandModelLibrary;
 use component_manager::ComponentManager;
 use composer::VideoCompositionService;
 use cover_images::CoverImageService;
@@ -91,6 +93,7 @@ pub struct BackendState {
     pub assets: AssetLibrary,
     pub local_results: LocalResultService,
     pub local_base64_assets: LocalBase64Library,
+    pub brand_models: BrandModelLibrary,
     pub material_transfer_root: std::path::PathBuf,
     pub staging: StagingService,
     pub tasks: GenerationTaskService,
@@ -170,6 +173,7 @@ impl BackendState {
             providers.clone(),
         );
         let local_base64_assets = LocalBase64Library::new(Arc::clone(&storage), &data_directory)?;
+        let brand_models = BrandModelLibrary::new(Arc::clone(&storage), &data_directory)?;
         let material_transfer_root = data_directory.join("material-transfer-sources");
         material_transfer::cleanup_orphan_sources(&material_transfer_root, &storage)?;
         log_startup_stage!("Provider/本地库/孤儿清理");
@@ -360,6 +364,7 @@ impl BackendState {
             assets,
             local_results,
             local_base64_assets,
+            brand_models,
             material_transfer_root,
             staging,
             tasks,

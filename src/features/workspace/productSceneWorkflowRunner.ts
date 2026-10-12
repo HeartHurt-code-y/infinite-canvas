@@ -35,6 +35,7 @@ import {
   type ProductSceneQualityState,
 } from "./productSceneQuality";
 import { getWorkflowExecutionPlan, isWorkflowExecutionPlanApproved } from "./workflowExecutionPlan";
+import { validateBoundBrandModel } from "./brandModelBinding";
 import {
   createProductSceneCheckpoint,
   generateProductScenePlan,
@@ -48,6 +49,7 @@ import {
 } from "./productSceneWorkflowModel";
 
 interface Dependencies {
+  readonly validateBrandModel: typeof validateBoundBrandModel;
   readonly generationClient: GenerationTaskClient;
   readonly promptClient: PromptNodeClient;
   readonly imageClient: Pick<
@@ -143,6 +145,7 @@ export function createProductSceneWorkflowRunner(
   overrides: Partial<Dependencies> = {},
 ): KnowledgeVideoWorkflowRunner {
   const dependencies: Dependencies = {
+    validateBrandModel: validateBoundBrandModel,
     generationClient,
     promptClient: promptNodeClient,
     imageClient: productSceneImageClient,
@@ -205,6 +208,8 @@ export function createProductSceneWorkflowRunner(
             "请上传并确认同一产品的参考原图、来源角度和参数；数量为 1～500，画幅为 1:1、3:4 或 9:16。",
           );
         const mode = productSceneGenerationMode(options);
+        if (options.brandCreative?.model)
+          await dependencies.validateBrandModel(options.brandCreative.model);
         const operation = mode === "reference" ? "image_to_image" : "text_to_image";
         const resultName = mode === "reference" ? "产品场景图" : "背景";
         const qualityEnabled = productSceneQualityEnabled(options);
@@ -519,6 +524,13 @@ export function createProductSceneWorkflowRunner(
               await flush();
               abort();
               if (fatalError) throw fatalError;
+              if (options.brandCreative?.model) {
+                try {
+                  await dependencies.validateBrandModel(options.brandCreative.model);
+                } catch (error) {
+                  throw new ProductSceneSourceChangedError(formatWorkflowError(error));
+                }
+              }
               const taskId = await dependencies.generationClient.start({
                 canvasId: CANVAS_ID,
                 sourceNodeId: node.key,
@@ -549,6 +561,20 @@ export function createProductSceneWorkflowRunner(
                         displayNameSnapshot: reference.label,
                         typePosition: index + 1,
                         contentIndex: index + 1,
+                      }))
+                    : []),
+                  ...(mode === "reference" && options.brandCreative?.model
+                    ? options.brandCreative.model.references.map((reference, index) => ({
+                        kind: "media_reference" as const,
+                        mentionId: `brand-model-${options.brandCreative!.model!.versionId}-${reference.id}`,
+                        target: {
+                          kind: "local_file" as const,
+                          path: reference.path,
+                          mediaType: "image" as const,
+                        },
+                        displayNameSnapshot: `定稿模特 · ${reference.label}`,
+                        typePosition: options.views.length + index + 1,
+                        contentIndex: options.views.length + index + 1,
                       }))
                     : []),
                 ],

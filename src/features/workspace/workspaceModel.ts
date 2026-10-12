@@ -39,6 +39,10 @@ import type { GreenScreenConfig } from "../../lib/greenScreen";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import type {
+  BrandVideoWorkflowCheckpoint,
+  BrandVideoWorkflowOptions,
+} from "./brandVideoWorkflowModel";
+import type {
   MusicVideoWorkflowCheckpoint,
   MusicVideoWorkflowOptions,
 } from "./musicVideoWorkflowModel";
@@ -757,6 +761,7 @@ export interface KnowledgeVideoWorkflowCheckpoint {
   readonly film?: AiFilmWorkflowCheckpoint;
   readonly comicDrama?: ComicDramaWorkflowCheckpoint;
   readonly musicVideo?: MusicVideoWorkflowCheckpoint;
+  readonly brandVideo?: BrandVideoWorkflowCheckpoint;
   readonly commerce?: CommerceWorkflowCheckpoint;
   readonly remotion?: RemotionWorkflowCheckpoint;
   readonly xhsCover?: XhsCoverWorkflowCheckpoint;
@@ -817,6 +822,7 @@ export interface KnowledgeVideoWorkflowConfig {
   readonly film?: AiFilmWorkflowOptions;
   readonly comicDrama?: ComicDramaWorkflowOptions;
   readonly musicVideo?: MusicVideoWorkflowOptions;
+  readonly brandVideo?: BrandVideoWorkflowOptions;
   readonly commerce?: CommerceWorkflowOptions;
   readonly remotion?: RemotionWorkflowOptions;
   readonly xhsCover?: XhsCoverWorkflowOptions;

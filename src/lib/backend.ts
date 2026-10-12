@@ -1009,6 +1009,65 @@ export function formatRawBackendError(error: unknown): string {
   }
 }
 
+/*
+ * 后端错误的 Rust 侧显示前缀（`BackendError` 的 `#[error("validation error: …")]`）。
+ * 这是给日志和排障用的分类名，对用户只是噪声，必须在展示前剥掉。
+ */
+const BACKEND_ERROR_KIND_PREFIX = /^[A-Za-z][A-Za-z/ ]*?\berror:\s*/;
+
+function backendErrorMessageOf(error: unknown): string | null {
+  if (error != null && typeof error === "object" && !(error instanceof Error)) {
+    const message = (error as Record<string, unknown>)["message"];
+    if (typeof message === "string") return message;
+  }
+  return null;
+}
+
+/**
+ * 面向用户的报错摘要：从后端错误里取出人能读懂的一句话。
+ *
+ * 为什么不能直接用 `formatRawBackendError`
+ * --------------------------------------
+ * Tauri 命令失败时 reject 的是后端 payload（`{ kind, message, details }`），
+ * 调试用的格式化函数会把它整坨 JSON 印到界面上——用户看到的不是「这张图为什么
+ * 不能用」，而是一段 nobody 能读懂的 `{"details":null,"kind":"validation",…}`。
+ * 报错要能在不看技术细节的情况下读懂，这是无障碍对「错误识别」的最低要求
+ * （WCAG 3.3.1），因此所有面向用户的展示都从这里取摘要。
+ *
+ * 分类前缀（`validation error:` 等）是给日志用的，一并剥掉；完整原文交给
+ * `backendErrorDetails` 的「展开完整报错」，排查不受影响。
+ *
+ * 保留了一句兜底文案：真的一句话都取不出来时，也不能把 undefined/空串当错误显示。
+ */
+export function backendErrorMessage(error: unknown): string {
+  const candidate =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : backendErrorMessageOf(error);
+  const summary = (candidate ?? "").replace(BACKEND_ERROR_KIND_PREFIX, "").trim();
+  return summary || "操作失败，请重试。";
+}
+
+/**
+ * 展开后给人看的完整原始错误；摘要之外没有额外信息时返回 null，
+ * 调用方因此不会渲染一个点开只有一句废话的「展开完整报错」。
+ *
+ * 普通 `Error` 的堆栈对用户没有意义，只有像桌面调用错误那样自带
+ * `kind` / `details` 字段的对象才值得展开排查。
+ */
+export function backendErrorDetails(error: unknown): string | null {
+  if (error == null || typeof error === "string") return null;
+  if (error instanceof Error) {
+    const structured = Object.keys(error).some(
+      (key) => key !== "name" && key !== "message" && key !== "stack",
+    );
+    return structured ? formatRawBackendError(error) : null;
+  }
+  return formatRawBackendError(error);
+}
+
 /** 历史全局素材库令牌引用；仅用于兼容旧版本已保存的凭据。 */
 export const ASSET_LIBRARY_CREDENTIAL_REF = "asset-library-token";
 
@@ -1877,6 +1936,7 @@ export type TextSkillMode =
   | "storyboard"
   | "knowledge_video_director"
   | "knowledge_video_qc"
+  | "brand_video_plan"
   | "ai_film_router"
   | "ai_film_synopsis"
   | "ai_film_characters"

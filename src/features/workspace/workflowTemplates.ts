@@ -4,6 +4,7 @@ import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWor
 import { createComicDramaCheckpoint, createComicDramaOptions } from "./comicDramaWorkflowModel";
 import { createMusicVideoCheckpoint, createMusicVideoOptions } from "./musicVideoWorkflowModel";
 import { createCommerceCheckpoint, createCommerceOptions } from "./commerceWorkflowModel";
+import { createBrandVideoCheckpoint, createBrandVideoOptions } from "./brandVideoWorkflowModel";
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import { createXhsCoverCheckpoint, createXhsCoverOptions } from "./xhsCoverWorkflowModel";
 import {
@@ -34,6 +35,7 @@ export const AI_FILM_WORKFLOW_TEMPLATE_ID = "ai-film-workflow-v1.3";
 export const COMIC_DRAMA_WORKFLOW_TEMPLATE_ID = "comic-drama-workflow-v2.3";
 export const MUSIC_VIDEO_WORKFLOW_TEMPLATE_ID = "music-video-workflow-v1.0.6";
 export const COMMERCE_WORKFLOW_TEMPLATE_ID = "commerce-video-workflow-v1";
+export const BRAND_VIDEO_WORKFLOW_TEMPLATE_ID = "brand-video-workflow-v1";
 export const REMOTION_WORKFLOW_TEMPLATE_ID = "remotion-animation-workflow-v1";
 export const XHS_COVER_WORKFLOW_TEMPLATE_ID = "xhs-cover-workflow-v1";
 export const REVERSE_VIDEO_WORKFLOW_TEMPLATE_ID = "reverse-video-workflow-v1.1";
@@ -186,6 +188,33 @@ export function createMusicVideoWorkflow(
                   ...entry.data.config.checkpoint,
                   musicVideo: createMusicVideoCheckpoint(),
                   film: createAiFilmCheckpoint(),
+                },
+              },
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
+export function createBrandVideoWorkflow(
+  options: CreateKnowledgeVideoDirectorWorkflowOptions,
+): WorkflowTemplateSubgraph {
+  const template = createKnowledgeVideoDirectorWorkflow(options);
+  return {
+    ...template,
+    nodes: template.nodes.map((entry) =>
+      entry.type === "knowledgeVideoWorkflow"
+        ? {
+            ...entry,
+            data: {
+              ...entry.data,
+              config: {
+                ...entry.data.config,
+                brandVideo: createBrandVideoOptions(),
+                checkpoint: {
+                  ...entry.data.config.checkpoint,
+                  brandVideo: createBrandVideoCheckpoint(),
                 },
               },
             },

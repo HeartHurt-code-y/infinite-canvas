@@ -12,6 +12,7 @@ import type {
 } from "../../lib/workflowHistory";
 import { catalog, completedTask, fakeDependencies, node } from "../../test/videoWorkflowFixtures";
 import { createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
+import { createBrandVideoOptions } from "./brandVideoWorkflowModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
 import { createCommerceOptions } from "./commerceWorkflowModel";
 import { createRemotionOptions } from "./remotionWorkflowModel";
@@ -211,6 +212,7 @@ describe("recorded workflow execution", () => {
   it.each([
     ["knowledge", {}],
     ["film", { film: createAiFilmWorkflowOptions() }],
+    ["brandVideo", { brandVideo: createBrandVideoOptions() }],
     ["comicDrama", { comicDrama: createComicDramaOptions() }],
     ["commerce", { commerce: createCommerceOptions() }],
     ["remotion", { remotion: createRemotionOptions() }],
@@ -230,6 +232,30 @@ describe("recorded workflow execution", () => {
       expect(historyClient.save).not.toHaveBeenCalled();
       expect(fake.promptClient.run).not.toHaveBeenCalled();
       expect(fake.generation.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["video", "documents"] as const)(
+    "records brand identity and the actually required model roles for %s",
+    async (deliverable) => {
+      const { runner, request, records, runnerFactory } = setup();
+      await runner.run({
+        ...request,
+        node: {
+          ...request.node,
+          config: {
+            ...request.node.config,
+            brandVideo: { ...createBrandVideoOptions(), brandName: "品牌", deliverable },
+          },
+        },
+      });
+      const record = records.get("history-1")!;
+      expect(record.workflowKind).toBe("brandVideo");
+      expect(record.models.map(({ role }) => role)).toEqual(
+        deliverable === "documents" ? ["text"] : ["text", "video"],
+      );
+      expect(runnerFactory.mock.calls[0]?.[0]).toBe("brandVideo");
+      expect(record.nodeSnapshot.config.brandVideo?.brandName).toBe("品牌");
     },
   );
 

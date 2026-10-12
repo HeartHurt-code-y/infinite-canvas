@@ -7,6 +7,7 @@ import { defaultModelOperationSchema } from "../../lib/modelCapabilities";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
+import { createBrandVideoCheckpoint, createBrandVideoOptions } from "./brandVideoWorkflowModel";
 import {
   createProductSceneOptions,
   generateProductScenePlan,
@@ -86,7 +87,7 @@ function commonProps(node: KnowledgeVideoWorkflowNodeData) {
   return {
     node,
     providerCatalog: catalog,
-    onChange: vi.fn(),
+    onChange: vi.fn<(config: KnowledgeVideoWorkflowConfig) => void>(),
     onExecute: vi.fn(),
     onContinue: vi.fn(),
     onCancel: vi.fn(),
@@ -96,6 +97,62 @@ function commonProps(node: KnowledgeVideoWorkflowNodeData) {
 }
 
 describe("KnowledgeVideoWorkflowNode", () => {
+  it.each([2, 20])(
+    "preserves the provider-planned %s-second brand shot when editing only its prompt",
+    (durationSeconds) => {
+      const base = createKnowledgeVideoWorkflowConfig(selections, true);
+      const shot: KnowledgeVideoWorkflowShot = {
+        id: "brand-shot",
+        sequence: 1,
+        section: "FILM",
+        track: "FILM",
+        title: "光与材质",
+        visual: "光经过珍珠",
+        narration: "",
+        videoPrompt: "克制的镜头",
+        durationSeconds,
+        acceptance: "商品完整",
+      };
+      const source = createNode({
+        ...base,
+        brandVideo: { ...createBrandVideoOptions(), brandName: "杉间" },
+        checkpoint: {
+          ...base.checkpoint,
+          brandVideo: createBrandVideoCheckpoint(),
+          phase: "awaiting_approval",
+          shots: [shot],
+        },
+      });
+      const props = commonProps(source);
+      render(<KnowledgeVideoWorkflowNode {...props} />);
+      fireEvent.click(screen.getByRole("button", { name: "编辑分镜" }));
+      expect(screen.getByRole("spinbutton", { name: "时长（秒，按当前模型能力）" })).toHaveValue(
+        durationSeconds,
+      );
+      fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+      const saved = vi.mocked(props.onChange).mock.calls[0]?.[0];
+      expect(saved?.checkpoint.shots[0]?.durationSeconds).toBe(durationSeconds);
+      expect(saved?.checkpoint.shotRuns[shot.id]?.promptEdited).toBe(true);
+    },
+  );
+
+  it("offers brand video with text and video models without requiring image generation", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const source = createNode({
+      ...base,
+      brandVideo: { ...createBrandVideoOptions(), brandName: "杉间" },
+      models: { ...base.models, image: { providerId: "", modelDefinitionId: "" } },
+      checkpoint: { ...base.checkpoint, brandVideo: createBrandVideoCheckpoint() },
+    });
+    const props = commonProps(source);
+    render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByText("品牌视觉短片工作流")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+    expect(screen.queryByText("图片生成")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    expect(props.onExecute).toHaveBeenCalledWith(source.key);
+  });
+
   it("requires a text model when product port or Logo inspection is enabled", () => {
     const base = createKnowledgeVideoWorkflowConfig(selections, true);
     const productNode = createNode({

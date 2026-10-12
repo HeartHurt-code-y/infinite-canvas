@@ -1,5 +1,7 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
-import type { ProductSceneAspectRatio } from "../../lib/productSceneImages";
+import type { BrandModelSelection } from "../../lib/brandModels";
+import { brandModelIdentityPrompt } from "./brandModelBinding";
+import { productSceneOutputSize, type ProductSceneAspectRatio } from "../../lib/productSceneImages";
 import {
   productSceneJewelrySignature,
   productSceneProtectionValid,
@@ -44,6 +46,7 @@ export interface ProductSceneBrandCreative {
   readonly style: ProductSceneBrandStyle;
   /** Art direction only; product identity comes from the actual source photos. */
   readonly brief: string;
+  readonly model?: BrandModelSelection;
 }
 export const PRODUCT_SCENE_BRAND_STYLES = [
   {
@@ -208,6 +211,156 @@ export function productSceneGenerationMode(
 ): ProductSceneGenerationMode {
   return options.generationMode ?? "composite";
 }
+
+/*
+ * 参数作用域：一个参数只在它真的进了成图链路的模式里出现。
+ *
+ * 为什么放在模型层
+ * ----------------
+ * 这三个判定原先只是配置区里的三处内联条件（`generationMode !== "protected"` 等），
+ * 界面能看见什么、计划里用什么，是两份各写一遍的知识。用户当场问过「场景倾向是
+ * 不是只属于 AI 多机位」，说明这层关系连产品内部都没有单一说法。现在界面渲染与
+ * 运行器都读这几个函数，作用域只有一份定义。
+ *
+ * 各模式的真实作用域（`generateProductScenePlan` / `backgroundPrompt`）：
+ *   - 场景倾向：从 SCENES 里筛环境池。多机位用它决定整幅画面的环境；原图保真合成
+ *     用它决定「空背景」的环境（产品仍按原图角度本地合成，两者互不影响）；珠宝
+ *     原片保护整张沿用原片，没有环境池可选；选了品牌摄影风格后由 BRAND_SCENES
+ *     固定风格场景，场景倾向失效。
+ *   - 背景景深：多机位写进提示词的景深偏好，保真合成交给本地合成器做背景虚化；
+ *     原片保护不重绘背景，没有景深可调。
+ *   - 场景种子：只用来打乱环境 / 材质 / 道具 / 灯光的组合顺序。原片保护的计划是
+ *     「第 i 张 = 第 i%n 张原片」，完全确定性，种子对它没有任何影响。
+ */
+/** 场景倾向只在「多机位 / 保真合成」且没有品牌风格模板时有意义。 */
+export function productSceneSceneBiasApplies(options: ProductSceneWorkflowOptions): boolean {
+  return productSceneGenerationMode(options) !== "protected" && !options.brandCreative;
+}
+/** 背景景深只在 AI 参与画面的模式里有意义（原片保护不重绘背景）。 */
+export function productSceneDepthApplies(options: ProductSceneWorkflowOptions): boolean {
+  return productSceneGenerationMode(options) !== "protected";
+}
+/** 场景种子只在计划靠随机组合排布的模式里有意义（原片保护的计划是确定性的）。 */
+export function productSceneSeedApplies(options: ProductSceneWorkflowOptions): boolean {
+  return productSceneGenerationMode(options) !== "protected";
+}
+
+/**
+ * 目标机位（俯仰角 / 焦段 / 景别）不是用户参数，只属于 AI 多机位。
+ *
+ * 界面从来不暴露机位：`generateProductScenePlan` 按计划自动轮换
+ * TARGET_CAMERAS / BRAND_TARGET_CAMERAS / REAR_TARGET_CAMERAS，其余模式没有
+ * 目标机位——保真合成沿用原图角度，原片保护沿用母版投影关系。
+ */
+export function productSceneCameraRotates(options: ProductSceneWorkflowOptions): boolean {
+  return productSceneGenerationMode(options) === "reference";
+}
+
+/*
+ * 参考图是否按原样保留（不抠图）。
+ *
+ * 为什么必须由模型层回答
+ * ----------------------
+ * 这是三种模式在素材上的真实分界：界面（按钮文案、原图提示、照片用途选项、
+ * 模式切换时的母版清理）和后端校验（`prepare` 的 `preserve_photo`）必须读同一份答案：
+ *
+ *   - 珠宝原片保护：整张沿用实拍母版，`prepare(preserve_photo: true)`；
+ *   - AI 多机位 + 品牌摄影：参考图原样送进图生图，`prepare(preserve_photo: true)`，
+ *     真实商品与真实佩戴照片都能用；
+ *   - 原图保真合成：本地把抠图后的产品贴到 AI 生成的空背景上，因此只要白底或
+ *     透明底；真实实拍照片会被后端拒绝——因为贴上去会连原背景一起盖住画面。
+ */
+export function productScenePreservesSourcePhotos(options: ProductSceneWorkflowOptions): boolean {
+  const mode = productSceneGenerationMode(options);
+  return mode === "protected" || (mode === "reference" && Boolean(options.brandCreative));
+}
+
+/**
+ * 把「产品画面占比」压到产品能完整入画的上限。
+ *
+ * 为什么必须由计划自己算
+ * ----------------------
+ * 桌面合成器（`composite_image`）按整数像素校验：宽 = round(画布宽 × 占比)，
+ * 高 = round(宽 × 原图高宽比)，下边缘落在 baseline，四边都必须落在画布内；放不下
+ * 就直接报「当前视图无法完整放入构图」——而此时背景已经付费生成完了，保真合成
+ * 模式又只能整张重做（`canRetryProductSceneRow` 只对原片保护开放重试），用户为
+ * 一张注定合不成的图付了钱。
+ *
+ * 竖长母版在默认 48% 与计划的 ±10% 抖动下就会踩到这条线（高宽比 1:1 约 1.5 起、
+ * 3:4 约 2.0 起、9:16 约 2.6 起）；再竖长到连合成器的 0.2 下限都放不下时，任何
+ * 占比都无解，`productSceneRequirements` 会在付费前直接列出来。占比因此是「期望值」
+ * 而不是「保证值」：计划在生成之前先按每张原图自己的比例收窄，用户不必先算一遍
+ * 再来调滑块。
+ */
+export function productSceneFittingWidthFraction(
+  aspectRatio: ProductSceneAspectRatio,
+  view: Pick<ProductSceneView, "width" | "height">,
+  placement: { readonly centerX: number; readonly baselineY: number },
+  desired: number,
+): number {
+  const canvas = productSceneOutputSize(aspectRatio);
+  const { width, height } = view;
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    !width ||
+    !height ||
+    !Number.isFinite(desired)
+  )
+    return desired;
+  const ratio = height / width;
+  // 与合成器同一套整数规则；先给解析上限，再按像素步进收窄，两边不会各说一套。
+  const analytic = Math.min(
+    0.8,
+    2 * Math.min(placement.centerX, 1 - placement.centerX),
+    (placement.baselineY * canvas.height) / (ratio * canvas.width),
+  );
+  let fraction = Math.min(desired, analytic);
+  for (let guard = 0; guard < 64 && fraction > 0.05; guard++) {
+    const productWidth = Math.round(canvas.width * fraction);
+    const productHeight = Math.round(productWidth * ratio);
+    const x = Math.round(canvas.width * placement.centerX - productWidth / 2);
+    const y = Math.round(canvas.height * placement.baselineY) - productHeight;
+    if (
+      productWidth > 0 &&
+      productHeight > 0 &&
+      x >= 0 &&
+      x + productWidth <= canvas.width &&
+      y >= 0
+    )
+      return fraction;
+    fraction = Math.round((fraction - 0.005) * 1000) / 1000;
+  }
+  return Math.min(desired, 0.05);
+}
+
+/**
+ * 当前原图集合下计划实际能达到的占比上限；`null` 表示没有可用的原图尺寸记录
+ * （旧计划缺 width/height，此时保持用户设定不变）。
+ *
+ * 界面用它把「已自动收窄」说清楚：用户改不改都行，但得知道计划不会照字面执行。
+ */
+export function productScenePlacementCeiling(options: ProductSceneWorkflowOptions): number | null {
+  const measured = options.views.filter(
+    (view) =>
+      Number.isInteger(view.width) &&
+      Number.isInteger(view.height) &&
+      Boolean(view.width) &&
+      Boolean(view.height),
+  );
+  if (!measured.length) return null;
+  return Math.min(
+    ...measured.map((view) =>
+      // 取计划里最紧的一档构图：中心 0.43 与较低的下边缘 0.77。
+      productSceneFittingWidthFraction(
+        options.aspectRatio,
+        view,
+        { centerX: 0.43, baselineY: 0.77 },
+        0.7,
+      ),
+    ),
+  );
+}
 export function createProductSceneCheckpoint(): ProductSceneWorkflowCheckpoint {
   return { inputSignature: null, rows: [], approvedThrough: 0, batchReviewPending: false };
 }
@@ -267,8 +420,13 @@ function hasText(value: unknown): boolean {
  *   - 珠宝原片保护模式下的实物身份与关键特征：同一 SKU 的不同实物必须分别记录，
  *     无法从图片推断，做不出「保真」这一结果。
  * 数量、并发、批次、画幅、占比、景深、种子、场景倾向、机位、系列模板、灯光都有
- * 推荐默认值，一律不写进清单（界面标「（可选）」）；功能开关（自动检查 / Logo
+ * 推荐默认值，一律不写进清单（界面只给必填项画红星）；功能开关（自动检查 / Logo
  * 贴回）只有用户主动开启时才需要补齐对应确认。
+ *
+ * 这条边界不只是文案约定：带默认值的参数要么由计划自己兜住（占比按原图比例收窄
+ * 到能完整入画，见 `productSceneFittingWidthFraction`），要么只出现在真正会用它的
+ * 模式里（见 `productSceneSceneBiasApplies` 等）。用户不碰这些参数时，链条上不能
+ * 留下任何「必须人工调一次」的隐藏门槛。
  */
 export function productSceneRequirements(
   options: ProductSceneWorkflowOptions,
@@ -321,6 +479,26 @@ export function productSceneRequirements(
         hint: `${label || "未命名原图"}：${reasons.join("；")}。`,
       });
   });
+  // 保真合成要在本地把紧贴裁切的母版放进画幅：竖长到连合成器下限都放不下时，
+  // 任何占比都合不出图——这属于「缺了就一定做不出结果」，必须在付费生成背景之前说清楚，
+  // 而不是等本地合成时报「当前视图无法完整放入构图」。换图或换更高的画幅都能解决。
+  if (productSceneGenerationMode(options) === "composite") {
+    options.views.forEach((view, index) => {
+      if (!view.width || !view.height) return;
+      const fitted = productSceneFittingWidthFraction(
+        options.aspectRatio,
+        view,
+        { centerX: 0.43, baselineY: 0.77 },
+        0.3,
+      );
+      if (fitted >= 0.2) return;
+      const ratio = Math.round((view.height / view.width) * 10) / 10;
+      missing.push({
+        field: `第 ${index + 1} 张原图画面比例`,
+        hint: `${hasText(view.label) ? view.label.trim() : "未命名原图"}：原图过于竖长（高宽比约 ${ratio}），在当前画幅下无法完整入画。请换用更接近横向的原图，或把图片比例改成更高的 9:16。`,
+      });
+    });
+  }
   // 珠宝原片保护模式沿用原始 generationMode 判断，与 productSceneJewelryOptionsValid 一致：
   // 旧计划里缺失的 generationMode 表示原图保真合成，不受珠宝校验约束。
   if (options.generationMode === "protected") {
@@ -403,6 +581,11 @@ export function productSceneRequirements(
       });
   }
   if (options.brandCreative) {
+    if (options.brandCreative.model && productSceneGenerationMode(options) !== "reference")
+      missing.push({
+        field: "数字模特生成方式",
+        hint: "选择“AI 多机位”使用定稿模特，或移除模特绑定后制作空背景。",
+      });
     if (!PRODUCT_SCENE_BRAND_STYLES.some((style) => style.id === options.brandCreative!.style))
       missing.push({
         field: "AI 品牌摄影风格",
@@ -959,8 +1142,11 @@ function brandPrompt(recipe: Omit<ProductSceneRecipe, "prompt">, framing: string
     `Create one brand jewelry or fashion product photograph in ${scene.description}. ${framing} framing. This is an AI brand visual, not a claimed customer photograph.`,
     direction,
     briefLine,
-    "SOURCE ROLES: every supplied image is an approved actual product or actual wearing source, not an art-direction sample. Treat the physical product as the identity subject; a person's face, outfit or background in a source photo is not a different product and is not permission to adopt that person's identity as an exclusive brand model. Use all actual product views together. Do not replace the product with other jewelry, clothing or props suggested by the brief.",
-    `Declared source photo roles in supplied image order: ${(recipe.sourcePhotoRoles ?? []).join(", ") || "unclassified actual product sources"}. Preserve the actual wearing scale, attachment points and relation to the body where supplied. Use a wearing composition or hands only when supported by the actual wearing sources or explicitly requested by the brief; otherwise choose a product still life. When the brief requests a new model without an approved identity source, use an original anonymous adult fashion model and make no same-person or exclusivity claim.`,
+    recipe.brandCreative?.model
+      ? "PRODUCT SOURCE ROLES: the first supplied images are actual product or actual wearing sources. The separately labeled model references define the approved model identity only; do not adopt their clothing or accessories as the actual product. Use all product views together and preserve visible construction."
+      : "SOURCE ROLES: every supplied image is an approved actual product or actual wearing source, not an art-direction sample. Treat the physical product as the identity subject; a person's face, outfit or background in a source photo is not a different product and is not permission to adopt that person's identity as an exclusive brand model. Use all actual product views together. Do not replace the product with other jewelry, clothing or props suggested by the brief.",
+    ...(recipe.brandCreative?.model ? [brandModelIdentityPrompt(recipe.brandCreative.model)] : []),
+    `Declared product photo roles in supplied image order: ${(recipe.sourcePhotoRoles ?? []).join(", ") || "unclassified actual product sources"}. Preserve the actual wearing scale, attachment points and relation to the body where supplied. ${recipe.brandCreative?.model ? "Use the explicitly selected approved model for a brand wearing composition, preserving that model's identity. Product-only photos do not verify hidden attachment geometry or physical dimensions; keep the product readable and do not invent such details." : "Use a wearing composition or hands only when supported by the actual wearing sources or explicitly requested by the brief; otherwise choose a product still life. When the brief requests a new model without an approved identity source, use an original anonymous adult fashion model and make no same-person or exclusivity claim."}`,
     "Preserve the actual product silhouette, proportions, construction, material, color, finish, pearl or bead order, chain links, clasps, gemstone setting, natural asymmetry and identifying details from the source images. Do not invent hidden construction or redesign the product. Keep unsupported surfaces naturally out of view. Product identity and coherent anatomy take precedence over decorative styling.",
     `Camera direction: ${camera.label}, azimuth ${camera.azimuth} degrees relative to the product front, elevation ${camera.elevation} degrees, ${camera.focalLength} mm full-frame-equivalent editorial lens, ${camera.distance} framing. Use a coherent three-dimensional viewpoint supported by the actual references; if a wearing source determines the pose, follow that wearing relationship instead of rotating the body as a flat cutout. The principal product occupies approximately ${Math.round(recipe.placement.widthFraction * 100)} percent of image width and remains readable.`,
     `Surface: ${recipe.material}. Distant styling: ${recipe.props}. Lighting: ${recipe.lighting}. Background separation preference ${Math.round(depth * 100)} percent, with real optical falloff and sharp principal product details. Maintain believable scale, reflections, contact shadows, attachment and gravity; styling never conceals key construction.`,
@@ -1124,12 +1310,22 @@ export function generateProductScenePlan(options: ProductSceneWorkflowOptions): 
     if (!pools.has(poolKey)) pools.set(poolKey, shuffle(combinations, next));
     const combination = pools.get(poolKey)!.pop();
     if (!combination) throw new Error("合法场景组合不足，请增加已确认产品视角。");
+    // 两次 next() 的调用顺序不能动：计划必须对同一份输入逐字复现。
+    const centerX = [0.43, 0.5, 0.57][Math.floor(next() * 3)]!;
+    const baselineY = view.angle === "eye" ? 0.8 : 0.77;
+    const requestedWidth = Math.min(
+      0.7,
+      (options.productScale ?? 0.48) * [0.9, 1, 1.1][Math.floor(next() * 3)]!,
+    );
     const placement = {
-      centerX: [0.43, 0.5, 0.57][Math.floor(next() * 3)]!,
-      baselineY: view.angle === "eye" ? 0.8 : 0.77,
-      widthFraction: Math.min(
-        0.7,
-        (options.productScale ?? 0.48) * [0.9, 1, 1.1][Math.floor(next() * 3)]!,
+      centerX,
+      baselineY,
+      // 期望占比先过一遍「完整入画」：竖长母版在这里收窄，避免付费生成背景后本地合成才报错。
+      widthFraction: productSceneFittingWidthFraction(
+        options.aspectRatio,
+        view,
+        { centerX, baselineY },
+        requestedWidth,
       ),
     };
     const recipe = {

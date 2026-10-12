@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
 import {
   musicVideoLipReviewSignature,
@@ -36,6 +37,8 @@ import {
 } from "./comicDramaWorkflowModel";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
 import { commerceInputReady, commerceRequirements } from "./commerceWorkflowModel";
+import { brandVideoInputReady, brandVideoRequirements } from "./brandVideoWorkflowModel";
+import { BrandVideoWorkflowSections } from "./BrandVideoWorkflowSections";
 import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowSections";
 import { remotionRequirements } from "./remotionWorkflowModel";
 import { XhsCoverConfiguration, XhsCoverDeliverables } from "./XhsCoverWorkflowSections";
@@ -407,6 +410,8 @@ export function KnowledgeVideoWorkflowNode({
   const isMusicVideo = musicVideoOptions != null;
   const comicDramaOptions = node.config.comicDrama;
   const commerceOptions = node.config.commerce;
+  const brandVideoOptions = node.config.brandVideo;
+  const isBrandVideo = brandVideoOptions != null;
   const remotionOptions = node.config.remotion;
   const coverOptions = node.config.xhsCover;
   const productSceneOptions = node.config.productScene;
@@ -427,6 +432,7 @@ export function KnowledgeVideoWorkflowNode({
   const isComicDrama =
     !isReverse && !isCover && !isRemotion && !isCommerce && comicDramaOptions != null;
   const isFilm =
+    !isBrandVideo &&
     !isMusicVideo &&
     !isReverse &&
     !isCover &&
@@ -434,25 +440,27 @@ export function KnowledgeVideoWorkflowNode({
     !isCommerce &&
     !isComicDrama &&
     filmOptions != null;
-  const workflowTitle = isProductScene
-    ? "产品场景图工作流"
-    : isReelbench
-      ? "视频拉片与分镜合成"
-      : isMusicVideo
-        ? "音乐 MV 工作流 V1.0.6"
-        : isReverse
-          ? "短视频反推工作流"
-          : isCover
-            ? "小红书封面工作流"
-            : isRemotion
-              ? "动画逻辑图工作流"
-              : isCommerce
-                ? "剧情带货工作流"
-                : isComicDrama
-                  ? "动漫短剧工作流 V2.3"
-                  : isFilm
-                    ? "AI影视工作流"
-                    : "知识视频工作流";
+  const workflowTitle = isBrandVideo
+    ? "品牌视觉短片工作流"
+    : isProductScene
+      ? "产品场景图工作流"
+      : isReelbench
+        ? "视频拉片与分镜合成"
+        : isMusicVideo
+          ? "音乐 MV 工作流 V1.0.6"
+          : isReverse
+            ? "短视频反推工作流"
+            : isCover
+              ? "小红书封面工作流"
+              : isRemotion
+                ? "动画逻辑图工作流"
+                : isCommerce
+                  ? "剧情带货工作流"
+                  : isComicDrama
+                    ? "动漫短剧工作流 V2.3"
+                    : isFilm
+                      ? "AI影视工作流"
+                      : "知识视频工作流";
   const phase = runState?.phase ?? node.config.checkpoint.phase;
   const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
@@ -639,17 +647,19 @@ export function KnowledgeVideoWorkflowNode({
     [node.config.models, providerCatalog, isCover, isProductReference],
   );
   const documentsOnly =
-    (musicVideoOptions ?? commerceOptions ?? comicDramaOptions ?? filmOptions)?.deliverable ===
-    "documents";
-  const modelsReady = isProductScene
-    ? configuredModels.image !== "待配置" &&
-      (!productSceneQuality || configuredModels.text !== "待配置")
-    : isCover
-      ? configuredModels.text !== "待配置" &&
-        (coverOptions.deliverable === "prompt" || configuredModels.image !== "待配置")
-      : isReverse || isReelbench || isRemotion || documentsOnly
-        ? configuredModels.text !== "待配置"
-        : Object.values(configuredModels).every((label) => label !== "待配置");
+    (brandVideoOptions ?? musicVideoOptions ?? commerceOptions ?? comicDramaOptions ?? filmOptions)
+      ?.deliverable === "documents";
+  const modelsReady = isBrandVideo
+    ? configuredModels.text !== "待配置" && (documentsOnly || configuredModels.video !== "待配置")
+    : isProductScene
+      ? configuredModels.image !== "待配置" &&
+        (!productSceneQuality || configuredModels.text !== "待配置")
+      : isCover
+        ? configuredModels.text !== "待配置" &&
+          (coverOptions.deliverable === "prompt" || configuredModels.image !== "待配置")
+        : isReverse || isReelbench || isRemotion || documentsOnly
+          ? configuredModels.text !== "待配置"
+          : Object.values(configuredModels).every((label) => label !== "待配置");
   const effectiveConfig = withCanvasWorkflowMaterials(node, {
     media: connectedInputs,
     texts: connectedTexts,
@@ -663,29 +673,31 @@ export function KnowledgeVideoWorkflowNode({
       node.config.connectedMaterials?.length ?? 0,
       node.config.connectedTexts?.length ?? 0,
     ].some((count) => count > 0);
-  const inputReady = isReelbench
-    ? reelbenchInputReady(effectiveConfig.brief, reelbenchOptions)
-    : isProductScene
-      ? productSceneInputReady(productSceneOptions)
-      : isMusicVideo
-        ? !!musicVideoOptions.songPath.trim() &&
-          (musicVideoOptions.characterMode !== "reference" ||
-            musicVideoOptions.characterReferences.length > 0)
-        : isReverse
-          ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
-          : isCover
-            ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
-            : isRemotion
-              ? Boolean(effectiveConfig.brief.trim())
-              : commerceOptions
-                ? commerceInputReady(commerceOptions)
-                : comicDramaOptions
-                  ? comicDramaOptions.episodes.length > 0 &&
-                    comicDramaOptions.episodes.length <= 10 &&
-                    comicDramaOptions.episodes.every(
-                      (episode) => episode.title.trim() && episode.script.trim(),
-                    )
-                  : Boolean(effectiveConfig.brief.trim());
+  const inputReady = isBrandVideo
+    ? brandVideoInputReady(brandVideoOptions)
+    : isReelbench
+      ? reelbenchInputReady(effectiveConfig.brief, reelbenchOptions)
+      : isProductScene
+        ? productSceneInputReady(productSceneOptions)
+        : isMusicVideo
+          ? !!musicVideoOptions.songPath.trim() &&
+            (musicVideoOptions.characterMode !== "reference" ||
+              musicVideoOptions.characterReferences.length > 0)
+          : isReverse
+            ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
+            : isCover
+              ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
+              : isRemotion
+                ? Boolean(effectiveConfig.brief.trim())
+                : commerceOptions
+                  ? commerceInputReady(commerceOptions)
+                  : comicDramaOptions
+                    ? comicDramaOptions.episodes.length > 0 &&
+                      comicDramaOptions.episodes.length <= 10 &&
+                      comicDramaOptions.episodes.every(
+                        (episode) => episode.title.trim() && episode.script.trim(),
+                      )
+                    : Boolean(effectiveConfig.brief.trim());
   const allMaterials = workflowReferenceMaterials(effectiveConfig);
   const materialQuota = workflowMaterialQuota(effectiveConfig);
   const materialsValid = allMaterials.every(
@@ -696,30 +708,32 @@ export function KnowledgeVideoWorkflowNode({
    * 缺口和运行器拦截的条件由此对齐，不会出现「看着都填好了，点下去说设置无效」。
    * 顺序按用户补录的自然顺序排，编辑器给的 hint 会直接显示在卡片上。
    */
-  const missingRequirements: WorkflowRequirements = isReelbench
-    ? reelbenchRequirements(reelbenchOptions)
-    : isProductScene
-      ? productSceneRequirements(productSceneOptions)
-      : isMusicVideo
-        ? musicVideoRequirements(musicVideoOptions)
-        : isReverse
-          ? reverseVideoRequirements(effectiveConfig.brief, reverseOptions)
-          : isCover
-            ? xhsCoverRequirements(effectiveConfig.brief, coverOptions)
-            : isRemotion
-              ? remotionRequirements(effectiveConfig.brief)
-              : commerceOptions
-                ? commerceRequirements(commerceOptions)
-                : comicDramaOptions
-                  ? comicDramaRequirements(comicDramaOptions)
-                  : effectiveConfig.brief.trim()
-                    ? []
-                    : [
-                        {
-                          field: "制作要求",
-                          hint: "用一句话说明要做什么；画幅、时长等细节可以留给工作流自动决定。",
-                        },
-                      ];
+  const missingRequirements: WorkflowRequirements = isBrandVideo
+    ? brandVideoRequirements(brandVideoOptions)
+    : isReelbench
+      ? reelbenchRequirements(reelbenchOptions)
+      : isProductScene
+        ? productSceneRequirements(productSceneOptions)
+        : isMusicVideo
+          ? musicVideoRequirements(musicVideoOptions)
+          : isReverse
+            ? reverseVideoRequirements(effectiveConfig.brief, reverseOptions)
+            : isCover
+              ? xhsCoverRequirements(effectiveConfig.brief, coverOptions)
+              : isRemotion
+                ? remotionRequirements(effectiveConfig.brief)
+                : commerceOptions
+                  ? commerceRequirements(commerceOptions)
+                  : comicDramaOptions
+                    ? comicDramaRequirements(comicDramaOptions)
+                    : effectiveConfig.brief.trim()
+                      ? []
+                      : [
+                          {
+                            field: "制作要求",
+                            hint: "用一句话说明要做什么；画幅、时长等细节可以留给工作流自动决定。",
+                          },
+                        ];
   /* 不算「字段」的拦截项也要说清楚，否则按钮灰着却看不到原因。 */
   const extraBlockers: WorkflowRequirements = [
     ...(materialsValid
@@ -844,27 +858,29 @@ export function KnowledgeVideoWorkflowNode({
           <span>
             <strong>{workflowTitle}</strong>
             <small>
-              {isProductScene
-                ? isProductReference
-                  ? "以产品图片为参考，生成不同机位与场景并逐张审核"
-                  : "以产品原图合成已有角度，分批制作并逐张审核"
-                : isReelbench
-                  ? "机器测量镜头边界，项目视觉模型标注；审核后导出报告与同步分镜视频"
-                  : isMusicVideo
-                    ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
-                    : isReverse
-                      ? "原片自动转为反推提示词、二创路线与可复用案例"
-                      : isCover
-                        ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
-                        : isRemotion
-                          ? "描述或草图自动转为动图、视频与可编辑工程"
-                          : isCommerce
-                            ? "商品资料自动转为剧情、镜头与成片交付"
-                            : isComicDrama
-                              ? "从剧本共创到成片，逐阶段审核并保留制作版本"
-                              : isFilm
-                                ? "八个制作阶段封装执行，支持已有资料接力"
-                                : "一个节点自动完成策划、生成、质检与交付"}
+              {isBrandVideo
+                ? "冻结模特与商品参考，审核品牌概念、首镜和片段后交付成片"
+                : isProductScene
+                  ? isProductReference
+                    ? "以产品图片为参考，生成不同机位与场景并逐张审核"
+                    : "以产品原图合成已有角度，分批制作并逐张审核"
+                  : isReelbench
+                    ? "机器测量镜头边界，项目视觉模型标注；审核后导出报告与同步分镜视频"
+                    : isMusicVideo
+                      ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
+                      : isReverse
+                        ? "原片自动转为反推提示词、二创路线与可复用案例"
+                        : isCover
+                          ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
+                          : isRemotion
+                            ? "描述或草图自动转为动图、视频与可编辑工程"
+                            : isCommerce
+                              ? "商品资料自动转为剧情、镜头与成片交付"
+                              : isComicDrama
+                                ? "从剧本共创到成片，逐阶段审核并保留制作版本"
+                                : isFilm
+                                  ? "八个制作阶段封装执行，支持已有资料接力"
+                                  : "一个节点自动完成策划、生成、质检与交付"}
             </small>
           </span>
         </span>
@@ -935,7 +951,12 @@ export function KnowledgeVideoWorkflowNode({
         </div>
         {(!isProductScene || unsupportedProductReferences) && !isReelbench ? (
           <div className="canvas-knowledge-workflow__inputs">
-            {!isReverse && !isReelbench && !isCommerce && !isComicDrama && !isProductScene ? (
+            {!isBrandVideo &&
+            !isReverse &&
+            !isReelbench &&
+            !isCommerce &&
+            !isComicDrama &&
+            !isProductScene ? (
               <label className="canvas-knowledge-workflow__brief">
                 <span>
                   {/* 只有内容必填的工作流才带红星：MV 的说明可留空由歌曲决定，封面另有选题要求。 */}
@@ -976,9 +997,10 @@ export function KnowledgeVideoWorkflowNode({
               </label>
             ) : null}
             {unsupportedProductReferences ? (
-              <p role="alert">
-                产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再核对和确认专用参考图。
-              </p>
+              <ErrorAlert
+                error="产品场景图只使用下方专用产品原图。"
+                hint="移除通用参考与连线，再核对和确认专用参考图。"
+              />
             ) : null}
             <WorkflowReferenceMaterials
               materials={node.config.materials ?? []}
@@ -1118,6 +1140,21 @@ export function KnowledgeVideoWorkflowNode({
           />
         ) : null}
 
+        {isBrandVideo && brandVideoOptions ? (
+          <BrandVideoWorkflowSections
+            options={brandVideoOptions}
+            checkpoint={node.config.checkpoint}
+            disabled={configurationLocked || phase === "awaiting_approval"}
+            onChange={(brandVideo) => onChange({ ...node.config, brandVideo })}
+            onBusyChange={setPickingMaterials}
+          />
+        ) : null}
+        {isBrandVideo && checkpoint.brandVideo?.concept && onExportFilmDocuments ? (
+          <button type="button" onClick={() => onExportFilmDocuments(node.key)}>
+            导出品牌短片制作文档
+          </button>
+        ) : null}
+
         {isCommerce && commerceOptions ? (
           <CommerceConfiguration
             options={commerceOptions}
@@ -1246,7 +1283,7 @@ export function KnowledgeVideoWorkflowNode({
               ) : null}
               {!isReverse && !isReelbench && !isRemotion ? (
                 <>
-                  <span>图片 · {configuredModels.image}</span>
+                  {!isBrandVideo && <span>图片 · {configuredModels.image}</span>}
                   {!isCover && !isProductScene ? (
                     <span>视频 · {configuredModels.video}</span>
                   ) : null}
@@ -1278,18 +1315,20 @@ export function KnowledgeVideoWorkflowNode({
             ) : null}
             {!isReverse && !isReelbench && !isRemotion ? (
               <>
-                <ModelSlot
-                  label="图片生成"
-                  selection={node.config.models.image}
-                  providerCatalog={providerCatalog}
-                  filter={
-                    isCover || isProductReference ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER
-                  }
-                  disabled={configurationLocked}
-                  /* 封面只交付提示词时不需要出图模型。 */
-                  required={!(isCover && coverOptions.deliverable === "prompt")}
-                  onChange={(selection) => patchModels("image", selection)}
-                />
+                {!isBrandVideo && (
+                  <ModelSlot
+                    label="图片生成"
+                    selection={node.config.models.image}
+                    providerCatalog={providerCatalog}
+                    filter={
+                      isCover || isProductReference ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER
+                    }
+                    disabled={configurationLocked}
+                    /* 封面只交付提示词时不需要出图模型。 */
+                    required={!(isCover && coverOptions.deliverable === "prompt")}
+                    onChange={(selection) => patchModels("image", selection)}
+                  />
+                )}
                 {!isCover && !isProductScene ? (
                   <ModelSlot
                     label="视频生成"
@@ -1297,6 +1336,7 @@ export function KnowledgeVideoWorkflowNode({
                     providerCatalog={providerCatalog}
                     filter={VIDEO_MODEL_FILTER}
                     disabled={configurationLocked}
+                    required={!isBrandVideo || !documentsOnly}
                     onChange={(selection) => patchModels("video", selection)}
                   />
                 ) : null}
@@ -1340,21 +1380,23 @@ export function KnowledgeVideoWorkflowNode({
               className="canvas-knowledge-workflow__progress-track"
               role="progressbar"
               aria-label={
-                isMusicVideo
-                  ? "MV 制作进度"
-                  : isReverse
-                    ? "短视频反推进度"
-                    : isCover
-                      ? "封面制作进度"
-                      : isRemotion
-                        ? "动画制作进度"
-                        : isCommerce
-                          ? "带货制作进度"
-                          : isComicDrama
-                            ? "漫剧制作进度"
-                            : isFilm
-                              ? "影视制作进度"
-                              : "知识视频制作进度"
+                isBrandVideo
+                  ? "品牌短片制作进度"
+                  : isMusicVideo
+                    ? "MV 制作进度"
+                    : isReverse
+                      ? "短视频反推进度"
+                      : isCover
+                        ? "封面制作进度"
+                        : isRemotion
+                          ? "动画制作进度"
+                          : isCommerce
+                            ? "带货制作进度"
+                            : isComicDrama
+                              ? "漫剧制作进度"
+                              : isFilm
+                                ? "影视制作进度"
+                                : "知识视频制作进度"
               }
               aria-valuemin={0}
               aria-valuemax={100}
@@ -1503,10 +1545,11 @@ export function KnowledgeVideoWorkflowNode({
         ) : null}
 
         {error ? (
-          <div className="canvas-knowledge-workflow__error" role="alert">
-            <Icon name="warning-circle" aria-hidden="true" size="lg" />
-            <span>{error}</span>
-          </div>
+          <ErrorAlert
+            id={`workflow-${node.key}-error`}
+            error={error}
+            hint="核对提示涉及的素材或模型；已有任务会保留，修正后继续。修改制作要求时请重新查看并确认计划。"
+          />
         ) : null}
 
         {downloadInputChanged ? (
@@ -1777,7 +1820,9 @@ export function KnowledgeVideoWorkflowNode({
                       ? "分集剧本"
                       : isFilm
                         ? "完整剧本"
-                        : "讲述脚本"}
+                        : isBrandVideo
+                          ? "品牌概念与文案"
+                          : "讲述脚本"}
                 </h4>
                 <pre>{node.config.checkpoint.script}</pre>
                 <h4>
@@ -1787,7 +1832,9 @@ export function KnowledgeVideoWorkflowNode({
                       ? "漫剧镜头设计"
                       : isFilm
                         ? "影视镜头设计"
-                        : "六段式分镜"}
+                        : isBrandVideo
+                          ? "品牌短片分镜"
+                          : "六段式分镜"}
                 </h4>
                 <pre>{node.config.checkpoint.storyboard}</pre>
                 <h4>逐镜质检</h4>
@@ -1796,7 +1843,7 @@ export function KnowledgeVideoWorkflowNode({
                     <li key={shot.id}>
                       <strong>
                         {String(shot.sequence).padStart(2, "0")} ·{" "}
-                        {isMusicVideo || isCommerce || isFilm || isComicDrama
+                        {isBrandVideo || isMusicVideo || isCommerce || isFilm || isComicDrama
                           ? shot.title
                           : shot.section}
                       </strong>
@@ -1833,7 +1880,9 @@ export function KnowledgeVideoWorkflowNode({
                     <div className="canvas-knowledge-workflow__shot-head">
                       <strong>
                         {String(shot.sequence).padStart(2, "0")} ·{" "}
-                        {isCommerce || isFilm || isComicDrama ? shot.title : shot.section}
+                        {isBrandVideo || isCommerce || isFilm || isComicDrama
+                          ? shot.title
+                          : shot.section}
                       </strong>
                       <span className="canvas-knowledge-workflow__shot-state">
                         {run?.redoRequested && !clipPath
@@ -1930,11 +1979,14 @@ export function KnowledgeVideoWorkflowNode({
                           />
                         </label>
                         <label>
-                          <span>时长（秒，4–15）</span>
+                          <span>
+                            {isBrandVideo ? "时长（秒，按当前模型能力）" : "时长（秒，4–15）"}
+                          </span>
                           <input
                             type="number"
-                            min={4}
-                            max={15}
+                            min={isBrandVideo ? 0.001 : 4}
+                            max={isBrandVideo ? undefined : 15}
+                            step={isBrandVideo ? "any" : 1}
                             value={shotDraft.durationSeconds}
                             onChange={(event) => {
                               const durationSeconds = event.currentTarget.valueAsNumber;
@@ -1950,11 +2002,18 @@ export function KnowledgeVideoWorkflowNode({
                           <button
                             type="button"
                             className="canvas-knowledge-workflow__primary"
+                            disabled={
+                              isBrandVideo &&
+                              (!Number.isFinite(shotDraft.durationSeconds) ||
+                                shotDraft.durationSeconds <= 0)
+                            }
                             onClick={() => {
-                              const duration = Math.min(
-                                15,
-                                Math.max(4, Math.round(shotDraft.durationSeconds) || 5),
-                              );
+                              const duration = isBrandVideo
+                                ? shotDraft.durationSeconds
+                                : Math.min(
+                                    15,
+                                    Math.max(4, Math.round(shotDraft.durationSeconds) || 5),
+                                  );
                               onChange({
                                 ...node.config,
                                 checkpoint: {
@@ -2069,12 +2128,15 @@ export function KnowledgeVideoWorkflowNode({
                             ? "请配置文本模型与支持参考图的图片模型"
                             : isReverse || isReelbench || isRemotion || documentsOnly
                               ? "请先配置文本模型"
-                              : "请先完成三个模型配置"
+                              : isBrandVideo
+                                ? "请配置文本和视频模型"
+                                : "请先完成三个模型配置"
                         : "先查看执行计划，确认后开始"}
                 </span>
                 <button
                   type="button"
                   className="canvas-knowledge-workflow__primary"
+                  aria-describedby={error ? `workflow-${node.key}-error` : undefined}
                   disabled={!readyToExecute}
                   title={
                     readyToExecute ? undefined : workflowRequirementsSummary(blockingRequirements)

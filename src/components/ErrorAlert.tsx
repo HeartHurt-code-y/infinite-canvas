@@ -1,0 +1,57 @@
+import { Icon } from "./Icon";
+import { backendErrorDetails, backendErrorMessage } from "../lib/backend";
+import "./ErrorAlert.css";
+
+/*
+ * 错误提示：全产品唯一的「红色高亮报错」实现。
+ *
+ * 为什么必须收敛到一个组件
+ * ------------------------
+ * 改之前各处自己写 `<p role="alert">{error}</p>`，于是同一个错误在同一个面板里
+ * 有三种死法：没有样式（白底黑字，用户根本看不出这是报错）、直接印后端 payload
+ * 的 JSON（`{"details":null,"kind":"validation",…}`）、或者把调试堆栈塞进 live
+ * region 让读屏软件整段朗读。报错是产品里用户最需要读懂的一段文字，不能每个
+ * 调用点各写一遍。
+ *
+ * 这里一次性做对的四件事
+ * ---------------------
+ *   1. 只显示人能读的摘要：原始 payload / 堆栈交给 `backendErrorMessage` 剥掉，
+ *      只留「发生了什么」，永远不把 JSON 直接当正文（详见 `backend.ts`）。
+ *   2. 不靠颜色单独传达（WCAG 1.4.1）：红色之外同时有警告图标与文字，
+ *      色弱用户和灰度打印都还能认出这是错误。
+ *   3. 语义与朗读：`role="alert"` 让错误出现时立刻被朗读；控件用
+ *      `aria-describedby` 指向这里的 `id`，键盘用户走到控件就知道错在哪
+ *      （WCAG 3.3.1 错误识别）。`role="alert"` 元素里不放可交互内容，
+ *      因此「展开完整报错」在 alert 之外——否则用户每次展开都会被强制听一遍原始 JSON。
+ *   4. 补救建议是报错的一部分：`hint` 说明「接下来怎么办」。
+ *      只说「图片不合格」不说「换什么图」的错误，用户只能靠猜。
+ */
+export interface ErrorAlertProps {
+  /** 原始错误：Tauri payload、Error 或已经格式化好的字符串都接受。 */
+  readonly error: unknown;
+  /** 用于触发控件的 aria-describedby；不传表示这个错误不挂在具体控件上。 */
+  readonly id?: string;
+  /** 补救建议：错误只说明「发生了什么」，这里说「接下来怎么办」。 */
+  readonly hint?: string | undefined;
+}
+
+export function ErrorAlert({ error, id, hint }: ErrorAlertProps) {
+  const details = backendErrorDetails(error);
+  return (
+    <div className="error-alert">
+      <p className="error-alert__summary" id={id} role="alert">
+        <Icon name="warning-circle" aria-hidden="true" size="sm" />
+        <span className="error-alert__text">
+          {backendErrorMessage(error)}
+          {hint ? <small className="error-alert__hint">{hint}</small> : null}
+        </span>
+      </p>
+      {details ? (
+        <details className="error-alert__details">
+          <summary>展开完整报错</summary>
+          <pre className="error-alert__raw">{details}</pre>
+        </details>
+      ) : null}
+    </div>
+  );
+}

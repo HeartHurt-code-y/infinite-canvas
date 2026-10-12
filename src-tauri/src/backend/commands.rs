@@ -12,6 +12,10 @@ use super::{
         self, BrandDesignExportResult, BrandDesignImage, ExportBrandDesignBundleCommand,
         ReadBrandDesignImageCommand,
     },
+    brand_models::{
+        ArchiveBrandModelCommand, BrandModelProfile, BrandModelVersion, BrandModelVersionCommand,
+        SaveBrandModelVersionCommand,
+    },
     commerce_sources::{self, CommerceSource},
     component_manager::{ComponentManagerStatus, RuntimeFeatureStatus},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
@@ -301,6 +305,70 @@ pub async fn export_brand_design_bundle(
     tokio::task::spawn_blocking(move || brand_design::export_bundle(command))
         .await
         .map_err(|error| BackendError::Conflict(format!("品牌设计交付失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn list_brand_models(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<BrandModelProfile>> {
+    let library = state.brand_models.clone();
+    tokio::task::spawn_blocking(move || library.list())
+        .await
+        .map_err(|_| BackendError::Conflict("模特库读取失败，请重试打开".into()))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn save_brand_model_version(
+    state: State<'_, BackendState>,
+    command: SaveBrandModelVersionCommand,
+) -> CommandResult<BrandModelProfile> {
+    let library = state.brand_models.clone();
+    tokio::task::spawn_blocking(move || library.save(command))
+        .await
+        .map_err(|_| BackendError::Conflict("模特版本保存失败，请重试保存".into()))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn approve_brand_model_version(
+    state: State<'_, BackendState>,
+    command: BrandModelVersionCommand,
+) -> CommandResult<BrandModelProfile> {
+    let library = state.brand_models.clone();
+    tokio::task::spawn_blocking(move || library.approve(command))
+        .await
+        .map_err(|_| BackendError::Conflict("模特身份批准失败，请刷新后重试".into()))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn validate_brand_model_version(
+    state: State<'_, BackendState>,
+    command: BrandModelVersionCommand,
+) -> CommandResult<BrandModelVersion> {
+    let library = state.brand_models.clone();
+    tokio::task::spawn_blocking(move || library.validate(command))
+        .await
+        .map_err(|_| BackendError::Conflict("模特身份检查失败，请刷新后重试".into()))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn archive_brand_model(
+    state: State<'_, BackendState>,
+    command: ArchiveBrandModelCommand,
+) -> CommandResult<BrandModelProfile> {
+    let library = state.brand_models.clone();
+    tokio::task::spawn_blocking(move || library.archive(command))
+        .await
+        .map_err(|_| BackendError::Conflict("模特归档状态保存失败，请重试".into()))
         .and_then(|result| result)
         .command()
 }

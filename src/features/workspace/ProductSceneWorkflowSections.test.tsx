@@ -117,6 +117,48 @@ function jewelryCheckpoint(configured = jewelryOptions()): KnowledgeVideoWorkflo
 }
 
 describe("ProductSceneWorkflowSections", () => {
+  it("retains the frozen digital model while changing brand photography style", () => {
+    const model = {
+      profileId: "brand-model",
+      versionId: "v1",
+      signature: "b".repeat(64),
+      name: "品牌模特",
+      description: "原创成年模特",
+      invariants: "五官与雀斑",
+      references: [
+        {
+          id: "front",
+          role: "front" as const,
+          label: "正面",
+          path: "C:/managed/model.png",
+          contentHash: "c".repeat(64),
+          width: 1200,
+          height: 1600,
+        },
+      ],
+    };
+    const change = vi.fn<(next: ProductSceneWorkflowOptions) => void>();
+    render(
+      <ProductSceneConfiguration
+        options={{
+          ...options(),
+          generationMode: "reference",
+          brandCreative: { style: "editorial", brief: "自然肤质", model },
+        }}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "AI 品牌摄影风格" }), {
+      target: { value: "retro" },
+    });
+    expect(change.mock.calls[0]?.[0].brandCreative).toEqual({
+      style: "retro",
+      brief: "自然肤质",
+      model,
+    });
+  });
   it("selects valid brand styles, retains the design project across modes and labels wearing references", () => {
     const base = jewelryOptions();
     const draft = generateJewelryLaunchDraft(base);
@@ -1188,6 +1230,185 @@ describe("ProductSceneWorkflowSections", () => {
     });
     expect(next.versionHistory!.versions).toHaveLength(original.versionHistory!.versions.length);
     expect(next.checkpoint.productScene!.rows[0]!.taskId).toBe("paid-1");
+  });
+
+  it("scopes scene bias to the modes that use it and says so instead of asking the user", () => {
+    const change = vi.fn();
+    // createProductSceneOptions 默认是 AI 多机位；两种模式各渲染一次，比对同一项的措辞。
+    const { unmount } = render(
+      <ProductSceneConfiguration
+        options={{ ...options(), generationMode: "composite" }}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 保真合成也用场景倾向（它决定 AI 空背景的环境），文案必须说清它不碰原图角度。
+    const bias = screen.getByRole("combobox", { name: "场景倾向" }).closest("label")!;
+    expect(bias).toHaveTextContent("只决定 AI 空背景的环境类型");
+    expect(
+      screen.getByRole("spinbutton", { name: "场景种子" }).closest("label")!,
+    ).toHaveTextContent("默认值可复现同一批场景");
+    expect(
+      screen.getByText(/已按推荐值预置，不改也能出图/, { selector: "small" }),
+    ).toBeInTheDocument();
+    unmount();
+    render(
+      <ProductSceneConfiguration
+        options={{ ...options(), generationMode: "reference" }}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 多机位下同一项改成说明「机位由计划轮换」：机位是唯一不开放的用户参数。
+    expect(screen.getByRole("combobox", { name: "场景倾向" }).closest("label")!).toHaveTextContent(
+      "拍摄机位由制作计划自动轮换",
+    );
+    // 常见比例（高宽比 1.33）不缺任何东西；竖长到任何占比都放不下时，付费前就说清楚。
+    expect(
+      productSceneRequirements({
+        ...options(),
+        generationMode: "composite",
+        views: [{ ...options().views[0]!, width: 1200, height: 1600 }],
+      }),
+    ).toEqual([]);
+    expect(
+      productSceneRequirements({
+        ...options(),
+        generationMode: "composite",
+        views: [{ ...options().views[0]!, width: 400, height: 4000 }],
+      }).map((requirement) => requirement.field),
+    ).toEqual(["第 1 张原图画面比例"]);
+  });
+
+  it("narrows a tall master automatically and tells the user before they adjust the slider", () => {
+    render(
+      <ProductSceneConfiguration
+        options={{
+          ...options(),
+          generationMode: "composite",
+          views: [{ ...options().views[0]!, width: 600, height: 1600 }],
+        }}
+        disabled={false}
+        onChange={vi.fn()}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 48% 期望值在竖长原图上放不下：界面先说清楚计划会收窄，用户不必自己算。
+    expect(
+      screen.getByRole("slider", { name: "产品画面占比" }).closest("label")!,
+    ).toHaveTextContent(
+      /% · 产品宽度占画面宽度；当前原图较竖长，计划会自动收窄到约 \d+% 保证产品完整入画/,
+    );
+  });
+
+  it("shows a rejected source photo as a readable, accessible error instead of raw JSON", async () => {
+    vi.spyOn(backend, "pickPromptMultimodalFiles").mockResolvedValue([
+      {
+        localPath: "C:/photo/model.jpg",
+        displayName: "佩戴实拍.jpg",
+        kind: "image",
+        mimeType: "image/jpeg",
+        byteSize: 48000,
+      },
+    ]);
+    // 真机上 Tauri 用后端 payload 拒绝：{ kind, message, details }。
+    vi.spyOn(productSceneImageClient, "prepare").mockRejectedValue({
+      details: null,
+      kind: "validation",
+      message:
+        "validation error: 当前图片不是透明底或纯白底。请先提供透明 PNG，避免自动抠掉机身或接口。",
+    });
+    render(
+      <ProductSceneConfiguration
+        options={{ ...options(), views: [], generationMode: "composite" }}
+        disabled={false}
+        onChange={vi.fn()}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "添加白底 / 透明产品原图" }));
+
+    const alert = await screen.findByRole("alert");
+    // 用户要读懂的是这句话，不是一坨 JSON，也不是后端内部的 "validation error:" 前缀。
+    expect(alert).toHaveTextContent(
+      "当前图片不是透明底或纯白底。请先提供透明 PNG，避免自动抠掉机身或接口。",
+    );
+    expect(alert).not.toHaveTextContent("validation error");
+    expect(alert).not.toHaveTextContent('"kind"');
+    // 只说「这张图不合格」不够，还得说换成什么图、去哪个模式。
+    expect(alert).toHaveTextContent("真实实拍或佩戴照片请改用「AI 多机位」或「珠宝原片保护」");
+    // 错误与触发它的控件关联：键盘用户走到按钮就知道错在哪（WCAG 3.3.1）。
+    expect(screen.getByRole("button", { name: "添加白底 / 透明产品原图" })).toHaveAttribute(
+      "aria-describedby",
+      "product-scene-source-error",
+    );
+  });
+
+  it("keeps wearing photos out of the composite mode that cannot composite them", () => {
+    const change = vi.fn();
+    // 品牌摄影（参考图原样送进图生图）才给「真实佩戴」这个选项。
+    const { unmount } = render(
+      <ProductSceneConfiguration
+        options={{
+          ...options(),
+          generationMode: "reference",
+          brandCreative: { style: "quiet", brief: "" },
+        }}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("option", { name: "真实佩戴" })).toBeInTheDocument();
+    unmount();
+
+    // 保真合成的母版是抠图后的商品本体：给不了真人佩戴照，就连选项都不该出现。
+    const { unmount: unmountWearingless } = render(
+      <ProductSceneConfiguration
+        options={{
+          ...options(),
+          generationMode: "composite",
+          brandCreative: { style: "quiet", brief: "" },
+        }}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("option", { name: "真实佩戴" })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "机身原图 照片用途" }).closest("label")!,
+    ).toHaveTextContent("原图保真合成只合成商品本体");
+    unmountWearingless();
+
+    // 从品牌摄影切到原图保真合成：母版是不透明的实拍照，贴上去会连原背景一起
+    // 盖住画面，已准备的原图必须清空重加，而不是留着等合成出一张贴片。
+    let latest: ProductSceneWorkflowOptions = {
+      ...options(),
+      generationMode: "reference",
+      brandCreative: { style: "quiet", brief: "" },
+      views: [{ ...options().views[0]!, photoRole: "wearing" }],
+    };
+    function Harness() {
+      const [value, setValue] = useState<ProductSceneWorkflowOptions>(latest);
+      latest = value;
+      return (
+        <ProductSceneConfiguration
+          options={value}
+          disabled={false}
+          onChange={setValue}
+          onBusyChange={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
+      target: { value: "composite" },
+    });
+    expect(latest.generationMode).toBe("composite");
+    expect(latest.views).toEqual([]);
   });
 
   it("marks required parameters with a red asterisk and lists every missing required item", () => {

@@ -11,6 +11,7 @@ export type WorkflowHistoryKind =
   | "film"
   | "comicDrama"
   | "musicVideo"
+  | "brandVideo"
   | "commerce"
   | "remotion"
   | "xhsCover"
@@ -121,6 +122,7 @@ const recordSchema = v.object({
     "film",
     "comicDrama",
     "musicVideo",
+    "brandVideo",
     "commerce",
     "remotion",
     "xhsCover",

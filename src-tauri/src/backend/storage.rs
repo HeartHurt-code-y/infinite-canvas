@@ -49,6 +49,9 @@ mod reverse_video_cases;
 #[path = "storage/remote_video_tasks.rs"]
 mod remote_video_tasks;
 
+#[path = "storage/brand_models.rs"]
+mod brand_models;
+
 #[path = "storage/local_base64_assets.rs"]
 mod local_base64_assets;
 
@@ -445,6 +448,7 @@ impl Storage {
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(workflow_history::SCHEMA)?;
         connection.execute_batch(reverse_video_cases::SCHEMA)?;
+        connection.execute_batch(brand_models::SCHEMA)?;
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
             params![now_ms()],

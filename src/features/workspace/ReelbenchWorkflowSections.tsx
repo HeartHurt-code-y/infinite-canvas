@@ -1,7 +1,7 @@
-import { useState } from "react";
+﻿import { useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import {
-  formatRawBackendError,
   toMediaSrc,
   type VideoDownloaderCookieBrowser,
   type VideoDownloaderEngineStatus,
@@ -128,7 +128,7 @@ export function ReelbenchConfiguration({
   onClearCookies,
 }: ReelbenchConfigurationProps) {
   const [picking, setPicking] = useState(false);
-  const [pickError, setPickError] = useState<string | null>(null);
+  const [pickError, setPickError] = useState<unknown>(null);
   const localSelected = Boolean(options.localVideoPath);
 
   async function pickVideo() {
@@ -138,7 +138,7 @@ export function ReelbenchConfiguration({
     try {
       await onPickVideo();
     } catch (error) {
-      setPickError(formatRawBackendError(error));
+      setPickError(error);
     } finally {
       setPicking(false);
     }
@@ -183,7 +183,7 @@ export function ReelbenchConfiguration({
           importLabel="导入下载登录凭据"
         />
       ) : null}
-      {pickError ? <p role="alert">{pickError}</p> : null}
+      {pickError ? <ErrorAlert error={pickError} /> : null}
       <label>
         <span>分析用途</span>
         <select
@@ -307,7 +307,7 @@ export function ReelbenchDeliverables({
     useState<NonNullable<KnowledgeVideoWorkflowCheckpoint["reelbench"]>["draft"]>(null);
   const [splitAt, setSplitAt] = useState("");
   const [mergeAt, setMergeAt] = useState("");
-  const [openError, setOpenError] = useState<string | null>(null);
+  const [openError, setOpenError] = useState<unknown>(null);
   const draft = state?.draft ?? null;
   const editingId = editingDraft === draft ? rawEditingId : null;
   const draftShot = editingDraft === draft ? rawDraftShot : null;
@@ -438,7 +438,7 @@ export function ReelbenchDeliverables({
     try {
       await revealDesktopItem(path);
     } catch (error) {
-      setOpenError(formatRawBackendError(error));
+      setOpenError(error);
     }
   }
 
@@ -828,7 +828,7 @@ export function ReelbenchDeliverables({
           ) : null}
         </div>
       ) : null}
-      {openError ? <p role="alert">{openError}</p> : null}
+      {openError ? <ErrorAlert error={openError} /> : null}
     </section>
   );
 }

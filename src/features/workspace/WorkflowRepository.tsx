@@ -11,6 +11,7 @@ export interface WorkflowRepositoryProps {
   readonly onInsertComicDramaWorkflow?: () => void;
   readonly onInsertMusicVideoWorkflow?: () => void;
   readonly onInsertCommerceWorkflow?: () => void;
+  readonly onInsertBrandVideoWorkflow?: () => void;
   readonly onInsertRemotionWorkflow?: () => void;
   readonly onInsertXhsCoverWorkflow?: () => void;
   readonly onInsertProductSceneWorkflow?: () => void;
@@ -26,6 +27,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
   onInsertComicDramaWorkflow,
   onInsertMusicVideoWorkflow,
   onInsertCommerceWorkflow,
+  onInsertBrandVideoWorkflow,
   onInsertRemotionWorkflow,
   onInsertXhsCoverWorkflow,
   onInsertProductSceneWorkflow,
@@ -413,6 +415,37 @@ export const WorkflowRepository = memo(function WorkflowRepository({
           >
             <Icon name="plus" aria-hidden="true" size="lg" />
             添加带货工作流
+          </button>
+        </article>
+        <article className="workflow-repository__card">
+          <div className="workflow-repository__card-mark" aria-hidden="true">
+            <Icon name="film-slate" size="2xl" />
+          </div>
+          <div className="workflow-repository__card-body">
+            <div className="workflow-repository__card-heading">
+              <span className="workflow-repository__badge">单节点</span>
+              <h2 className="workflow-repository__card-title">品牌视觉短片工作流</h2>
+            </div>
+            <p className="workflow-repository__description">
+              围绕新品、系列或节日制作品牌短片，复用已定稿数字模特与商品原图。先审核概念与分镜，再看首镜试产，选用片段后合成。
+            </p>
+            <ol className="workflow-repository__stages" aria-label="品牌视觉短片工作流能力">
+              {["品牌概念", "分镜与身份参考", "首镜试产", "审核与成片"].map((label) => (
+                <li key={label} className="workflow-repository__stage">
+                  <span className="workflow-repository__stage-name">{label}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <button
+            type="button"
+            className="workflow-repository__insert"
+            onClick={onInsertBrandVideoWorkflow}
+            disabled={!onInsertBrandVideoWorkflow}
+            aria-label="添加品牌视觉短片工作流节点"
+          >
+            <Icon name="plus" aria-hidden="true" size="lg" />
+            添加品牌视频工作流
           </button>
         </article>
         <article className="workflow-repository__card">

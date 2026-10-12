@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
-import { formatRawBackendError } from "../../lib/backend";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { exportBrandDesignBundle, readBrandDesignImage } from "../../lib/brandDesignClient";
 import {
   brandDesignInputSignature,
@@ -45,7 +45,8 @@ export function BrandDesignStudio({
 }: BrandDesignStudioProps) {
   const [pageId, setPageId] = useState<JewelryLaunchSlotId | "HOME" | "DETAIL">("HOME");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const errorId = useId();
   const [notice, setNotice] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ signature: string; pageId: string; url: string } | null>(
     null,
@@ -120,7 +121,7 @@ export function BrandDesignStudio({
     try {
       await action();
     } catch (cause) {
-      if (mounted.current) setError(formatRawBackendError(cause));
+      if (mounted.current) setError(cause);
     } finally {
       operation.current = false;
       if (mounted.current) setBusy(false);
@@ -241,7 +242,12 @@ export function BrandDesignStudio({
       <div className="brand-design__body">
         <p>用同一套风格制作商品图、首页主视觉和连续详情。可选原图或已保存的 AI 成图。</p>
         <div className="brand-design__actions">
-          <button type="button" disabled={disabled || busy} onClick={importDesign}>
+          <button
+            type="button"
+            disabled={disabled || busy}
+            aria-describedby={error ? errorId : undefined}
+            onClick={importDesign}
+          >
             打开设计工程
           </button>
         </div>
@@ -297,7 +303,11 @@ export function BrandDesignStudio({
                 />
               </label>
               <div className="brand-design__actions">
-                <button type="button" onClick={pickLogo}>
+                <button
+                  type="button"
+                  aria-describedby={error ? errorId : undefined}
+                  onClick={pickLogo}
+                >
                   {design.logo ? "更换品牌 Logo" : "添加真实 Logo"}
                 </button>
                 {design.logo && (
@@ -396,7 +406,11 @@ export function BrandDesignStudio({
                     </select>
                   </label>
                   <div className="brand-design__actions">
-                    <button type="button" onClick={pickImage}>
+                    <button
+                      type="button"
+                      aria-describedby={error ? errorId : undefined}
+                      onClick={pickImage}
+                    >
                       导入图位图片
                     </button>
                   </div>
@@ -468,10 +482,20 @@ export function BrandDesignStudio({
               )}
             </fieldset>
             <div className="brand-design__actions">
-              <button type="button" disabled={busy || disabled} onClick={previewPage}>
+              <button
+                type="button"
+                disabled={busy || disabled}
+                aria-describedby={error ? errorId : undefined}
+                onClick={previewPage}
+              >
                 {busy ? "正在处理…" : "更新设计预览"}
               </button>
-              <button type="button" disabled={busy} onClick={exportDesign}>
+              <button
+                type="button"
+                disabled={busy}
+                aria-describedby={error ? errorId : undefined}
+                onClick={exportDesign}
+              >
                 导出品牌设计成图
               </button>
             </div>
@@ -485,7 +509,13 @@ export function BrandDesignStudio({
             )}
           </>
         )}
-        {error && <p role="alert">{error}</p>}
+        {Boolean(error) && (
+          <ErrorAlert
+            id={errorId}
+            error={error}
+            hint="检查源图片仍在本机，重新选择缺失图片；文案过长时缩短后重新预览或导出。"
+          />
+        )}
         {notice && <p role="status">{notice}</p>}
       </div>
     </details>
