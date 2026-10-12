@@ -196,7 +196,9 @@ export function CommerceConfiguration({
           {!hasProductImage && options.deliverable === "video" ? (
             <p>请添加真实商品图后开始制作成片。</p>
           ) : null}
-          {materialError ? <ErrorAlert workflow id={materialErrorId} error={materialError} /> : null}
+          {materialError ? (
+            <ErrorAlert workflow id={materialErrorId} error={materialError} />
+          ) : null}
         </section>
         <div className="canvas-commerce-workflow__format">
           <label>
@@ -344,11 +346,15 @@ export function CommerceDeliverables({
               <li key={source.url}>
                 <strong>{source.title || source.url}</strong>
                 <small>{source.url}</small>
-                <span>
-                  {source.status === "fetched"
-                    ? "已读取"
-                    : `读取失败：${source.error ?? "请补充商品文字或文档"}`}
-                </span>
+                {source.status === "fetched" ? (
+                  <span>已读取</span>
+                ) : (
+                  <ErrorAlert
+                    workflow
+                    error={source.error ?? "商品资料页面读取失败，请补充商品文字或文档。"}
+                    hint="核对链接是否公开可访问；无法读取时，在商品事实与卖点中补充已确认的文字，或添加本地文档，再继续制作。"
+                  />
+                )}
               </li>
             ))}
           </ul>

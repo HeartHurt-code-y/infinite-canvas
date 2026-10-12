@@ -25,6 +25,7 @@ import {
 } from "./productSceneWorkflowModel";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import { modelWorkflowError, workflowErrorPresentation } from "../../lib/workflowErrors";
 import { restoreWorkflowVersion } from "./workflowVersionHistory";
 import { workflowConnectedTextBlock } from "./workflowMaterials";
 import {
@@ -430,8 +431,41 @@ describe("recorded workflow execution", () => {
     const result = await runner.run(request);
     expect(result.phase).toBe("failed");
     expect(result.error).toContain("历史记录保存失败：磁盘已满");
+    const presentation = workflowErrorPresentation(result.error);
+    expect(presentation.origin).toBe("workflow");
+    expect(presentation.action).toContain("保存");
+    expect(presentation.details).toContain("磁盘已满");
     expect(runnerFactory).not.toHaveBeenCalled();
     expect(fake.promptClient.run).not.toHaveBeenCalled();
+  });
+
+  it("preserves complete remote errors through retry causes and durable history without blaming recovery", async () => {
+    const { runner, request, runnerFactory, records, events } = setup();
+    const rawError = {
+      kind: "provider",
+      message: "参考素材已修改：供应商返回该完整原文",
+      details: {
+        httpStatus: 422,
+        rawResponse: `${"完整供应商响应".repeat(600)}末尾原始证据`,
+        requestId: "provider-request-42",
+      },
+    };
+    runnerFactory.mockImplementation(() => ({
+      run() {
+        return Promise.reject(
+          new Error("本次调用重试后仍失败", { cause: modelWorkflowError(rawError) }),
+        );
+      },
+    }));
+    const result = await runner.run(request);
+    const presentation = workflowErrorPresentation(result.error);
+    expect(presentation.origin).toBe("model");
+    expect(presentation.cause).toBeNull();
+    expect(presentation.details).toContain("末尾原始证据");
+    expect(presentation.details).toContain("provider-request-42");
+    expect(presentation.details).not.toContain("工作流历史恢复失败");
+    expect(records.get("history-1")?.error).toBe(result.error);
+    expect(events.at(-1)?.error).toBe(result.error);
   });
 
   it("can retry an initial save failure only after a typed not_found proves the unused history identity is absent", async () => {
@@ -970,6 +1004,9 @@ describe("recovering model calls between submission and checkpoint persistence",
     );
     const result = await runner.run(resumed);
     expect(result.error).toContain("无法与当前步骤唯一对应");
+    const presentation = workflowErrorPresentation(result.error);
+    expect(presentation.origin).toBe("workflow");
+    expect(presentation.action).toContain("原任务");
     expect(fake.promptClient.run).not.toHaveBeenCalled();
     expect(fake.generation.start).not.toHaveBeenCalled();
   });

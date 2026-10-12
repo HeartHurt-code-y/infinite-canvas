@@ -65,7 +65,10 @@ export function topologicallySortWorkflowSteps<
     indegree.set(step.id, dependencies.size);
     for (const dependency of dependencies) {
       if (!byId.has(dependency))
-        throw workflowUsageError("plan", `执行计划步骤 ${step.id} 引用了不存在的依赖 ${dependency}。`);
+        throw workflowUsageError(
+          "plan",
+          `执行计划步骤 ${step.id} 引用了不存在的依赖 ${dependency}。`,
+        );
       const dependents = children.get(dependency) ?? [];
       dependents.push(step.id);
       children.set(dependency, dependents);
@@ -241,7 +244,10 @@ export function approveWorkflowExecutionPlan(
 ): WorkflowExecutionPlan {
   topologicallySortWorkflowSteps(plan.steps);
   if (!isWorkflowExecutionPlanCurrent(plan, node))
-    throw workflowUsageError("input_changed", "制作输入或分镜版本已改变，请重新生成执行计划后确认。");
+    throw workflowUsageError(
+      "input_changed",
+      "制作输入或分镜版本已改变，请重新生成执行计划后确认。",
+    );
   return { ...plan, approval: { planSignature: planSignature(plan), approvedAt: now } };
 }
 

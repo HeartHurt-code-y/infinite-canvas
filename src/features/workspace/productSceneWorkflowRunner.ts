@@ -165,7 +165,7 @@ export function createProductSceneWorkflowRunner(
   const dependencies: Dependencies = {
     ...baseDependencies,
     promptClient: withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
-    generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "getProgress"]),
+    generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start"]),
   };
   return {
     async run(request) {
@@ -488,7 +488,7 @@ export function createProductSceneWorkflowRunner(
               status: "needs_review",
               reviewNotes: [
                 ...current().reviewNotes,
-                `自动检测或Logo处理失败，须重检后才能选用：${message}`,
+                `自动检测或Logo处理失败，须重检后才能选用：${formatWorkflowError(error)}`,
               ],
             });
             await flush();
@@ -641,7 +641,7 @@ export function createProductSceneWorkflowRunner(
                 throw new Error(
                   `${resultName}任务状态：${formatWorkflowError(detail.finalError ?? detail.summary.status)}。${mode === "reference" ? "全部参考图均已提交；若模型不支持此数量，请调整参考图或选择支持它的模型并重新规划。" : ""}已保留任务身份；继续只查询原任务，只有明确点击该图重做才提交新的生成请求。`,
                   detail.summary.status === "failed"
-                    ? { cause: modelWorkflowError(detail.finalError ?? detail.summary.status) }
+                    ? { cause: modelWorkflowError(detail.finalError ?? detail.summary) }
                     : undefined,
                 );
               await dependencies.sleep(1000, signal);
@@ -821,7 +821,11 @@ export function createProductSceneWorkflowRunner(
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
         const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
-        progress(paused ? "已暂停。已保存的生成任务与本地图片将在继续时复用。" : message);
+        progress(
+          paused
+            ? "已暂停。已保存的生成任务与本地图片将在继续时复用。"
+            : formatWorkflowError(error),
+        );
         return checkpoint;
       }
     },

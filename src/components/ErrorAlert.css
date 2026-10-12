@@ -45,7 +45,7 @@
 }
 
 .error-alert__guidance dt {
-  color: var(--color-text-1);
+  color: var(--color-text);
   font-weight: 700;
 }
 

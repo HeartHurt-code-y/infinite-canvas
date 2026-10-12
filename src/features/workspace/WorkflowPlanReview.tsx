@@ -1,4 +1,5 @@
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { toMediaSrc } from "../../lib/backend";
 import {
   getWorkflowExecutionPlan,
@@ -19,12 +20,12 @@ export function WorkflowPlanReview({
   const plan = getWorkflowExecutionPlan(node);
   if (!plan) return null;
   const approved = isWorkflowExecutionPlanApproved(plan, node);
-  let error: string | null = null;
+  let error: unknown = null;
   let steps = plan.steps;
   try {
     steps = topologicallySortWorkflowSteps(plan.steps);
   } catch (failure) {
-    error = failure instanceof Error ? failure.message : "计划依赖关系无效";
+    error = failure;
   }
   const titles = new Map(steps.map((step) => [step.id, step.title]));
   return (
@@ -80,12 +81,13 @@ export function WorkflowPlanReview({
           </li>
         ))}
       </ol>
-      {error ? <p role="alert">{error}</p> : null}
+      {error ? <ErrorAlert workflow error={error} id={`workflow-plan-${node.key}-error`} /> : null}
       {!approved ? (
         <button
           type="button"
           className="canvas-knowledge-workflow__primary"
           disabled={disabled || !!error}
+          aria-describedby={error ? `workflow-plan-${node.key}-error` : undefined}
           onClick={onApprove}
         >
           确认计划并执行

@@ -371,7 +371,11 @@ export function ComicDramaConfiguration({
             <small>确认分镜后会列出需要配音的角色。</small>
           )}
           {hasDuplicateVoices ? (
-            <ErrorAlert workflow id={voicesErrorId} error="不同说话角色请绑定不同的控制台音色 ID。" />
+            <ErrorAlert
+              workflow
+              id={voicesErrorId}
+              error="不同说话角色请绑定不同的控制台音色 ID。"
+            />
           ) : null}
           <small>账号音色权限以供应商实际语音合成响应为准；示例 ID 不代表当前账号已开通。</small>
           {!speechProviders.length ? (
@@ -422,6 +426,7 @@ export function ComicDramaDeliverables({
   ) => void | Promise<void>;
 }) {
   const [reviewError, setReviewError] = useState<unknown>(null);
+  const reviewErrorId = useId();
   const [reviewingShot, setReviewingShot] = useState<string | null>(null);
   const reviewShot = async (shotId: string, decision: "approved" | "rejected") => {
     if (!onReviewDubbedShot) return;
@@ -524,7 +529,7 @@ export function ComicDramaDeliverables({
             <small>
               请逐镜试听并观看嘴部动作。配音镜头的原音轨已被替换；人工通过前不会合成成片。
             </small>
-            {reviewError ? <ErrorAlert workflow error={reviewError} /> : null}
+            {reviewError ? <ErrorAlert workflow id={reviewErrorId} error={reviewError} /> : null}
             {checkpoint.shots.map((shot) => {
               const dubbed = checkpoint.comicDrama?.speech?.dubbedClips?.[shot.id];
               if (!dubbed) return null;
@@ -558,6 +563,7 @@ export function ComicDramaDeliverables({
                       <button
                         type="button"
                         disabled={reviewingShot != null}
+                        aria-describedby={reviewError ? reviewErrorId : undefined}
                         onClick={() => {
                           void reviewShot(shot.id, "approved");
                         }}
@@ -567,6 +573,7 @@ export function ComicDramaDeliverables({
                       <button
                         type="button"
                         disabled={reviewingShot != null}
+                        aria-describedby={reviewError ? reviewErrorId : undefined}
                         onClick={() => {
                           void reviewShot(shot.id, "rejected");
                         }}

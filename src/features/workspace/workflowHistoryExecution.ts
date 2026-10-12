@@ -15,7 +15,12 @@ import {
   type WorkflowHistoryKind,
   type WorkflowHistoryRecord,
 } from "../../lib/workflowHistory";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  workflowErrorPresentation,
+  workflowUsageError,
+} from "../../lib/workflowErrors";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import {
   initializeWorkflowVersions,
@@ -389,13 +394,20 @@ export function createRecordedWorkflowRunner(
         for (const wake of productSceneDrainWaiters.splice(0)) wake();
       };
       const publishFailure = (error: unknown, historyFailure: boolean) => {
-        const message = `${historyFailure ? "工作流历史记录保存失败：" : "工作流历史恢复失败："}${formatWorkflowError(error)}`;
+        const failure = historyFailure
+          ? workflowUsageError(
+              "storage",
+              `工作流历史记录保存失败：${formatWorkflowError(error)}`,
+              error,
+            )
+          : error;
+        const message = formatWorkflowFailure(failure);
         checkpoint = { ...checkpoint, phase: "failed", error: message };
         publishCheckpoint(checkpoint);
         request.onProgress({
           phase: "failed",
           progress: latestProgress.progress,
-          message,
+          message: workflowErrorPresentation(failure).summary,
           error: message,
         });
         return checkpoint;
@@ -523,7 +535,12 @@ export function createRecordedWorkflowRunner(
           pending = queue;
           await pending;
         } while (pending !== queue);
-        if (persistenceFailure) throw new Error(formatWorkflowError(persistenceFailure));
+        if (persistenceFailure)
+          throw workflowUsageError(
+            "storage",
+            "工作流历史记录保存失败，已阻止后续请求。",
+            persistenceFailure,
+          );
       };
       const beforeModelCall = async () => {
         await flush();
@@ -534,7 +551,10 @@ export function createRecordedWorkflowRunner(
             config: { ...request.node.config, checkpoint },
           })
         )
-          throw new Error("当前执行计划尚未确认或已发生变化，已阻止模型请求。");
+          throw workflowUsageError(
+            "approval",
+            "当前执行计划尚未确认或已发生变化，已阻止模型请求。",
+          );
       };
       const eventFor = (state: KnowledgeVideoWorkflowRunState): WorkflowHistoryEvent => ({
         id: dependencies.createId(),
@@ -545,7 +565,8 @@ export function createRecordedWorkflowRunner(
         createdAt: dependencies.now(),
       });
       try {
-        if (!historyId) throw new Error("缺少工作流历史身份，尚未执行模型请求。");
+        if (!historyId)
+          throw workflowUsageError("task_identity", "缺少工作流历史身份，尚未执行模型请求。");
         let priorTasks: readonly GenerationTaskDetail[] = [];
         const timestamp = dependencies.now();
         let detail: WorkflowHistoryDetail | null = null;
@@ -559,7 +580,11 @@ export function createRecordedWorkflowRunner(
               "kind" in error &&
               error.kind === "not_found";
             if (!missing || checkpoint.runId)
-              throw new Error(formatWorkflowError(error), { cause: error });
+              throw workflowUsageError(
+                "storage",
+                "工作流历史恢复失败，尚未执行新的模型请求。",
+                error,
+              );
             latestProgress = { ...latestProgress, message: "重新建立尚未开始执行的历史记录" };
           }
         }
@@ -568,7 +593,7 @@ export function createRecordedWorkflowRunner(
             detail.record.workflowKind !== kind ||
             detail.record.canvasId !== dependencies.canvasId
           )
-            throw new Error("历史记录与当前工作流类型或画布不匹配。");
+            throw workflowUsageError("task_identity", "历史记录与当前工作流类型或画布不匹配。");
           // Reject edited references before enqueue can replace the archived original input.
           validateWorkflowMaterialsResume(request.node.config, {
             ...checkpoint,
@@ -596,7 +621,13 @@ export function createRecordedWorkflowRunner(
           );
           const loaded = await Promise.all(
             candidates.map((task) => dependencies.generationClient.get(task.id)),
-          );
+          ).catch((error: unknown) => {
+            throw workflowUsageError(
+              "storage",
+              "读取已提交任务的历史状态失败，已阻止重复提交。请先在任务历史中核实已有结果。",
+              error,
+            );
+          });
           priorTasks = loaded.filter(
             (task) =>
               task.summary.status !== "failed" &&
@@ -649,7 +680,8 @@ export function createRecordedWorkflowRunner(
               commandKey(task.logicalRequest, operation) === key,
           );
           if (matching.length > 1)
-            throw new Error(
+            throw workflowUsageError(
+              "task_identity",
               "历史中存在多个相同请求，无法唯一确认该恢复哪个任务。请先核实任务结果，避免重复计费。",
             );
           if (matching[0]) {
@@ -660,7 +692,8 @@ export function createRecordedWorkflowRunner(
             (task) => task.summary.status !== "succeeded" && task.summary.status !== "failed",
           );
           if (uncertain)
-            throw new Error(
+            throw workflowUsageError(
+              "task_pending",
               `历史任务 ${uncertain.summary.id} 仍为 ${uncertain.summary.status}，且无法与当前步骤唯一对应。已阻止新模型请求，请先核实该任务。`,
             );
           return null;
@@ -673,7 +706,8 @@ export function createRecordedWorkflowRunner(
               if (previous) {
                 if (previous.summary.status === "succeeded" && previous.textOutput)
                   return previous.textOutput;
-                throw new Error(
+                throw workflowUsageError(
+                  "task_pending",
                   `历史文本任务 ${previous.summary.id} 的输出尚不能确认（${previous.summary.status}），已阻止重复调用。请先核实该任务。`,
                 );
               }
@@ -754,7 +788,7 @@ export function createRecordedWorkflowRunner(
           latestProgress = {
             phase: "failed",
             progress: latestProgress.progress,
-            message: failed.error!,
+            message: workflowErrorPresentation(failed.error).summary,
             error: failed.error,
           };
           enqueue(eventFor(latestProgress));

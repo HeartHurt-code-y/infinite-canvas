@@ -3034,7 +3034,9 @@ async fn read_reference_response(
             json!({
                 "displayName": display_name,
                 "httpStatus": status,
-                "rawResponse": raw.chars().take(2000).collect::<String>()
+                "errorOrigin": "workflow",
+                "workflowErrorCode": "download",
+                "rawResponse": raw
             }),
         ));
     }
@@ -3277,6 +3279,44 @@ async fn append_gpt_image_style_references(
     }))
 }
 
+/// Keep the complete received body for both HTTP rejection and an empty/error SSE response.
+fn prompt_model_response_failure(
+    response: &CapturedHttpResponse,
+    payload: &Value,
+    profile: &str,
+    path: &str,
+    stream: Option<TextModelStream>,
+) -> BackendError {
+    if !(200..300).contains(&response.status) {
+        return BackendError::protocol(
+            "prompt model chat completion failed",
+            json!({
+                "errorOrigin": "model",
+                "httpStatus": response.status,
+                "profile": profile,
+                "path": path,
+                "rawResponse": response.body,
+            }),
+        );
+    }
+    BackendError::protocol(
+        "prompt model returned an empty message",
+        json!({
+            "errorOrigin": "model",
+            "profile": profile,
+            "path": path,
+            "streamDialect": stream.map(|dialect| format!("{dialect:?}")),
+            "termination": payload
+                .pointer("/choices/0/finish_reason")
+                .or_else(|| payload.get("stop_reason"))
+                .or_else(|| payload.pointer("/candidates/0/finishReason")),
+            "upstreamError": payload.get("error"),
+            "streamFrames": payload.pointer("/x_stream/frames"),
+            "rawResponse": response.body,
+        }),
+    )
+}
+
 async fn execute_recorded_text_call(
     deps: &PromptVisionDeps<'_>,
     task_id: &str,
@@ -3430,14 +3470,8 @@ async fn execute_recorded_text_call(
         )
         .await?;
     if !(200..300).contains(&response.status) {
-        return Err(BackendError::protocol(
-            "prompt model chat completion failed",
-            json!({
-                "httpStatus": response.status,
-                "profile": profile,
-                "path": path,
-                "rawResponse": response.body.chars().take(2000).collect::<String>(),
-            }),
+        return Err(prompt_model_response_failure(
+            &response, &payload, profile, &path, stream,
         ));
     }
     validate_prompt_response_completeness(command.mode, &payload)?;
@@ -3445,20 +3479,8 @@ async fn execute_recorded_text_call(
     if raw_model_output.trim().is_empty() {
         // 流式返回时上游可能以 HTTP 200 在流内回错误对象，此时响应体是重组后的
         // payload，正文为空但错误信息在 `error` / 帧统计里，一并附上便于归因。
-        return Err(BackendError::protocol(
-            "prompt model returned an empty message",
-            json!({
-                "profile": profile,
-                "path": path,
-                "streamDialect": stream.map(|dialect| format!("{dialect:?}")),
-                "termination": payload
-                    .pointer("/choices/0/finish_reason")
-                    .or_else(|| payload.get("stop_reason"))
-                    .or_else(|| payload.pointer("/candidates/0/finishReason")),
-                "upstreamError": payload.get("error"),
-                "streamFrames": payload.pointer("/x_stream/frames"),
-                "rawResponse": response.body.chars().take(2000).collect::<String>()
-            }),
+        return Err(prompt_model_response_failure(
+            &response, &payload, profile, &path, stream,
         ));
     }
     let optimized_prompt = extract_optimized_prompt(command.mode, &raw_model_output);
@@ -3879,6 +3901,102 @@ fn load_builtin_realistic_character_system_prompt() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompt_error_details_preserve_full_http_and_stream_model_responses() {
+        let payload = json!({
+            "error": { "message": "provider rejected the request", "diagnostics": "x".repeat(4000) },
+            "choices": [{ "finish_reason": "error" }],
+            "x_stream": { "frames": 5 },
+            "requestId": "model-response-tail-42"
+        });
+        let raw_response = payload.to_string();
+        for status in [422, 200] {
+            let response = CapturedHttpResponse {
+                call_id: "call-42".to_string(),
+                status,
+                headers: json!({}),
+                body: raw_response.clone(),
+            };
+            let error = prompt_model_response_failure(
+                &response,
+                &payload,
+                "openai_chat",
+                "/v1/chat/completions",
+                Some(TextModelStream::OpenAiChat),
+            )
+            .payload();
+            assert_eq!(error.kind, "protocol");
+            assert_eq!(error.details["errorOrigin"], "model");
+            assert_eq!(error.details["profile"], "openai_chat");
+            assert_eq!(error.details["path"], "/v1/chat/completions");
+            assert_eq!(error.details["rawResponse"], raw_response);
+            let archived: Value =
+                serde_json::from_str(error.details["rawResponse"].as_str().unwrap()).unwrap();
+            assert_eq!(archived["requestId"], "model-response-tail-42");
+            assert_eq!(
+                archived["error"]["diagnostics"].as_str().unwrap().len(),
+                4000
+            );
+            if status == 422 {
+                assert!(error.message.contains("chat completion failed"));
+                assert_eq!(error.details["httpStatus"], 422);
+            } else {
+                assert!(error.message.contains("empty message"));
+                assert_eq!(error.details["streamDialect"], "OpenAiChat");
+                assert_eq!(error.details["termination"], "error");
+                assert_eq!(error.details["upstreamError"], payload["error"]);
+                assert_eq!(error.details["streamFrames"], 5);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prompt_error_details_preserve_reference_response_and_workflow_origin() {
+        use std::io::{Read as _, Write as _};
+        let raw_response = json!({
+            "diagnostics": "x".repeat(4000),
+            "requestId": "reference-response-tail-42"
+        })
+        .to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_body = raw_response.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                server_body.len(),
+                server_body
+            )
+            .unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/reference.png"))
+            .send()
+            .await
+            .unwrap();
+        let error = read_reference_response(response, "workflow reference", None)
+            .await
+            .unwrap_err()
+            .payload();
+        server.join().unwrap();
+        assert_eq!(error.kind, "protocol");
+        assert_eq!(error.details["errorOrigin"], "workflow");
+        assert_eq!(error.details["workflowErrorCode"], "download");
+        assert_eq!(error.details["httpStatus"], 403);
+        assert_eq!(error.details["displayName"], "workflow reference");
+        assert_eq!(error.details["rawResponse"], raw_response);
+        let archived: Value =
+            serde_json::from_str(error.details["rawResponse"].as_str().unwrap()).unwrap();
+        assert_eq!(archived["requestId"], "reference-response-tail-42");
+    }
 
     #[test]
     fn cinematic_dialogue_uses_local_text_contract_and_preserves_json() {

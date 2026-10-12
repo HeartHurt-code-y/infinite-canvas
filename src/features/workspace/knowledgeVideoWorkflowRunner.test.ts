@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderCatalogEntry } from "../../lib/backend";
+import { workflowErrorPresentation } from "../../lib/workflowErrors";
 import {
   createKnowledgeVideoWorkflowRunner,
   parseKnowledgeVideoPlan,
@@ -139,6 +140,7 @@ describe("knowledge video workflow runner", () => {
         httpStatus: 401,
         profile: "gemini_generate_content_v1",
         path: "/v1/models/project-text:generateContent",
+        attempts: [{ requestId: "original-request", reason: "quota", retryable: false }],
         rawResponse: JSON.stringify({
           error: {
             type: "moyu_api_error",
@@ -174,6 +176,8 @@ describe("knowledge video workflow runner", () => {
     expect(result.error).toContain("401");
     expect(result.error).toContain("该令牌额度已用尽");
     expect(result.error).not.toContain("test-token-secret");
+    expect(workflowErrorPresentation(result.error).origin).toBe("model");
+    expect(workflowErrorPresentation(result.error).details).toContain("original-request");
     expect(onCheckpoint).toHaveBeenLastCalledWith(result);
     expect(onProgress).toHaveBeenLastCalledWith(
       expect.objectContaining({ phase: "failed", progress: 8, error: result.error }),
@@ -372,7 +376,16 @@ describe("knowledge video workflow runner", () => {
       const task = completedTask(taskId);
       return Promise.resolve(
         !allowVideos && taskId.startsWith("video")
-          ? { ...task, summary: { ...task.summary, status: "failed" }, results: [] }
+          ? {
+              ...task,
+              summary: { ...task.summary, status: "failed" },
+              results: [],
+              finalError: {
+                kind: "protocol",
+                message: "provider rejected",
+                details: { raw: "original terminal response" },
+              },
+            }
           : task,
       );
     });
@@ -394,6 +407,8 @@ describe("knowledge video workflow runner", () => {
     };
     const failed = await runner.run(request);
     expect(failed.phase).toBe("failed");
+    expect(workflowErrorPresentation(failed.error).origin).toBe("model");
+    expect(workflowErrorPresentation(failed.error).details).toContain("original terminal response");
     expect(failed.shotRuns["shot-01"]?.videoTaskId).toBeNull();
     expect(fake.generation.start).toHaveBeenCalledTimes(3);
     expect(fake.generation.get).toHaveBeenCalledWith("video-2");
@@ -451,6 +466,12 @@ describe("knowledge video workflow runner", () => {
       };
       const failed = await runner.run(request);
       expect(failed.phase).toBe("failed");
+      expect(workflowErrorPresentation(failed.error).origin).toBe("workflow");
+      if (failure === "query_error") {
+        const presentation = workflowErrorPresentation(failed.error);
+        expect(presentation.details).toContain("HTTP 503 查询暂时失败");
+        expect(presentation.cause).toContain("历史记录");
+      }
       expect(failed.shotRuns["shot-01"]?.videoTaskId).toBe("video-1");
       expect(fake.generation.start).toHaveBeenCalledTimes(2);
       const stillFailed = await runner.run({
@@ -628,7 +649,8 @@ describe("knowledge video workflow runner", () => {
       onProgress: vi.fn(),
     });
     expect(result.phase).toBe("failed");
-    expect(result.error).toContain("封面生成失败");
+    expect(workflowErrorPresentation(result.error).origin).toBe("model");
+    expect(workflowErrorPresentation(result.error).details).toContain('"status": "failed"');
     expect(result.shotRuns["shot-01"]?.imageTaskId).toBeNull();
     expect(fake.generation.start).toHaveBeenCalledTimes(2);
     expect(fake.composer.startComposition).not.toHaveBeenCalled();

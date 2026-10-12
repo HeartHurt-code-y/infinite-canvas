@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GenerationTaskClient, PromptNodeClient } from "../../lib/backend";
+import { workflowErrorPresentation } from "../../lib/workflowErrors";
 import type { BrandModelSelection } from "../../lib/brandModels";
 import {
   parseProductSceneInspection,
@@ -289,6 +290,30 @@ function setup(config: ProductSceneWorkflowOptions = options) {
 }
 
 describe("protected jewelry scenes", () => {
+  it.each(["model", "composition"] as const)(
+    "preserves original %s failure and classifies the row at its actual boundary",
+    async (failure) => {
+      const run = setup({ ...jewelryOptions(), totalCount: 1 });
+      const plan = await run.runner.run(run.request);
+      const original = {
+        kind: "protocol",
+        message: "failed during image processing",
+        details: { traceId: "full-original-evidence", frames: [{ index: 0, reason: "response" }] },
+      };
+      if (failure === "model") vi.mocked(run.generation.start).mockRejectedValueOnce(original);
+      else vi.mocked(run.imageClient.composeProtected).mockRejectedValueOnce(original);
+      const checkpoint = await run.runner.run(run.resume(plan, 1));
+      const presentation = workflowErrorPresentation(checkpoint.productScene!.rows[0]!.error);
+      expect(presentation.origin).toBe(failure === "model" ? "model" : "workflow");
+      if (failure === "model") {
+        expect(presentation.details).toContain("full-original-evidence");
+        expect(presentation.details).toContain("frames");
+        expect(run.imageClient.composeProtected).not.toHaveBeenCalled();
+      }
+      expect(run.generation.start).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("runs square protected composition without altering the original source identity", async () => {
     const config = { ...jewelryOptions(), aspectRatio: "1:1" as const, totalCount: 1 };
     const { runner, request, resume, imageClient, generation } = setup(config);

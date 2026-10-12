@@ -1,5 +1,6 @@
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { workflowStatusMessage } from "../../lib/workflowErrors";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
 import {
   musicVideoLipReviewSignature,
@@ -513,7 +514,10 @@ export function KnowledgeVideoWorkflowNode({
           : isRemotion && phase === "generating"
             ? "本地渲染中"
             : PHASE_LABELS[phase];
-  const message = runtimeMessage && runtimeMessage.length > 0 ? runtimeMessage : phaseLabel;
+  const message =
+    runtimeMessage && runtimeMessage.length > 0
+      ? workflowStatusMessage(runtimeMessage)
+      : phaseLabel;
   const decision = node.config.checkpoint.decision;
   const decisionKey = decision
     ? `${node.config.checkpoint.planRevision}:${decision.kind}:${decision.question}`

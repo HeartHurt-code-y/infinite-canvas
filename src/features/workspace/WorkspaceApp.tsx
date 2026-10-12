@@ -279,7 +279,12 @@ import {
   withCanvasWorkflowMaterials,
   withLiveWorkflowCanvasInputs,
 } from "./workflowCanvasInputs";
-import { formatWorkflowError, formatWorkflowFailure, workflowUsageError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  workflowErrorPresentation,
+  workflowUsageError,
+} from "../../lib/workflowErrors";
 import { WorkflowRepository } from "./WorkflowRepository";
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
@@ -2333,7 +2338,14 @@ export function WorkspaceApp({
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     void recoverWorkflowHistory().catch((error: unknown) => {
-      toast.error("工作流历史恢复失败", { description: <ErrorAlert error={error} workflow /> });
+      toast.error("工作流历史恢复失败", {
+        description: (
+          <ErrorAlert
+            error={workflowUsageError("storage", "工作流历史恢复失败。", error)}
+            workflow
+          />
+        ),
+      });
     });
   }, [recoverWorkflowHistory]);
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
@@ -4901,7 +4913,14 @@ export function WorkspaceApp({
       } catch (error: unknown) {
         const message = formatRawBackendError(error);
         frontendLog("error", `[canvas] 工作流放入失败: ${message}`);
-        toast.error("工作流放入失败", { description: <ErrorAlert error={error} workflow /> });
+        toast.error("工作流放入失败", {
+          description: (
+            <ErrorAlert
+              error={workflowUsageError("unknown", "工作流节点未能放入当前画布。", error)}
+              workflow
+            />
+          ),
+        });
       }
     },
     [
@@ -5010,7 +5029,14 @@ export function WorkspaceApp({
             });
           workflowReviewHistoryEditsRef.current.set(key, save);
           void save.catch((error: unknown) =>
-            toast.error("工作流审核历史保存失败", { description: <ErrorAlert error={error} workflow /> }),
+            toast.error("工作流审核历史保存失败", {
+              description: (
+                <ErrorAlert
+                  error={workflowUsageError("storage", "工作流审核历史保存失败。", error)}
+                  workflow
+                />
+              ),
+            }),
           );
         }
       }
@@ -5143,7 +5169,7 @@ export function WorkspaceApp({
             [key]: {
               phase: "failed",
               progress: 0,
-              message,
+              message: workflowErrorPresentation(error).summary,
               error: message,
             },
           }));
@@ -5157,7 +5183,9 @@ export function WorkspaceApp({
             phase: "failed",
             progress: 0,
             message: "请在桌面应用中执行工作流。",
-            error: formatWorkflowFailure(workflowUsageError("runtime", "自动工作流需要桌面端的项目供应商和本地合成能力。")),
+            error: formatWorkflowFailure(
+              workflowUsageError("runtime", "自动工作流需要桌面端的项目供应商和本地合成能力。"),
+            ),
           },
         }));
         return;
@@ -5297,7 +5325,10 @@ export function WorkspaceApp({
         if (latest.canvasId !== canvasId)
           throw workflowUsageError("task_identity", "请先打开这条工作流所属的画布。");
         if (activeWorkflowHistoryIdsRef.current.has(latest.id) && action !== "locate")
-          throw workflowUsageError("task_pending", "这条工作流正在运行，请先在画布中暂停后再处理。");
+          throw workflowUsageError(
+            "task_pending",
+            "这条工作流正在运行，请先在画布中暂停后再处理。",
+          );
         const document = snapshotV2({});
         const nodes = document.knowledgeVideoWorkflowNodes ?? [];
         const activeNode = nodes.find(
@@ -5437,7 +5468,12 @@ export function WorkspaceApp({
         if (!picked.length) return;
         if (role === "song" && picked.length !== 1) {
           toast.error("选择 MV 原曲失败", {
-            description: <ErrorAlert error={workflowUsageError("materials", "一次请选择一首完整歌曲")} workflow />,
+            description: (
+              <ErrorAlert
+                error={workflowUsageError("materials", "一次请选择一首完整歌曲")}
+                workflow
+              />
+            ),
           });
           return;
         }
@@ -5473,7 +5509,14 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择 MV 素材失败", { description: <ErrorAlert error={error} workflow /> });
+        toast.error("选择 MV 素材失败", {
+          description: (
+            <ErrorAlert
+              error={workflowUsageError("materials", "未能选择 MV 原曲或人物参考图。", error)}
+              workflow
+            />
+          ),
+        });
       }
     },
     [patchNode],
@@ -5511,7 +5554,14 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择视频失败", { description: <ErrorAlert error={error} workflow /> });
+        toast.error("选择视频失败", {
+          description: (
+            <ErrorAlert
+              error={workflowUsageError("materials", "未能选择要反推的本地视频。", error)}
+              workflow
+            />
+          ),
+        });
       }
     },
     [patchNode],
@@ -5574,7 +5624,14 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择视频失败", { description: <ErrorAlert error={error} workflow /> });
+        toast.error("选择视频失败", {
+          description: (
+            <ErrorAlert
+              error={workflowUsageError("materials", "未能选择要拉片的本地视频。", error)}
+              workflow
+            />
+          ),
+        });
       }
     },
     [patchNode],
@@ -6004,7 +6061,14 @@ export function WorkspaceApp({
         .checkpoint.remotion?.renderJob?.projectPath;
       if (path)
         void revealDesktopItem(path).catch((error: unknown) =>
-          toast.error("打开动画工程失败", { description: <ErrorAlert error={error} workflow /> }),
+          toast.error("打开动画工程失败", {
+            description: (
+              <ErrorAlert
+                error={workflowUsageError("storage", "未能打开已保存的动画工程。", error)}
+                workflow
+              />
+            ),
+          }),
         );
     },
     [canvasNodesNow],
@@ -6098,7 +6162,14 @@ export function WorkspaceApp({
           }
           toast.success(`${title}已导出`);
         } catch (error) {
-          toast.error(`${title}导出失败`, { description: <ErrorAlert error={error} workflow /> });
+          toast.error(`${title}导出失败`, {
+            description: (
+              <ErrorAlert
+                error={workflowUsageError("storage", `${title}未能保存到所选位置。`, error)}
+                workflow
+              />
+            ),
+          });
         }
       })();
     },

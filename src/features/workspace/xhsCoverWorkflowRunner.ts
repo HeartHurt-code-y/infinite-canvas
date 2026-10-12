@@ -216,7 +216,7 @@ export function createXhsCoverWorkflowRunner(
           withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
           request.node.config,
         ),
-        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "get"]),
+        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start"]),
       };
       const { node, signal } = request;
       let checkpoint = node.config.checkpoint;
@@ -569,7 +569,7 @@ export function createXhsCoverWorkflowRunner(
                 update({ taskId: null });
                 throw new Error(
                   `封面生成失败：${formatWorkflowError(detail.finalError ?? detail.summary.status)}`,
-                  { cause: modelWorkflowError(detail.finalError ?? detail.summary.status) },
+                  { cause: modelWorkflowError(detail.finalError ?? detail.summary) },
                 );
               }
               if (["unknown", "interrupted"].includes(detail.summary.status))

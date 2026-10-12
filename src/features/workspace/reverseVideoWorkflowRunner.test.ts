@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { workflowErrorPresentation } from "../../lib/workflowErrors";
 import {
   workflowReferenceFixtures,
   workflowReferenceInputs,
@@ -487,7 +488,10 @@ describe("reverse video workflow", () => {
     );
     const failed = await run.runner.run(run.request);
     expect(failed.phase).toBe("failed");
-    expect(failed.error).toContain("需要切换到支持读图的多模态模型");
+    expect(workflowErrorPresentation(failed.error).origin).toBe("model");
+    expect(workflowErrorPresentation(failed.error).details).toContain(
+      "HTTP 400: model does not support image input",
+    );
     expect(failed.reverseVideo?.videoPath).toBeTruthy();
     expect(failed.reverseVideo?.evidence).toEqual(evidence);
     expect(failed.reverseVideo?.analysis).toBeNull();

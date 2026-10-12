@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+﻿import { useId, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import {
@@ -129,6 +129,7 @@ export function ReelbenchConfiguration({
 }: ReelbenchConfigurationProps) {
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState<unknown>(null);
+  const pickErrorId = useId();
   const localSelected = Boolean(options.localVideoPath);
 
   async function pickVideo() {
@@ -169,7 +170,12 @@ export function ReelbenchConfiguration({
         </label>
       )}
       <div className="reelbench__actions">
-        <button type="button" onClick={() => void pickVideo()} disabled={!onPickVideo || picking}>
+        <button
+          type="button"
+          aria-describedby={pickError ? pickErrorId : undefined}
+          onClick={() => void pickVideo()}
+          disabled={!onPickVideo || picking}
+        >
           {picking ? "正在选择…" : localSelected ? "更换本地视频" : "选择本地视频"}
         </button>
       </div>
@@ -183,7 +189,7 @@ export function ReelbenchConfiguration({
           importLabel="导入下载登录凭据"
         />
       ) : null}
-      {pickError ? <ErrorAlert workflow error={pickError} /> : null}
+      {pickError ? <ErrorAlert workflow id={pickErrorId} error={pickError} /> : null}
       <label>
         <span>分析用途</span>
         <select
@@ -308,6 +314,7 @@ export function ReelbenchDeliverables({
   const [splitAt, setSplitAt] = useState("");
   const [mergeAt, setMergeAt] = useState("");
   const [openError, setOpenError] = useState<unknown>(null);
+  const openErrorId = useId();
   const draft = state?.draft ?? null;
   const editingId = editingDraft === draft ? rawEditingId : null;
   const draftShot = editingDraft === draft ? rawDraftShot : null;
@@ -799,21 +806,37 @@ export function ReelbenchDeliverables({
         <div className="reelbench__delivery" role="status">
           <strong>拉片报告已导出</strong>
           <div className="reelbench__actions">
-            <button type="button" onClick={() => void reveal(state.reportHtmlPath!)}>
+            <button
+              type="button"
+              aria-describedby={openError ? openErrorId : undefined}
+              onClick={() => void reveal(state.reportHtmlPath!)}
+            >
               查看交互报告
             </button>
             {state.reportMarkdownPath ? (
-              <button type="button" onClick={() => void reveal(state.reportMarkdownPath!)}>
+              <button
+                type="button"
+                aria-describedby={openError ? openErrorId : undefined}
+                onClick={() => void reveal(state.reportMarkdownPath!)}
+              >
                 查看镜头表
               </button>
             ) : null}
             {state.reportJsonPath ? (
-              <button type="button" onClick={() => void reveal(state.reportJsonPath!)}>
+              <button
+                type="button"
+                aria-describedby={openError ? openErrorId : undefined}
+                onClick={() => void reveal(state.reportJsonPath!)}
+              >
                 查看数据
               </button>
             ) : null}
             {state.syncVideoPath ? (
-              <button type="button" onClick={() => void reveal(state.syncVideoPath!)}>
+              <button
+                type="button"
+                aria-describedby={openError ? openErrorId : undefined}
+                onClick={() => void reveal(state.syncVideoPath!)}
+              >
                 查看同步视频
               </button>
             ) : null}
@@ -828,7 +851,7 @@ export function ReelbenchDeliverables({
           ) : null}
         </div>
       ) : null}
-      {openError ? <ErrorAlert workflow error={openError} /> : null}
+      {openError ? <ErrorAlert workflow id={openErrorId} error={openError} /> : null}
     </section>
   );
 }

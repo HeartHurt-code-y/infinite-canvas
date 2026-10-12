@@ -5,6 +5,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { ImeTextarea } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
 import { toMediaSrc } from "../../lib/backend";
+import { workflowStatusMessage } from "../../lib/workflowErrors";
 import {
   workflowHistoryClient,
   type WorkflowHistoryClient,
@@ -215,6 +216,7 @@ function WorkflowDetail({
   const [resolution, setResolution] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
+  const actionErrorId = useId();
   const [actionMessage, setActionMessage] = useState("");
   const busyRef = useRef(false);
   const running = active || ACTIVE_PHASES.includes(record.status);
@@ -251,7 +253,9 @@ function WorkflowDetail({
     <div className="history-detail__scroll workflow-history__detail">
       <section className="history-section">
         <h3>{record.title}</h3>
-        <p className="workflow-history__message">{record.message || PHASE_LABELS[record.status]}</p>
+        <p className="workflow-history__message">
+          {workflowStatusMessage(record.message || PHASE_LABELS[record.status])}
+        </p>
         <progress aria-label="工作流进度" max={100} value={record.progress} />
         <dl className="history-facts">
           <div>
@@ -286,6 +290,7 @@ function WorkflowDetail({
             <button
               type="button"
               disabled={busy}
+              aria-describedby={actionError ? actionErrorId : undefined}
               onClick={() => void runAction(() => onLocateWorkflow(record), "已定位到工作流节点。")}
             >
               定位到画布
@@ -326,6 +331,7 @@ function WorkflowDetail({
               type="button"
               className="workflow-history__primary"
               disabled={busy || (requiresDecision && !answer)}
+              aria-describedby={actionError ? actionErrorId : undefined}
               onClick={() =>
                 void runAction(
                   () => onResumeWorkflow(record, requiresDecision ? answer : undefined),
@@ -347,6 +353,7 @@ function WorkflowDetail({
             <button
               type="button"
               disabled={busy}
+              aria-describedby={actionError ? actionErrorId : undefined}
               onClick={() =>
                 void runAction(
                   () => onRestartWorkflow(record),
@@ -362,7 +369,7 @@ function WorkflowDetail({
       ) : (
         <p className="history-empty-note">工作流正在执行，可刷新进度或定位到画布查看。</p>
       )}
-      {actionError ? <ErrorAlert workflow error={actionError} /> : null}
+      {actionError ? <ErrorAlert workflow id={actionErrorId} error={actionError} /> : null}
       {actionMessage ? <p role="status">{actionMessage}</p> : null}
       <section className="history-section">
         <h3>制作输入</h3>
@@ -409,7 +416,7 @@ function WorkflowDetail({
                   <span>{Math.round(event.progress)}%</span>
                   <time>{dateTime(event.createdAt)}</time>
                 </div>
-                <p>{event.message}</p>
+                <p>{workflowStatusMessage(event.message)}</p>
                 {event.error ? <ErrorAlert workflow error={event.error} /> : null}
               </li>
             ))}
@@ -566,6 +573,7 @@ export function WorkflowHistoryPanel({
   const [selectedId, setSelectedId] = useState(initialWorkflowId);
   const [detail, setDetail] = useState<WorkflowHistoryDetail | null>(null);
   const [listError, setListError] = useState<unknown>(null);
+  const listErrorId = useId();
   const [detailError, setDetailError] = useState<unknown>(null);
   const detailErrorId = useId();
   const [loaded, setLoaded] = useState(false);
@@ -704,6 +712,7 @@ export function WorkflowHistoryPanel({
               type="button"
               className="history-filter workflow-history__refresh"
               aria-label="刷新工作流历史"
+              aria-describedby={listError ? listErrorId : undefined}
               disabled={!loaded}
               onClick={refresh}
             >
@@ -718,7 +727,7 @@ export function WorkflowHistoryPanel({
           />
         </div>
         <div className="history-list__scroll">
-          {listError ? <ErrorAlert workflow error={listError} /> : null}
+          {listError ? <ErrorAlert workflow id={listErrorId} error={listError} /> : null}
           {!loaded ? (
             <p className="history-list__empty">正在加载工作流历史…</p>
           ) : items.length === 0 && !listError ? (
@@ -764,6 +773,7 @@ export function WorkflowHistoryPanel({
             <button
               type="button"
               className="history-list__more"
+              aria-describedby={listError ? listErrorId : undefined}
               disabled={moreLoading || !loaded}
               onClick={() => void loadMore()}
             >

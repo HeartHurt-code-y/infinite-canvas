@@ -24,6 +24,7 @@ import {
   formatWorkflowFailure,
   modelWorkflowError,
   withWorkflowModelErrors,
+  workflowUsageError,
 } from "../../lib/workflowErrors";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import {
@@ -574,9 +575,10 @@ async function waitForGenerationResult(
     throwIfAborted(signal);
     const detail = await client.get(taskId).catch((error: unknown) => {
       if (isAbortError(error)) throw error;
-      throw new Error(
+      throw workflowUsageError(
+        "storage",
         `任务 ${taskId} 查询暂时失败：${errorMessage(error)}。已保留原任务，重试时先查询，不会重复生成。`,
-        { cause: error },
+        error,
       );
     });
     throwIfAborted(signal);
@@ -591,7 +593,7 @@ async function waitForGenerationResult(
       );
     }
     if (detail.summary.status === "failed") {
-      throw new ConfirmedGenerationFailure(taskId, detail.finalError ?? detail.summary.status);
+      throw new ConfirmedGenerationFailure(taskId, detail.finalError ?? detail.summary);
     }
     if (UNCONFIRMED_STATUSES.has(detail.summary.status)) {
       throw new Error(
@@ -836,7 +838,7 @@ export function createKnowledgeVideoWorkflowRunner(
           withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
           node.config,
         ),
-        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "get"]),
+        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start"]),
       };
       const workflowTitle = definition?.title ?? "知识视频";
       let checkpoint = node.config.checkpoint;

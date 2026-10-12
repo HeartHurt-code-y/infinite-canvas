@@ -230,7 +230,7 @@ describe("commerce workflow node", () => {
     fireEvent.click(screen.getByText("v1"));
     expect(screen.getByText("旧版剧情")).toBeInTheDocument();
     fireEvent.click(screen.getByText("资料来源读取记录"));
-    expect(screen.getByText("读取失败：页面未提供可读文本")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("页面未提供可读文本");
     fireEvent.click(screen.getByText("商品、角色与场景资产"));
     expect(screen.getByRole("img", { name: "商品原图" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "导出带货制作文档" }));

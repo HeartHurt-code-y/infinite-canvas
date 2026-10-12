@@ -684,7 +684,12 @@ export function ProductSceneConfiguration({
             : "添加白底 / 透明产品原图"}
       </button>
       {error ? (
-        <ErrorAlert workflow id={PRODUCT_SOURCE_ERROR_ID} error={error.failure} hint={error.remedy} />
+        <ErrorAlert
+          workflow
+          id={PRODUCT_SOURCE_ERROR_ID}
+          error={error.failure}
+          hint={error.remedy}
+        />
       ) : null}
       <div className="product-scene__views">
         {options.views.map((view) => (
@@ -1639,10 +1644,10 @@ export function ProductSceneDeliverables({
               <details>
                 <summary>制作记录（{row.attempts.length}）</summary>
                 {row.attempts.map((attempt, index) => (
-                  <p key={index}>
-                    {attempt.taskId ?? "未提交模型"}
-                    {attempt.error ? ` · ${attempt.error}` : ""}
-                  </p>
+                  <div key={index}>
+                    <p>{attempt.taskId ?? "未提交模型"}</p>
+                    {attempt.error ? <ErrorAlert workflow error={attempt.error} /> : null}
+                  </div>
                 ))}
               </details>
             ) : null}

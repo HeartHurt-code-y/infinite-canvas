@@ -50,21 +50,40 @@ export function ErrorAlert({ error, id, hint, workflow = false }: ErrorAlertProp
           <span>{summary}</span>
           {presentation?.origin === "workflow" ? (
             <dl className="error-alert__guidance">
-              <div><dt>为什么发生</dt><dd>{presentation.cause}</dd></div>
-              <div><dt>现在怎么处理</dt><dd>{presentation.action}</dd></div>
+              <div>
+                <dt>为什么发生</dt>
+                <dd>{presentation.cause}</dd>
+              </div>
+              <div>
+                <dt>现在怎么处理</dt>
+                <dd>{presentation.action}</dd>
+              </div>
               <div>
                 <dt>正确流程</dt>
-                <dd><ol>{presentation.steps.map((step) => <li key={step}>{step}</li>)}</ol></dd>
+                <dd>
+                  <ol>
+                    {presentation.steps.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                </dd>
               </div>
-              <div><dt>如何避免</dt><dd>{presentation.prevention}</dd></div>
+              <div>
+                <dt>如何避免</dt>
+                <dd>{presentation.prevention}</dd>
+              </div>
             </dl>
           ) : null}
-          {hint && presentation?.origin !== "model" ? <small className="error-alert__hint">{hint}</small> : null}
+          {hint && presentation?.origin !== "model" ? (
+            <small className="error-alert__hint">{hint}</small>
+          ) : null}
         </div>
       </div>
       {details ? (
         <details className="error-alert__details" open={presentation?.origin === "model"}>
-          <summary>{presentation?.origin === "model" ? "模型调用完整原始报错" : "展开完整报错"}</summary>
+          <summary>
+            {presentation?.origin === "model" ? "模型调用完整原始报错" : "展开完整报错"}
+          </summary>
           <pre className="error-alert__raw">{details}</pre>
         </details>
       ) : null}

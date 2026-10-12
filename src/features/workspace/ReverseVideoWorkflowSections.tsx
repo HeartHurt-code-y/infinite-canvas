@@ -1,4 +1,4 @@
-﻿import { useState } from "react";
+﻿import { useId, useState } from "react";
 
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
@@ -50,6 +50,7 @@ export function ReverseVideoConfiguration({
 }: ReverseVideoConfigurationProps) {
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState<unknown>(null);
+  const pickErrorId = useId();
   const localSelected = Boolean(options.localVideoPath);
 
   async function pickVideo() {
@@ -95,7 +96,12 @@ export function ReverseVideoConfiguration({
         </label>
       )}
       <div className="canvas-reverse-video__actions">
-        <button type="button" disabled={!onPickVideo || picking} onClick={() => void pickVideo()}>
+        <button
+          type="button"
+          disabled={!onPickVideo || picking}
+          aria-describedby={pickError ? pickErrorId : undefined}
+          onClick={() => void pickVideo()}
+        >
           {picking
             ? "正在选择视频…"
             : localSelected
@@ -120,7 +126,7 @@ export function ReverseVideoConfiguration({
           ? "无需下载，使用已选择的视频完成抽帧与分析。"
           : "链接由项目内的下载器处理。若平台要求登录，可选择本机浏览器或导入 cookies.txt 后重试。"}
       </small>
-      {pickError ? <ErrorAlert workflow error={pickError} /> : null}
+      {pickError ? <ErrorAlert workflow id={pickErrorId} error={pickError} /> : null}
       <label className="canvas-knowledge-workflow__brief">
         <span>补充方向</span>
         <ImeTextarea
@@ -143,6 +149,7 @@ const REVIEW_LABELS = { PASS: "通过", REVISE: "需要修订", NEEDS_DECISION: 
 
 export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverablesProps) {
   const [openError, setOpenError] = useState<unknown>(null);
+  const openErrorId = useId();
   const state = checkpoint.reverseVideo;
   if (!state) return null;
   const { evidence, analysis, review, learning, delivery } = state;
@@ -171,7 +178,11 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
               preload="metadata"
               src={toMediaSrc(videoPath)}
             />
-            <button type="button" onClick={() => void reveal(videoPath)}>
+            <button
+              type="button"
+              aria-describedby={openError ? openErrorId : undefined}
+              onClick={() => void reveal(videoPath)}
+            >
               查看原片文件
             </button>
           </div>
@@ -206,7 +217,11 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
                       : ""}
                     {sheet.frameCount != null ? ` · ${sheet.frameCount} 帧` : ""}
                   </figcaption>
-                  <button type="button" onClick={() => void reveal(sheet.localPath)}>
+                  <button
+                    type="button"
+                    aria-describedby={openError ? openErrorId : undefined}
+                    onClick={() => void reveal(sheet.localPath)}
+                  >
                     查看{sheet.displayName}文件
                   </button>
                 </figure>
@@ -251,16 +266,32 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
       ) : null}
       {delivery ? (
         <div className="canvas-reverse-video__actions">
-          <button type="button" onClick={() => void reveal(delivery.markdownPath)}>
+          <button
+            type="button"
+            aria-describedby={openError ? openErrorId : undefined}
+            onClick={() => void reveal(delivery.markdownPath)}
+          >
             查看 Markdown 文件
           </button>
-          <button type="button" onClick={() => void reveal(delivery.textPath)}>
+          <button
+            type="button"
+            aria-describedby={openError ? openErrorId : undefined}
+            onClick={() => void reveal(delivery.textPath)}
+          >
             查看 TXT 文件
           </button>
-          <button type="button" onClick={() => void reveal(delivery.casePath)}>
+          <button
+            type="button"
+            aria-describedby={openError ? openErrorId : undefined}
+            onClick={() => void reveal(delivery.casePath)}
+          >
             查看案例文件
           </button>
-          <button type="button" onClick={() => void reveal(delivery.directory)}>
+          <button
+            type="button"
+            aria-describedby={openError ? openErrorId : undefined}
+            onClick={() => void reveal(delivery.directory)}
+          >
             查看交付文件夹
           </button>
         </div>
@@ -281,7 +312,7 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
           </div>
         </details>
       ) : null}
-      {openError ? <ErrorAlert workflow error={openError} /> : null}
+      {openError ? <ErrorAlert workflow id={openErrorId} error={openError} /> : null}
     </section>
   );
 }

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { describe, expect, it, vi } from "vitest";
 
 import type { GenerationTaskClient } from "../../lib/backend";
+import { formatWorkflowFailure, modelWorkflowError } from "../../lib/workflowErrors";
 import type {
   WorkflowHistoryClient,
   WorkflowHistoryDetail,
@@ -94,6 +95,63 @@ function createClient(detail = details()) {
 }
 
 describe("WorkflowHistoryPanel", () => {
+  it("keeps persisted model failures fully expanded in both failure details and the timeline", async () => {
+    const original = {
+      kind: "provider",
+      message: "模型服务拒绝本次请求",
+      details: {
+        request_id: "provider-request-42",
+        response: { code: "model_busy", retry_after: 7 },
+      },
+    };
+    const failure = formatWorkflowFailure(modelWorkflowError(original));
+    const item = { ...record(), error: failure, message: failure };
+    const detail = details(item);
+    render(
+      <WorkflowHistoryPanel
+        client={createClient({
+          ...detail,
+          events: [{ ...detail.events[0]!, error: failure, message: failure }],
+        })}
+        onSelectGenerationTask={vi.fn()}
+      />,
+    );
+    const rawResponses = await screen.findAllByText(/"request_id": "provider-request-42"/);
+    expect(rawResponses).toHaveLength(2);
+    for (const raw of rawResponses) {
+      expect(raw).toBeVisible();
+      expect(raw).toHaveTextContent('"retry_after": 7');
+      expect(raw.closest("details")).toHaveAttribute("open");
+      expect(raw.closest('[role="alert"]')).toBeNull();
+    }
+    expect(screen.queryByText("为什么发生")).not.toBeInTheDocument();
+    expect(screen.queryByText(/workflow-error:v1:/)).not.toBeInTheDocument();
+  });
+
+  it("explains persisted local failures and keeps technical details collapsed", async () => {
+    const failure = JSON.stringify({
+      kind: "validation",
+      message: "当前资料已改变，请重新确认执行计划。",
+      details: { expectedSignature: "old-input", actualSignature: "new-input" },
+    });
+    render(
+      <WorkflowHistoryPanel
+        client={createClient(details({ ...record(), error: failure }))}
+        onSelectGenerationTask={vi.fn()}
+      />,
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("当前资料已改变，请重新确认执行计划。");
+    for (const label of ["为什么发生", "现在怎么处理", "正确流程", "如何避免"]) {
+      expect(within(alert).getByText(label)).toBeVisible();
+    }
+    expect(alert).not.toHaveTextContent("expectedSignature");
+    const raw = screen.getByText(/expectedSignature/);
+    expect(raw).not.toBeVisible();
+    fireEvent.click(screen.getByText("展开完整报错"));
+    expect(raw).toBeVisible();
+  });
+
   it("跨画布范围不按画布过滤，并在行上标注归属画布", async () => {
     const client = createClient();
     render(
@@ -274,7 +332,13 @@ describe("WorkflowHistoryPanel", () => {
       rejectAction(new Error("无法恢复：缺少原始参考图"));
       return Promise.resolve();
     });
-    expect(await screen.findByRole("alert")).toHaveTextContent("无法恢复：缺少原始参考图");
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole("alert")
+          .some((alert) => within(alert).queryByText("无法恢复：缺少原始参考图")),
+      ).toBe(true),
+    );
     expect(screen.getByRole("button", { name: "重试当前步骤" })).toBeEnabled();
     expect(screen.getByText("已保留媒体（1）")).toBeInTheDocument();
   });

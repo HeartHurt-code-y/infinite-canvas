@@ -11,6 +11,7 @@ import { createRemotionOptions } from "./remotionWorkflowModel";
 import { createReverseVideoOptions } from "./reverseVideoWorkflowModel";
 import type { KnowledgeVideoWorkflowConfig, KnowledgeVideoWorkflowPhase } from "./workspaceModel";
 import { createXhsCoverOptions } from "./xhsCoverWorkflowModel";
+import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 
 const material: PickedPromptMaterial = {
   localPath: "C:\\references\\scene.png",
@@ -47,6 +48,39 @@ const templates: readonly [string, Partial<KnowledgeVideoWorkflowConfig>][] = [
 ];
 
 describe("workflow reference materials", () => {
+  it("explains a local picker failure and preserves the complete payload outside the alert", async () => {
+    const failure = {
+      kind: "validation",
+      message: "所选参考素材是空文件，请重新选择有效文件。",
+      details: { path: "C:/references/empty.pdf", byteSize: 0 },
+    };
+    render(
+      <WorkflowReferenceMaterials
+        materials={[]}
+        allMaterials={[]}
+        disabled={false}
+        picking={false}
+        onPick={vi.fn<() => Promise<void>>().mockRejectedValue(failure)}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "添加工作流多模态参考素材" });
+    fireEvent.click(button);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(failure.message);
+    for (const label of ["为什么发生", "现在怎么处理", "正确流程", "如何避免"]) {
+      expect(within(alert).getByText(label)).toBeVisible();
+    }
+    expect(alert).not.toHaveTextContent('"kind"');
+    expect(alert).not.toHaveTextContent("C:/references/empty.pdf");
+    expect(button).toHaveAttribute("aria-describedby", alert.id);
+    const raw = screen.getByText(/"byteSize": 0/);
+    expect(raw).not.toBeVisible();
+    fireEvent.click(screen.getByText("展开完整报错"));
+    expect(raw).toBeVisible();
+    expect(raw).toHaveTextContent("C:/references/empty.pdf");
+    expect(raw.closest('[role="alert"]')).toBeNull();
+  });
+
   it("shows multiple connected text outputs and enables a workflow with an otherwise empty brief", () => {
     const props = nodeProps({ brief: "" });
     const onUnlink = vi.fn();

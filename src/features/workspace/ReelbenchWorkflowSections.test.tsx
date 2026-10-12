@@ -122,7 +122,11 @@ describe("Reelbench shot review", () => {
       onPickReelbenchVideo,
     };
     const view = render(<KnowledgeVideoWorkflowNode node={source} {...props} />);
-    expect(screen.getByRole("alert")).toHaveTextContent("requested format is not available");
+    expect(screen.getByRole("alert")).not.toHaveTextContent("requested format is not available");
+    const rawReelbenchError = screen.getByText(/requested format is not available/);
+    expect(rawReelbenchError).not.toBeVisible();
+    fireEvent.click(screen.getByText("展开完整报错"));
+    expect(rawReelbenchError).toBeVisible();
     expect(screen.getByText(/切换来源只是再次尝试/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试当前步骤" }));
     expect(onContinue).toHaveBeenCalledWith(base.key);
