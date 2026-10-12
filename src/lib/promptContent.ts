@@ -25,6 +25,16 @@ import {
 import { resolveOrdinalMentions, type PromptUnboundMention } from "./promptOrdinalMentions";
 import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
+  appendStyledText,
+  normalizePromptTextStyle,
+  PROMPT_INLINE_MARKS,
+  samePromptTextStyle,
+  serializePromptTextMarkdown,
+  type PromptBlockKind,
+  type PromptInlineMark,
+  type PromptTextStyle,
+} from "./promptRichText";
+import {
   createPromptTiptapExtensions,
   plainTextToTiptapContent,
   PROMPT_TIPTAP_MARK_REFERENCE_NODE,
@@ -66,8 +76,12 @@ export function describePromptContentCandidates<T extends PromptReferenceCandida
   };
 }
 
+export type { PromptBlockKind, PromptInlineMark, PromptTextStyle } from "./promptRichText";
+
 /**
  * 提示内容的持久化真相。DOM、dataset、chip class 与零宽光标锚点只属于 adapter。
+ * text 条目可携带富格式（见 PromptTextStyle）；缺省字段即普通段落纯文本，
+ * 与 v1 存量文档逐字节兼容。
  */
 export interface PromptContentDocumentV1 {
   readonly schema: "prompt-content";
@@ -81,7 +95,7 @@ export type PromptContentItem =
   | PromptContentMarkReferenceItem
   | PromptContentPendingReferenceItem;
 
-export interface PromptContentTextItem {
+export interface PromptContentTextItem extends PromptTextStyle {
   readonly kind: "text";
   readonly text: string;
 }
@@ -265,6 +279,17 @@ export interface PromptContentEditorSession {
     readonly allowMediaOnly: boolean;
   }): PromptGenerationPreparation;
   focusIssue(issue: PromptContentIssue): boolean;
+  /** 应用/取消行内格式（粗体、斜体等）；无编辑器或输入法组合期间为空操作。 */
+  toggleInlineMark(mark: PromptInlineMark): void;
+  /** 切换块级结构；"paragraph" 表示退回普通段落。 */
+  toggleBlockFormat(block: PromptBlockKind | "paragraph"): void;
+  /** 光标处的当前格式状态，供工具栏高亮。 */
+  activeFormats(): {
+    readonly marks: readonly PromptInlineMark[];
+    readonly block: PromptBlockKind | "paragraph";
+  };
+  /** 订阅格式状态变化（选择区或内容事务）；返回退订函数。 */
+  subscribeFormatChanges(listener: () => void): () => void;
 }
 
 export interface PromptContentModule {
@@ -308,14 +333,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function appendText(items: PromptContentItem[], text: string): void {
-  const clean = text.replaceAll("\u200b", "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-  if (!clean) return;
-  const previous = items.at(-1);
-  if (previous?.kind === "text") {
-    items[items.length - 1] = { kind: "text", text: previous.text + clean };
-  } else {
-    items.push({ kind: "text", text: clean });
-  }
+  appendStyledText(
+    items,
+    text.replaceAll("\u200b", "").replaceAll("\r\n", "\n").replaceAll("\r", "\n"),
+  );
 }
 
 function endsWithNewline(items: readonly PromptContentItem[]): boolean {
@@ -407,7 +428,22 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
   for (const raw of value["items"]) {
     if (!isRecord(raw)) return null;
     if (raw["kind"] === "text" && typeof raw["text"] === "string") {
-      appendText(items, raw["text"]);
+      const style = normalizePromptTextStyle({
+        ...(Array.isArray(raw["marks"])
+          ? {
+              marks: raw["marks"].filter(
+                (mark): mark is PromptInlineMark => typeof mark === "string",
+              ),
+            }
+          : {}),
+        ...(typeof raw["block"] === "string" ? { block: raw["block"] as PromptBlockKind } : {}),
+        ...(typeof raw["indent"] === "number" ? { indent: raw["indent"] } : {}),
+      });
+      appendStyledText(
+        items,
+        raw["text"].replaceAll("\u200b", "").replaceAll("\r\n", "\n").replaceAll("\r", "\n"),
+        style,
+      );
       continue;
     }
     if (
@@ -491,7 +527,9 @@ export function isPromptContentDocument(value: unknown): value is PromptContentD
 function promptContentItemEqual(first: PromptContentItem, second: PromptContentItem): boolean {
   if (first.kind !== second.kind) return false;
   if (first.kind === "text") {
-    return second.kind === "text" && first.text === second.text;
+    return (
+      second.kind === "text" && first.text === second.text && samePromptTextStyle(first, second)
+    );
   }
   if (first.kind === "pending_reference") {
     return (
@@ -542,10 +580,15 @@ function viewFromDocument(
   const byKey = new Map(connections.map((connection) => [connection.key, connection] as const));
   let referenceCount = 0;
   let pendingCount = 0;
+  // 有序列表的 markdown 投影编号：遇到任何非 ordered 条目即重新从 1 计数。
+  let orderedCounter = 0;
   for (const item of document.items) {
     if (item.kind === "text") {
-      segments.push({ kind: "text", text: item.text });
-      plain.push(item.text);
+      const orderedNumber =
+        item.block === "ordered" ? (orderedCounter += 1) : ((orderedCounter = 0), undefined);
+      const text = serializePromptTextMarkdown(item.text, item, orderedNumber);
+      segments.push({ kind: "text", text });
+      plain.push(text);
       continue;
     }
     if (item.kind === "pending_reference") {
@@ -659,6 +702,10 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private readonly freshTimers = new Map<string, number>();
   private readonly handlePaste = () => true;
   private composing = false;
+  private readonly formatListeners = new Set<() => void>();
+  private readonly emitFormatChanges = () => {
+    for (const listener of this.formatListeners) listener();
+  };
   private compositionEndTimer: number | null = null;
   private pendingConnections = false;
   /** 最近一次同步进来的画布存活节点 key；缺省表示调用方不提供实例存亡，自愈重连保持关闭。 */
@@ -749,6 +796,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         this.document = promptDocumentFromTiptapJson(editor.getJSON());
       },
     });
+    // 格式状态（加粗、标题等）随每个事务变化，工具栏据此高亮。
+    this.editor.on("transaction", this.emitFormatChanges);
   }
 
   updateConnections(
@@ -1350,6 +1399,55 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     target.focus();
     target.click();
     return true;
+  }
+
+  toggleInlineMark(mark: PromptInlineMark): void {
+    if (this.editor == null || this.isComposing()) return;
+    this.editor.chain().focus().toggleMark(mark).run();
+    this.syncFromEditor();
+    this.notify();
+  }
+
+  toggleBlockFormat(block: PromptBlockKind | "paragraph"): void {
+    if (this.editor == null || this.isComposing()) return;
+    const chain = this.editor.chain().focus();
+    if (block === "paragraph") chain.setParagraph();
+    else if (block === "heading1") chain.toggleHeading({ level: 1 });
+    else if (block === "heading2") chain.toggleHeading({ level: 2 });
+    else if (block === "heading3") chain.toggleHeading({ level: 3 });
+    else if (block === "bullet") chain.toggleBulletList();
+    else if (block === "ordered") chain.toggleOrderedList();
+    else if (block === "blockquote") chain.toggleBlockquote();
+    else if (block === "code") chain.toggleCodeBlock();
+    else if (block === "hr") chain.setHorizontalRule();
+    chain.run();
+    this.syncFromEditor();
+    this.notify();
+  }
+
+  activeFormats(): {
+    readonly marks: readonly PromptInlineMark[];
+    readonly block: PromptBlockKind | "paragraph";
+  } {
+    const editor = this.editor;
+    if (editor == null) return { marks: [], block: "paragraph" };
+    const marks = PROMPT_INLINE_MARKS.filter((mark) => editor.isActive(mark));
+    let block: PromptBlockKind | "paragraph" = "paragraph";
+    if (editor.isActive("heading", { level: 1 })) block = "heading1";
+    else if (editor.isActive("heading", { level: 2 })) block = "heading2";
+    else if (editor.isActive("heading", { level: 3 })) block = "heading3";
+    else if (editor.isActive("bulletList")) block = "bullet";
+    else if (editor.isActive("orderedList")) block = "ordered";
+    else if (editor.isActive("blockquote")) block = "blockquote";
+    else if (editor.isActive("codeBlock")) block = "code";
+    return { marks: [...marks], block };
+  }
+
+  subscribeFormatChanges(listener: () => void): () => void {
+    this.formatListeners.add(listener);
+    return () => {
+      this.formatListeners.delete(listener);
+    };
   }
 }
 

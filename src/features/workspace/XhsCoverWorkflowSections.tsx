@@ -1,9 +1,10 @@
 import { Icon } from "../../components/Icon";
-import { useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useId, useState } from "react";
 
 import { ImeInput } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
-import { formatRawBackendError, isDesktopRuntime, toMediaSrc } from "../../lib/backend";
+import { isDesktopRuntime, toMediaSrc } from "../../lib/backend";
 import { copyTextToDesktopClipboard } from "./desktopActions";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import { XHS_COVER_STYLES, type XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
@@ -59,7 +60,8 @@ export function XhsCoverConfiguration({
   onRemoveImage,
 }: XhsCoverConfigurationProps) {
   const [picking, setPicking] = useState<ImageRole | null>(null);
-  const [imageError, setImageError] = useState<string | null>(null);
+  const [imageError, setImageError] = useState<unknown>(null);
+  const imageErrorId = useId();
   const images = [...options.portraits, ...options.materials];
   const totalBytes = images.reduce((total, item) => total + item.byteSize, 0);
   const full = images.length >= 8;
@@ -71,7 +73,7 @@ export function XhsCoverConfiguration({
     try {
       await onPickImages(role);
     } catch (error) {
-      setImageError(formatRawBackendError(error));
+      setImageError(error);
     } finally {
       setPicking(null);
     }
@@ -93,6 +95,7 @@ export function XhsCoverConfiguration({
               <strong>{title}</strong>
               <button
                 type="button"
+                aria-describedby={imageError ? imageErrorId : undefined}
                 disabled={
                   !onPickImages || picking !== null || full || items.length >= (portraits ? 3 : 5)
                 }
@@ -135,7 +138,7 @@ export function XhsCoverConfiguration({
       <small>
         图片合计最多 8 张。当前 {images.length} 张 · {(totalBytes / 1024 / 1024).toFixed(2)} MB。
       </small>
-      {imageError ? <p role="alert">{imageError}</p> : null}
+      {imageError ? <ErrorAlert workflow id={imageErrorId} error={imageError} /> : null}
       <details className="canvas-knowledge-workflow__models canvas-xhs-cover__preferences">
         <summary>
           <span className="canvas-knowledge-workflow__models-title">封面偏好</span>
@@ -236,19 +239,23 @@ export function XhsCoverDeliverables({
   onExportDocuments,
 }: XhsCoverDeliverablesProps) {
   const [copyMessage, setCopyMessage] = useState("");
+  const [copyError, setCopyError] = useState<unknown>(null);
+  const copyErrorId = useId();
   const state = checkpoint.xhsCover;
   if (!state?.plan) return null;
   const { plan, review, history } = state;
   const imagePath = state.finalPath ?? state.imagePath;
 
   async function copyPrompt() {
+    setCopyError(null);
+    setCopyMessage("");
     try {
       if (isDesktopRuntime()) await copyTextToDesktopClipboard(plan.prompt);
       else if (navigator.clipboard) await navigator.clipboard.writeText(plan.prompt);
       else throw new Error("当前环境不支持复制，请从下方选中提示词手动复制。");
       setCopyMessage("提示词已复制");
     } catch (error) {
-      setCopyMessage(`复制失败：${formatRawBackendError(error)}`);
+      setCopyError(error);
     }
   }
 
@@ -295,10 +302,15 @@ export function XhsCoverDeliverables({
           <details className="canvas-knowledge-workflow__deliverables">
             <summary>完整图片提示词</summary>
             <div>
-              <button type="button" onClick={() => void copyPrompt()}>
+              <button
+                type="button"
+                aria-describedby={copyError ? copyErrorId : undefined}
+                onClick={() => void copyPrompt()}
+              >
                 复制封面提示词
               </button>
               <span role="status">{copyMessage}</span>
+              {copyError ? <ErrorAlert workflow id={copyErrorId} error={copyError} /> : null}
               <pre className="canvas-xhs-cover__prompt">{plan.prompt}</pre>
             </div>
           </details>

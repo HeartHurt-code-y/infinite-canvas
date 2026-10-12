@@ -1,5 +1,6 @@
 import type { MediaType } from "./backend";
 import { createPromptReference, type PromptReferenceCandidate } from "./promptReferences";
+import { pickPromptTextStyle } from "./promptRichText";
 // 文档形状只做类型引用；运行时依赖保持单向（promptContent → promptOrdinalMentions）。
 import type { PromptContentDocumentV1, PromptContentItem } from "./promptContent";
 
@@ -408,13 +409,22 @@ export function resolveOrdinalMentions(
     let cursor = 0;
     for (const match of scan.matched) {
       if (match.from > cursor)
-        items.push({ kind: "text", text: item.text.slice(cursor, match.from) });
+        items.push({
+          kind: "text",
+          text: item.text.slice(cursor, match.from),
+          ...pickPromptTextStyle(item),
+        });
       const reference = createPromptReference(match.candidate, { alias: match.label });
       items.push(reference);
       freshMentionIds.push(reference.mentionId);
       cursor = match.to;
     }
-    if (cursor < item.text.length) items.push({ kind: "text", text: item.text.slice(cursor) });
+    if (cursor < item.text.length)
+      items.push({
+        kind: "text",
+        text: item.text.slice(cursor),
+        ...pickPromptTextStyle(item),
+      });
   }
   return {
     document: { schema: "prompt-content", version: 1, items },

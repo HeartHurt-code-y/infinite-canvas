@@ -12,6 +12,7 @@ import {
   type MvSongProbe,
 } from "../../lib/mvMedia";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import { withWorkflowModelErrors } from "../../lib/workflowErrors";
 import { createAiFilmCheckpoint, type AiFilmAsset } from "./aiFilmWorkflowModel";
 import { parseComicDramaReview } from "./comicDramaWorkflowRunner";
 import {
@@ -589,7 +590,10 @@ export interface MusicVideoWorkflowRunnerDependencies extends KnowledgeVideoWork
 export function createMusicVideoWorkflowRunner(
   overrides: Partial<MusicVideoWorkflowRunnerDependencies> = {},
 ) {
-  const media = overrides.mvMediaClient ?? mvMediaClient;
+  const media = withWorkflowModelErrors(overrides.mvMediaClient ?? mvMediaClient, [
+    "transcribeSong",
+    "alignLyrics",
+  ]);
   const requireHumanLipReviews = async (context: WorkflowPlanningContext) => {
     const checkpoint = context.checkpoint();
     const state = checkpoint.musicVideo;

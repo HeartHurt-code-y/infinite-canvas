@@ -1,9 +1,10 @@
 import { Icon } from "../../components/Icon";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { ImeTextarea } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
-import { formatRawBackendError, toMediaSrc } from "../../lib/backend";
+import { toMediaSrc } from "../../lib/backend";
 import {
   workflowHistoryClient,
   type WorkflowHistoryClient,
@@ -89,10 +90,6 @@ interface WorkflowHistoryPanelProps {
 
 function dateTime(timestamp: number) {
   return new Date(timestamp).toLocaleString();
-}
-
-function readableError(error: unknown) {
-  return error instanceof Error ? error.message : formatRawBackendError(error);
 }
 
 function DeferredSection({
@@ -217,7 +214,7 @@ function WorkflowDetail({
   const checkpoint = record.nodeSnapshot.config.checkpoint;
   const [resolution, setResolution] = useState("");
   const [busy, setBusy] = useState(false);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<unknown>(null);
   const [actionMessage, setActionMessage] = useState("");
   const busyRef = useRef(false);
   const running = active || ACTIVE_PHASES.includes(record.status);
@@ -243,7 +240,7 @@ function WorkflowDetail({
       setActionMessage(result === false ? "" : success);
       if (refresh) onRefresh();
     } catch (error) {
-      setActionError(readableError(error));
+      setActionError(error);
     } finally {
       busyRef.current = false;
       setBusy(false);
@@ -302,7 +299,7 @@ function WorkflowDetail({
       {record.error ? (
         <section className="history-section history-section--error">
           <h3>失败原因</h3>
-          <pre className="history-raw workflow-history__error">{record.error}</pre>
+          <ErrorAlert workflow error={record.error} />
         </section>
       ) : null}
       {!running && requiresDecision ? (
@@ -365,11 +362,7 @@ function WorkflowDetail({
       ) : (
         <p className="history-empty-note">工作流正在执行，可刷新进度或定位到画布查看。</p>
       )}
-      {actionError ? (
-        <p role="alert" className="workflow-history__error">
-          {actionError}
-        </p>
-      ) : null}
+      {actionError ? <ErrorAlert workflow error={actionError} /> : null}
       {actionMessage ? <p role="status">{actionMessage}</p> : null}
       <section className="history-section">
         <h3>制作输入</h3>
@@ -417,7 +410,7 @@ function WorkflowDetail({
                   <time>{dateTime(event.createdAt)}</time>
                 </div>
                 <p>{event.message}</p>
-                {event.error ? <pre className="workflow-history__error">{event.error}</pre> : null}
+                {event.error ? <ErrorAlert workflow error={event.error} /> : null}
               </li>
             ))}
           </ol>
@@ -572,8 +565,9 @@ export function WorkflowHistoryPanel({
   const [cursor, setCursor] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState(initialWorkflowId);
   const [detail, setDetail] = useState<WorkflowHistoryDetail | null>(null);
-  const [listError, setListError] = useState<string | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [listError, setListError] = useState<unknown>(null);
+  const [detailError, setDetailError] = useState<unknown>(null);
+  const detailErrorId = useId();
   const [loaded, setLoaded] = useState(false);
   const [moreLoading, setMoreLoading] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -620,7 +614,7 @@ export function WorkflowHistoryPanel({
       })
       .catch((error) => {
         if (cancelled || request !== listRequestRef.current) return;
-        setListError(readableError(error));
+        setListError(error);
         setItems([]);
         setCursor(null);
         setLoaded(true);
@@ -645,7 +639,7 @@ export function WorkflowHistoryPanel({
       })
       .catch((error) => {
         if (cancelled || request !== detailRequestRef.current) return;
-        setDetailError(readableError(error));
+        setDetailError(error);
       });
     return () => {
       cancelled = true;
@@ -672,7 +666,7 @@ export function WorkflowHistoryPanel({
       setCursor(page.nextCursor);
       setListError(null);
     } catch (error) {
-      if (request === listRequestRef.current) setListError(readableError(error));
+      if (request === listRequestRef.current) setListError(error);
     } finally {
       if (request === listRequestRef.current) {
         moreLoadingRef.current = false;
@@ -724,11 +718,7 @@ export function WorkflowHistoryPanel({
           />
         </div>
         <div className="history-list__scroll">
-          {listError ? (
-            <p className="history-list__error" role="alert">
-              {listError}
-            </p>
-          ) : null}
+          {listError ? <ErrorAlert workflow error={listError} /> : null}
           {!loaded ? (
             <p className="history-list__empty">正在加载工作流历史…</p>
           ) : items.length === 0 && !listError ? (
@@ -784,12 +774,12 @@ export function WorkflowHistoryPanel({
       </aside>
       <div className="history-detail" aria-label="工作流详情">
         {detailError ? (
-          <p role="alert" className="history-detail__error">
-            {detailError}
-            <button type="button" onClick={refresh}>
+          <div className="history-detail__error">
+            <ErrorAlert workflow id={detailErrorId} error={detailError} />
+            <button type="button" aria-describedby={detailErrorId} onClick={refresh}>
               重试读取详情
             </button>
-          </p>
+          </div>
         ) : selectedId && detail?.record.id === selectedId ? (
           <WorkflowDetail
             key={detail.record.id}

@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
-import { backendErrorMessage, isDesktopRuntime } from "../../lib/backend";
+import { isDesktopRuntime } from "../../lib/backend";
 import { saveMarkdownDocumentToDesktop } from "./desktopActions";
 import {
   generateJewelryLaunchDraft,
@@ -154,7 +154,8 @@ export function ProductSceneJewelryLaunch({
   designCandidates,
 }: ProductSceneJewelryLaunchProps) {
   const [exporting, setExporting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const errorId = useId();
   const [notice, setNotice] = useState<string | null>(null);
   const launch = options.jewelry?.launch;
   const draft = launch?.draft;
@@ -184,7 +185,7 @@ export function ProductSceneJewelryLaunch({
       setError(null);
       setNotice("淘宝十图方案已保存，可逐项查看或导出。");
     } catch (cause) {
-      setError(`生成方案失败：${backendErrorMessage(cause)}`);
+      setError(cause);
     }
   }
 
@@ -230,7 +231,7 @@ export function ProductSceneJewelryLaunch({
       }
       setNotice("淘宝十图方案已导出。");
     } catch (cause) {
-      setError(`导出方案失败：${backendErrorMessage(cause)}`);
+      setError(cause);
     } finally {
       setExporting(false);
       onBusyChange?.(false);
@@ -253,11 +254,21 @@ export function ProductSceneJewelryLaunch({
         />
       </label>
       <div className="jewelry-launch__actions">
-        <button type="button" disabled={disabled || exporting} onClick={generateDraft}>
+        <button
+          type="button"
+          disabled={disabled || exporting}
+          aria-describedby={error ? errorId : undefined}
+          onClick={generateDraft}
+        >
           {draft ? "更新淘宝十图方案" : "生成淘宝十图方案"}
         </button>
         {draft && (
-          <button type="button" disabled={exporting} onClick={() => void exportDraft()}>
+          <button
+            type="button"
+            disabled={exporting}
+            aria-describedby={error ? errorId : undefined}
+            onClick={() => void exportDraft()}
+          >
             {exporting ? "正在导出…" : "导出十图方案"}
           </button>
         )}
@@ -267,7 +278,7 @@ export function ProductSceneJewelryLaunch({
           资料或原图设置已改变，建议更新方案。旧方案仍可查看和导出。
         </p>
       )}
-      {error ? <ErrorAlert error={error} /> : null}
+      {error ? <ErrorAlert workflow id={errorId} error={error} /> : null}
       {notice && <p role="status">{notice}</p>}
       {draft && <LaunchDraft draft={draft} />}
       {draft && (

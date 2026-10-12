@@ -120,7 +120,7 @@ export function ReverseVideoConfiguration({
           ? "无需下载，使用已选择的视频完成抽帧与分析。"
           : "链接由项目内的下载器处理。若平台要求登录，可选择本机浏览器或导入 cookies.txt 后重试。"}
       </small>
-      {pickError ? <ErrorAlert error={pickError} /> : null}
+      {pickError ? <ErrorAlert workflow error={pickError} /> : null}
       <label className="canvas-knowledge-workflow__brief">
         <span>补充方向</span>
         <ImeTextarea
@@ -281,7 +281,7 @@ export function ReverseVideoDeliverables({ checkpoint }: ReverseVideoDeliverable
           </div>
         </details>
       ) : null}
-      {openError ? <ErrorAlert error={openError} /> : null}
+      {openError ? <ErrorAlert workflow error={openError} /> : null}
     </section>
   );
 }

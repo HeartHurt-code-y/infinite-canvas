@@ -6,7 +6,11 @@ import {
   type VideoDownloaderClient,
 } from "../../lib/backend";
 import { reelbenchBackendClient } from "../../lib/reelbenchBackend";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import { sameWorkflowSignature } from "../../lib/workflowSignatures";
 import { downloadFailureSummary } from "./downloadFailureSummary";
 import { isWorkflowExecutionPlanApproved, getWorkflowExecutionPlan } from "./workflowExecutionPlan";
@@ -148,7 +152,10 @@ export function createReelbenchWorkflowRunner(
     async run(request) {
       const dependencies = {
         ...base,
-        promptClient: withWorkflowMaterials(base.promptClient, request.node.config),
+        promptClient: withWorkflowMaterials(
+          withWorkflowModelErrors(base.promptClient, ["run"]),
+          request.node.config,
+        ),
       };
       const { node, signal } = request;
       let checkpoint = node.config.checkpoint;
@@ -490,7 +497,7 @@ export function createReelbenchWorkflowRunner(
         return checkpoint;
       } catch (error) {
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
-        const message = formatWorkflowError(error);
+        const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(
           paused ? "paused" : "failed",

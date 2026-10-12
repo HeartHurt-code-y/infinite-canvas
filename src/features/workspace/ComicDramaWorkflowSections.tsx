@@ -1,5 +1,6 @@
 import { Icon } from "../../components/Icon";
-import { useEffect, useRef, useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
 import { isDesktopRuntime, toMediaSrc, type ProviderCatalogEntry } from "../../lib/backend";
@@ -34,7 +35,9 @@ export function ComicDramaConfiguration({
   onBriefChange,
 }: ComicDramaConfigurationProps) {
   const [importing, setImporting] = useState(false);
-  const [importError, setImportError] = useState("");
+  const [importError, setImportError] = useState<unknown>(null);
+  const importErrorId = useId();
+  const voicesErrorId = useId();
   const settingsRef = useRef<HTMLDetailsElement>(null);
   const importTarget = useRef({ disabled, onChange });
   useEffect(() => {
@@ -70,7 +73,7 @@ export function ComicDramaConfiguration({
 
   const importFiles = async (files: readonly File[]) => {
     if (!files.length) return;
-    setImportError("");
+    setImportError(null);
     if (files.some((file) => !/\.(txt|md|markdown)$/i.test(file.name))) {
       setImportError("请选择 TXT 或 Markdown 剧本文件。");
       return;
@@ -96,8 +99,8 @@ export function ComicDramaConfiguration({
       if (!importTarget.current.disabled) {
         importTarget.current.onChange({ ...options, episodes: [...existing, ...episodes] });
       }
-    } catch {
-      setImportError("剧本文件读取失败，请重新选择文件。");
+    } catch (error) {
+      setImportError(error);
     } finally {
       setImporting(false);
     }
@@ -120,6 +123,7 @@ export function ComicDramaConfiguration({
           <input
             type="file"
             aria-label="导入漫剧分集剧本"
+            aria-describedby={importError ? importErrorId : undefined}
             accept=".txt,.md,.markdown,text/plain,text/markdown"
             multiple
             onChange={(event) => {
@@ -131,7 +135,7 @@ export function ComicDramaConfiguration({
           <small>支持多个 TXT / Markdown 文件，按文件名排序，每个文件对应一集，最多 10 集。</small>
         </label>
         {importing ? <p role="status">正在读取剧本…</p> : null}
-        {importError ? <p role="alert">{importError}</p> : null}
+        {importError ? <ErrorAlert workflow id={importErrorId} error={importError} /> : null}
         {options.episodes.map((episode, index) => (
           <fieldset className="canvas-comic-drama-workflow__episode" key={episode.id}>
             <legend>第 {index + 1} 集</legend>
@@ -339,6 +343,7 @@ export function ComicDramaConfiguration({
                     </span>
                     <ImeInput
                       aria-label={`${asset.name}控制台音色 ID`}
+                      aria-describedby={hasDuplicateVoices ? voicesErrorId : undefined}
                       value={selected}
                       disabled={!selectedModel}
                       placeholder="粘贴供应商控制台中的真实音色 ID"
@@ -366,7 +371,7 @@ export function ComicDramaConfiguration({
             <small>确认分镜后会列出需要配音的角色。</small>
           )}
           {hasDuplicateVoices ? (
-            <small role="alert">不同说话角色请绑定不同的控制台音色 ID。</small>
+            <ErrorAlert workflow id={voicesErrorId} error="不同说话角色请绑定不同的控制台音色 ID。" />
           ) : null}
           <small>账号音色权限以供应商实际语音合成响应为准；示例 ID 不代表当前账号已开通。</small>
           {!speechProviders.length ? (
@@ -416,16 +421,16 @@ export function ComicDramaDeliverables({
     decision: "approved" | "rejected",
   ) => void | Promise<void>;
 }) {
-  const [reviewError, setReviewError] = useState("");
+  const [reviewError, setReviewError] = useState<unknown>(null);
   const [reviewingShot, setReviewingShot] = useState<string | null>(null);
   const reviewShot = async (shotId: string, decision: "approved" | "rejected") => {
     if (!onReviewDubbedShot) return;
-    setReviewError("");
+    setReviewError(null);
     setReviewingShot(shotId);
     try {
       await onReviewDubbedShot(shotId, decision);
     } catch (error: unknown) {
-      setReviewError(error instanceof Error ? error.message : String(error));
+      setReviewError(error);
     } finally {
       setReviewingShot(null);
     }
@@ -519,7 +524,7 @@ export function ComicDramaDeliverables({
             <small>
               请逐镜试听并观看嘴部动作。配音镜头的原音轨已被替换；人工通过前不会合成成片。
             </small>
-            {reviewError ? <p role="alert">{reviewError}</p> : null}
+            {reviewError ? <ErrorAlert workflow error={reviewError} /> : null}
             {checkpoint.shots.map((shot) => {
               const dubbed = checkpoint.comicDrama?.speech?.dubbedClips?.[shot.id];
               if (!dubbed) return null;

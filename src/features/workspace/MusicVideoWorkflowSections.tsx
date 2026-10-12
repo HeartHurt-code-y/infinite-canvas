@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import { toMediaSrc } from "../../lib/backend";
 import type { ProviderCatalogEntry } from "../../lib/backend";
@@ -459,6 +460,7 @@ function MusicVideoLipReviewPreview({
   const clipRef = useRef<HTMLVideoElement>(null);
   const songRef = useRef<HTMLAudioElement>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(null);
+  const playbackErrorId = useId();
   function synchronize() {
     const clip = clipRef.current;
     const song = songRef.current;
@@ -488,6 +490,7 @@ function MusicVideoLipReviewPreview({
         preload="metadata"
         src={toMediaSrc(clipPath)}
         aria-label={`${title} 片段预览`}
+        aria-describedby={playbackError ? playbackErrorId : undefined}
         onPlay={playWithOriginalSong}
         onPause={() => songRef.current?.pause()}
         onEnded={() => songRef.current?.pause()}
@@ -500,9 +503,10 @@ function MusicVideoLipReviewPreview({
         preload="metadata"
         src={`${toMediaSrc(songPath)}#t=${startSeconds},${endSeconds}`}
         aria-label={`${title} 原曲窗口试听`}
+        aria-describedby={playbackError ? playbackErrorId : undefined}
         onLoadedMetadata={synchronize}
       />
-      {playbackError ? <p role="alert">{playbackError}</p> : null}
+      {playbackError ? <ErrorAlert workflow id={playbackErrorId} error={playbackError} /> : null}
     </>
   );
 }
@@ -528,7 +532,8 @@ export function MusicVideoDeliverables({
   const [editing, setEditing] = useState<MusicVideoStage | null>(null);
   const [lipNotes, setLipNotes] = useState<Record<string, string>>({});
   const [lipBusy, setLipBusy] = useState<string | null>(null);
-  const [lipError, setLipError] = useState<string | null>(null);
+  const [lipError, setLipError] = useState<unknown>(null);
+  const lipErrorId = useId();
   const state = checkpoint.musicVideo;
   if (
     !state ||
@@ -546,7 +551,7 @@ export function MusicVideoDeliverables({
       const clipSignature = await mvMediaClient.clipSignature(clipPath);
       await onLipReview(shotId, decision, clipSignature, lipNotes[shotId] ?? "");
     } catch (error) {
-      setLipError(error instanceof Error ? error.message : String(error));
+      setLipError(error);
     } finally {
       setLipBusy(null);
     }
@@ -662,7 +667,7 @@ export function MusicVideoDeliverables({
           <p>
             当前未接入自动唇音偏移检测。请试听原曲窗口、预览实际片段，并逐镜选用或驳回；片段正文变化后审核自动失效。
           </p>
-          {lipError ? <p role="alert">{lipError}</p> : null}
+          {lipError ? <ErrorAlert workflow id={lipErrorId} error={lipError} /> : null}
           {syncShots.map((shot) => {
             const clipPath = checkpoint.shotRuns[shot.id]?.clipPath;
             const review = state.lipReviews?.[shot.id];
@@ -720,6 +725,7 @@ export function MusicVideoDeliverables({
                   <button
                     type="button"
                     disabled={disabled || !clipPath || lipBusy !== null}
+                    aria-describedby={lipError ? lipErrorId : undefined}
                     onClick={() => void reviewLipShot(shot.id, "approved")}
                   >
                     人工选用此镜
@@ -727,6 +733,7 @@ export function MusicVideoDeliverables({
                   <button
                     type="button"
                     disabled={disabled || !clipPath || lipBusy !== null}
+                    aria-describedby={lipError ? lipErrorId : undefined}
                     onClick={() => void reviewLipShot(shot.id, "rejected")}
                   >
                     驳回并返工

@@ -18,7 +18,12 @@ import {
   type ProductSceneProtectionEvidence,
 } from "./productSceneJewelry";
 import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  modelWorkflowError,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import type {
   KnowledgeVideoWorkflowRunRequest,
   KnowledgeVideoWorkflowRunner,
@@ -144,7 +149,7 @@ export function productSceneImageParameters(
 export function createProductSceneWorkflowRunner(
   overrides: Partial<Dependencies> = {},
 ): KnowledgeVideoWorkflowRunner {
-  const dependencies: Dependencies = {
+  const baseDependencies: Dependencies = {
     validateBrandModel: validateBoundBrandModel,
     generationClient,
     promptClient: promptNodeClient,
@@ -156,6 +161,11 @@ export function createProductSceneWorkflowRunner(
     now: Date.now,
     sleep,
     ...overrides,
+  };
+  const dependencies: Dependencies = {
+    ...baseDependencies,
+    promptClient: withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
+    generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "getProgress"]),
   };
   return {
     async run(request) {
@@ -472,7 +482,7 @@ export function createProductSceneWorkflowRunner(
           } catch (error) {
             if (signal.aborted || (error instanceof Error && error.name === "AbortError"))
               throw error;
-            const message = formatWorkflowError(error);
+            const message = formatWorkflowFailure(error);
             updateQuality({ status: "failed", error: message });
             updateRow(rowId, {
               status: "needs_review",
@@ -630,6 +640,9 @@ export function createProductSceneWorkflowRunner(
               if (["failed", "unknown", "interrupted"].includes(detail.summary.status))
                 throw new Error(
                   `${resultName}任务状态：${formatWorkflowError(detail.finalError ?? detail.summary.status)}。${mode === "reference" ? "全部参考图均已提交；若模型不支持此数量，请调整参考图或选择支持它的模型并重新规划。" : ""}已保留任务身份；继续只查询原任务，只有明确点击该图重做才提交新的生成请求。`,
+                  detail.summary.status === "failed"
+                    ? { cause: modelWorkflowError(detail.finalError ?? detail.summary.status) }
+                    : undefined,
                 );
               await dependencies.sleep(1000, signal);
             }
@@ -748,7 +761,7 @@ export function createProductSceneWorkflowRunner(
                 if (signal.aborted || (error instanceof Error && error.name === "AbortError"))
                   throw error;
                 if (error instanceof ProductSceneSourceChangedError) fatalError ??= error;
-                const message = formatWorkflowError(error);
+                const message = formatWorkflowFailure(error);
                 updateRow(plannedRow.id, { status: "error", error: message });
                 failedRows.push(plannedRow.index);
                 progress(
@@ -806,7 +819,7 @@ export function createProductSceneWorkflowRunner(
         return checkpoint;
       } catch (error) {
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
-        const message = formatWorkflowError(error);
+        const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(paused ? "已暂停。已保存的生成任务与本地图片将在继续时复用。" : message);
         return checkpoint;

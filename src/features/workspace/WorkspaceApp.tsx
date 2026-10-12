@@ -1,11 +1,11 @@
 import { Icon } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { AppUpdateBanner } from "./AppUpdateBanner";
 import {
   ensureRuntimeFeatureInstalled,
   RUNTIME_COMPONENTS_REQUEST_EVENT,
 } from "../../lib/runtimeComponents";
 import { CanvasAgentController } from "./agent/canvasAgentController";
-import { CanvasAgentPanel } from "./agent/CanvasAgentPanel";
 import { createAgentCanvasTools } from "./agent/agentCanvasTools";
 import { createAgentBlenderTools, previewAgentBlenderScenes } from "./agent/agentBlenderTools";
 import {
@@ -279,7 +279,7 @@ import {
   withCanvasWorkflowMaterials,
   withLiveWorkflowCanvasInputs,
 } from "./workflowCanvasInputs";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import { formatWorkflowError, formatWorkflowFailure, workflowUsageError } from "../../lib/workflowErrors";
 import { WorkflowRepository } from "./WorkflowRepository";
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
@@ -475,6 +475,9 @@ const WhiteModelStudioDialog = lazy(() =>
 );
 const RuntimeComponentsPanel = lazy(() =>
   import("./RuntimeComponentsPanel").then((module) => ({ default: module.RuntimeComponentsPanel })),
+);
+const CanvasAgentPanel = lazy(() =>
+  import("./agent/CanvasAgentPanel").then((module) => ({ default: module.CanvasAgentPanel })),
 );
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
@@ -2330,7 +2333,7 @@ export function WorkspaceApp({
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     void recoverWorkflowHistory().catch((error: unknown) => {
-      toast.error("工作流历史恢复失败", { description: formatWorkflowError(error) });
+      toast.error("工作流历史恢复失败", { description: <ErrorAlert error={error} workflow /> });
     });
   }, [recoverWorkflowHistory]);
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
@@ -4896,9 +4899,9 @@ export function WorkspaceApp({
                               : "填写制作要求并点击开始，其余步骤由节点自动完成。",
         });
       } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = formatRawBackendError(error);
         frontendLog("error", `[canvas] 工作流放入失败: ${message}`);
-        toast.error("工作流放入失败", { description: message });
+        toast.error("工作流放入失败", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [
@@ -5007,7 +5010,7 @@ export function WorkspaceApp({
             });
           workflowReviewHistoryEditsRef.current.set(key, save);
           void save.catch((error: unknown) =>
-            toast.error("工作流审核历史保存失败", { description: formatWorkflowError(error) }),
+            toast.error("工作流审核历史保存失败", { description: <ErrorAlert error={error} workflow /> }),
           );
         }
       }
@@ -5045,7 +5048,7 @@ export function WorkspaceApp({
         });
         scheduleCanvasSave();
       } catch (error) {
-        toast.error("工作流版本无法恢复", { description: formatWorkflowError(error) });
+        toast.error("工作流版本无法恢复", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [
@@ -5134,7 +5137,7 @@ export function WorkspaceApp({
             },
           }));
         } catch (error) {
-          const message = formatWorkflowError(error);
+          const message = formatWorkflowFailure(error);
           setKnowledgeVideoWorkflowRuns((current) => ({
             ...current,
             [key]: {
@@ -5154,7 +5157,7 @@ export function WorkspaceApp({
             phase: "failed",
             progress: 0,
             message: "请在桌面应用中执行工作流。",
-            error: "自动工作流需要桌面端的项目供应商和本地合成能力。",
+            error: formatWorkflowFailure(workflowUsageError("runtime", "自动工作流需要桌面端的项目供应商和本地合成能力。")),
           },
         }));
         return;
@@ -5255,7 +5258,7 @@ export function WorkspaceApp({
           }
         })
         .catch((error: unknown) => {
-          const message = formatWorkflowError(error);
+          const message = formatWorkflowFailure(error);
           setKnowledgeVideoWorkflowRuns((current) => ({
             ...current,
             [key]: { phase: "failed", progress: 0, message: "工作流执行失败。", error: message },
@@ -5291,9 +5294,10 @@ export function WorkspaceApp({
       try {
         await recoverWorkflowHistory();
         const latest = (await workflowHistoryClient.get(record.id)).record;
-        if (latest.canvasId !== canvasId) throw new Error("请先打开这条工作流所属的画布。");
+        if (latest.canvasId !== canvasId)
+          throw workflowUsageError("task_identity", "请先打开这条工作流所属的画布。");
         if (activeWorkflowHistoryIdsRef.current.has(latest.id) && action !== "locate")
-          throw new Error("这条工作流正在运行，请先在画布中暂停后再处理。");
+          throw workflowUsageError("task_pending", "这条工作流正在运行，请先在画布中暂停后再处理。");
         const document = snapshotV2({});
         const nodes = document.knowledgeVideoWorkflowNodes ?? [];
         const activeNode = nodes.find(
@@ -5408,7 +5412,7 @@ export function WorkspaceApp({
   const locateHistoryWorkflow = useCallback(
     (record: WorkflowHistoryRecord) => {
       void restoreStoredWorkflow(record, "locate").catch((error: unknown) =>
-        toast.error("恢复工作流失败", { description: formatWorkflowError(error) }),
+        toast.error("恢复工作流失败", { description: <ErrorAlert error={error} workflow /> }),
       );
     },
     [restoreStoredWorkflow],
@@ -5432,7 +5436,9 @@ export function WorkspaceApp({
         });
         if (!picked.length) return;
         if (role === "song" && picked.length !== 1) {
-          toast.error("一次请选择一首完整歌曲");
+          toast.error("选择 MV 原曲失败", {
+            description: <ErrorAlert error={workflowUsageError("materials", "一次请选择一首完整歌曲")} workflow />,
+          });
           return;
         }
         patchNode("knowledgeVideoWorkflow", key, (node) => {
@@ -5467,7 +5473,7 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择 MV 素材失败", { description: formatWorkflowError(error) });
+        toast.error("选择 MV 素材失败", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [patchNode],
@@ -5505,7 +5511,7 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择视频失败", { description: formatWorkflowError(error) });
+        toast.error("选择视频失败", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [patchNode],
@@ -5568,7 +5574,7 @@ export function WorkspaceApp({
           };
         });
       } catch (error) {
-        toast.error("选择视频失败", { description: formatWorkflowError(error) });
+        toast.error("选择视频失败", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [patchNode],
@@ -5896,7 +5902,7 @@ export function WorkspaceApp({
         patchNode("knowledgeVideoWorkflow", key, () => approvedNode);
         runKnowledgeVideoWorkflow(key, plan.executionIntent === "resume", undefined, approvedNode);
       } catch (error) {
-        toast.error("执行计划无法确认", { description: formatWorkflowError(error) });
+        toast.error("执行计划无法确认", { description: <ErrorAlert error={error} workflow /> });
       }
     },
     [snapshotV2, patchNode, runKnowledgeVideoWorkflow],
@@ -5998,7 +6004,7 @@ export function WorkspaceApp({
         .checkpoint.remotion?.renderJob?.projectPath;
       if (path)
         void revealDesktopItem(path).catch((error: unknown) =>
-          toast.error("打开动画工程失败", { description: formatRawBackendError(error) }),
+          toast.error("打开动画工程失败", { description: <ErrorAlert error={error} workflow /> }),
         );
     },
     [canvasNodesNow],
@@ -6092,7 +6098,7 @@ export function WorkspaceApp({
           }
           toast.success(`${title}已导出`);
         } catch (error) {
-          toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
+          toast.error(`${title}导出失败`, { description: <ErrorAlert error={error} workflow /> });
         }
       })();
     },
@@ -13460,11 +13466,19 @@ export function WorkspaceApp({
 
   return (
     <main className="workspace-shell">
-      <CanvasAgentPanel
-        controller={canvasAgent}
-        catalog={providerCatalog}
-        disabled={!canvasHydrated}
-      />
+      <Suspense
+        fallback={
+          <div className="canvas-load-notice" role="status">
+            <strong>正在加载画布助手…</strong>
+          </div>
+        }
+      >
+        <CanvasAgentPanel
+          controller={canvasAgent}
+          catalog={providerCatalog}
+          disabled={!canvasHydrated}
+        />
+      </Suspense>
       {!canvasHydrated ? (
         <div className="canvas-load-notice" role="status">
           <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>

@@ -40,8 +40,22 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
 
+      # Rust 侧依赖治理：漏洞公告 + 许可证 + 来源约束（配置见 deny.toml）。
+      # 本地复现：cargo deny --manifest-path src-tauri/Cargo.toml check
+      - name: Check Rust dependencies (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --manifest-path src-tauri/Cargo.toml check
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # 前端依赖治理：生产依赖漏洞审计 + 未使用依赖检测（配置见 knip.json）。
+      - name: Check frontend production vulnerabilities
+        run: pnpm audit --prod
+
+      - name: Check unused dependencies (knip)
+        run: pnpm knip
 
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium

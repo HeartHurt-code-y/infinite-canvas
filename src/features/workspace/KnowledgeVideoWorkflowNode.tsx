@@ -998,6 +998,7 @@ export function KnowledgeVideoWorkflowNode({
             ) : null}
             {unsupportedProductReferences ? (
               <ErrorAlert
+                workflow
                 error="产品场景图只使用下方专用产品原图。"
                 hint="移除通用参考与连线，再核对和确认专用参考图。"
               />
@@ -1546,6 +1547,7 @@ export function KnowledgeVideoWorkflowNode({
 
         {error ? (
           <ErrorAlert
+            workflow
             id={`workflow-${node.key}-error`}
             error={error}
             hint="核对提示涉及的素材或模型；已有任务会保留，修正后继续。修改制作要求时请重新查看并确认计划。"

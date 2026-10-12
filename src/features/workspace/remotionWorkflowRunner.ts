@@ -1,7 +1,11 @@
 import { promptNodeClient, type PromptNodeClient, type TextSkillMode } from "../../lib/backend";
 import { remotionRendererClient, type RemotionRendererClient } from "../../lib/remotionRenderer";
 import { requestRuntimeComponents } from "../../lib/runtimeComponents";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import { parseComicDramaReview } from "./comicDramaWorkflowRunner";
 import {
@@ -264,7 +268,10 @@ export function createRemotionWorkflowRunner(
     async run(request) {
       const dependencies = {
         ...baseDependencies,
-        promptClient: withWorkflowMaterials(baseDependencies.promptClient, request.node.config),
+        promptClient: withWorkflowMaterials(
+          withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
+          request.node.config,
+        ),
       };
       const { node, signal, onCheckpoint, onProgress } = request;
       let checkpoint = node.config.checkpoint;
@@ -539,7 +546,7 @@ export function createRemotionWorkflowRunner(
             /* 后端任务仍可用原身份查询与重试取消。 */
           }
         }
-        const message = formatWorkflowError(error);
+        const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(
           paused ? "paused" : "failed",

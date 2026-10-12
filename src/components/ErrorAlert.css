@@ -37,6 +37,30 @@
   line-height: 1.5;
 }
 
+.error-alert__guidance {
+  display: grid;
+  gap: var(--space-2xs);
+  margin: var(--space-3xs) 0 0;
+  color: var(--color-text-2);
+}
+
+.error-alert__guidance dt {
+  color: var(--color-text-1);
+  font-weight: 700;
+}
+
+.error-alert__guidance dd {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.error-alert__guidance ol {
+  display: grid;
+  gap: var(--space-3xs);
+  margin: 0;
+  padding-inline-start: var(--space-lg);
+}
+
 /* 原始报错是排查用的，不进 alert live region：展开由用户主动触发。 */
 .error-alert__details {
   justify-self: start;

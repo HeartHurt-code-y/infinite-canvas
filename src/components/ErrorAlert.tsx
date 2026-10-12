@@ -1,5 +1,6 @@
 import { Icon } from "./Icon";
 import { backendErrorDetails, backendErrorMessage } from "../lib/backend";
+import { workflowErrorPresentation } from "../lib/workflowErrors";
 import "./ErrorAlert.css";
 
 /*
@@ -33,22 +34,37 @@ export interface ErrorAlertProps {
   readonly id?: string;
   /** 补救建议：错误只说明「发生了什么」，这里说「接下来怎么办」。 */
   readonly hint?: string | undefined;
+  /** Workflow usage errors include guidance; marked model failures retain their complete response. */
+  readonly workflow?: boolean;
 }
 
-export function ErrorAlert({ error, id, hint }: ErrorAlertProps) {
-  const details = backendErrorDetails(error);
+export function ErrorAlert({ error, id, hint, workflow = false }: ErrorAlertProps) {
+  const presentation = workflow ? workflowErrorPresentation(error) : null;
+  const details = presentation ? presentation.details : backendErrorDetails(error);
+  const summary = presentation ? presentation.summary : backendErrorMessage(error);
   return (
     <div className="error-alert">
-      <p className="error-alert__summary" id={id} role="alert">
+      <div className="error-alert__summary" id={id} role="alert">
         <Icon name="warning-circle" aria-hidden="true" size="sm" />
-        <span className="error-alert__text">
-          {backendErrorMessage(error)}
-          {hint ? <small className="error-alert__hint">{hint}</small> : null}
-        </span>
-      </p>
+        <div className="error-alert__text">
+          <span>{summary}</span>
+          {presentation?.origin === "workflow" ? (
+            <dl className="error-alert__guidance">
+              <div><dt>为什么发生</dt><dd>{presentation.cause}</dd></div>
+              <div><dt>现在怎么处理</dt><dd>{presentation.action}</dd></div>
+              <div>
+                <dt>正确流程</dt>
+                <dd><ol>{presentation.steps.map((step) => <li key={step}>{step}</li>)}</ol></dd>
+              </div>
+              <div><dt>如何避免</dt><dd>{presentation.prevention}</dd></div>
+            </dl>
+          ) : null}
+          {hint && presentation?.origin !== "model" ? <small className="error-alert__hint">{hint}</small> : null}
+        </div>
+      </div>
       {details ? (
-        <details className="error-alert__details">
-          <summary>展开完整报错</summary>
+        <details className="error-alert__details" open={presentation?.origin === "model"}>
+          <summary>{presentation?.origin === "model" ? "模型调用完整原始报错" : "展开完整报错"}</summary>
           <pre className="error-alert__raw">{details}</pre>
         </details>
       ) : null}

@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/knip/schema.json",
+  "entry": ["scripts/*.mjs", "tools/**/*.mjs"],
+  "project": ["src/**/*.{ts,tsx}"],
+  "ignore": ["**/*.test.ts", "**/*.test.tsx", "**/__fixtures__/**"],
+  "ignoreDependencies": ["@remotion/renderer"],
+  "rules": {
+    "duplicates": "off",
+    "exports": "off",
+    "nsExports": "off",
+    "nsTypes": "off",
+    "types": "off",
+    "files": "off"
+  }
+}

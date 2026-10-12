@@ -19,7 +19,12 @@ import {
   modelParameterCapabilities,
   type ModelParameterCapability,
 } from "../../lib/modelCapabilities";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  modelWorkflowError,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import {
   CANVAS_ID,
@@ -102,7 +107,9 @@ class QcRegenerationError extends Error {
 /** Only an explicit failed task status permits another paid submission. */
 class ConfirmedGenerationFailure extends Error {
   constructor(taskId: string, details: unknown) {
-    super(`任务 ${taskId} 已明确执行失败：${errorMessage(details)}`);
+    super(`任务 ${taskId} 已明确执行失败：${errorMessage(details)}`, {
+      cause: modelWorkflowError(details),
+    });
     this.name = "ConfirmedGenerationFailure";
   }
 }
@@ -825,7 +832,11 @@ export function createKnowledgeVideoWorkflowRunner(
       const { node, providerCatalog, signal, onCheckpoint, onProgress } = request;
       const dependencies = {
         ...baseDependencies,
-        promptClient: withWorkflowMaterials(baseDependencies.promptClient, node.config),
+        promptClient: withWorkflowMaterials(
+          withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
+          node.config,
+        ),
+        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "get"]),
       };
       const workflowTitle = definition?.title ?? "知识视频";
       let checkpoint = node.config.checkpoint;
@@ -1675,6 +1686,7 @@ export function createKnowledgeVideoWorkflowRunner(
           let run = checkpoint.shotRuns[shot.id]!;
           if (run.qcStatus === "passed") return;
           let qcInfrastructureFailure = "";
+          let qcInfrastructureError: unknown;
           let finished = false;
           for (
             let qcAttempt = 0;
@@ -1866,6 +1878,7 @@ export function createKnowledgeVideoWorkflowRunner(
               if (error instanceof QcRegenerationError) throw error.original;
               if (isAbortError(error)) throw error;
               qcInfrastructureFailure = errorMessage(error);
+              qcInfrastructureError = error;
               if (qcAttempt < node.config.maxAutomaticRetries) {
                 await dependencies.sleep(400, signal);
               }
@@ -1882,6 +1895,7 @@ export function createKnowledgeVideoWorkflowRunner(
                 ...current,
                 phase: "awaiting_approval",
                 lastActivePhase: "qc",
+                error: formatWorkflowFailure(qcInfrastructureError),
                 decision: {
                   kind: "qc",
                   question: `镜头 ${shot.sequence} 无法完成视觉质检：${qcInfrastructureFailure}`,
@@ -2042,7 +2056,7 @@ export function createKnowledgeVideoWorkflowRunner(
           lastActivePhase: stoppedAt,
           error: cancelled
             ? "已停止本地轮询与后续步骤；供应商侧已提交的任务可能仍会完成。"
-            : errorMessage(error),
+            : formatWorkflowFailure(error),
         }));
         progress(
           cancelled ? "paused" : "failed",

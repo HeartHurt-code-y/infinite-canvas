@@ -270,7 +270,7 @@ function ProductSceneQualityDetails({
           </details>
         </>
       ) : null}
-      {quality?.error ? <ErrorAlert error={quality.error} /> : null}
+      {quality?.error ? <ErrorAlert workflow error={quality.error} /> : null}
       <small>可重新检查当前基图；不会重新生成图片。</small>
     </section>
   );
@@ -684,7 +684,7 @@ export function ProductSceneConfiguration({
             : "添加白底 / 透明产品原图"}
       </button>
       {error ? (
-        <ErrorAlert id={PRODUCT_SOURCE_ERROR_ID} error={error.failure} hint={error.remedy} />
+        <ErrorAlert workflow id={PRODUCT_SOURCE_ERROR_ID} error={error.failure} hint={error.remedy} />
       ) : null}
       <div className="product-scene__views">
         {options.views.map((view) => (
@@ -1126,7 +1126,7 @@ export function ProductSceneConfiguration({
                 移除 Logo 贴回
               </button>
               {generationMode !== "reference" ? (
-                <p role="alert">请移除此额外 Logo，或切换到 AI 多机位模式。</p>
+                <ErrorAlert workflow error="请移除此额外 Logo，或切换到 AI 多机位模式。" />
               ) : null}
             </div>
           ) : null}
@@ -1569,7 +1569,7 @@ export function ProductSceneDeliverables({
                 ? `产品参考：${options.views.map((view) => view.label).join("、")}`
                 : `原图视角：${options.views.find((view) => view.id === row.recipe.viewId)?.label ?? row.recipe.viewId}`}
             </small>
-            {row.error ? <ErrorAlert error={row.error} /> : null}
+            {row.error ? <ErrorAlert workflow error={row.error} /> : null}
             {row.reviewNotes.map((note, index) => (
               <small key={index}>{note}</small>
             ))}

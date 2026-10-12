@@ -306,12 +306,6 @@
     "fs:scope-video-recursive",
     "fs:write-all",
     "fs:write-files",
-    "global-shortcut:allow-is-registered",
-    "global-shortcut:allow-register",
-    "global-shortcut:allow-register-all",
-    "global-shortcut:allow-unregister",
-    "global-shortcut:allow-unregister-all",
-    "global-shortcut:default",
     "http:allow-fetch-cancel",
     "http:allow-fetch-cancel-body",
     "http:allow-fetch-read-body",
@@ -352,31 +346,6 @@
     "process:allow-restart",
     "process:default",
     "updater:default",
-    "shell:allow-kill",
-    "shell:allow-open",
-    "shell:allow-stdin-write",
-    "shell:default",
-    "store:allow-clear",
-    "store:allow-delete",
-    "store:allow-entries",
-    "store:allow-get",
-    "store:allow-get-store",
-    "store:allow-has",
-    "store:allow-keys",
-    "store:allow-length",
-    "store:allow-load",
-    "store:allow-reload",
-    "store:allow-reset",
-    "store:allow-save",
-    "store:allow-set",
-    "store:allow-values",
-    "store:default",
-    "upload:allow-download",
-    "upload:allow-upload",
-    "upload:default",
-    "websocket:allow-connect",
-    "websocket:allow-send",
-    "websocket:default",
     {
       "identifier": "fs:scope",
       "allow": ["**"]
@@ -400,76 +369,6 @@
         {
           "url": "*",
           "app": true
-        }
-      ]
-    },
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [
-        {
-          "cmd": "cmd.exe",
-          "args": true,
-          "name": "cmd"
-        },
-        {
-          "cmd": "powershell.exe",
-          "args": true,
-          "name": "powershell"
-        },
-        {
-          "cmd": "pwsh",
-          "args": true,
-          "name": "pwsh"
-        },
-        {
-          "cmd": "sh",
-          "args": true,
-          "name": "sh"
-        },
-        {
-          "cmd": "bash",
-          "args": true,
-          "name": "bash"
-        },
-        {
-          "cmd": "zsh",
-          "args": true,
-          "name": "zsh"
-        }
-      ]
-    },
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "cmd": "cmd.exe",
-          "args": true,
-          "name": "cmd"
-        },
-        {
-          "cmd": "powershell.exe",
-          "args": true,
-          "name": "powershell"
-        },
-        {
-          "cmd": "pwsh",
-          "args": true,
-          "name": "pwsh"
-        },
-        {
-          "cmd": "sh",
-          "args": true,
-          "name": "sh"
-        },
-        {
-          "cmd": "bash",
-          "args": true,
-          "name": "bash"
-        },
-        {
-          "cmd": "zsh",
-          "args": true,
-          "name": "zsh"
         }
       ]
     }

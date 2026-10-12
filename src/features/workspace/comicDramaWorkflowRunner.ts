@@ -1,6 +1,6 @@
 import type { ExplicitMediaInput, TextSkillMode } from "../../lib/backend";
 import { modelParameterCapabilities } from "../../lib/modelCapabilities";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import { formatWorkflowError, withWorkflowModelErrors } from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import { speechClient } from "../../lib/speech";
 import { mvMediaClient } from "../../lib/mvMedia";
@@ -810,12 +810,13 @@ export function createComicDramaWorkflowRunner(
   } = {},
 ) {
   const {
-    speechClient: voiceClient = speechClient,
+    speechClient: rawVoiceClient = speechClient,
     // 默认值包一层：`mvMediaClient.clipSignature` 是对象方法，直接解构会脱离接收者，
     // 后续实现若开始使用 `this` 就会静默丢上下文。
     clipSignature = (path: string) => mvMediaClient.clipSignature(path),
     ...baseDependencies
   } = dependencies;
+  const voiceClient = withWorkflowModelErrors(rawVoiceClient, ["synthesize"]);
   return createKnowledgeVideoWorkflowRunner(baseDependencies, {
     title: "漫剧作品",
     plan: planComicDrama,

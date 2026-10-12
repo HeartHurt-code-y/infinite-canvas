@@ -1,4 +1,5 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import { workflowUsageError } from "../../lib/workflowErrors";
 import { workflowMaterialsSignature } from "./workflowMaterials";
 import { comicDramaStageDependencies, COMIC_DRAMA_STAGE_LABELS } from "./comicDramaWorkflowModel";
 import {
@@ -51,7 +52,8 @@ export function topologicallySortWorkflowSteps<
 >(steps: readonly T[]): T[] {
   const byId = new Map<string, T>();
   for (const step of steps) {
-    if (!step.id || byId.has(step.id)) throw new Error(`执行计划步骤身份重复或为空：${step.id}`);
+    if (!step.id || byId.has(step.id))
+      throw workflowUsageError("plan", `执行计划步骤身份重复或为空：${step.id}`);
     byId.set(step.id, step);
   }
   const indegree = new Map<string, number>();
@@ -59,11 +61,11 @@ export function topologicallySortWorkflowSteps<
   for (const step of steps) {
     const dependencies = new Set(step.dependsOn);
     if (dependencies.size !== step.dependsOn.length)
-      throw new Error(`执行计划步骤 ${step.id} 包含重复依赖。`);
+      throw workflowUsageError("plan", `执行计划步骤 ${step.id} 包含重复依赖。`);
     indegree.set(step.id, dependencies.size);
     for (const dependency of dependencies) {
       if (!byId.has(dependency))
-        throw new Error(`执行计划步骤 ${step.id} 引用了不存在的依赖 ${dependency}。`);
+        throw workflowUsageError("plan", `执行计划步骤 ${step.id} 引用了不存在的依赖 ${dependency}。`);
       const dependents = children.get(dependency) ?? [];
       dependents.push(step.id);
       children.set(dependency, dependents);
@@ -82,7 +84,7 @@ export function topologicallySortWorkflowSteps<
   }
   if (ordered.length !== steps.length) {
     const blocked = steps.filter((step) => indegree.get(step.id)! > 0).map((step) => step.id);
-    throw new Error(`执行计划存在循环依赖，无法执行：${blocked.join("、")}`);
+    throw workflowUsageError("plan", `执行计划存在循环依赖，无法执行：${blocked.join("、")}`);
   }
   return ordered;
 }
@@ -239,7 +241,7 @@ export function approveWorkflowExecutionPlan(
 ): WorkflowExecutionPlan {
   topologicallySortWorkflowSteps(plan.steps);
   if (!isWorkflowExecutionPlanCurrent(plan, node))
-    throw new Error("制作输入或分镜版本已改变，请重新生成执行计划后确认。");
+    throw workflowUsageError("input_changed", "制作输入或分镜版本已改变，请重新生成执行计划后确认。");
   return { ...plan, approval: { planSignature: planSignature(plan), approvedAt: now } };
 }
 

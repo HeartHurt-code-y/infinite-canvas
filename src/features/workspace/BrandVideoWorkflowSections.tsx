@@ -240,6 +240,7 @@ export function BrandVideoWorkflowSections({
         </fieldset>
         {error ? (
           <ErrorAlert
+            workflow
             id={errorId}
             error={error}
             hint="重新选择可读取的 PNG、JPG 或 WebP 商品图片；资料文档请添加到工作流的参考素材。"

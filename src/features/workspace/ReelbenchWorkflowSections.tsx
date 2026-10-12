@@ -183,7 +183,7 @@ export function ReelbenchConfiguration({
           importLabel="导入下载登录凭据"
         />
       ) : null}
-      {pickError ? <ErrorAlert error={pickError} /> : null}
+      {pickError ? <ErrorAlert workflow error={pickError} /> : null}
       <label>
         <span>分析用途</span>
         <select
@@ -828,7 +828,7 @@ export function ReelbenchDeliverables({
           ) : null}
         </div>
       ) : null}
-      {openError ? <ErrorAlert error={openError} /> : null}
+      {openError ? <ErrorAlert workflow error={openError} /> : null}
     </section>
   );
 }

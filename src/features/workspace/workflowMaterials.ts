@@ -7,6 +7,7 @@ import type {
   PromptReferenceInput,
 } from "../../lib/backend";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
+import { workflowUsageError } from "../../lib/workflowErrors";
 import type {
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowConfig,
@@ -146,7 +147,7 @@ export function workflowMaterialQuota(config: KnowledgeVideoWorkflowConfig): {
 export function validateWorkflowMaterials(config: KnowledgeVideoWorkflowConfig): void {
   const materials = workflowReferenceMaterials(config);
   if (materials.some((material) => !Number.isFinite(material.byteSize) || material.byteSize <= 0))
-    throw new Error("工作流参考素材必须是非空文件，文件大小必须有效。");
+    throw workflowUsageError("materials", "工作流参考素材必须是非空文件，文件大小必须有效。");
 }
 
 /** Preserve the call's existing reference order before appending general references. */
@@ -211,7 +212,10 @@ export function validateWorkflowMaterialsResume(
       workflowMaterialsSignature(config),
     )
   )
-    throw new Error("工作流参考素材已修改，请按当前资料重新制作，避免沿用旧资料生成的结果。");
+    throw workflowUsageError(
+      "input_changed",
+      "工作流参考素材已修改，请按当前资料重新制作，避免沿用旧资料生成的结果。",
+    );
 }
 
 /** Per-run decoration also covers each template's retries and independent review calls. */

@@ -15,7 +15,11 @@ import {
 } from "../../lib/backend";
 import { reverseVideoClient, type ReverseVideoClient } from "../../lib/reverseVideo";
 import type { buildVideoContactSheets } from "../../lib/videoFrameSampler";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import { downloadFailureSummary } from "./downloadFailureSummary";
 import type {
@@ -254,6 +258,7 @@ function visionFailure(error: unknown): Error {
     unavailable
       ? `当前模型无法读取联系表，需要切换到支持读图的多模态模型后断点续跑。已下载视频和已抽取画面会保留，尚未确认的视觉结果不会当作交付物。\n${message}`
       : message,
+    { cause: error },
   );
 }
 
@@ -291,7 +296,10 @@ export function createReverseVideoWorkflowRunner(
     async run(request) {
       const dependencies = {
         ...baseDependencies,
-        promptClient: withWorkflowMaterials(baseDependencies.promptClient, request.node.config),
+        promptClient: withWorkflowMaterials(
+          withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
+          request.node.config,
+        ),
       };
       const { node, signal } = request;
       let checkpoint = node.config.checkpoint;
@@ -631,7 +639,7 @@ export function createReverseVideoWorkflowRunner(
         return checkpoint;
       } catch (error) {
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
-        const message = formatWorkflowError(error);
+        const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(
           paused ? "paused" : "failed",

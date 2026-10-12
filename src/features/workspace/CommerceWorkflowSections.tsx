@@ -1,5 +1,6 @@
 import { Icon } from "../../components/Icon";
-import { useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useId, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
@@ -34,17 +35,19 @@ export function CommerceConfiguration({
   onRemoveMaterial,
 }: CommerceConfigurationProps) {
   const [picking, setPicking] = useState(false);
-  const [materialError, setMaterialError] = useState("");
+  const [materialError, setMaterialError] = useState<unknown>(null);
+  const materialErrorId = useId();
+  const urlsErrorId = useId();
   const hasProductImage = options.materials.some((material) => material.kind === "image");
   const urls = options.productUrl.split(/\r?\n/).filter((url) => url.trim());
   const pickMaterials = async () => {
     if (!onPickMaterials || disabled || picking) return;
     setPicking(true);
-    setMaterialError("");
+    setMaterialError(null);
     try {
       await onPickMaterials();
     } catch (error) {
-      setMaterialError(error instanceof Error ? error.message : "商品资料读取失败，请重新选择。");
+      setMaterialError(error);
     } finally {
       setPicking(false);
     }
@@ -109,15 +112,16 @@ export function CommerceConfiguration({
           <ImeTextarea
             rows={2}
             aria-label="带货商品链接"
+            aria-describedby={urls.length > 4 ? urlsErrorId : undefined}
             value={options.productUrl}
             placeholder="每行一个链接，最多 4 个"
             onValueChange={(value) => onChange({ ...options, productUrl: value })}
           />
           <small>自动读取公开商品资料；链接读取失败时可补充下方文字或文档。</small>
-          {urls.length > 4 ? (
-            <span role="alert">最多填写 4 个资料链接，请移除多余链接。</span>
-          ) : null}
         </label>
+        {urls.length > 4 ? (
+          <ErrorAlert workflow id={urlsErrorId} error="最多填写 4 个资料链接，请移除多余链接。" />
+        ) : null}
         <label className="canvas-knowledge-workflow__brief">
           <span>商品事实与卖点</span>
           <ImeTextarea
@@ -147,7 +151,12 @@ export function CommerceConfiguration({
                 "商品图片与文档"
               )}
             </strong>
-            <button type="button" disabled={!onPickMaterials} onClick={() => void pickMaterials()}>
+            <button
+              type="button"
+              disabled={!onPickMaterials}
+              aria-describedby={materialError ? materialErrorId : undefined}
+              onClick={() => void pickMaterials()}
+            >
               {picking ? "正在选择资料…" : "添加商品资料"}
             </button>
           </div>
@@ -187,7 +196,7 @@ export function CommerceConfiguration({
           {!hasProductImage && options.deliverable === "video" ? (
             <p>请添加真实商品图后开始制作成片。</p>
           ) : null}
-          {materialError ? <p role="alert">{materialError}</p> : null}
+          {materialError ? <ErrorAlert workflow id={materialErrorId} error={materialError} /> : null}
         </section>
         <div className="canvas-commerce-workflow__format">
           <label>

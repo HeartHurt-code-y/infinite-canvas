@@ -2,6 +2,7 @@ import { Icon, type IconSize } from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
+import { PromptRichTextToolbar } from "./PromptRichTextToolbar";
 import {
   frontendLog,
   refreshMediaUrlWithStagingFallback,
@@ -1020,6 +1021,7 @@ export function PromptMentionInput({
         ) : null}
 
         <div ref={fieldRef} className="prompt-mention__field">
+          <PromptRichTextToolbar session={promptSession} />
           <div
             ref={attachInput}
             className="prompt-mention__editor"

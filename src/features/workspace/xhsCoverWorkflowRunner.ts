@@ -15,7 +15,12 @@ import {
 } from "../../lib/backend";
 import { coverImageClient } from "../../lib/coverImages";
 import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
-import { formatWorkflowError } from "../../lib/workflowErrors";
+import {
+  formatWorkflowError,
+  formatWorkflowFailure,
+  modelWorkflowError,
+  withWorkflowModelErrors,
+} from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import { requirementsMet, workflowRequirementsSummary } from "./workflowFieldRequirements";
 import type {
@@ -207,7 +212,11 @@ export function createXhsCoverWorkflowRunner(
     async run(request) {
       const dependencies = {
         ...baseDependencies,
-        promptClient: withWorkflowMaterials(baseDependencies.promptClient, request.node.config),
+        promptClient: withWorkflowMaterials(
+          withWorkflowModelErrors(baseDependencies.promptClient, ["run"]),
+          request.node.config,
+        ),
+        generationClient: withWorkflowModelErrors(baseDependencies.generationClient, ["start", "get"]),
       };
       const { node, signal } = request;
       let checkpoint = node.config.checkpoint;
@@ -560,6 +569,7 @@ export function createXhsCoverWorkflowRunner(
                 update({ taskId: null });
                 throw new Error(
                   `封面生成失败：${formatWorkflowError(detail.finalError ?? detail.summary.status)}`,
+                  { cause: modelWorkflowError(detail.finalError ?? detail.summary.status) },
                 );
               }
               if (["unknown", "interrupted"].includes(detail.summary.status))
@@ -647,7 +657,7 @@ export function createXhsCoverWorkflowRunner(
         }
       } catch (error) {
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
-        const message = formatWorkflowError(error);
+        const message = formatWorkflowFailure(error);
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(
           paused ? "paused" : "failed",

@@ -4,6 +4,7 @@ import type {
   PromptContentItem,
   PromptContentMediaReferenceItem,
 } from "./promptContent";
+import { appendStyledText, pickPromptTextStyle } from "./promptRichText";
 import { sameMediaReferenceTarget, sameMediaSourceIdentity } from "./promptReferenceTarget";
 
 /** 引用规则只处理候选和 canonical document，不读取编辑器 DOM。 */
@@ -296,14 +297,6 @@ export function refreshConnectedPromptReferencePositions(
   return changed ? { ...document, items } : document;
 }
 
-function appendText(items: PromptContentItem[], text: string): void {
-  if (!text) return;
-  const previous = items.at(-1);
-  if (previous?.kind === "text")
-    items[items.length - 1] = { kind: "text", text: previous.text + text };
-  else items.push({ kind: "text", text });
-}
-
 function safeMatchBoundary(text: string, start: number, end: number, explicit: boolean): boolean {
   const before = text[start - 1];
   const after = text[end];
@@ -346,7 +339,8 @@ export function resolvePromptReferences(
   const catalog = buildReferenceCatalog(candidates);
   const merged: PromptContentItem[] = [];
   for (const item of document.items) {
-    if (item.kind === "text") appendText(merged, item.text);
+    // 只合并样式相同的相邻文本；不同格式的边界必须保留。
+    if (item.kind === "text") appendStyledText(merged, item.text, pickPromptTextStyle(item));
     else merged.push(item);
   }
   const items: PromptContentItem[] = [];
@@ -383,7 +377,7 @@ export function resolvePromptReferences(
       const end = patternStart + pattern.text.length;
       const sourceStart = normalized.starts[cursor]!;
       const sourceEnd = normalized.ends[end - 1]!;
-      appendText(items, item.text.slice(copiedUntil, sourceStart));
+      appendStyledText(items, item.text.slice(copiedUntil, sourceStart), pickPromptTextStyle(item));
       if (pattern.candidateIndexes.length === 1) {
         const candidateIndex = pattern.candidateIndexes[0]!;
         const candidate = candidates[candidateIndex]!;
@@ -406,7 +400,7 @@ export function resolvePromptReferences(
       copiedUntil = sourceEnd;
       cursor = end;
     }
-    appendText(items, item.text.slice(copiedUntil));
+    appendStyledText(items, item.text.slice(copiedUntil), pickPromptTextStyle(item));
   }
   return {
     document: { schema: "prompt-content", version: 1, items },

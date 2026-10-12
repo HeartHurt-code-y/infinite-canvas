@@ -1,12 +1,15 @@
 import { Node, type Extensions, type JSONContent } from "@tiptap/core";
-import Document from "@tiptap/extension-document";
-import HardBreak from "@tiptap/extension-hard-break";
-import Paragraph from "@tiptap/extension-paragraph";
-import Text from "@tiptap/extension-text";
+import StarterKit from "@tiptap/starter-kit";
 import { Placeholder, UndoRedo } from "@tiptap/extensions";
 import type { MediaReferenceTarget, MediaType } from "./backend";
 import { normalizePromptReferenceText } from "./promptReferences";
 import { decodeMediaReferenceTarget } from "./promptReferenceTarget";
+import {
+  appendStyledText,
+  promptMarkFromTiptapName,
+  type PromptInlineMark,
+  type PromptTextStyle,
+} from "./promptRichText";
 import type {
   PromptContentDocumentV1,
   PromptContentItem,
@@ -371,10 +374,9 @@ const MarkReference = Node.create({
 
 export function createPromptTiptapExtensions(placeholder: string): Extensions {
   return [
-    Document,
-    Paragraph,
-    Text,
-    HardBreak,
+    // StarterKit 覆盖段落/文本/硬换行与全部富格式标记（标题、列表、引用、代码块、
+    // 粗斜下划删除线等）；undoRedo 关闭——会话统一使用 @tiptap/extensions 的 UndoRedo。
+    StarterKit.configure({ undoRedo: false }),
     MediaReference,
     PendingReference,
     MarkReference,
@@ -384,14 +386,7 @@ export function createPromptTiptapExtensions(placeholder: string): Extensions {
 }
 
 function appendText(items: PromptContentItem[], text: string): void {
-  const clean = text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-  if (!clean) return;
-  const previous = items.at(-1);
-  if (previous?.kind === "text") {
-    items[items.length - 1] = { kind: "text", text: previous.text + clean };
-  } else {
-    items.push({ kind: "text", text: clean });
-  }
+  appendStyledText(items, text);
 }
 
 export function plainTextToTiptapContent(text: string): JSONContent[] {
@@ -449,15 +444,51 @@ export function promptMarkReferenceToTiptapNode(
   };
 }
 
-export function promptDocumentToTiptapJson(
-  document: PromptContentDocumentV1,
-  presentation: PromptTiptapPresentation = {},
-): JSONContent {
+const HEADING_LEVELS = { heading1: 1, heading2: 2, heading3: 3 } as const;
+
+/**
+ * 把一个块内的条目流转换成 tiptap 行内节点：连续同格式的 text 条目并成一个
+ * text 节点（行内格式挂在 marks 上），文本内的 "\n" 拆成 hardBreak，引用 chip 原样落位。
+ */
+function inlineItemsToTiptapContent(
+  items: readonly PromptContentItem[],
+  presentation: PromptTiptapPresentation,
+): JSONContent[] {
   const content: JSONContent[] = [];
-  for (const item of document.items) {
+  const pushRun = (text: string, marks: readonly PromptInlineMark[]) => {
+    const lines = text.split("\n");
+    lines.forEach((line, index) => {
+      if (line)
+        content.push({
+          type: "text",
+          text: line,
+          ...(marks.length > 0 ? { marks: marks.map((mark) => ({ type: mark })) } : {}),
+        });
+      if (index < lines.length - 1) content.push({ type: "hardBreak" });
+    });
+  };
+  let runText = "";
+  let runMarks: readonly PromptInlineMark[] = [];
+  let runOpen = false;
+  const flushRun = () => {
+    if (!runOpen) return;
+    pushRun(runText, runMarks);
+    runText = "";
+    runOpen = false;
+  };
+  for (const item of items) {
     if (item.kind === "text") {
-      content.push(...plainTextToTiptapContent(item.text));
-    } else if (item.kind === "media_reference") {
+      const marks = item.marks ?? [];
+      if (runOpen && marks.join("\u0000") !== runMarks.join("\u0000")) flushRun();
+      if (!runOpen) {
+        runMarks = marks;
+        runOpen = true;
+      }
+      runText += item.text;
+      continue;
+    }
+    flushRun();
+    if (item.kind === "media_reference") {
       content.push(promptReferenceToTiptapNode(item, presentation));
     } else if (item.kind === "mark_reference") {
       content.push(promptMarkReferenceToTiptapNode(item, presentation));
@@ -472,114 +503,307 @@ export function promptDocumentToTiptapJson(
       });
     }
   }
-  return {
-    type: "doc",
-    content: [{ type: "paragraph", ...(content.length > 0 ? { content } : {}) }],
+  flushRun();
+  return content;
+}
+
+interface PromptListFrame {
+  readonly kind: "bullet" | "ordered";
+  readonly indent: number;
+  readonly listNode: JSONContent;
+  lastListItem: JSONContent | null;
+}
+
+export function promptDocumentToTiptapJson(
+  document: PromptContentDocumentV1,
+  presentation: PromptTiptapPresentation = {},
+): JSONContent {
+  const blocks: JSONContent[] = [];
+  let paragraphItems: PromptContentItem[] = [];
+  const listStack: PromptListFrame[] = [];
+  // 最近一个可承接行内内容的结构化块（标题/引用/列表项段落）的内容数组。
+  // 标题里的引用 chip 在 canonical 里不带块上下文，重建时靠它回到标题内。
+  let lastInlineHost: JSONContent[] | null = null;
+
+  const flushParagraph = () => {
+    if (paragraphItems.length === 0) return;
+    const content = inlineItemsToTiptapContent(paragraphItems, presentation);
+    paragraphItems = [];
+    if (content.length > 0) blocks.push({ type: "paragraph", content });
+    // 普通段落落位后，尾随 chip 属于这个段落而不是更早的结构化块。
+    lastInlineHost = null;
   };
+
+  for (const item of document.items) {
+    if (item.kind === "text" && (item.block == null || item.block === "code")) {
+      if (item.block === "code") {
+        flushParagraph();
+        blocks.push({
+          type: "codeBlock",
+          ...(item.text ? { content: [{ type: "text", text: item.text }] } : {}),
+        });
+        continue;
+      }
+      paragraphItems.push(item);
+      continue;
+    }
+    if (item.kind === "text" && item.block === "hr") {
+      flushParagraph();
+      blocks.push({ type: "horizontalRule" });
+      continue;
+    }
+    if (item.kind === "text" && (item.block === "bullet" || item.block === "ordered")) {
+      let depth = item.indent ?? 0;
+      // 弹掉更深的层级；同深度但类型不同的列表也闭合（同级切换 bullet↔ordered）。
+      while (listStack.length > 0) {
+        const topFrame = listStack.at(-1)!;
+        if (topFrame.indent > depth || (topFrame.indent === depth && topFrame.kind !== item.block))
+          listStack.pop();
+        else break;
+      }
+      const top = listStack.at(-1);
+      let frame: PromptListFrame;
+      if (top != null && top.kind === item.block && top.indent === depth) {
+        frame = top;
+      } else {
+        // 新建嵌套层：深度至少比父层深一级，避免存档里的跳级缩进生成悬空层级。
+        if (top != null) depth = Math.max(depth, top.indent + 1);
+        const listNode = {
+          type: item.block === "bullet" ? "bulletList" : "orderedList",
+          content: [] as JSONContent[],
+        };
+        if (top == null) {
+          flushParagraph();
+          blocks.push(listNode);
+        } else {
+          top.lastListItem?.content?.push(listNode);
+        }
+        frame = { kind: item.block, indent: depth, listNode, lastListItem: null };
+        listStack.push(frame);
+      }
+      const content = inlineItemsToTiptapContent([item], presentation);
+      const listItem: JSONContent = {
+        type: "listItem",
+        content: [{ type: "paragraph", content }],
+      };
+      frame.listNode.content!.push(listItem);
+      frame.lastListItem = listItem;
+      lastInlineHost = content;
+      continue;
+    }
+    if (item.kind === "text" && item.block === "blockquote") {
+      flushParagraph();
+      const content = inlineItemsToTiptapContent([item], presentation);
+      blocks.push({ type: "blockquote", content: [{ type: "paragraph", content }] });
+      lastInlineHost = content;
+      continue;
+    }
+    if (item.kind === "text") {
+      const level = HEADING_LEVELS[item.block as keyof typeof HEADING_LEVELS];
+      if (level != null) {
+        flushParagraph();
+        const content = inlineItemsToTiptapContent([item], presentation);
+        blocks.push({ type: "heading", attrs: { level }, content });
+        lastInlineHost = content;
+        continue;
+      }
+    }
+    if (paragraphItems.length === 0 && lastInlineHost != null) {
+      // 纯 chip 跟在结构化块后面：回流到那个块里，避免被拆成独立段落。
+      lastInlineHost.push(...inlineItemsToTiptapContent([item], presentation));
+      continue;
+    }
+    // 引用等行内条目落到当前段落缓冲，与相邻文本同块。
+    paragraphItems.push(item);
+  }
+  // 列表帧在创建时已挂进文档；这里只需闭合段落缓冲。
+  flushParagraph();
+  const content = blocks.length > 0 ? blocks : [{ type: "paragraph" }];
+  return { type: "doc", content };
 }
 
 export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentDocumentV1 {
   const items: PromptContentItem[] = [];
   const mentionIds = new Set<string>();
-  const blocks = value.content ?? [];
-  const walkInline = (node: JSONContent) => {
-    if (node.type === "text") {
-      appendText(items, node.text ?? "");
-      return;
-    }
-    if (node.type === "hardBreak") {
-      appendText(items, "\n");
-      return;
-    }
-    if (node.type === PROMPT_TIPTAP_MEDIA_REFERENCE_NODE) {
-      const attrs = jsonContentAttributes(node);
-      const target = decodeMediaReferenceTarget(attrs["target"]);
-      const canvasNodeKey = attrs["canvasNodeKey"];
-      const displayNameSnapshot = attrs["displayNameSnapshot"];
-      if (
-        !target ||
-        typeof canvasNodeKey !== "string" ||
-        !canvasNodeKey ||
-        typeof displayNameSnapshot !== "string"
-      ) {
-        appendText(items, typeof displayNameSnapshot === "string" ? displayNameSnapshot : "");
-        return;
-      }
-      const rawMentionId = attrs["mentionId"];
-      const mentionId =
-        typeof rawMentionId === "string" && rawMentionId && !mentionIds.has(rawMentionId)
-          ? rawMentionId
-          : `mention-${globalThis.crypto.randomUUID()}`;
-      mentionIds.add(mentionId);
-      const learnedPattern = attrs["learnedPattern"];
-      const aliasSnapshot = attrs["aliasSnapshot"];
-      const slotSnapshot = attrs["slotSnapshot"];
-      items.push({
-        kind: "media_reference",
-        mentionId,
-        canvasNodeKey,
-        target,
-        displayNameSnapshot,
-        ...(typeof learnedPattern === "string" && learnedPattern
-          ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
-          : {}),
-        ...(typeof aliasSnapshot === "string" && aliasSnapshot ? { aliasSnapshot } : {}),
-        ...(typeof slotSnapshot === "number" && Number.isInteger(slotSnapshot) && slotSnapshot >= 0
-          ? { slotSnapshot }
-          : {}),
-      });
-      return;
-    }
-    if (node.type === PROMPT_TIPTAP_MARK_REFERENCE_NODE) {
-      const attrs = jsonContentAttributes(node);
-      const markId = attrs["markId"];
-      const labelSnapshot = attrs["labelSnapshot"];
-      const descriptionSnapshot = attrs["descriptionSnapshot"];
-      const color = attrs["color"];
-      if (typeof markId !== "string" || !markId || typeof labelSnapshot !== "string") {
-        appendText(items, typeof labelSnapshot === "string" ? labelSnapshot : "");
-        return;
-      }
-      const rawMentionId = attrs["mentionId"];
-      const mentionId =
-        typeof rawMentionId === "string" && rawMentionId && !mentionIds.has(rawMentionId)
-          ? rawMentionId
-          : `mark-${globalThis.crypto.randomUUID()}`;
-      mentionIds.add(mentionId);
-      items.push({
-        kind: "mark_reference",
-        mentionId,
-        markId,
-        labelSnapshot,
-        descriptionSnapshot: typeof descriptionSnapshot === "string" ? descriptionSnapshot : "",
-        color: typeof color === "string" ? color : "",
-      });
-      return;
-    }
-    if (node.type === PROMPT_TIPTAP_PENDING_REFERENCE_NODE) {
-      const attrs = jsonContentAttributes(node);
-      const normalizedPattern = attrs["normalizedPattern"];
-      const displayText = attrs["displayText"];
-      const candidateCount = attrs["candidateCount"];
-      if (typeof normalizedPattern === "string" && typeof displayText === "string") {
-        items.push({
-          kind: "pending_reference",
-          normalizedPattern: normalizePromptReferenceText(normalizedPattern),
-          displayText,
-          candidateCount:
-            typeof candidateCount === "number" && Number.isFinite(candidateCount)
-              ? Math.max(2, Math.floor(candidateCount))
-              : 2,
+  let previousPlainParagraph = false;
+
+  // 跨块的行内内容默认合流；结构化块（标题/引用/列表项）传入独立 sink，
+  // 避免相邻同格式块的文本被 appendStyledText 焊成一个条目、丢失块边界。
+  const walkInline = (
+    nodes: JSONContent[],
+    style: PromptTextStyle,
+    sink: PromptContentItem[] = items,
+  ) => {
+    for (const node of nodes) {
+      if (node.type === "text") {
+        const marks = (node.marks ?? [])
+          .map((mark) => promptMarkFromTiptapName(String(mark.type ?? "")))
+          .filter((mark): mark is PromptInlineMark => mark != null);
+        appendStyledText(sink, node.text ?? "", {
+          ...style,
+          ...(marks.length > 0 ? { marks } : {}),
         });
+        continue;
       }
-      return;
+      if (node.type === "hardBreak") {
+        appendStyledText(sink, "\n", style);
+        continue;
+      }
+      if (node.type === PROMPT_TIPTAP_MEDIA_REFERENCE_NODE) {
+        const attrs = jsonContentAttributes(node);
+        const target = decodeMediaReferenceTarget(attrs["target"]);
+        const canvasNodeKey = attrs["canvasNodeKey"];
+        const displayNameSnapshot = attrs["displayNameSnapshot"];
+        if (
+          !target ||
+          typeof canvasNodeKey !== "string" ||
+          !canvasNodeKey ||
+          typeof displayNameSnapshot !== "string"
+        ) {
+          appendText(sink, typeof displayNameSnapshot === "string" ? displayNameSnapshot : "");
+          continue;
+        }
+        const rawMentionId = attrs["mentionId"];
+        const mentionId =
+          typeof rawMentionId === "string" && rawMentionId && !mentionIds.has(rawMentionId)
+            ? rawMentionId
+            : `mention-${globalThis.crypto.randomUUID()}`;
+        mentionIds.add(mentionId);
+        const learnedPattern = attrs["learnedPattern"];
+        const aliasSnapshot = attrs["aliasSnapshot"];
+        const slotSnapshot = attrs["slotSnapshot"];
+        sink.push({
+          kind: "media_reference",
+          mentionId,
+          canvasNodeKey,
+          target,
+          displayNameSnapshot,
+          ...(typeof learnedPattern === "string" && learnedPattern
+            ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
+            : {}),
+          ...(typeof aliasSnapshot === "string" && aliasSnapshot ? { aliasSnapshot } : {}),
+          ...(typeof slotSnapshot === "number" &&
+          Number.isInteger(slotSnapshot) &&
+          slotSnapshot >= 0
+            ? { slotSnapshot }
+            : {}),
+        });
+        continue;
+      }
+      if (node.type === PROMPT_TIPTAP_MARK_REFERENCE_NODE) {
+        const attrs = jsonContentAttributes(node);
+        const markId = attrs["markId"];
+        const labelSnapshot = attrs["labelSnapshot"];
+        const descriptionSnapshot = attrs["descriptionSnapshot"];
+        const color = attrs["color"];
+        if (typeof markId !== "string" || !markId || typeof labelSnapshot !== "string") {
+          appendText(sink, typeof labelSnapshot === "string" ? labelSnapshot : "");
+          continue;
+        }
+        const rawMentionId = attrs["mentionId"];
+        const mentionId =
+          typeof rawMentionId === "string" && rawMentionId && !mentionIds.has(rawMentionId)
+            ? rawMentionId
+            : `mark-${globalThis.crypto.randomUUID()}`;
+        mentionIds.add(mentionId);
+        sink.push({
+          kind: "mark_reference",
+          mentionId,
+          markId,
+          labelSnapshot,
+          descriptionSnapshot: typeof descriptionSnapshot === "string" ? descriptionSnapshot : "",
+          color: typeof color === "string" ? color : "",
+        });
+        continue;
+      }
+      if (node.type === PROMPT_TIPTAP_PENDING_REFERENCE_NODE) {
+        const attrs = jsonContentAttributes(node);
+        const normalizedPattern = attrs["normalizedPattern"];
+        const displayText = attrs["displayText"];
+        const candidateCount = attrs["candidateCount"];
+        if (typeof normalizedPattern === "string" && typeof displayText === "string") {
+          sink.push({
+            kind: "pending_reference",
+            normalizedPattern: normalizePromptReferenceText(normalizedPattern),
+            displayText,
+            candidateCount:
+              typeof candidateCount === "number" && Number.isFinite(candidateCount)
+                ? Math.max(2, Math.floor(candidateCount))
+                : 2,
+          });
+        }
+        continue;
+      }
+      walkInline(node.content ?? [], style, sink);
     }
-    for (const child of node.content ?? []) walkInline(child);
   };
 
-  blocks.forEach((block, index) => {
-    for (const child of block.content ?? []) walkInline(child);
-    if (index < blocks.length - 1) appendText(items, "\n");
+  const walkList = (listNode: JSONContent, kind: "bullet" | "ordered", indent: number) => {
+    for (const listItem of listNode.content ?? []) {
+      for (const child of listItem.content ?? []) {
+        if (child.type === "bulletList") walkList(child, "bullet", indent + 1);
+        else if (child.type === "orderedList") walkList(child, "ordered", indent + 1);
+        else {
+          // 每个列表项独立成条：相邻同格式列表项不能在 canonical 里被合并。
+          const sink: PromptContentItem[] = [];
+          walkInline(child.content ?? [], { block: kind, ...(indent > 0 ? { indent } : {}) }, sink);
+          items.push(...sink);
+        }
+      }
+    }
+  };
+
+  const blocks = value.content ?? [];
+  blocks.forEach((block) => {
+    switch (block.type) {
+      case "heading": {
+        const level = Number(jsonContentAttributes(block)["level"] ?? 1);
+        const heading =
+          level === 1 ? "heading1" : level === 2 ? "heading2" : level === 3 ? "heading3" : null;
+        if (heading == null) break;
+        {
+          const sink: PromptContentItem[] = [];
+          walkInline(block.content ?? [], { block: heading }, sink);
+          items.push(...sink);
+        }
+        previousPlainParagraph = false;
+        return;
+      }
+      case "blockquote": {
+        for (const child of block.content ?? []) {
+          const sink: PromptContentItem[] = [];
+          walkInline(child.content ?? [], { block: "blockquote" }, sink);
+          items.push(...sink);
+        }
+        previousPlainParagraph = false;
+        return;
+      }
+      case "bulletList":
+        walkList(block, "bullet", 0);
+        previousPlainParagraph = false;
+        return;
+      case "orderedList":
+        walkList(block, "ordered", 0);
+        previousPlainParagraph = false;
+        return;
+      case "codeBlock": {
+        const code = (block.content ?? []).map((child) => child.text ?? "").join("");
+        items.push({ kind: "text", text: code, block: "code" });
+        previousPlainParagraph = false;
+        return;
+      }
+      case "horizontalRule":
+        items.push({ kind: "text", text: "", block: "hr" });
+        previousPlainParagraph = false;
+        return;
+      case undefined:
+      default:
+        break;
+    }
+    // 普通段落：仅在「上一块也是普通段落」时补换行，结构化块自定界。
+    if (previousPlainParagraph) appendText(items, "\n");
+    walkInline(block.content ?? [], {});
+    previousPlainParagraph = true;
   });
   return { schema: "prompt-content", version: 1, items };
 }

@@ -1,4 +1,9 @@
 packages:
   - .
 
-dangerouslyAllowAllBuilds: true
+# 仅放行带构建脚本且必需的依赖；其余依赖的 pre/postinstall 一律不执行，
+# 防止新引入依赖的安装脚本在装包时静默运行（供应链防护）。
+# 注意 pnpm 12 的键位是 allowBuilds（map），不是 10/11 的 onlyBuiltDependencies；
+# 批准命令：pnpm approve-builds <pkg>。
+allowBuilds:
+  esbuild: true

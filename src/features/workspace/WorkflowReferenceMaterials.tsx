@@ -1,10 +1,10 @@
 import { Icon } from "../../components/Icon";
-import { useState } from "react";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useId, useState } from "react";
 
 import { AutoSizeThumb } from "./MediaNodeViews";
 import {
   formatBytes,
-  formatRawBackendError,
   toMediaSrc,
   type PickedPromptMaterial,
   type PromptReferenceInput,
@@ -54,7 +54,8 @@ export function WorkflowReferenceMaterials({
   onPick,
   onRemove,
 }: WorkflowReferenceMaterialsProps) {
-  const [materialError, setMaterialError] = useState<string | null>(null);
+  const [materialError, setMaterialError] = useState<unknown>(null);
+  const materialErrorId = useId();
   const totalBytes = allMaterials.reduce((total, material) => total + material.byteSize, 0);
 
   async function pickMaterials() {
@@ -63,7 +64,7 @@ export function WorkflowReferenceMaterials({
     try {
       await onPick();
     } catch (error) {
-      setMaterialError(formatRawBackendError(error));
+      setMaterialError(error);
     }
   }
 
@@ -78,6 +79,7 @@ export function WorkflowReferenceMaterials({
         <button
           type="button"
           aria-label="添加工作流多模态参考素材"
+          aria-describedby={materialError ? materialErrorId : undefined}
           disabled={disabled || picking || !onPick}
           onClick={() => void pickMaterials()}
         >
@@ -230,7 +232,7 @@ export function WorkflowReferenceMaterials({
           ))}
         </ul>
       ) : null}
-      {materialError ? <p role="alert">{materialError}</p> : null}
+      {materialError ? <ErrorAlert workflow id={materialErrorId} error={materialError} /> : null}
     </section>
   );
 }

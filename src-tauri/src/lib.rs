@@ -148,10 +148,6 @@ pub fn run() {
             backend::local_base64_assets::LOCAL_BASE64_SCHEME,
             backend::local_base64_assets::handle_local_base64_request,
         )
-        .plugin(tauri_plugin_websocket::init())
-        .plugin(tauri_plugin_upload::init())
-        .plugin(tauri_plugin_store::Builder::new().build())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_os::init())
@@ -164,7 +160,6 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_http::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
