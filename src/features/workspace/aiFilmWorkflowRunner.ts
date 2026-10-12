@@ -11,12 +11,12 @@ import {
   type AiFilmRoute,
   type AiFilmWorkflowCheckpoint,
 } from "./aiFilmWorkflowModel";
+import { createKnowledgeVideoWorkflowRunner } from "./knowledgeVideoWorkflowRunner";
 import {
-  createKnowledgeVideoWorkflowRunner,
   type KnowledgeVideoWorkflowRunnerDependencies,
   type WorkflowPlan,
   type WorkflowPlanningContext,
-} from "./knowledgeVideoWorkflowRunner";
+} from "./workflowRunnerContract";
 import {
   CANVAS_ID,
   type KnowledgeVideoWorkflowCheckpoint,

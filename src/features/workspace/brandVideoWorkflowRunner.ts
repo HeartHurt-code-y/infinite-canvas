@@ -17,13 +17,13 @@ import {
   type BrandVideoWorkflowOptions,
   type BrandVideoConcept,
 } from "./brandVideoWorkflowModel";
+import { createKnowledgeVideoWorkflowRunner } from "./knowledgeVideoWorkflowRunner";
 import {
-  createKnowledgeVideoWorkflowRunner,
   type KnowledgeVideoWorkflowRunnerDependencies,
   type KnowledgeVideoWorkflowRunRequest,
   type WorkflowPlan,
   type WorkflowPlanningContext,
-} from "./knowledgeVideoWorkflowRunner";
+} from "./workflowRunnerContract";
 import { CANVAS_ID, type KnowledgeVideoWorkflowShot } from "./workspaceModel";
 
 export interface BrandVideoRunnerDependencies {

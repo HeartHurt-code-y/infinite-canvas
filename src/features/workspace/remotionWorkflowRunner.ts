@@ -30,7 +30,7 @@ import {
 import type {
   KnowledgeVideoWorkflowRunRequest,
   KnowledgeVideoWorkflowRunner,
-} from "./knowledgeVideoWorkflowRunner";
+} from "./workflowRunnerContract";
 
 const record = (value: unknown): Record<string, unknown> => {
   if (value == null || typeof value !== "object" || Array.isArray(value))

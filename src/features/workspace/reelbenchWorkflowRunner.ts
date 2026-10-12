@@ -39,7 +39,7 @@ import {
   isTextGenerationModel,
   type KnowledgeVideoWorkflowCheckpoint,
 } from "./workspaceModel";
-import type { KnowledgeVideoWorkflowRunner } from "./knowledgeVideoWorkflowRunner";
+import type { KnowledgeVideoWorkflowRunner } from "./workflowRunnerContract";
 
 interface ReelbenchBackend {
   readonly analyze: typeof reelbenchBackendClient.analyze;

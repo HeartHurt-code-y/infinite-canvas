@@ -5,8 +5,6 @@ import {
   videoFrameExtractionClient,
   type ConfiguredModel,
   type GenerationTaskClient,
-  type PromptNodeClient,
-  type TextSkillMode,
   type ProviderCatalogEntry,
   type VideoComposerClient,
   type VideoCompositionJobRecord,
@@ -57,6 +55,25 @@ import {
   withWorkflowMaterials,
   workflowMaterialsSignature,
 } from "./workflowMaterials";
+import {
+  type KnowledgeVideoWorkflowRunnerDependencies,
+  type KnowledgeVideoWorkflowRunner,
+  type VideoWorkflowDefinition,
+  type WorkflowPlan,
+  type WorkflowPlanningContext,
+} from "./workflowRunnerContract";
+
+/* 运行器合同（请求/依赖/规划上下文/定义）已搬到 workflowRunnerContract.ts；
+ * 这里保留 re-export，让既有调用方按原路径继续引用。 */
+export type {
+  KnowledgeVideoWorkflowRunnerDependencies,
+  KnowledgeVideoWorkflowRunRequest,
+  KnowledgeVideoWorkflowRunner,
+  RecordedClients,
+  VideoWorkflowDefinition,
+  WorkflowPlan,
+  WorkflowPlanningContext,
+} from "./workflowRunnerContract";
 
 const SECTION_ORDER: readonly KnowledgeVideoWorkflowSection[] = [
   "HOOK",
@@ -70,16 +87,6 @@ const TRACKS: readonly KnowledgeVideoWorkflowTrack[] = ["LECTURER", "DEMO", "MET
 const FRAME_PERCENTAGES = [0.3, 0.6, 0.8, 0.95, 0.99] as const;
 const UNCONFIRMED_STATUSES = new Set(["unknown", "interrupted"]);
 const SAVE_FAILURES = new Set(["failed", "interrupted", "local_missing", "conflict"]);
-
-export interface WorkflowPlan {
-  readonly documentsOnly?: boolean;
-  readonly manifest: string;
-  readonly aspectRatio: string;
-  readonly script: string;
-  readonly storyboard: string;
-  readonly shots: readonly KnowledgeVideoWorkflowShot[];
-  readonly decision: KnowledgeVideoWorkflowCheckpoint["decision"];
-}
 
 interface WorkflowQcResult {
   readonly result: "PASS" | "RETRY" | "NEEDS_DECISION";
@@ -115,43 +122,6 @@ class ConfirmedGenerationFailure extends Error {
   }
 }
 
-export interface KnowledgeVideoWorkflowRunRequest {
-  readonly node: KnowledgeVideoWorkflowNodeData;
-  readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly resume?: boolean;
-  readonly decisionResolution?: string;
-  readonly signal: AbortSignal;
-  /** Recorded execution flushes its approved checkpoint before local renderer/composer effects too. */
-  readonly beforeSideEffect?: () => Promise<void>;
-  readonly onCheckpoint: (checkpoint: KnowledgeVideoWorkflowCheckpoint) => void;
-  readonly onProgress: (state: KnowledgeVideoWorkflowRunState) => void;
-}
-
-export interface KnowledgeVideoWorkflowRunner {
-  run(request: KnowledgeVideoWorkflowRunRequest): Promise<KnowledgeVideoWorkflowCheckpoint>;
-}
-
-export interface KnowledgeVideoWorkflowRunnerDependencies {
-  readonly promptClient: PromptNodeClient;
-  readonly generationClient: GenerationTaskClient;
-  readonly frameClient: VideoFrameExtractionClient;
-  readonly composerClient: VideoComposerClient;
-  readonly now: () => number;
-  readonly createId: () => string;
-  readonly sleep: (milliseconds: number, signal: AbortSignal) => Promise<void>;
-}
-
-export interface WorkflowPlanningContext {
-  readonly request: KnowledgeVideoWorkflowRunRequest;
-  readonly dependencies: KnowledgeVideoWorkflowRunnerDependencies;
-  readonly checkpoint: () => KnowledgeVideoWorkflowCheckpoint;
-  readonly commit: (
-    update: (current: KnowledgeVideoWorkflowCheckpoint) => KnowledgeVideoWorkflowCheckpoint,
-  ) => void;
-  readonly progress: KnowledgeVideoWorkflowRunRequest["onProgress"];
-  readonly resolution?: string;
-}
-
 /** One QC decision is bound to the exact shot and saved result the user reviews. */
 function qcDecisionTarget(
   checkpoint: KnowledgeVideoWorkflowCheckpoint,
@@ -168,46 +138,6 @@ function qcDecisionTarget(
       run,
     }),
   };
-}
-
-export interface VideoWorkflowDefinition {
-  readonly isPlanningComplete?: (checkpoint: KnowledgeVideoWorkflowCheckpoint) => boolean;
-  readonly validateResume?: (
-    request: KnowledgeVideoWorkflowRunRequest,
-    checkpoint: KnowledgeVideoWorkflowCheckpoint,
-  ) => void | Promise<void>;
-  readonly requiresMediaReview?: boolean;
-  readonly forceComposition?: boolean;
-  readonly validateMedia?: (context: WorkflowPlanningContext) => void | Promise<void>;
-  /** Fixed product/person files are prepared by the workflow instead of generated assets. */
-  readonly handlesShotImageReferences?: boolean;
-  readonly shotQcContext?: (
-    context: WorkflowPlanningContext,
-    shot: KnowledgeVideoWorkflowShot,
-  ) => Promise<{ readonly references: readonly PromptVisionImageInput[]; readonly prompt: string }>;
-  readonly prepareShotMedia?: (
-    context: WorkflowPlanningContext,
-    shot: KnowledgeVideoWorkflowShot,
-  ) => Promise<readonly ExplicitMediaInput[]>;
-  /** Prepare workflow-specific media and pause for its review before final composition. */
-  readonly prepareComposition?: (
-    context: WorkflowPlanningContext,
-    clips: readonly { shot: KnowledgeVideoWorkflowShot; path: string }[],
-  ) => Promise<boolean>;
-  readonly startComposition?: (
-    context: WorkflowPlanningContext,
-    clips: readonly { shot: KnowledgeVideoWorkflowShot; path: string }[],
-  ) => Promise<VideoCompositionJobRecord>;
-  readonly validateDelivery?: (
-    context: WorkflowPlanningContext,
-    finalPath: string,
-  ) => Promise<void>;
-  readonly qcMode?: TextSkillMode;
-  readonly title: string;
-  readonly plan: (context: WorkflowPlanningContext) => Promise<WorkflowPlan>;
-  readonly initialize: (
-    previous: KnowledgeVideoWorkflowCheckpoint,
-  ) => Partial<KnowledgeVideoWorkflowCheckpoint>;
 }
 
 function defaultSleep(milliseconds: number, signal: AbortSignal): Promise<void> {

@@ -20,13 +20,13 @@ import {
   type ComicDramaStageRun,
   type ComicDramaWorkflowCheckpoint,
 } from "./comicDramaWorkflowModel";
+import { createKnowledgeVideoWorkflowRunner } from "./knowledgeVideoWorkflowRunner";
 import {
-  createKnowledgeVideoWorkflowRunner,
   type KnowledgeVideoWorkflowRunnerDependencies,
   type KnowledgeVideoWorkflowRunRequest,
   type WorkflowPlan,
   type WorkflowPlanningContext,
-} from "./knowledgeVideoWorkflowRunner";
+} from "./workflowRunnerContract";
 import { CANVAS_ID, type KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import {
   comicDramaReviewOutputSchema,

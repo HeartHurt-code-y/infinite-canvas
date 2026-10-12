@@ -1,10 +1,8 @@
 import {
   generationClient,
   promptNodeClient,
-  type GenerationTaskClient,
   type GenerationTaskDetail,
   type OptimizeVideoPromptCommand,
-  type PromptNodeClient,
   type StartGenerationCommand,
 } from "../../lib/backend";
 import {
@@ -43,9 +41,12 @@ import { createBrandVideoWorkflowRunner } from "./brandVideoWorkflowRunner";
 import { createCommerceWorkflowRunner } from "./commerceWorkflowRunner";
 import {
   createKnowledgeVideoWorkflowRunner,
-  type KnowledgeVideoWorkflowRunRequest,
-  type KnowledgeVideoWorkflowRunner,
 } from "./knowledgeVideoWorkflowRunner";
+import {
+  type KnowledgeVideoWorkflowRunner,
+  type KnowledgeVideoWorkflowRunRequest,
+  type RecordedClients,
+} from "./workflowRunnerContract";
 import { createRemotionWorkflowRunner } from "./remotionWorkflowRunner";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { createProductSceneWorkflowRunner } from "./productSceneWorkflowRunner";
@@ -61,10 +62,6 @@ import {
   type KnowledgeVideoWorkflowRunState,
 } from "./workspaceModel";
 
-interface RecordedClients {
-  readonly promptClient: PromptNodeClient;
-  readonly generationClient: GenerationTaskClient;
-}
 export interface RecordedWorkflowRunRequest extends KnowledgeVideoWorkflowRunRequest {
   /** Explicit migration of an existing canvas checkpoint into its first history record. */
   readonly newHistory?: boolean;

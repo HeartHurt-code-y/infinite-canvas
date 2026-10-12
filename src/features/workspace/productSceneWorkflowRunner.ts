@@ -27,7 +27,7 @@ import {
 import type {
   KnowledgeVideoWorkflowRunRequest,
   KnowledgeVideoWorkflowRunner,
-} from "./knowledgeVideoWorkflowRunner";
+} from "./workflowRunnerContract";
 import {
   CANVAS_ID,
   isTextGenerationModel,
