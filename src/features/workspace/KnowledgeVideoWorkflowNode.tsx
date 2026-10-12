@@ -318,10 +318,7 @@ export interface KnowledgeVideoWorkflowNodeProps {
   readonly onUndoVersion?: (key: string) => void;
   readonly onRedoVersion?: (key: string, versionId?: string) => void;
   readonly onRestoreVersion?: (key: string, versionId: string) => void;
-  readonly onExportFilmDocuments?: (key: string) => void;
-  readonly onExportComicDramaDocuments?: (key: string) => void;
-  readonly onExportCommerceDocuments?: (key: string) => void;
-  readonly onExportRemotionDocuments?: (key: string) => void;
+  readonly onExportDocuments?: (key: string) => void;
   readonly onRevealRemotionProject?: (key: string) => void;
   readonly onPickMaterials?: (key: string) => Promise<void>;
   readonly onRemoveMaterial?: (key: string, localPath: string) => void;
@@ -329,11 +326,9 @@ export interface KnowledgeVideoWorkflowNodeProps {
   readonly onRemoveCommerceMaterial?: (key: string, localPath: string) => void;
   readonly onPickCoverImages?: (key: string, role: "portrait" | "material") => Promise<void>;
   readonly onRemoveCoverImage?: (key: string, role: "portrait" | "material", path: string) => void;
-  readonly onExportCoverDocuments?: (key: string) => void;
   readonly onPickReverseVideo?: (key: string) => Promise<void> | void;
   readonly onPickReelbenchVideo?: (key: string) => Promise<void> | void;
   readonly onPickMusicVideoMaterial?: (key: string, role: "song" | "character") => Promise<void>;
-  readonly onExportMusicVideoDocuments?: (key: string) => void;
   readonly onRemoveReverseVideo?: (key: string) => void;
   readonly onRemoveReelbenchVideo?: (key: string) => void;
   readonly onOpenDownloadSettings?: (key: string) => void;
@@ -368,10 +363,7 @@ export function KnowledgeVideoWorkflowNode({
   onUndoVersion,
   onRedoVersion,
   onRestoreVersion,
-  onExportFilmDocuments,
-  onExportComicDramaDocuments,
-  onExportCommerceDocuments,
-  onExportRemotionDocuments,
+  onExportDocuments,
   onRevealRemotionProject,
   onPickMaterials,
   onRemoveMaterial,
@@ -379,11 +371,9 @@ export function KnowledgeVideoWorkflowNode({
   onRemoveCommerceMaterial,
   onPickCoverImages,
   onRemoveCoverImage,
-  onExportCoverDocuments,
   onPickReverseVideo,
   onPickReelbenchVideo,
   onPickMusicVideoMaterial,
-  onExportMusicVideoDocuments,
   onRemoveReverseVideo,
   onRemoveReelbenchVideo,
   onOpenDownloadSettings,
@@ -1122,8 +1112,8 @@ export function KnowledgeVideoWorkflowNode({
             onBusyChange={setPickingMaterials}
           />
         ) : null}
-        {isBrandVideo && checkpoint.brandVideo?.concept && onExportFilmDocuments ? (
-          <button type="button" onClick={() => onExportFilmDocuments(node.key)}>
+        {isBrandVideo && checkpoint.brandVideo?.concept && onExportDocuments ? (
+          <button type="button" onClick={() => onExportDocuments(node.key)}>
             导出品牌短片制作文档
           </button>
         ) : null}
@@ -1634,9 +1624,7 @@ export function KnowledgeVideoWorkflowNode({
                 ),
               });
             }}
-            {...(onExportMusicVideoDocuments
-              ? { onExport: () => onExportMusicVideoDocuments(node.key) }
-              : {})}
+            {...(onExportDocuments ? { onExport: () => onExportDocuments(node.key) } : {})}
           />
         ) : null}
         {isReverse ? <ReverseVideoDeliverables checkpoint={node.config.checkpoint} /> : null}
@@ -1663,9 +1651,7 @@ export function KnowledgeVideoWorkflowNode({
           <XhsCoverDeliverables
             checkpoint={node.config.checkpoint}
             onRevealResult={() => onRevealResult(node.key)}
-            {...(onExportCoverDocuments
-              ? { onExportDocuments: () => onExportCoverDocuments(node.key) }
-              : {})}
+            {...(onExportDocuments ? { onExportDocuments: () => onExportDocuments(node.key) } : {})}
           />
         ) : null}
 
@@ -1673,9 +1659,7 @@ export function KnowledgeVideoWorkflowNode({
           <RemotionDeliverables
             checkpoint={node.config.checkpoint}
             onRevealResult={() => onRevealResult(node.key)}
-            {...(onExportRemotionDocuments
-              ? { onExport: () => onExportRemotionDocuments(node.key) }
-              : {})}
+            {...(onExportDocuments ? { onExport: () => onExportDocuments(node.key) } : {})}
             {...(onRevealRemotionProject
               ? { onRevealProject: () => onRevealRemotionProject(node.key) }
               : {})}
@@ -1685,9 +1669,7 @@ export function KnowledgeVideoWorkflowNode({
         {isCommerce ? (
           <CommerceDeliverables
             checkpoint={node.config.checkpoint}
-            {...(onExportCommerceDocuments
-              ? { onExport: () => onExportCommerceDocuments(node.key) }
-              : {})}
+            {...(onExportDocuments ? { onExport: () => onExportDocuments(node.key) } : {})}
           />
         ) : null}
 
@@ -1719,17 +1701,15 @@ export function KnowledgeVideoWorkflowNode({
                 ),
               });
             }}
-            {...(onExportComicDramaDocuments
-              ? { onExport: () => onExportComicDramaDocuments(node.key) }
-              : {})}
+            {...(onExportDocuments ? { onExport: () => onExportDocuments(node.key) } : {})}
           />
         ) : null}
 
         {isFilm && node.config.checkpoint.film?.artifacts.length ? (
           <section className="canvas-ai-film-workflow__artifacts" aria-label="影视阶段交付物">
             <strong>{phase === "done" ? "影视交付物已就绪" : "已完成的制作阶段"}</strong>
-            {onExportFilmDocuments ? (
-              <button type="button" onClick={() => onExportFilmDocuments(node.key)}>
+            {onExportDocuments ? (
+              <button type="button" onClick={() => onExportDocuments(node.key)}>
                 导出影视制作文档
               </button>
             ) : null}

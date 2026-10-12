@@ -97,6 +97,15 @@ describe("workflowKinds registry", () => {
   });
 
   it("exposes display copy and repository card data for every kind", () => {
+    const documentKinds = new Set([
+      "film",
+      "comicDrama",
+      "musicVideo",
+      "commerce",
+      "brandVideo",
+      "remotion",
+      "xhsCover",
+    ]);
     for (const entry of WORKFLOW_KINDS) {
       expect(entry.nodeTitle.length).toBeGreaterThan(0);
       expect(entry.historyTitle.length).toBeGreaterThan(0);
@@ -105,8 +114,15 @@ describe("workflowKinds registry", () => {
       expect(entry.repository.title.length).toBeGreaterThan(0);
       expect(entry.repository.description.length).toBeGreaterThan(0);
       expect(entry.repository.stages).toHaveLength(4);
+      expect(entry.repository.stagesAriaLabel.length).toBeGreaterThan(0);
       expect(entry.repository.insertLabel.length).toBeGreaterThan(0);
       expect(workflowKindDefinitionOf(entry.id)).toBe(entry);
+      // 文档交付类型带导出标题；其余（与四件套）缺省。
+      expect((entry.deliveryTitle != null) === documentKinds.has(entry.id)).toBe(true);
+      if (entry.deliveryBundle != null) {
+        expect(entry.deliveryBundleTitle).toBeTruthy();
+        expect(entry.id === "comicDrama" || entry.id === "musicVideo").toBe(true);
+      }
     }
   });
 

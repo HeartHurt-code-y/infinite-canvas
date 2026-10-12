@@ -40,8 +40,14 @@ import type {
   WorkflowTemplateSubgraph,
 } from "./workflowTemplates";
 import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
-import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
-import { musicVideoDeliveryMarkdown } from "./musicVideoWorkflowModel";
+import {
+  comicDramaDeliveryBundle,
+  comicDramaDeliveryMarkdown,
+} from "./comicDramaWorkflowModel";
+import {
+  musicVideoDeliveryBundle,
+  musicVideoDeliveryMarkdown,
+} from "./musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { brandVideoDeliveryMarkdown } from "./brandVideoWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
@@ -95,10 +101,19 @@ export interface WorkflowRepositoryCard {
   readonly description: string;
   /** 卡片下方的四段能力标签。 */
   readonly stages: readonly string[];
+  /** 能力标签列表的可访问名（个别卡片与标题不同文，逐字保留）。 */
+  readonly stagesAriaLabel: string;
   /** 知识视频卡片的既有版式：能力标签前渲染两位序号。 */
   readonly numberedStages?: boolean;
   readonly insertLabel: string;
   readonly insertAriaLabel?: string;
+}
+
+/** 四件套打包导出的单个文件（漫剧与 MV 的既有导出形状）。 */
+export interface WorkflowDeliveryFile {
+  readonly fileName: string;
+  readonly content: string;
+  readonly mediaType: string;
 }
 
 export interface WorkflowKindDefinition {
@@ -124,6 +139,14 @@ export interface WorkflowKindDefinition {
   readonly repository: WorkflowRepositoryCard;
   /** 「导出制作文档」的正文构建器；不支持文档交付的类型缺省。 */
   readonly deliveryMarkdown?: (checkpoint: KnowledgeVideoWorkflowCheckpoint) => string;
+  /** 「导出制作文档」的文档标题（toast 与导出文件名用）。 */
+  readonly deliveryTitle?: string;
+  /** 四件套打包导出（当前仅漫剧与 MV）；缺省走单一 Markdown 导出。 */
+  readonly deliveryBundle?: (
+    checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  ) => readonly WorkflowDeliveryFile[];
+  /** 四件套导出的打包名（toast 用）。 */
+  readonly deliveryBundleTitle?: string;
 }
 
 /** 知识视频是缺省类型：其余 10 个类型的专属字段一个都没有的配置都属于它。 */
@@ -181,6 +204,7 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "上传同一产品参考图，以 AI 多机位组合拍摄角度与场景；也可选择原图保真合成。分批制作、逐张审核后导出。",
       stages: ["产品确认", "分批制作", "逐张审核", "图片导出"],
+      stagesAriaLabel: "产品场景图工作流能力",
       insertLabel: "添加产品场景图",
       insertAriaLabel: "添加产品场景图工作流节点",
     },
@@ -205,6 +229,7 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "读取本地视频，测量逐镜切点与运动，结合项目视觉模型标注镜头；审核后导出镜头报告与同步分镜视频。",
       stages: ["本地切镜", "逐镜标注", "批量审核", "报告与视频"],
+      stagesAriaLabel: "视频拉片与分镜合成能力",
       insertLabel: "添加拉片工作流",
       insertAriaLabel: "添加视频拉片与分镜合成工作流节点",
     },
@@ -231,10 +256,14 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "以原曲为时间轴，确认歌词、风格、人物和分镜，首镜试产通过后生成全片，按音乐窗口合成并保留制作版本。",
       stages: ["歌曲与歌词", "风格与分镜", "首镜与片段审核", "原曲合成交付"],
+      stagesAriaLabel: "音乐 MV 工作流能力",
       insertLabel: "添加 MV 工作流",
       insertAriaLabel: "添加音乐 MV 工作流节点",
     },
     deliveryMarkdown: musicVideoDeliveryMarkdown,
+    deliveryTitle: "MV 制作文档",
+    deliveryBundle: musicVideoDeliveryBundle,
+    deliveryBundleTitle: "音乐 MV",
   },
   {
     id: "reverseVideo",
@@ -256,6 +285,7 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "粘贴分享链接或选择本地视频，由项目下载器获取原片，自动抽帧、反推提示词与二创路线，校验后保存案例和交付文档。",
       stages: ["下载与抽帧", "反推与二创", "检查与入库", "文档交付"],
+      stagesAriaLabel: "短视频反推工作流能力",
       insertLabel: "添加反推工作流",
       insertAriaLabel: "添加短视频反推工作流节点",
     },
@@ -282,10 +312,12 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "填写选题即可开始；想沿用真人形象时再添加人物参考图。自动提炼标题、匹配八种风格、生成与检查封面，交付 3:4 竖版图片及提示词。",
       stages: ["标题与风格", "参考图生成", "自动检查", "封面交付"],
+      stagesAriaLabel: "小红书封面工作流能力",
       insertLabel: "添加封面工作流",
       insertAriaLabel: "添加小红书封面工作流节点",
     },
     deliveryMarkdown: xhsCoverDeliveryMarkdown,
+    deliveryTitle: "小红书封面制作文档",
   },
   {
     id: "knowledge",
@@ -313,6 +345,7 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "画布只增加一个节点。使用项目内已配置的模型，确认计划后按依赖执行，检查片段后合成交付。",
       stages: KNOWLEDGE_VIDEO_STAGES,
+      stagesAriaLabel: "知识教学视频自动工作流能力",
       numberedStages: true,
       insertLabel: "添加工作流节点",
     },
@@ -342,12 +375,14 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "从故事概念到角色、剧本、资产、表演与视频，八个阶段自动衔接。支持已有资料接力和指定阶段修订。",
       stages: ["故事与剧本", "角色与场景", "表演与镜头", "成片交付"],
+      stagesAriaLabel: "AI影视工作流能力",
       insertLabel: "添加影视工作流",
       insertAriaLabel: "添加AI影视工作流节点",
     },
     // 与原导出闸门同语义：没有已完成的影视产物就不产文档正文。
     deliveryMarkdown: (checkpoint) =>
       checkpoint.film?.artifacts.length ? aiFilmDeliveryMarkdown(checkpoint) : "",
+    deliveryTitle: "影视制作文档",
   },
   {
     id: "comicDrama",
@@ -368,10 +403,14 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "剧本共创、风格锁定、服化道、导演分镜与执行提示词逐阶段确认。检查资产、首镜与全部片段后合成，交付制作四件套。",
       stages: ["剧本与风格", "资产与分镜", "首镜与批量审核", "成片与四件套"],
+      stagesAriaLabel: "漫剧自动工作流能力",
       insertLabel: "添加漫剧工作流",
       insertAriaLabel: "添加漫剧自动工作流节点",
     },
     deliveryMarkdown: comicDramaDeliveryMarkdown,
+    deliveryTitle: "漫剧制作文档",
+    deliveryBundle: comicDramaDeliveryBundle,
+    deliveryBundleTitle: "动漫短剧",
   },
   {
     id: "commerce",
@@ -391,10 +430,12 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "添加商品资料与实物图，快速生成 15 秒四镜头剧情，或完成五阶段制作。自动检查商品事实与包装一致性，交付文档和成片。",
       stages: ["商品研究", "剧情与剧本", "分镜与资产", "成片交付"],
+      stagesAriaLabel: "剧情带货工作流能力",
       insertLabel: "添加带货工作流",
       insertAriaLabel: "添加剧情带货工作流节点",
     },
     deliveryMarkdown: commerceDeliveryMarkdown,
+    deliveryTitle: "剧情带货制作文档",
   },
   {
     id: "brandVideo",
@@ -418,10 +459,12 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "围绕新品、系列或节日制作品牌短片，复用已定稿数字模特与商品原图。先审核概念与分镜，再看首镜试产，选用片段后合成。",
       stages: ["品牌概念", "分镜与身份参考", "首镜试产", "审核与成片"],
+      stagesAriaLabel: "品牌视觉短片工作流能力",
       insertLabel: "添加品牌视频工作流",
       insertAriaLabel: "添加品牌视觉短片工作流节点",
     },
     deliveryMarkdown: brandVideoDeliveryMarkdown,
+    deliveryTitle: "品牌短片制作文档",
   },
   {
     id: "remotion",
@@ -441,10 +484,12 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
       description:
         "输入描述或 ASCII 草图，自动匹配流程、卡片、时间线与数据图模板。在本机渲染 GIF 或 MP4，并交付可编辑工程。",
       stages: ["理解内容", "匹配与检查", "本地渲染", "动画交付"],
+      stagesAriaLabel: "动画逻辑图工作流能力",
       insertLabel: "添加动画工作流",
       insertAriaLabel: "添加动画逻辑图工作流节点",
     },
     deliveryMarkdown: remotionDeliveryMarkdown,
+    deliveryTitle: "动画逻辑图制作文档",
   },
 ];
 

@@ -290,13 +290,11 @@ import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
 import { workflowMaterialPathKey } from "./workflowMaterials";
-import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
-import { comicDramaDeliveryMarkdown, comicDramaDeliveryBundle } from "./comicDramaWorkflowModel";
-import { musicVideoDeliveryMarkdown, musicVideoDeliveryBundle } from "./musicVideoWorkflowModel";
-import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
-import { brandVideoDeliveryMarkdown } from "./brandVideoWorkflowModel";
-import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
-import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
+import {
+  workflowKindDefinitionOf,
+  workflowKindOf,
+  type WorkflowKind,
+} from "./workflowKinds";
 import type {
   AssetEdgeData,
   AssetItem,
@@ -4821,20 +4819,7 @@ export function WorkspaceApp({
    * 模板只保存当前项目供应商目录校准后的模型绑定；插入本身不会发起任何模型任务。
    */
   const insertWorkflow = useCallback(
-    async (
-      kind:
-        | "knowledge"
-        | "film"
-        | "comicDrama"
-        | "musicVideo"
-        | "commerce"
-        | "brandVideo"
-        | "remotion"
-        | "xhsCover"
-        | "productScene"
-        | "reverseVideo"
-        | "reelbench",
-    ) => {
+    async (kind: WorkflowKind) => {
       try {
         const anchor = viewportCenterBoardCoordinates();
         const scale = flowInstanceRef.current?.getZoom() ?? zoom / 100;
@@ -4845,33 +4830,8 @@ export function WorkspaceApp({
           visibleHeight > 0
             ? Math.max(0, (KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT + 48 - visibleHeight) / 2)
             : 0;
-        const templateModule = await import("./workflowTemplates");
-        const createWorkflow = {
-          knowledge: templateModule.createKnowledgeVideoDirectorWorkflow,
-          film: templateModule.createAiFilmWorkflow,
-          comicDrama: templateModule.createComicDramaWorkflow,
-          musicVideo: templateModule.createMusicVideoWorkflow,
-          commerce: templateModule.createCommerceWorkflow,
-          brandVideo: templateModule.createBrandVideoWorkflow,
-          remotion: templateModule.createRemotionWorkflow,
-          xhsCover: templateModule.createXhsCoverWorkflow,
-          productScene: templateModule.createProductSceneWorkflow,
-          reverseVideo: templateModule.createReverseVideoWorkflow,
-          reelbench: templateModule.createReelbenchWorkflow,
-        }[kind];
-        const title = {
-          knowledge: "知识教学视频",
-          film: "AI影视",
-          comicDrama: "漫剧自动",
-          musicVideo: "音乐 MV",
-          commerce: "剧情带货",
-          brandVideo: "品牌视觉短片",
-          remotion: "动画逻辑图",
-          xhsCover: "小红书封面",
-          productScene: "产品场景图",
-          reverseVideo: "短视频反推",
-          reelbench: "视频拉片与分镜合成",
-        }[kind];
+        // 模板工厂经注册表按需加载，保留工作流模板代码的分块加载。
+        const createWorkflow = await workflowKindDefinitionOf(kind).loadTemplate();
         const workflow = createWorkflow({
           anchor: { x: anchor.x, y: anchor.y + topInset },
           occupied: occupiedNodeRects,
@@ -4884,31 +4844,13 @@ export function WorkspaceApp({
           selectNodeKey: workflow.selectedNodeKey,
         });
         setWorkflowRepositoryExpanded(false);
+        const { insertTitle, insertToastDescription } = workflowKindDefinitionOf(kind);
         frontendLog(
           "info",
-          `[canvas] ${title}工作流已放入画布: 节点=${workflow.nodes.length}, 连线=${workflow.edges.length}, 位置=(${Math.round(workflow.bounds.x)}, ${Math.round(workflow.bounds.y)})`,
+          `[canvas] ${insertTitle}工作流已放入画布: 节点=${workflow.nodes.length}, 连线=${workflow.edges.length}, 位置=(${Math.round(workflow.bounds.x)}, ${Math.round(workflow.bounds.y)})`,
         );
-        toast.success(`${title}工作流已放入画布`, {
-          description:
-            kind === "productScene"
-              ? "添加同一版本的产品参考图，使用 AI 多机位分批制作 3:4 或 9:16 场景图，并逐张审核。"
-              : kind === "brandVideo"
-                ? "填写系列或节日创意，选择已定稿模特及商品参考，审核首镜后制作品牌短片。"
-                : kind === "musicVideo"
-                  ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
-                  : kind === "reverseVideo"
-                    ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
-                    : kind === "reelbench"
-                      ? "选择本地视频，确认计划后测量切点、标注镜头，批量审核并导出报告和同步分镜视频。"
-                      : kind === "xhsCover"
-                        ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
-                        : kind === "remotion"
-                          ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
-                          : kind === "commerce"
-                            ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
-                            : kind === "comicDrama"
-                              ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
-                              : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+        toast.success(`${insertTitle}工作流已放入画布`, {
+          description: insertToastDescription,
         });
       } catch (error: unknown) {
         const message = formatRawBackendError(error);
@@ -4933,39 +4875,6 @@ export function WorkspaceApp({
       zoom,
     ],
   );
-  const insertKnowledgeVideoDirectorWorkflow = useCallback(() => {
-    void insertWorkflow("knowledge");
-  }, [insertWorkflow]);
-  const insertAiFilmWorkflow = useCallback(() => {
-    void insertWorkflow("film");
-  }, [insertWorkflow]);
-  const insertComicDramaWorkflow = useCallback(() => {
-    void insertWorkflow("comicDrama");
-  }, [insertWorkflow]);
-  const insertCommerceWorkflow = useCallback(() => {
-    void insertWorkflow("commerce");
-  }, [insertWorkflow]);
-  const insertBrandVideoWorkflow = useCallback(() => {
-    void insertWorkflow("brandVideo");
-  }, [insertWorkflow]);
-  const insertRemotionWorkflow = useCallback(() => {
-    void insertWorkflow("remotion");
-  }, [insertWorkflow]);
-  const insertXhsCoverWorkflow = useCallback(() => {
-    void insertWorkflow("xhsCover");
-  }, [insertWorkflow]);
-  const insertProductSceneWorkflow = useCallback(() => {
-    void insertWorkflow("productScene");
-  }, [insertWorkflow]);
-  const insertReverseVideoWorkflow = useCallback(() => {
-    void insertWorkflow("reverseVideo");
-  }, [insertWorkflow]);
-  const insertReelbenchWorkflow = useCallback(() => {
-    void insertWorkflow("reelbench");
-  }, [insertWorkflow]);
-  const insertMusicVideoWorkflow = useCallback(() => {
-    void insertWorkflow("musicVideo");
-  }, [insertWorkflow]);
   const toggleWorkflowRepository = useCallback(
     () => setWorkflowRepositoryExpanded((current) => !current),
     [],
@@ -6078,57 +5987,18 @@ export function WorkspaceApp({
     (key: string) => {
       const node = canvasNodesNow("knowledgeVideoWorkflow").find((item) => item.key === key);
       if (!node) return;
-      const isDrama = Boolean(node.config.comicDrama);
-      const isMusicVideo = Boolean(node.config.musicVideo);
-      const isCommerce = Boolean(node.config.commerce);
-      const isBrandVideo = Boolean(node.config.brandVideo);
-      const isRemotion = Boolean(node.config.remotion);
-      const isCover = Boolean(node.config.xhsCover);
-      if (
-        !isCover &&
-        !isRemotion &&
-        !isDrama &&
-        !isMusicVideo &&
-        !isCommerce &&
-        !isBrandVideo &&
-        !node.config.checkpoint.film?.artifacts.length
-      )
-        return;
-      const content = isBrandVideo
-        ? brandVideoDeliveryMarkdown(node.config.checkpoint)
-        : isMusicVideo
-          ? musicVideoDeliveryMarkdown(node.config.checkpoint)
-          : isCover
-            ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
-            : isRemotion
-              ? remotionDeliveryMarkdown(node.config.checkpoint)
-              : isCommerce
-                ? commerceDeliveryMarkdown(node.config.checkpoint)
-                : isDrama
-                  ? comicDramaDeliveryMarkdown(node.config.checkpoint)
-                  : aiFilmDeliveryMarkdown(node.config.checkpoint);
-      if (!content) return;
-      const title = isBrandVideo
-        ? "品牌短片制作文档"
-        : isMusicVideo
-          ? "MV 制作文档"
-          : isCover
-            ? "小红书封面制作文档"
-            : isRemotion
-              ? "动画逻辑图制作文档"
-              : isCommerce
-                ? "剧情带货制作文档"
-                : isDrama
-                  ? "漫剧制作文档"
-                  : "影视制作文档";
+      // 导出正文、文档标题与四件套打包全部由注册表按工作流类型分发；
+      // 无文档交付的类型（或正文为空）在此静默返回，与原闸门同语义。
+      const delivery = workflowKindDefinitionOf(workflowKindOf(node.config));
+      const content = delivery.deliveryMarkdown?.(node.config.checkpoint) ?? "";
+      if (!content || delivery.deliveryTitle == null) return;
+      const title = delivery.deliveryTitle;
       const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
         try {
-          if (isDrama || isMusicVideo) {
-            const files = isMusicVideo
-              ? musicVideoDeliveryBundle(node.config.checkpoint)
-              : comicDramaDeliveryBundle(node.config.checkpoint);
-            const bundleTitle = isMusicVideo ? "音乐 MV" : "动漫短剧";
+          if (delivery.deliveryBundle) {
+            const files = delivery.deliveryBundle(node.config.checkpoint);
+            const bundleTitle = delivery.deliveryBundleTitle ?? title;
             if (isDesktopRuntime()) {
               const folder = await saveWorkflowBundleToDesktop(files, bundleTitle);
               if (!folder) return;
@@ -12072,7 +11942,7 @@ export function WorkspaceApp({
                   onPickReverseVideo={handlePickReverseVideo}
                   onPickReelbenchVideo={handlePickReelbenchVideo}
                   onPickMusicVideoMaterial={handlePickMusicVideoMaterial}
-                  onExportMusicVideoDocuments={exportFilmDocuments}
+                  onExportDocuments={exportFilmDocuments}
                   onRemoveReverseVideo={handleRemoveReverseVideo}
                   onRemoveReelbenchVideo={handleRemoveReelbenchVideo}
                   onOpenDownloadSettings={importDownloaderCookies}
@@ -12080,16 +11950,11 @@ export function WorkspaceApp({
                   downloadCookieBusy={downloaderCookieBusy}
                   onSelectDownloadCookieBrowser={selectDownloaderCookieBrowser}
                   onClearDownloadCookies={clearDownloaderCookies}
-                  onExportFilmDocuments={exportFilmDocuments}
-                  onExportComicDramaDocuments={exportFilmDocuments}
-                  onExportCommerceDocuments={exportFilmDocuments}
-                  onExportRemotionDocuments={exportFilmDocuments}
                   onRevealRemotionProject={revealRemotionProject}
                   onPickCommerceMaterials={handlePickCommerceMaterials}
                   onRemoveCommerceMaterial={handleRemoveCommerceMaterial}
                   onPickCoverImages={handlePickCoverImages}
                   onRemoveCoverImage={handleRemoveCoverImage}
-                  onExportCoverDocuments={exportFilmDocuments}
                 />
               ),
             },
@@ -13604,17 +13469,7 @@ export function WorkspaceApp({
             <WorkflowRepository
               expanded={workflowRepositoryExpanded}
               onToggle={toggleWorkflowRepository}
-              onInsertKnowledgeVideoWorkflow={insertKnowledgeVideoDirectorWorkflow}
-              onInsertAiFilmWorkflow={insertAiFilmWorkflow}
-              onInsertComicDramaWorkflow={insertComicDramaWorkflow}
-              onInsertCommerceWorkflow={insertCommerceWorkflow}
-              onInsertBrandVideoWorkflow={insertBrandVideoWorkflow}
-              onInsertRemotionWorkflow={insertRemotionWorkflow}
-              onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
-              onInsertProductSceneWorkflow={insertProductSceneWorkflow}
-              onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
-              onInsertReelbenchWorkflow={insertReelbenchWorkflow}
-              onInsertMusicVideoWorkflow={insertMusicVideoWorkflow}
+              onInsert={(kind) => void insertWorkflow(kind)}
             />
             <button
               ref={setNodeMenuTriggerElement}
