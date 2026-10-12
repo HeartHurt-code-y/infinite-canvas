@@ -34,25 +34,12 @@ import {
   workflowExecutionInputSignature,
 } from "./workflowExecutionPlan";
 import { validateWorkflowMaterialsResume, workflowMaterialsSignature } from "./workflowMaterials";
-import { createAiFilmWorkflowRunner } from "./aiFilmWorkflowRunner";
-import { createComicDramaWorkflowRunner } from "./comicDramaWorkflowRunner";
-import { createMusicVideoWorkflowRunner } from "./musicVideoWorkflowRunner";
-import { createBrandVideoWorkflowRunner } from "./brandVideoWorkflowRunner";
-import { createCommerceWorkflowRunner } from "./commerceWorkflowRunner";
-import {
-  createKnowledgeVideoWorkflowRunner,
-} from "./knowledgeVideoWorkflowRunner";
 import {
   type KnowledgeVideoWorkflowRunner,
   type KnowledgeVideoWorkflowRunRequest,
   type RecordedClients,
 } from "./workflowRunnerContract";
-import { createRemotionWorkflowRunner } from "./remotionWorkflowRunner";
-import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
-import { createProductSceneWorkflowRunner } from "./productSceneWorkflowRunner";
-import { productSceneQualityEnabled } from "./productSceneWorkflowModel";
-import { createReverseVideoWorkflowRunner } from "./reverseVideoWorkflowRunner";
-import { createReelbenchWorkflowRunner } from "./reelbenchWorkflowRunner";
+import { workflowKindDefinitionOf, workflowKindOf } from "./workflowKinds";
 import {
   CANVAS_ID,
   createKnowledgeVideoWorkflowConfig,
@@ -85,64 +72,6 @@ export interface RecordedWorkflowDependencies extends RecordedClients {
   ) => KnowledgeVideoWorkflowRunner;
   readonly now: () => number;
   readonly createId: () => string;
-}
-
-export function workflowKindForNode(node: KnowledgeVideoWorkflowNodeData): WorkflowHistoryKind {
-  if (node.config.productScene) return "productScene";
-  if (node.config.musicVideo) return "musicVideo";
-  if (node.config.brandVideo) return "brandVideo";
-  if (node.config.reverseVideo) return "reverseVideo";
-  if (node.config.reelbench) return "reelbench";
-  if (node.config.xhsCover) return "xhsCover";
-  if (node.config.remotion) return "remotion";
-  if (node.config.commerce) return "commerce";
-  if (node.config.comicDrama) return "comicDrama";
-  if (node.config.film) return "film";
-  return "knowledge";
-}
-
-const TITLES: Record<WorkflowHistoryKind, string> = {
-  knowledge: "知识视频",
-  film: "影视制作",
-  comicDrama: "漫剧制作",
-  musicVideo: "音乐 MV",
-  brandVideo: "品牌视频",
-  commerce: "带货创作",
-  remotion: "动画制作",
-  xhsCover: "小红书封面",
-  productScene: "产品场景图",
-  reverseVideo: "短视频反推",
-  reelbench: "视频拉片与分镜合成",
-};
-
-function defaultRunnerFactory(
-  kind: WorkflowHistoryKind,
-  clients: RecordedClients,
-): KnowledgeVideoWorkflowRunner {
-  switch (kind) {
-    case "productScene":
-      return createProductSceneWorkflowRunner(clients);
-    case "musicVideo":
-      return createMusicVideoWorkflowRunner(clients);
-    case "brandVideo":
-      return createBrandVideoWorkflowRunner(clients);
-    case "film":
-      return createAiFilmWorkflowRunner(clients);
-    case "comicDrama":
-      return createComicDramaWorkflowRunner(clients);
-    case "commerce":
-      return createCommerceWorkflowRunner(clients);
-    case "remotion":
-      return createRemotionWorkflowRunner({ promptClient: clients.promptClient });
-    case "xhsCover":
-      return createXhsCoverWorkflowRunner(clients);
-    case "reverseVideo":
-      return createReverseVideoWorkflowRunner({ promptClient: clients.promptClient });
-    case "reelbench":
-      return createReelbenchWorkflowRunner({ promptClient: clients.promptClient });
-    case "knowledge":
-      return createKnowledgeVideoWorkflowRunner(clients);
-  }
 }
 
 function snapshot<T>(value: T): T {
@@ -214,24 +143,7 @@ function modelSnapshots(
   request: KnowledgeVideoWorkflowRunRequest,
   kind: WorkflowHistoryKind,
 ): WorkflowHistoryRecord["models"] {
-  const roles =
-    kind === "productScene"
-      ? request.node.config.productScene &&
-        productSceneQualityEnabled(request.node.config.productScene)
-        ? (["text", "image"] as const)
-        : (["image"] as const)
-      : kind === "remotion" ||
-          kind === "reverseVideo" ||
-          kind === "reelbench" ||
-          (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
-          (kind === "brandVideo" && request.node.config.brandVideo?.deliverable === "documents") ||
-          (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
-        ? (["text"] as const)
-        : kind === "xhsCover"
-          ? (["text", "image"] as const)
-          : kind === "brandVideo"
-            ? (["text", "video"] as const)
-            : (["text", "image", "video"] as const);
+  const roles = workflowKindDefinitionOf(kind).historyRoles(request.node.config);
   return roles.map((role) => {
     const selected = request.node.config.models[role];
     const provider = request.providerCatalog.find(
@@ -259,7 +171,7 @@ export function createRecordedWorkflowRunner(
     historyClient: workflowHistoryClient,
     promptClient: promptNodeClient,
     generationClient,
-    runnerFactory: defaultRunnerFactory,
+    runnerFactory: (kind, clients) => workflowKindDefinitionOf(kind).createRunner(clients),
     now: Date.now,
     createId: () => crypto.randomUUID(),
     ...overrides,
@@ -370,7 +282,7 @@ export function createRecordedWorkflowRunner(
       let revision = 0;
       let record: WorkflowHistoryRecord | null = null;
       const historyId = request.node.config.historyRunId;
-      const kind = workflowKindForNode(request.node);
+      const kind = workflowKindOf(request.node.config);
       type ProductSceneSave = {
         readonly checkpoint: KnowledgeVideoWorkflowCheckpoint;
         readonly progress: KnowledgeVideoWorkflowRunState;
@@ -641,7 +553,7 @@ export function createRecordedWorkflowRunner(
             canvasId: dependencies.canvasId,
             sourceNodeId: request.node.key,
             workflowKind: kind,
-            title: `${TITLES[kind]} · ${title ? title : "未命名"}`,
+            title: `${workflowKindDefinitionOf(kind).historyTitle} · ${title ? title : "未命名"}`,
             status: checkpoint.phase,
             progress: 0,
             message: latestProgress.message,

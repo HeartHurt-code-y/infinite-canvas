@@ -13,9 +13,9 @@ import {
 } from "./workflowExecutionPlan";
 import {
   createRecordedWorkflowRunner,
-  workflowKindForNode,
   type RecordedWorkflowDependencies,
 } from "./workflowHistoryExecution";
+import { workflowKindOf } from "./workflowKinds";
 import {
   redoWorkflowVersion,
   restoreWorkflowVersion,
@@ -63,7 +63,7 @@ describe("native music-video workflow integration", () => {
     expect(template.edges).toEqual([]);
     const entry = template.nodes[0];
     if (entry?.type !== "knowledgeVideoWorkflow") throw new Error("Missing MV node");
-    expect(workflowKindForNode(entry.data)).toBe("musicVideo");
+    expect(workflowKindOf(entry.data.config)).toBe("musicVideo");
     expect(entry.data.config.musicVideo).toEqual(createMusicVideoOptions());
     expect(entry.data.config.checkpoint.musicVideo).toEqual(createMusicVideoCheckpoint());
     expect(entry.data.config.models).toEqual({

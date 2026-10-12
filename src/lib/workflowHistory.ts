@@ -1,23 +1,17 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
 import { isDesktopRuntime, type GenerationTaskSummary } from "./backend";
+import { WORKFLOW_KIND_IDS, type WorkflowKind } from "../features/workspace/workflowKinds";
 import type {
   KnowledgeVideoWorkflowNodeData,
   KnowledgeVideoWorkflowPhase,
 } from "../features/workspace/workspaceModel";
 
-export type WorkflowHistoryKind =
-  | "knowledge"
-  | "film"
-  | "comicDrama"
-  | "musicVideo"
-  | "brandVideo"
-  | "commerce"
-  | "remotion"
-  | "xhsCover"
-  | "productScene"
-  | "reverseVideo"
-  | "reelbench";
+/**
+ * 工作流类型与注册表同源：id 列表见 workflowKinds 的 WORKFLOW_KINDS，
+ * 与 Rust `WorkflowKind`（storage/workflow_history.rs）一一对应。
+ */
+export type WorkflowHistoryKind = WorkflowKind;
 
 export interface WorkflowHistoryModelSnapshot {
   readonly role: "text" | "image" | "video";
@@ -117,19 +111,7 @@ const recordSchema = v.object({
   id: v.string(),
   canvasId: v.string(),
   sourceNodeId: v.string(),
-  workflowKind: v.picklist([
-    "knowledge",
-    "film",
-    "comicDrama",
-    "musicVideo",
-    "brandVideo",
-    "commerce",
-    "remotion",
-    "xhsCover",
-    "productScene",
-    "reverseVideo",
-    "reelbench",
-  ]),
+  workflowKind: v.picklist(WORKFLOW_KIND_IDS),
   title: v.string(),
   status: phaseSchema,
   progress: v.number(),
