@@ -38,6 +38,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
+use ts_rs::TS;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -91,8 +92,9 @@ pub const WAN30_SKILL_DIR: &str = "builtin://wan3-prompt-skill";
 /// 人物真实感图片提示词生成技能（realistic-character-prompt）随应用编译。
 pub const REALISTIC_CHARACTER_SKILL_DIR: &str = "builtin://realistic-character-prompt";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum PromptOptimizationMode {
     /// 客户端画布智能体：复用文本适配与历史记录，由客户端校验和执行声明式工具计划。
     #[serde(rename = "canvas_agent")]

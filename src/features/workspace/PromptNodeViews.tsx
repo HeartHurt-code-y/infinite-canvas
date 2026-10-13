@@ -30,6 +30,7 @@ import {
 } from "../../lib/modelCapabilities";
 import {
   resolveSeedanceTask,
+  seedanceTaskInputs,
   seedanceTaskOptions,
   selectSeedanceTask,
   type SeedanceTaskMode,
@@ -1857,7 +1858,7 @@ export function VideoNodeSettings({
     selectedModel?.remoteModelId ?? "",
     parameterCapabilities,
     greenScreen ? { ...config, seedanceTaskMode: greenScreen.taskMode } : config,
-    greenScreen ? greenScreen.connections : (mediaInputs ?? []),
+    seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])),
   );
   const currentTaskLabel = seedanceTaskOptions(selectedModel?.remoteModelId ?? "").find(
     (option) => option.value === taskState.mode,

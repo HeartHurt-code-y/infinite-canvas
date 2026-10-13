@@ -150,12 +150,14 @@ export const workspaceUiPrefsSchema = v.looseObject({
   assetLibrarySource: v.optional(v.nullable(v.picklist(["cloud", "local"]))),
 });
 
-const mediaTypeSchema = v.picklist(["image", "video", "audio"]);
+// 枚举 picklist 是这些跨语言契约在值层面的单一来源；与 src/lib/bindings/ 下
+// ts-rs 生成的类型由 bindingsParity.test.ts 逐字对账。
+export const mediaTypeSchema = v.picklist(["image", "video", "audio"]);
 
 /** 生成结果记录的类型：媒体产物之外，Context-IR 等任务产出文本（"text"）。 */
-const generationResultMediaTypeSchema = v.picklist(["image", "video", "audio", "text"]);
+export const generationResultMediaTypeSchema = v.picklist(["image", "video", "audio", "text"]);
 
-const stagingStatusSchema = v.picklist([
+export const stagingStatusSchema = v.picklist([
   "validating",
   "authorizing",
   "uploading",
@@ -300,7 +302,13 @@ export const tosBucketPullSummarySchema = v.looseObject({
   prefix: v.string(),
 }) satisfies v.GenericSchema<TosBucketPullSummary>;
 
-const cloudAssetStatusSchema = v.picklist(["processing", "ready", "failed", "deleted", "unknown"]);
+export const cloudAssetStatusSchema = v.picklist([
+  "processing",
+  "ready",
+  "failed",
+  "deleted",
+  "unknown",
+]);
 
 export const cloudAssetSchema = v.looseObject({
   providerConnectionId: v.string(),
@@ -364,7 +372,7 @@ export const realPersonGroupSchema = v.looseObject({
 
 export const realPersonGroupsSchema = v.array(realPersonGroupSchema);
 
-const generationTaskStatusSchema = v.picklist([
+export const generationTaskStatusSchema = v.picklist([
   "created",
   "submitting",
   "retry_wait",
@@ -376,7 +384,17 @@ const generationTaskStatusSchema = v.picklist([
   "interrupted",
 ]);
 
-const queryHealthSchema = v.picklist(["healthy", "retry_wait", "degraded"]);
+export const queryHealthSchema = v.picklist(["healthy", "retry_wait", "degraded"]);
+
+export const saveStatusSchema = v.picklist([
+  "pending",
+  "writing",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "local_missing",
+  "conflict",
+]);
 
 const tokenUsageSchema = v.looseObject({
   promptTokens: nullableNumberSchema,
@@ -439,15 +457,7 @@ export const generationResultRecordSchema = v.looseObject({
   mediaType: generationResultMediaTypeSchema,
   remoteTaskId: nullableStringSchema,
   source: v.unknown(),
-  saveStatus: v.picklist([
-    "pending",
-    "writing",
-    "succeeded",
-    "failed",
-    "interrupted",
-    "local_missing",
-    "conflict",
-  ]),
+  saveStatus: saveStatusSchema,
   finalPath: nullableStringSchema,
   relativePath: nullableStringSchema,
   byteSize: nullableNumberSchema,
@@ -593,12 +603,24 @@ export const generationRetryExhaustedEventSchema = v.looseObject({
   reason: v.unknown(),
 });
 
-const videoDownloadStatusSchema = v.picklist([
+export const videoDownloadStatusSchema = v.picklist([
   "preparing_engine",
   "downloading",
   "completed",
   "failed",
   "cancelled",
+]);
+
+export const videoDownloadQualityModeSchema = v.picklist(["best", "sd480"]);
+
+export const videoDownloadCredentialSourceSchema = v.picklist([
+  "chrome",
+  "edge",
+  "firefox",
+  "brave",
+  "manual",
+  "site_session",
+  "none",
 ]);
 
 export const videoDownloadJobRecordSchema = v.looseObject({
@@ -608,37 +630,53 @@ export const videoDownloadJobRecordSchema = v.looseObject({
   progress: nullableNumberSchema,
   finalPath: nullableStringSchema,
   fileName: nullableStringSchema,
-  qualityMode: v.nullable(v.picklist(["best", "sd480"])),
+  qualityMode: v.nullable(videoDownloadQualityModeSchema),
   qualityHint: nullableStringSchema,
   watermarkRemoved: v.boolean(),
-  credentialSource: v.optional(
-    v.nullable(
-      v.picklist(["chrome", "edge", "firefox", "brave", "manual", "site_session", "none"]),
-    ),
-    null,
-  ),
+  credentialSource: v.optional(v.nullable(videoDownloadCredentialSourceSchema), null),
   probeStatus: v.optional(nullableStringSchema, null),
   error: nullableStringSchema,
   createdAt: v.number(),
   updatedAt: v.number(),
 }) satisfies v.GenericSchema<VideoDownloadJobRecord>;
 
+export const videoDownloaderEngineStateSchema = v.picklist([
+  "not_installed",
+  "installing",
+  "ready",
+  "failed",
+]);
+
+export const videoCookieBrowserSchema = v.picklist(["auto", "chrome", "edge", "firefox", "brave"]);
+
 export const videoDownloaderEngineStatusSchema = v.looseObject({
-  state: v.picklist(["not_installed", "installing", "ready", "failed"]),
+  state: videoDownloaderEngineStateSchema,
   version: nullableStringSchema,
   binaryPath: nullableStringSchema,
   cookiesInstalled: v.boolean(),
-  cookieBrowser: v.optional(
-    v.nullable(v.picklist(["auto", "chrome", "edge", "firefox", "brave"])),
-    null,
-  ),
+  cookieBrowser: v.optional(v.nullable(videoCookieBrowserSchema), null),
   bilibiliLoggedIn: v.boolean(),
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoDownloaderEngineStatus>;
 
+export const videoCompositionStatusSchema = v.picklist([
+  "preparing_engine",
+  "processing",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
+export const videoComposerEngineStateSchema = v.picklist([
+  "not_installed",
+  "installing",
+  "ready",
+  "failed",
+]);
+
 export const videoCompositionJobRecordSchema = v.looseObject({
   jobId: v.string(),
-  status: v.picklist(["preparing_engine", "processing", "completed", "failed", "cancelled"]),
+  status: videoCompositionStatusSchema,
   progress: nullableNumberSchema,
   finalPath: nullableStringSchema,
   fileName: nullableStringSchema,
@@ -665,17 +703,19 @@ export const mediaThumbnailSchema = v.looseObject({
 
 export const nullableMediaThumbnailSchema = v.nullable(mediaThumbnailSchema);
 
+export const videoFrameExtractionStatusSchema = v.picklist([
+  "preparing_engine",
+  "processing",
+  "paused",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+
 export const videoFrameExtractionJobRecordSchema = v.looseObject({
   jobId: v.string(),
   videoPath: v.string(),
-  status: v.picklist([
-    "preparing_engine",
-    "processing",
-    "paused",
-    "completed",
-    "failed",
-    "cancelled",
-  ]),
+  status: videoFrameExtractionStatusSchema,
   progress: nullableNumberSchema,
   frames: v.array(
     v.looseObject({

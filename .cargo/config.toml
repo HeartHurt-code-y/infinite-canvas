@@ -1,0 +1,5 @@
+[env]
+# ts-rs 导出目标：相对于 CARGO_MANIFEST_DIR（src-tauri），落到仓库根的 src/lib/bindings。
+# 配置放在仓库根而不是 src-tauri/.cargo：pnpm codegen 从仓库根调 cargo（--manifest-path），
+# cargo 只从「调用目录向上」发现配置，放 src-tauri 下会漏读导致产物落错目录。
+TS_RS_EXPORT_DIR = "../src/lib/bindings"

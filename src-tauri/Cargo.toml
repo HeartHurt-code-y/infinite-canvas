@@ -69,6 +69,7 @@ hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 tempfile = "3"
 tar = "0.4"
 unicode-normalization = "0.1"
+ts-rs = { version = "12.0.1", features = ["no-serde-warnings"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

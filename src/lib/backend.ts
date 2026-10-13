@@ -1,6 +1,25 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as v from "valibot";
 import type { SeedanceTaskMode } from "./seedanceTasks";
+// 跨语言契约类型：由 ts-rs 从 src-tauri 的 Rust 类型生成（pnpm codegen），
+// 手写 union 一律不再维护；需要前端独有变体时在本地联合里显式扩展（见 StagingStatus）。
+import type { GenerationOperation } from "./bindings/GenerationOperation";
+import type { GenerationTaskStatus } from "./bindings/GenerationTaskStatus";
+import type { QueryHealth } from "./bindings/QueryHealth";
+import type { SaveStatus } from "./bindings/SaveStatus";
+import type { CloudAssetStatus } from "./bindings/CloudAssetStatus";
+import type { MediaType } from "./bindings/MediaType";
+import type { PromptSegment } from "./bindings/PromptSegment";
+import type { RemoteVideoTaskStatus } from "./bindings/RemoteVideoTaskStatus";
+import type { VideoDownloadStatus } from "./bindings/VideoDownloadStatus";
+import type { VideoDownloaderEngineState } from "./bindings/VideoDownloaderEngineState";
+import type { VideoDownloadQualityMode } from "./bindings/VideoDownloadQualityMode";
+import type { VideoDownloadCredentialSource } from "./bindings/VideoDownloadCredentialSource";
+import type { VideoCookieBrowser as VideoDownloaderCookieBrowser } from "./bindings/VideoCookieBrowser";
+import type { VideoFrameExtractionStatus } from "./bindings/VideoFrameExtractionStatus";
+import type { VideoCompositionStatus } from "./bindings/VideoCompositionStatus";
+import type { VideoComposerEngineState } from "./bindings/VideoComposerEngineState";
+
 import {
   formatRawBackendError,
   frontendLog,
@@ -71,8 +90,7 @@ import {
   videoFrameExtractionJobRecordSchema,
 } from "./backendSchemas";
 
-export type GenerationOperation =
-  "text_to_image" | "image_to_image" | "video_generation" | "text_generation" | "speech_generation";
+export type { GenerationOperation };
 
 /**
  * Canonical, provider-neutral operation schema persisted with a model definition.
@@ -410,20 +428,10 @@ export interface WorkspaceUiPrefs {
   readonly assetLibrarySource: "cloud" | "local" | null;
 }
 
-export type StagingStatus =
-  // 仅前端占位：文件已选定、startUpload 尚未返回 jobId 前的等待期状态，后端任务记录不会出现该值。
-  | "preparing"
-  | "validating"
-  | "authorizing"
-  | "uploading"
-  | "staged"
-  | "importing"
-  | "active"
-  | "in_use"
-  | "failed"
-  | "interrupted"
-  | "cleaning"
-  | "cleaned";
+import type { StagingStatus as BackendStagingStatus } from "./bindings/StagingStatus";
+// 仅前端占位 "preparing"：文件已选定、startUpload 尚未返回 jobId 前的等待期状态，
+// 后端任务记录不会出现该值；其余 11 个状态由 ts-rs 从 Rust 枚举生成。
+export type StagingStatus = "preparing" | BackendStagingStatus;
 
 export interface StagingAssetImportTarget {
   readonly providerConnectionId: string;
@@ -440,7 +448,7 @@ export interface StagingAssetImportTarget {
 export interface StartStagingCommand {
   readonly localPath: string;
   readonly purpose: string;
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
   readonly import?: StagingAssetImportTarget | null;
 }
 
@@ -448,7 +456,8 @@ export interface StagingJobRecord {
   readonly id: string;
   readonly localPath: string;
   readonly purpose: string;
-  readonly mediaType: MediaType;
+  /** 素材上传只收三媒体；schema 校验同为三变体 picklist。 */
+  readonly mediaType: MediaLibraryKind;
   readonly objectKey: string | null;
   readonly status: StagingStatus;
   readonly bytesTotal: number | null;
@@ -474,7 +483,7 @@ export interface AssetImportOutputRecord {
   readonly jobId: string;
   readonly providerConnectionId?: string | undefined;
   readonly localPath: string;
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
   readonly status: StagingStatus;
   /** 入库成功后拿到的素材 ID；尚未入库完成时为 null。 */
   readonly assetId: string | null;
@@ -492,7 +501,7 @@ export interface AssetImportOutputRecord {
 /** 云端素材导入时留在本机的原件。没有记录或文件已不在时为 null。 */
 export interface ImportedAssetSource {
   readonly localPath: string;
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
   readonly groupId: string | null;
   readonly name: string | null;
 }
@@ -500,7 +509,7 @@ export interface ImportedAssetSource {
 /** 旧版对象存储素材：本机只有 SQLite 索引，媒体正文在 TOS。 */ export interface LocalAssetRecord {
   readonly id: string;
   readonly name: string;
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
   readonly objectKey: string;
   readonly previewUrl: string;
   readonly byteSize: number;
@@ -517,15 +526,11 @@ export interface RefreshLocalAssetMediaCommand {
   /** 本地素材身份：完成上传的 staging job id（即 `LocalAssetRecord.id`）。 */
   readonly stagingJobId: string;
   /** 期望的素材类型；后端索引记录类型不符时报错。 */
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
 }
 
 /** 本地素材库按类型计数（全库范围，不受查询过滤影响）。 */
-export interface LocalAssetKindTotals {
-  readonly image: number;
-  readonly video: number;
-  readonly audio: number;
-}
+export type LocalAssetKindTotals = Record<MediaLibraryKind, number>;
 
 /** 本地素材分页查询参数：按类型与文件名子串过滤后返回单页。 */
 export interface LocalAssetListQuery {
@@ -554,7 +559,7 @@ export interface LocalAssetPage {
 export interface LocalBase64AssetRecord {
   readonly id: string;
   readonly name: string;
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
   readonly mimeType: string;
   /** 本机原生协议地址；不含远端签名，不会过期。 */
   readonly previewUrl: string;
@@ -618,7 +623,7 @@ export const localBase64AssetClient = {
     invokeDesktop("list_local_base64_assets", localBase64AssetPageSchema, { query: query ?? null }),
   refreshMedia: (command: {
     readonly assetId: string;
-    readonly mediaType: MediaType;
+    readonly mediaType: MediaLibraryKind;
   }): Promise<string> => invokeDesktop("refresh_local_base64_asset_media", stringSchema, command),
   listGroups: (): Promise<LocalBase64AssetGroupRecord[]> =>
     invokeDesktop("list_local_base64_asset_groups", localBase64AssetGroupsSchema),
@@ -643,7 +648,7 @@ export interface SaveExistingAssetCommand {
     readonly kind: "local_base64" | "object_storage" | "cloud";
     readonly assetId: string;
     readonly providerConnectionId?: string | null;
-    readonly mediaType: MediaType;
+    readonly mediaType: MediaLibraryKind;
   };
   readonly destination: "local" | "cloud" | "object_storage";
   readonly targetProviderConnectionId?: string | null;
@@ -805,6 +810,8 @@ export async function refreshAssetItemMediaUrl(
   },
   mediaType: MediaType,
 ): Promise<string | null> {
+  // 文本产物（Context-IR）没有可续签的媒体地址；调用方多为生成结果行，直接短路。
+  if (mediaType === "text") return null;
   const providerConnectionId = asset.providerConnectionId ?? "";
   try {
     if ((asset.source ?? "cloud") === "cloud") {
@@ -977,7 +984,7 @@ export function assetLibraryCredentialRef(providerConnectionId: string): string 
   return `${ASSET_LIBRARY_CREDENTIAL_REF}:${providerConnectionId}`;
 }
 
-export type CloudAssetStatus = "processing" | "ready" | "failed" | "deleted" | "unknown";
+export type { CloudAssetStatus };
 
 export interface CloudAsset {
   readonly providerConnectionId: string;
@@ -987,7 +994,7 @@ export interface CloudAsset {
   /** 海外上传记录的数值查询键，用于精确定位和清理该记录。 */
   readonly dbId: number | null;
   readonly name: string;
-  readonly kind: MediaType;
+  readonly kind: MediaLibraryKind;
   readonly status: CloudAssetStatus;
   readonly rawStatus: string;
   readonly previewUrl: string | null;
@@ -1033,7 +1040,7 @@ export interface RefreshAssetMediaCommand {
   /** Cloud `asset-xxx` ID; an `asset://` prefix is accepted and stripped. */
   readonly id: string;
   /** 期望素材类型；上游返回类型不符时报错。 */
-  readonly mediaType: MediaType;
+  readonly mediaType: MediaLibraryKind;
 }
 
 export interface RealPersonAuthLink {
@@ -1138,11 +1145,7 @@ export interface AssetKindCountQuery {
  * 云端素材库按类型计数（扫描范围内全量，不受分页与当前类型 Tab 影响），
  * 驱动素材面板类型 Tab 角标；与本地素材的 `LocalAssetKindTotals` 同形。
  */
-export interface CloudAssetKindTotals {
-  readonly image: number;
-  readonly video: number;
-  readonly audio: number;
-}
+export type CloudAssetKindTotals = Record<MediaLibraryKind, number>;
 
 /** 云端素材类型计数只部署在桌面端；浏览器预览与测试注入的客户端可以没有该方法。 */
 export interface AssetKindCountClient {
@@ -1297,7 +1300,7 @@ export const assetLibraryClient: AssetLibraryClient &
   deleteRealPersonGroup: (command) => invokeDesktopVoid("delete_real_person_group", { command }),
 };
 
-const MEDIA_EXTENSION_KINDS: Record<string, MediaType> = {
+const MEDIA_EXTENSION_KINDS: Record<string, MediaLibraryKind> = {
   png: "image",
   jpg: "image",
   jpeg: "image",
@@ -1324,7 +1327,7 @@ const MEDIA_EXTENSION_KINDS: Record<string, MediaType> = {
   m4a: "audio",
 };
 
-export function inferMediaKindFromName(fileName: string): MediaType | null {
+export function inferMediaKindFromName(fileName: string): MediaLibraryKind | null {
   // URL 也兼容：先去掉查询串（?token=...）与片段（#...），再取路径末段的扩展名。
   const pathOnly = fileName.split(/[?#]/, 1)[0] ?? "";
   const extension = pathOnly.split(".").pop()?.toLowerCase();
@@ -1439,18 +1442,9 @@ export function promptMultimodalDefinitionForPath(
   return PROMPT_MATERIAL_BY_EXTENSION[extension] ?? null;
 }
 
-export type GenerationTaskStatus =
-  | "created"
-  | "submitting"
-  | "retry_wait"
-  | "queued"
-  | "running"
-  | "succeeded"
-  | "failed"
-  | "unknown"
-  | "interrupted";
+export type { GenerationTaskStatus };
 
-export type QueryHealth = "healthy" | "retry_wait" | "degraded";
+export type { QueryHealth };
 
 export interface TokenUsage {
   readonly promptTokens: number | null;
@@ -1494,13 +1488,17 @@ export interface GenerationTaskPage {
   readonly nextCursorCreatedBefore: number | null;
 }
 
-export type MediaType = "image" | "video" | "audio";
+export type { MediaType };
+/** 素材库三媒体（图片/视频/音频）；"text" 只出现在生成结果（Context-IR 文档）里。 */
+export type MediaLibraryKind = Exclude<MediaType, "text">;
 
-/** 生成结果记录的类型：除媒体产物外，Context-IR 等任务产出纯文本（mediaType 为 "text"）。 */
-export type GenerationResultMediaType = MediaType | "text";
+/**
+ * 生成结果记录的类型。历史名字：Rust 的 MediaType 本就含 "text"
+ * （Context-IR 等文本产物），前端曾经手抄一份三变体 union 再拼上 "text"。
+ */
+export type GenerationResultMediaType = MediaType;
 
-export type SaveStatus =
-  "pending" | "writing" | "succeeded" | "failed" | "interrupted" | "local_missing" | "conflict";
+export type { SaveStatus };
 
 export interface GenerationResultRecord {
   readonly displayName?: string | null | undefined;
@@ -1563,88 +1561,20 @@ export interface TextGenerationOutputRecord {
   readonly rawModelOutput: string;
 }
 
-export interface TextPromptSegment {
-  readonly kind: "text";
-  readonly text: string;
-}
+import type { MediaReferenceTarget as BackendMediaReferenceTarget } from "./bindings/MediaReferenceTarget";
+import type { PromptSegment as BackendPromptSegment } from "./bindings/PromptSegment";
 
-/** 提示词中的 @ 精确媒体引用（对齐后端 PromptSegment::MediaReference 的 serde 形状）。 */
-export interface AssetMediaReferenceTarget {
-  readonly kind: "asset";
-  readonly providerConnectionId: string;
-  readonly assetId: string;
-  /** Stable identity of the repeated canvas instance, when the reference came from the canvas. */
-  readonly canvasNodeKey?: string;
-  /** Tauri IPC enum value; Rust deserializes MediaType with snake_case names. */
-  readonly mediaType: MediaType;
-}
+export type TextPromptSegment = Extract<BackendPromptSegment, { kind: "text" }>;
+export type MediaReferencePromptSegment = Extract<
+  BackendPromptSegment,
+  { kind: "media_reference" }
+>;
+export type { PromptSegment };
 
-/** 旧版对象存储素材引用：目录在本机，正文在 TOS。 */
-export interface LocalAssetMediaReferenceTarget {
-  readonly kind: "local_asset";
-  readonly stagingJobId: string;
-  readonly canvasNodeKey?: string;
-  readonly mediaType: MediaType;
-}
-
-export interface LocalBase64AssetMediaReferenceTarget {
-  readonly kind: "local_base64_asset";
-  readonly assetId: string;
-  readonly canvasNodeKey?: string;
-  readonly mediaType: MediaType;
-}
-
-export interface LocalResultMediaReferenceTarget {
-  readonly kind: "local_result";
-  readonly generationTaskId: string;
-  readonly resultIndex: number;
-  /** Stable identity of the repeated canvas instance. */
-  readonly canvasNodeKey?: string;
-  readonly mediaType: MediaType;
-}
-
-/** 任意本地文件引用（如视频抽帧产物）：直接读取磁盘路径。 */
-export interface LocalFileMediaReferenceTarget {
-  readonly kind: "local_file";
-  /** 本地文件绝对路径。 */
-  readonly path: string;
-  /** Stable identity of the repeated canvas instance. */
-  readonly canvasNodeKey?: string;
-  readonly mediaType: MediaType;
-}
-
-/** 公网 http(s) URL 引用（文档/网页生视频的 file/link 素材）：直接把 URL 交给供应商抓取。
- *  仅用于显式媒体输入，不参与提示词 @ 引用（mention）系统。 */
-export interface UrlMediaReferenceTarget {
-  readonly kind: "url";
-  /** 公网 http(s) URL，仅支持无需登录的公开页面。 */
-  readonly url: string;
-  /** Stable identity of the repeated canvas instance. */
-  readonly canvasNodeKey?: string;
-  readonly mediaType: MediaType;
-}
-
-export type ExplicitMediaTarget = MediaReferenceTarget | UrlMediaReferenceTarget;
-
-export type MediaReferenceTarget =
-  | AssetMediaReferenceTarget
-  | LocalAssetMediaReferenceTarget
-  | LocalBase64AssetMediaReferenceTarget
-  | LocalResultMediaReferenceTarget
-  | LocalFileMediaReferenceTarget;
-
-export interface MediaReferencePromptSegment {
-  readonly kind: "media_reference";
-  readonly mentionId: string;
-  readonly target: MediaReferenceTarget;
-  readonly displayNameSnapshot: string;
-  /** 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。 */
-  readonly typePosition?: number;
-  /** 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。 */
-  readonly contentIndex?: number;
-}
-
-export type PromptSegment = TextPromptSegment | MediaReferencePromptSegment;
+/** @ 引用（mention）目标：契约去掉 url 变体——url 仅用于显式媒体输入，不进 mention 系统。 */
+export type MediaReferenceTarget = Exclude<BackendMediaReferenceTarget, { kind: "url" }>;
+export type UrlMediaReferenceTarget = Extract<BackendMediaReferenceTarget, { kind: "url" }>;
+export type ExplicitMediaTarget = BackendMediaReferenceTarget;
 
 export interface ExplicitMediaInput {
   readonly target: ExplicitMediaTarget;
@@ -1703,8 +1633,7 @@ export async function renameGenerationResult(
   await invokeDesktopVoid("rename_generation_result", { taskId, resultIndex, name });
 }
 
-export type RemoteVideoTaskStatus =
-  "NOT_START" | "SUBMITTED" | "QUEUED" | "IN_PROGRESS" | "SUCCESS" | "FAILURE" | "UNKNOWN";
+export type { RemoteVideoTaskStatus };
 
 export interface RemoteVideoTaskQuery {
   readonly providerConnectionId: string;
@@ -2072,17 +2001,15 @@ export function formatSaveProgress(
 
 // ---------- 网络爆款视频下载（内置 yt-dlp 引擎） ----------
 
-export type VideoDownloadStatus =
-  "preparing_engine" | "downloading" | "completed" | "failed" | "cancelled";
+export type { VideoDownloadStatus };
 
-export type VideoDownloaderEngineState = "not_installed" | "installing" | "ready" | "failed";
+export type { VideoDownloaderEngineState };
 
 /** B 站画质路由：best=最高可用画质；sd480=未登录封顶 480P。 */
-export type VideoDownloadQualityMode = "best" | "sd480";
+export type { VideoDownloadQualityMode };
 
 /** 本次真实下载实际使用的来源；none 表示未携带 Cookies。 */
-export type VideoDownloadCredentialSource =
-  "chrome" | "edge" | "firefox" | "brave" | "manual" | "site_session" | "none";
+export type { VideoDownloadCredentialSource };
 
 export interface VideoDownloadJobRecord {
   readonly jobId: string;
@@ -2119,7 +2046,7 @@ export interface VideoDownloaderEngineStatus {
   readonly lastError: string | null;
 }
 
-export type VideoDownloaderCookieBrowser = "auto" | "chrome" | "edge" | "firefox" | "brave";
+export type { VideoDownloaderCookieBrowser };
 
 export interface VideoDownloaderClient {
   getEngine: () => Promise<VideoDownloaderEngineStatus>;
@@ -2158,8 +2085,7 @@ export const videoDownloaderClient: VideoDownloaderClient = {
 
 // ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
 
-export type VideoFrameExtractionStatus =
-  "preparing_engine" | "processing" | "paused" | "completed" | "failed" | "cancelled";
+export type { VideoFrameExtractionStatus };
 
 /** 单张抽帧结果。 */
 export interface ExtractedFrame {
@@ -2246,10 +2172,9 @@ export const mediaClient: MediaClient = {
 
 // ---------- 画布视频合成（内置 FFmpeg 引擎） ----------
 
-export type VideoCompositionStatus =
-  "preparing_engine" | "processing" | "completed" | "failed" | "cancelled";
+export type { VideoCompositionStatus };
 
-export type VideoComposerEngineState = "not_installed" | "installing" | "ready" | "failed";
+export type { VideoComposerEngineState };
 
 export interface VideoComposerEngineStatus {
   readonly state: VideoComposerEngineState;

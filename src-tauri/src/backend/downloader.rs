@@ -15,6 +15,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use ts_rs::TS;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -76,8 +77,9 @@ fn engine_binary_file_name() -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoDownloadStatus {
     /// 正在获取/更新 yt-dlp 引擎（首次使用或引擎缺失时）。
     PreparingEngine,
@@ -87,8 +89,9 @@ pub enum VideoDownloadStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoDownloaderEngineState {
     NotInstalled,
     Installing,
@@ -98,8 +101,9 @@ pub enum VideoDownloaderEngineState {
 
 /// 直接从本机浏览器读取登录态。浏览器名是唯一持久化的设置；Cookie 正文
 /// 由 yt-dlp 在每次下载时读取，绝不导出到应用数据目录或返回给前端。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoCookieBrowser {
     Auto,
     Chrome,
@@ -140,8 +144,9 @@ impl VideoCookieBrowser {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoDownloadCredentialSource {
     Chrome,
     Edge,
@@ -186,8 +191,9 @@ fn read_cookie_browser_setting(engine_dir: &Path) -> Option<VideoCookieBrowser> 
 /// - B 站未登录 → `Sd480`：把画质封顶在 480P，保证下载始终成功；
 /// - B 站已登录 → `Best`：请求当前账号可用的最高画质；
 /// - 其他站点 → 不设置（None），沿用引擎默认行为。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoDownloadQualityMode {
     Best,
     Sd480,

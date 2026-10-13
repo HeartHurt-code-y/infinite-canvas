@@ -25,6 +25,8 @@ export default defineConfig([
     // src-tauri 下的 skills 为 Rust 侧技能资产的独立 CommonJS 工具脚本，
     // 不参与前端构建，不纳入前端 lint 范围。
     "src-tauri/skills/**",
+    // ts-rs 生成的跨语言契约绑定（pnpm codegen 产物），不参与前端 lint。
+    "src/lib/bindings/**",
     "src-tauri/gen/**",
     "src-tauri/target/**",
     "src-tauri/resources/remotion-runtime/**",

@@ -1,4 +1,4 @@
-import type { MediaReferenceTarget } from "./backend";
+import type { MediaReferenceTarget, MediaType } from "./backend";
 import type {
   PromptContentDocumentV1,
   PromptContentItem,
@@ -17,9 +17,10 @@ export interface PromptReferenceCandidate {
     "asset" | "local_asset" | "local_base64_asset" | "local_result" | "local_file";
   readonly generationTaskId?: string;
   readonly resultIndex?: number;
-  readonly kind: "image" | "video" | "audio";
+  /** Rust 的 MediaType 含 "text"（Context-IR 文档引用），@ 引用从未排除过它。 */
+  readonly kind: MediaType;
   readonly name: string;
-  readonly previewUrl?: string | null;
+  readonly previewUrl?: string | null | undefined;
   /**
    * 该素材在目标生成节点媒体清单里的位置（0 起）；只有生成节点连线带这个信息。
    * 引用会把这个位置记进自己的快照，用于判断「换图后是哪一处引用需要跟随新素材」。
@@ -63,6 +64,7 @@ const LABELS = {
   image: ["图片", "参考图", "图"],
   video: ["视频", "参考视频", "视"],
   audio: ["音频", "参考音频", "音"],
+  text: ["文档", "参考文档", "文档"],
 } as const;
 /**
  * 全角 "@"（U+FF20）。中文输入法在 macOS 上常把 Shift+2 提交成全角，

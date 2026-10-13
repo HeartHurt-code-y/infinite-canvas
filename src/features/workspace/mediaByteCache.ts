@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 
 import { toMediaProxyUrl, type MediaProxyIdentity } from "../../lib/mediaProxy";
-import type { AssetKind } from "./workspaceModel";
+import type { MediaType } from "../../lib/backend";
 
 /**
  * 图片正文按素材身份走代理（长签名不进 WebView）。
  * 视频封面 / 视频正文与登记的 preview_url 不是同一条渲染路径：封面继续把地址放进 `src`。
  */
-function proxyIdentity(assetId: string, kind: AssetKind): MediaProxyIdentity | undefined {
+function proxyIdentity(assetId: string, kind: MediaType): MediaProxyIdentity | undefined {
   if (assetId === "" || kind === "video") return undefined;
   return { assetId };
 }
@@ -33,7 +33,7 @@ function proxyIdentity(assetId: string, kind: AssetKind): MediaProxyIdentity | u
 /** 一份素材预览内容的稳定身份：素材身份 + 用途（图片正文 / 视频封面）。 */
 export interface AssetMediaIdentity {
   readonly assetId: string;
-  readonly kind: AssetKind;
+  readonly kind: MediaType;
 }
 
 /**
@@ -62,20 +62,20 @@ const inFlight = new Map<string, Promise<string | null>>();
 /** 已签发的 object URL，仅在显式清空时回收。 */
 const objectUrls = new Set<string>();
 
-function keyOf(assetId: string, kind: AssetKind): string {
+function keyOf(assetId: string, kind: MediaType): string {
   return `${assetId}:${kind}`;
 }
 
 /** 从素材条目取缓存身份；缺 ID 的占位条目返回 null（调用方保持原样渲染）。 */
 export function assetMediaByteIdentity(asset: {
   readonly id: string;
-  readonly kind: AssetKind;
+  readonly kind: MediaType;
 }): AssetMediaIdentity | null {
   return asset.id === "" ? null : { assetId: asset.id, kind: asset.kind };
 }
 
-/** 是否值得缓存：只有图片正文与视频封面这类图片内容；视频正文不缓存。 */
-function isCacheableKind(kind: AssetKind): boolean {
+/** 是否值得缓存：只有图片正文与视频封面这类图片内容；视频正文与文本产物不缓存。 */
+function isCacheableKind(kind: MediaType): boolean {
   return kind === "image" || kind === "video";
 }
 
@@ -90,7 +90,7 @@ function isVideoMediaPath(mediaUrl: string): boolean {
  */
 export async function loadMediaBytes(
   assetId: string,
-  kind: AssetKind,
+  kind: MediaType,
   mediaUrl: string | null | undefined,
 ): Promise<string | null> {
   if (assetId === "") return null;
@@ -148,7 +148,7 @@ export async function loadMediaBytes(
 }
 
 /** 缓存身份的同步查询：渲染期据此优先用本地字节，不发起任何请求。 */
-export function getMediaByteUrl(assetId: string, kind: AssetKind): string | null {
+export function getMediaByteUrl(assetId: string, kind: MediaType): string | null {
   if (assetId === "") return null;
   return cachedBytes.get(keyOf(assetId, kind))?.objectUrl ?? null;
 }
@@ -204,7 +204,7 @@ export interface MediaByteSource {
  */
 export function useMediaByteSource(
   assetId: string,
-  kind: AssetKind,
+  kind: MediaType,
   mediaUrl: string | null | undefined,
 ): MediaByteSource {
   const { objectUrl, blockedObjectUrl, retryFromBytes, retryFromRemote, reload } = useCachedBytes(
@@ -230,7 +230,7 @@ export function useMediaByteSource(
  */
 function useCachedBytes(
   assetId: string,
-  kind: AssetKind,
+  kind: MediaType,
   mediaUrl: string | null | undefined,
 ): {
   readonly objectUrl: string | null;

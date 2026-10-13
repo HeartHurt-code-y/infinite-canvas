@@ -3109,6 +3109,8 @@ function referenceAssetIdentity(
   target: MediaReferenceTarget | undefined,
 ): { readonly assetId: string; readonly kind: AssetKind } | null {
   if (target == null) return null;
+  // 文本产物（Context-IR）没有可预览的字节流，不进字节缓存账本。
+  if (target.mediaType === "text") return null;
   if (target.kind === "asset") return { assetId: target.assetId, kind: target.mediaType };
   if (target.kind === "local_asset") {
     return { assetId: target.stagingJobId, kind: target.mediaType };

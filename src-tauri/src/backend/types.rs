@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum GenerationOperation {
     TextToImage,
     ImageToImage,
@@ -38,8 +40,9 @@ impl TryFrom<&str> for GenerationOperation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum GenerationTaskStatus {
     Created,
     Submitting,
@@ -94,8 +97,9 @@ impl TryFrom<&str> for GenerationTaskStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum QueryHealth {
     Healthy,
     RetryWait,
@@ -112,8 +116,9 @@ impl QueryHealth {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum SaveStatus {
     Pending,
     Writing,
@@ -138,8 +143,9 @@ impl SaveStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum MediaType {
     Image,
     Video,
@@ -168,12 +174,13 @@ impl MediaType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
+#[ts(export)]
 pub enum PromptSegment {
     Text {
         text: String,
@@ -192,12 +199,13 @@ pub enum PromptSegment {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(
     tag = "kind",
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
+#[ts(export)]
 pub enum MediaReferenceTarget {
     Asset {
         provider_connection_id: String,
@@ -643,8 +651,9 @@ pub struct VideoTaskListCommand {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+#[ts(export)]
 pub enum RemoteVideoTaskStatus {
     NotStart,
     Submitted,
@@ -769,8 +778,9 @@ pub struct RawProviderResponse {
     pub body: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum CloudAssetStatus {
     Processing,
     Ready,
@@ -1175,8 +1185,9 @@ where
     })
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum StagingStatus {
     Validating,
     Authorizing,

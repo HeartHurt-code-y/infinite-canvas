@@ -29,6 +29,7 @@ import {
   type LocalAssetRecord,
   type LocalBase64AssetRecord,
   type MediaReferenceTarget,
+  type MediaLibraryKind,
   type MediaType,
   type PromptSegment,
   type StartGenerationCommand,
@@ -178,6 +179,9 @@ function initialDocumentFromSegments(
       items.push({ kind: "text", text: segment.text });
       continue;
     }
+    // @ 引用从不指向公网 URL（url 目标只用于显式媒体输入）；后端联合里有该变体，
+    // 历史数据若出现则无法对应素材行，跳过即可。
+    if (segment.target.kind === "url") continue;
     const material = byTarget.get(targetSignature(segment.target));
     if (material == null) continue;
     const canvasNodeKey = `history-material-${material.id}`;
@@ -196,6 +200,7 @@ const MEDIA_TYPE_LABELS: Record<MediaType, string> = {
   image: "图片",
   video: "视频",
   audio: "音频",
+  text: "文本",
 };
 
 function materialKindLabel(material: EditableMaterial): string {
@@ -596,11 +601,13 @@ export function RegenerateGenerationDialog({
     if (!runtime || !cloudListSettled) return;
     const missing = new Map<
       string,
-      { providerConnectionId: string; id: string; mediaType: MediaType }
+      { providerConnectionId: string; id: string; mediaType: MediaLibraryKind }
     >();
     for (const material of materials) {
       const target = material.target;
-      if (target.kind !== "asset" || previewUrls.has(material.id)) continue;
+      // 文本产物（Context-IR）没有可取回的预览图，缺省就保持类型图标。
+      if (target.kind !== "asset" || target.mediaType === "text" || previewUrls.has(material.id))
+        continue;
       const key = cloudAssetKey(target);
       if (fetchedAssetPreviews.has(key) || missing.has(key)) continue;
       missing.set(key, {

@@ -17,6 +17,7 @@ import {
   type GenerationTaskSummary,
   type LocalAssetRecord,
   type LocalBase64AssetRecord,
+  type MediaLibraryKind,
   type MediaReferenceTarget,
   type PickedPromptMaterial,
   type PromptOptimizationContextEntry,
@@ -71,7 +72,7 @@ import type {
   ComicDramaWorkflowOptions,
 } from "./comicDramaWorkflowModel";
 
-export type AssetKind = "image" | "video" | "audio";
+export type AssetKind = MediaLibraryKind;
 export type AssetLibrarySource = "cloud" | "local";
 /** 生成节点种类。视频、图片与提示词配置按画布节点实例保存。 */
 export type GenerationNodeId = "image" | "video";

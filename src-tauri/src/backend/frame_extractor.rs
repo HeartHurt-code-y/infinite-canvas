@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use ts_rs::TS;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -30,8 +31,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 内存中最多保留的任务数；超出后清掉已终态的最旧记录，防止长会话无界增长。
 const JOB_RETAIN_LIMIT: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoFrameExtractionStatus {
     /// 正在准备 FFmpeg 引擎。
     PreparingEngine,

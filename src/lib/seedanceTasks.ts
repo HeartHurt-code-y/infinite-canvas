@@ -32,6 +32,21 @@ interface TaskInput {
   readonly kind: "image" | "video" | "audio";
 }
 
+/**
+ * 种子任务只认媒体输入：reference_* 角色按 image/video/audio 映射，Context-IR
+ * 文本素材（mediaType "text"）不参与角色映射，在入口处过滤掉。
+ */
+export function seedanceTaskInputs(
+  inputs: readonly {
+    readonly key: string;
+    readonly kind: "image" | "video" | "audio" | "text";
+  }[],
+): TaskInput[] {
+  return inputs.filter(
+    (input): input is typeof input & { kind: "image" | "video" | "audio" } => input.kind !== "text",
+  );
+}
+
 export interface SeedanceTaskSettings {
   readonly seedanceTaskMode?: SeedanceTaskMode;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;

@@ -29,6 +29,8 @@
     "test:dom": "vitest run --project dom",
     "test:browser": "vitest run --project browser",
     "test:coverage": "vitest run --coverage",
+    "codegen": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib export_bindings",
+    "codegen:check": "pnpm codegen && git diff --exit-code -- src/lib/bindings",
     "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml --locked",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",

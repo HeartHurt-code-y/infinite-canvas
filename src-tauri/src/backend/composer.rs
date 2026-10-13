@@ -20,6 +20,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+use ts_rs::TS;
 
 use serde::Serialize;
 use serde_json::json;
@@ -46,8 +47,9 @@ const REMOTE_READ_TIMEOUT_MICROS: &str = "30000000";
 /// 进度轮询期间进度条封顶值；100 只在编码成功收尾时写入。
 const PROCESSING_PROGRESS_CAP: f64 = 99.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoComposerEngineState {
     NotInstalled,
     Installing,
@@ -64,8 +66,9 @@ pub struct VideoComposerEngineStatus {
     pub last_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
+#[ts(export)]
 pub enum VideoCompositionStatus {
     /// 正在准备引擎或探测输入元数据。
     PreparingEngine,

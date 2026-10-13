@@ -87,11 +87,11 @@ import {
   type LocalAssetRecord,
   type LocalBase64AssetGroupRecord,
   type LocalBase64AssetRecord,
-  type MediaType,
   type PromptOptimizationContextEntry,
   type PromptMultimodalInput,
   type PromptVisionImageInput,
   type ProviderCatalogEntry,
+  type MediaLibraryKind,
   type RealPersonGroup,
   type StagingJobRecord,
   type StartGenerationCommand,
@@ -227,7 +227,11 @@ import {
   nextLibraryPickOrder,
   regroupAssetNodes,
 } from "./assetGroups";
-import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
+import {
+  resolveSeedanceTask,
+  seedanceTaskInputs,
+  selectSeedanceTask,
+} from "../../lib/seedanceTasks";
 import { prepareGreenScreenGeneration } from "../../lib/greenScreen";
 import { greenScreenPreparationOutputs, greenScreenWorkflowSignature } from "./greenScreenWorkflow";
 import { prefetchLocalAssetMedia, resetLocalAssetMediaRegistry } from "./localAssetMedia";
@@ -290,11 +294,7 @@ import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
 import { workflowMaterialPathKey } from "./workflowMaterials";
-import {
-  workflowKindDefinitionOf,
-  workflowKindOf,
-  type WorkflowKind,
-} from "./workflowKinds";
+import { workflowKindDefinitionOf, workflowKindOf, type WorkflowKind } from "./workflowKinds";
 import type {
   AssetEdgeData,
   AssetItem,
@@ -3873,7 +3873,7 @@ export function WorkspaceApp({
         readonly pendingId: string;
         readonly filePath: string;
         readonly name: string;
-        readonly kind: MediaType;
+        readonly kind: MediaLibraryKind;
       }> = [];
       const unsupportedFiles: string[] = [];
       for (const filePath of files) {
@@ -4214,7 +4214,7 @@ export function WorkspaceApp({
     async (
       asset: {
         readonly id: string;
-        readonly kind: MediaType;
+        readonly kind: MediaLibraryKind;
         readonly name: string;
         readonly source?: AssetLibrarySource | undefined;
         readonly providerConnectionId?: string | undefined;
@@ -8806,7 +8806,7 @@ export function WorkspaceApp({
               greenScreenPreparation
                 ? { ...genNode.config, seedanceTaskMode: greenScreenPreparation.taskMode }
                 : genNode.config,
-              connections,
+              seedanceTaskInputs(connections),
             )
           : null;
       if (seedanceTask?.issue) {

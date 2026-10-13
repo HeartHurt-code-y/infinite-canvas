@@ -27,3 +27,5 @@ component-catalog.json
 # 之前按子目录零散排除，实际是同一件事：格式化会改写正文换行并扰动资源基准。
 skills/
 src-tauri/skills/
+# ts-rs 生成的跨语言契约绑定（pnpm codegen 产物，逐字提交）
+src/lib/bindings/

@@ -5,7 +5,12 @@ import { isDesktopRuntime, type MediaReferenceTarget } from "./backend";
 const text = v.pipe(v.string(), v.nonEmpty());
 const nonNegative = v.pipe(v.number(), v.finite(), v.minValue(0));
 const index = v.pipe(nonNegative, v.integer());
-const sourceBase = { mediaType: v.literal("video"), canvasNodeKey: v.exactOptional(text) };
+// Rust 侧 canvasNodeKey 是 Option<String>：线上只有 absent 或 null，没有 undefined；
+// exactOptional 让校验输出的类型与生成的绑定类型逐字一致（absent | string | null）。
+const sourceBase = {
+  mediaType: v.literal("video"),
+  canvasNodeKey: v.exactOptional(v.nullable(text)),
+};
 const sourceSchema = v.variant("kind", [
   v.object({ kind: v.literal("asset"), providerConnectionId: text, assetId: text, ...sourceBase }),
   v.object({ kind: v.literal("local_asset"), stagingJobId: text, ...sourceBase }),

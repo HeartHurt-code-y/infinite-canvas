@@ -57,7 +57,10 @@ function BindingSelect({
   readonly onChange: (binding: GreenScreenBinding | null) => void;
 }) {
   const available = inputs.filter(
-    (input) => input.kind !== "audio" && kinds.includes(input.kind) && input.target.kind !== "url",
+    (input) =>
+      (input.kind === "image" || input.kind === "video") &&
+      kinds.includes(input.kind) &&
+      input.target.kind !== "url",
   );
   const selected = binding ? available.find((input) => matches(binding, input)) : undefined;
   const missing = binding != null && selected == null;
