@@ -44,6 +44,7 @@ jobs:
         with:
           version: 12.5.1
       - name: Set up Node
+        id: setup-node
         uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -65,10 +66,55 @@ jobs:
           node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/create-macos-install-dmg.test.mjs scripts/create-macos-install-package.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs scripts/prepare-ai-media-runtime.test.mjs
       - name: Prepare optional signing identity
         run: bash scripts/prepare-macos-online-signing.sh
+      # Cache native prepared trees and their verified ZIPs, not application-version
+      # catalogs or installers. Every prepare/pack command still validates the files.
+      - name: Restore native runtime components
+        id: runtime-components-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            src-tauri/resources/ffmpeg
+            src-tauri/resources/remotion-runtime
+            src-tauri/resources/blender
+            src-tauri/resources/pose-runtime
+            src-tauri/resources/ai-media-runtime
+            src-tauri/resources/ai-media-quality-runtime
+            .cache/runtime-components/packages
+          key: macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/runtime-component-zip.py', 'scripts/macos-runtime-signature.mjs', 'scripts/ai-media/**', 'tools/blender/**', 'tools/remotion-runtime/*.mjs', 'tools/remotion-runtime/*.tsx', 'tools/remotion-runtime/package.json', 'tools/remotion-runtime/pnpm-lock.yaml', 'src-tauri/skills/gpt-image-2-style-library/**') }}
+          restore-keys: |
+            macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-
+            macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-
+      - name: Report runtime component cache
+        env:
+          CACHE_HIT: ${{ steps.runtime-components-cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.runtime-components-cache.outputs.cache-matched-key }}
+        run: |
+          {
+            echo '### Native runtime component cache'
+            echo "- Exact input match: ${CACHE_HIT:-false}"
+            echo "- Restored key: ${CACHE_MATCHED_KEY:-none}"
+            echo '- Preparation and ZIP integrity checks always run; unchanged verified components are reused.'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Build and verify online DMG and updater
+        id: verified-build
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/build-macos-online.sh
+      # Save immediately after native verification, so a later publication or
+      # artifact-upload failure does not discard successfully prepared components.
+      - name: Save verified native runtime components
+        if: steps.verified-build.outcome == 'success' && steps.runtime-components-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            src-tauri/resources/ffmpeg
+            src-tauri/resources/remotion-runtime
+            src-tauri/resources/blender
+            src-tauri/resources/pose-runtime
+            src-tauri/resources/ai-media-runtime
+            src-tauri/resources/ai-media-quality-runtime
+            .cache/runtime-components/packages
+          key: ${{ steps.runtime-components-cache.outputs.cache-primary-key }}
       - name: Publish verified online release
         if: inputs.publish
         env:
