@@ -163,6 +163,7 @@ import {
   type CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { useDeferredSessionState } from "./useDeferredSessionState";
+import { WorkflowSessionsProvider, useWorkflowSessions } from "./useWorkflowSessions";
 import { WorkflowSessionRegistry } from "./workflowSessionRegistry";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import {
@@ -187,11 +188,7 @@ import {
   RealPersonAssetDialog,
 } from "./deferredDialogs";
 import { preloadHistoryDialog, preloadProviderSettingsDialog } from "./deferredDialogLoaders";
-import {
-  revealDesktopItem,
-  saveMarkdownDocumentToDesktop,
-  saveWorkflowBundleToDesktop,
-} from "./desktopActions";
+import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "./desktopActions";
 import {
   CanvasDocumentSkillNode,
   CanvasPromptNode,
@@ -264,38 +261,12 @@ import type {
   VideoLocalEditSource,
 } from "./VideoLocalEditDialog";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
-import {
-  restoreWorkflowVersion,
-  undoWorkflowVersion,
-  redoWorkflowVersion,
-} from "./workflowVersionHistory";
-import {
-  approveWorkflowExecutionPlan,
-  createWorkflowDeliveryPlan,
-  createWorkflowExecutionPlan,
-  getWorkflowExecutionPlan,
-  isWorkflowExecutionPlanApproved,
-  isWorkflowExecutionPlanCurrent,
-  workflowExecutionInputSignature,
-} from "./workflowExecutionPlan";
-import {
-  workflowCanvasInputsFromResolved,
-  workflowCanvasInputsFromDocument,
-  withCanvasWorkflowMaterials,
-  withLiveWorkflowCanvasInputs,
-} from "./workflowCanvasInputs";
-import {
-  formatWorkflowError,
-  formatWorkflowFailure,
-  workflowErrorPresentation,
-  workflowUsageError,
-} from "../../lib/workflowErrors";
+import { workflowExecutionInputSignature } from "./workflowExecutionPlan";
+import { workflowCanvasInputsFromResolved } from "./workflowCanvasInputs";
+import { formatWorkflowError, workflowUsageError } from "../../lib/workflowErrors";
 import { WorkflowRepository } from "./WorkflowRepository";
-import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
-import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
-import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
-import { workflowMaterialPathKey } from "./workflowMaterials";
-import { workflowKindDefinitionOf, workflowKindOf, type WorkflowKind } from "./workflowKinds";
+import { workflowHistoryClient } from "../../lib/workflowHistory";
+import { workflowKindDefinitionOf, type WorkflowKind } from "./workflowKinds";
 import type {
   AssetEdgeData,
   AssetItem,
@@ -314,11 +285,7 @@ import type {
   GenNodeData,
   GenerationMediaInput,
   ImageNodeConfig,
-  KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowConfig,
-  KnowledgeVideoWorkflowNodeData,
-  KnowledgeVideoWorkflowRunState,
-  KnowledgeVideoWorkflowShotRun,
   MentionCandidate,
   MobilePanel,
   NodeModelSelections,
@@ -452,7 +419,6 @@ import {
   resolvePendingDocumentNodeConfig,
   resolvePendingGenerationNodeConfig,
   resolvePendingKnowledgeVideoWorkflowConfig,
-  createKnowledgeVideoWorkflowConfig,
   saveComposedVideoBlob,
   screenplayMessageId,
   screenplayMaterialId,
@@ -1900,7 +1866,6 @@ export function WorkspaceApp({
     restoreDocument,
     undo: undoCanvasOperation,
     redo: redoCanvasOperation,
-    runWithCoalescedHistory,
   } = useCanvasCommands();
   // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
   const { pastCount, futureCount } = useCanvasHistoryCounts();
@@ -2317,20 +2282,6 @@ export function WorkspaceApp({
     setVideoDownloaderRuns,
     setFrameExtractorRuns,
   ]);
-  const [knowledgeVideoWorkflowRuns, setKnowledgeVideoWorkflowRunsInternal] = useState<
-    Readonly<Record<string, KnowledgeVideoWorkflowRunState>>
-  >({});
-  const setKnowledgeVideoWorkflowRuns = useDeferredSessionState(
-    setKnowledgeVideoWorkflowRunsInternal,
-    activeRef,
-    active,
-  );
-  const [workflowSessions] = useState(() => new WorkflowSessionRegistry());
-  const recordedWorkflowRunner = useMemo(
-    () => createRecordedWorkflowRunner({ canvasId }),
-    [canvasId],
-  );
-  const [activeWorkflowHistoryIds, setActiveWorkflowHistoryIds] = useState<readonly string[]>([]);
   const recoverWorkflowHistory = services.recoverWorkflowHistory;
   useEffect(() => {
     if (!isDesktopRuntime()) return;
@@ -2516,6 +2467,50 @@ export function WorkspaceApp({
   );
   const mobilePanelTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // 工作流会话注册表：清空画布、卸载中止、删除校验、撤销/重做排除都在
+  // 会话控制器钩子之前消费它，因此实例在此创建并注入钩子。
+  const [workflowSessionRegistry] = useState(() => new WorkflowSessionRegistry());
+
+  // 会话控制器的宿主依赖里，保存调度与视口取点声明在持久化/视口层（本钩子之后），
+  // 经 latest-ref 在动作触发时读取；动作只在回调期消费它们，语义与直连一致。
+  const scheduleCanvasSaveRef = useRef<() => void>(() => {});
+  const viewportCenterBoardCoordinatesRef = useRef<() => { x: number; y: number }>(() => ({
+    x: 0,
+    y: 0,
+  }));
+  const showHistoryPanel = useCallback((workflowId: string | null) => {
+    setHistoryInitialTab("workflow");
+    setHistoryInitialWorkflowId(workflowId);
+    setHistoryOpen(true);
+  }, []);
+  const closeHistoryPanel = useCallback(() => {
+    setHistoryOpen(false);
+  }, []);
+  const centerView = useCallback(
+    (boardX: number, boardY: number) => {
+      void flowInstanceRef.current?.setCenter(boardX, boardY, {
+        zoom: zoom / 100,
+        duration: 200,
+      });
+    },
+    [zoom],
+  );
+  const sessions = useWorkflowSessions({
+    canvasId,
+    active,
+    activeRef,
+    registry: workflowSessionRegistry,
+    recoverWorkflowHistory: services.recoverWorkflowHistory,
+    providerCatalog,
+    scheduleCanvasSave: () => scheduleCanvasSaveRef.current(),
+    showHistoryPanel,
+    closeHistoryPanel,
+    centerView,
+    viewportCenterBoardCoordinates: () => viewportCenterBoardCoordinatesRef.current(),
+    occupiedNodeRects,
+  });
+  const knowledgeVideoWorkflowRuns = sessions.runs;
+  const activeWorkflowHistoryIds = sessions.activeHistoryRunIds;
   // 「清空画布」确认弹窗的原生 <dialog> 引用——HTMLDialogElement 自带
   // modal 语义（ESC 关闭、focus trap、::backdrop 遮罩），无需自建 dialog 框架。
   const clearCanvasDialogRef = useRef<HTMLDialogElement | null>(null);
@@ -2525,7 +2520,7 @@ export function WorkspaceApp({
     // 不清空任务历史（生成节点删除/本地结果文件缺失都不能清理历史，详见 MVP 契约）。
     for (const controller of videoComposerAbortControllersRef.current.values()) controller.abort();
     videoComposerAbortControllersRef.current.clear();
-    workflowSessions.abortAll();
+    workflowSessionRegistry.abortAll();
     // 先撤销拼接产物仅会话内有效的 blob 预览，再原子清空画布持久状态。
     for (const node of canvasNodesOfState(canvasStore.getState(), "output")) {
       if (node.origin === "composition" && node.previewSrc?.startsWith("blob:")) {
@@ -2537,18 +2532,18 @@ export function WorkspaceApp({
     setVideoComposerRuns({});
     setVideoDownloaderRuns({});
     setFrameExtractorRuns({});
-    setKnowledgeVideoWorkflowRuns({});
+    sessions.clearAllRuns();
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
   }, [
     cancelVideoToolBatches,
     clearCanvasState,
     canvasStore,
-    workflowSessions,
+    sessions,
+    workflowSessionRegistry,
     setVideoComposerRuns,
     setVideoDownloaderRuns,
     setFrameExtractorRuns,
-    setKnowledgeVideoWorkflowRuns,
     setGenNodeSizes,
     setPreviewOutputNodeKey,
   ]);
@@ -2560,9 +2555,9 @@ export function WorkspaceApp({
         controller.abort();
       }
       videoComposerAbortControllersRef.current.clear();
-      workflowSessions.abortAll();
+      workflowSessionRegistry.abortAll();
     },
-    [cancelVideoToolBatches, canvasStore, workflowSessions],
+    [cancelVideoToolBatches, canvasStore, workflowSessionRegistry],
   );
 
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
@@ -2628,9 +2623,9 @@ export function WorkspaceApp({
     if (
       canvasAgent.getState().status !== "idle" ||
       startingNodeKeys.size > 0 ||
-      workflowSessions.runningCount > 0 ||
-      workflowSessions.historyRunCount > 0 ||
-      workflowSessions.historyActionCount > 0 ||
+      workflowSessionRegistry.runningCount > 0 ||
+      workflowSessionRegistry.historyRunCount > 0 ||
+      workflowSessionRegistry.historyActionCount > 0 ||
       videoComposerAbortControllersRef.current.size > 0 ||
       videoDownloadQueuesRef.current.size > 0 ||
       Object.values(videoComposerRuns).some((run) => run.status === "running") ||
@@ -2653,7 +2648,7 @@ export function WorkspaceApp({
     canvasAgent,
     canvasId,
     startingNodeKeys,
-    workflowSessions,
+    workflowSessionRegistry,
     videoComposerRuns,
     videoDownloaderRuns,
     frameExtractorRuns,
@@ -2673,9 +2668,9 @@ export function WorkspaceApp({
     schedule: scheduleCanvasSave,
     documentChanged,
   } = canvasPersistence;
-  // 视口 `input` 监听不能随 schedule 引用重挂：提示词编辑器的 input 会冒泡到这里触发
-  // 防抖保存，退订窗口里的那次击键会丢一次落盘。订阅只跟激活/水合走，回调读 ref。
-  const scheduleCanvasSaveRef = useRef(scheduleCanvasSave);
+  // 会话控制器动作与视口 input 监听都经 latest-ref 读最新保存调度：提示词编辑器的
+  // input 会冒泡触发防抖保存，退订窗口里的那次击键不能丢一次落盘。订阅只跟
+  // schedule 引用走，回调读 ref。
   useLayoutEffect(() => {
     scheduleCanvasSaveRef.current = scheduleCanvasSave;
   }, [scheduleCanvasSave]);
@@ -4612,6 +4607,9 @@ export function WorkspaceApp({
     });
     return { x: point.x, y: point.y };
   }, [fallbackFlowPosition]);
+  useLayoutEffect(() => {
+    viewportCenterBoardCoordinatesRef.current = viewportCenterBoardCoordinates;
+  }, [viewportCenterBoardCoordinates]);
 
   /** 指针拖拽松开点 → 画布坐标；松开点不在画布视口内时返回 null。 */
   const dropClientPointToBoard = useCallback(
@@ -4875,7 +4873,6 @@ export function WorkspaceApp({
     [],
   );
 
-  const workflowReviewHistoryEditsRef = useRef(new Map<string, Promise<void>>());
   const updateKnowledgeVideoWorkflowConfig = useCallback(
     (key: string, config: KnowledgeVideoWorkflowConfig) => {
       const previousNode =
@@ -4896,13 +4893,9 @@ export function WorkspaceApp({
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
       if (
         (config.brandVideo || config.musicVideo || config.productScene || config.reelbench) &&
-        !workflowSessions.isRunning(key)
+        !workflowSessionRegistry.isRunning(key)
       ) {
-        setKnowledgeVideoWorkflowRuns((current) => {
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
+        sessions.clearRun(key);
       }
       if (
         (config.productScene || config.reelbench) &&
@@ -4910,11 +4903,11 @@ export function WorkspaceApp({
         previousNode &&
         workflowExecutionInputSignature(previousNode) ===
           workflowExecutionInputSignature({ ...previousNode, config }) &&
-        !workflowSessions.isRunning(key)
+        !workflowSessionRegistry.isRunning(key)
       ) {
         const node = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
         if (node) {
-          const previous = workflowReviewHistoryEditsRef.current.get(key) ?? Promise.resolve();
+          const previous = sessions.pendingReviewHistoryEdit(key) ?? Promise.resolve();
           const save = previous
             .catch(() => undefined)
             .then(async () => {
@@ -4931,7 +4924,7 @@ export function WorkspaceApp({
                 },
               });
             });
-          workflowReviewHistoryEditsRef.current.set(key, save);
+          sessions.trackReviewHistoryEdit(key, save);
           void save.catch((error: unknown) =>
             toast.error("工作流审核历史保存失败", {
               description: (
@@ -4945,1087 +4938,7 @@ export function WorkspaceApp({
         }
       }
     },
-    [patchNode, snapshotV2, workflowSessions, setKnowledgeVideoWorkflowRuns],
-  );
-
-  const navigateWorkflowVersion = useCallback(
-    (
-      key: string,
-      operation: (config: KnowledgeVideoWorkflowConfig) => KnowledgeVideoWorkflowConfig,
-    ) => {
-      const source = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((node) => node.key === key);
-      if (!source) return;
-      const run = knowledgeVideoWorkflowRuns[key];
-      if (
-        workflowSessions.isRunning(key) ||
-        (source.config.historyRunId &&
-          workflowSessions.isHistoryActionActive(source.config.historyRunId)) ||
-        ["planning", "generating", "qc", "composing"].includes(
-          run?.phase ?? source.config.checkpoint.phase,
-        )
-      ) {
-        toast.info("请先暂停当前工作流或等待完成，再切换工作流版本。");
-        return;
-      }
-      try {
-        const config = operation(source.config);
-        if (config === source.config) return;
-        patchNode("knowledgeVideoWorkflow", key, (current) => ({ ...current, config }));
-        setKnowledgeVideoWorkflowRuns((current) => {
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
-        scheduleCanvasSave();
-      } catch (error) {
-        toast.error("工作流版本无法恢复", { description: <ErrorAlert error={error} workflow /> });
-      }
-    },
-    [
-      snapshotV2,
-      knowledgeVideoWorkflowRuns,
-      workflowSessions,
-      patchNode,
-      scheduleCanvasSave,
-      setKnowledgeVideoWorkflowRuns,
-    ],
-  );
-  const undoKnowledgeVideoWorkflowVersion = useCallback(
-    (key: string) => navigateWorkflowVersion(key, undoWorkflowVersion),
-    [navigateWorkflowVersion],
-  );
-  const redoKnowledgeVideoWorkflowVersion = useCallback(
-    (key: string, id?: string) =>
-      navigateWorkflowVersion(key, (config) => redoWorkflowVersion(config, id)),
-    [navigateWorkflowVersion],
-  );
-  const restoreKnowledgeVideoWorkflowVersion = useCallback(
-    (key: string, id: string) =>
-      navigateWorkflowVersion(key, (config) => restoreWorkflowVersion(config, id)),
-    [navigateWorkflowVersion],
-  );
-
-  const runKnowledgeVideoWorkflow = useCallback(
-    (
-      key: string,
-      resume: boolean,
-      decisionResolution?: string,
-      restoredNode?: KnowledgeVideoWorkflowNodeData,
-    ) => {
-      if (workflowSessions.isRunning(key)) return;
-      const document = snapshotV2({});
-      const sourceNode =
-        restoredNode ??
-        document.knowledgeVideoWorkflowNodes?.find((candidate) => candidate.key === key);
-      if (!sourceNode) return;
-      const currentNode = withCanvasWorkflowMaterials(
-        sourceNode,
-        workflowCanvasInputsFromDocument(document, key),
-      );
-      if (!isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(currentNode), currentNode)) {
-        try {
-          const previousPlan = getWorkflowExecutionPlan(currentNode);
-          const changedInput =
-            previousPlan != null &&
-            previousPlan.inputSignature !== workflowExecutionInputSignature(currentNode);
-          const plan = isWorkflowExecutionPlanCurrent(previousPlan, currentNode)
-            ? previousPlan!
-            : previousPlan?.scope === "delivery" && resume && !changedInput
-              ? createWorkflowDeliveryPlan(currentNode)
-              : createWorkflowExecutionPlan(
-                  currentNode,
-                  resume && !changedInput ? "resume" : "restart",
-                );
-          patchNode("knowledgeVideoWorkflow", key, (current) => ({
-            ...current,
-            config: {
-              ...current.config,
-              executionPlan: plan,
-              checkpoint: {
-                ...(changedInput
-                  ? createKnowledgeVideoWorkflowConfig(
-                      {
-                        prompt: current.config.models.text,
-                        image: current.config.models.image,
-                        video: current.config.models.video,
-                      },
-                      current.config.catalogResolved,
-                    ).checkpoint
-                  : current.config.checkpoint),
-                executionPlan: plan,
-                phase: "awaiting_approval",
-                error: null,
-              },
-            },
-          }));
-          setKnowledgeVideoWorkflowRuns((current) => ({
-            ...current,
-            [key]: {
-              phase: "awaiting_approval",
-              progress: 0,
-              message: "请检查执行计划并确认后开始。",
-              error: null,
-            },
-          }));
-        } catch (error) {
-          const message = formatWorkflowFailure(error);
-          setKnowledgeVideoWorkflowRuns((current) => ({
-            ...current,
-            [key]: {
-              phase: "failed",
-              progress: 0,
-              message: workflowErrorPresentation(error).summary,
-              error: message,
-            },
-          }));
-        }
-        return;
-      }
-      if (!isDesktopRuntime()) {
-        setKnowledgeVideoWorkflowRuns((current) => ({
-          ...current,
-          [key]: {
-            phase: "failed",
-            progress: 0,
-            message: "请在桌面应用中执行工作流。",
-            error: formatWorkflowFailure(
-              workflowUsageError("runtime", "自动工作流需要桌面端的项目供应商和本地合成能力。"),
-            ),
-          },
-        }));
-        return;
-      }
-      const historyRunId =
-        resume && sourceNode.config.historyRunId
-          ? sourceNode.config.historyRunId
-          : crypto.randomUUID();
-      if (!workflowSessions.beginHistoryRun(historyRunId)) return;
-      const savedNode = { ...sourceNode, config: { ...sourceNode.config, historyRunId } };
-      const node = withCanvasWorkflowMaterials(
-        savedNode,
-        workflowCanvasInputsFromDocument(document, key),
-      );
-      patchNode("knowledgeVideoWorkflow", key, () => savedNode);
-      setActiveWorkflowHistoryIds(workflowSessions.historyRunIds());
-      const session = workflowSessions.begin(key);
-      // 同步段无重入，这里不会撞上刚被占用的 key；防御性兜底保持守卫语义完整。
-      if (!session) return;
-      setKnowledgeVideoWorkflowRuns((current) => ({
-        ...current,
-        [key]: {
-          phase: resume ? node.config.checkpoint.phase : "planning",
-          progress: resume ? 20 : 2,
-          message: resume ? "正在从已保存进度继续…" : "正在启动自动工作流…",
-          error: null,
-        },
-      }));
-      void recoverWorkflowHistory()
-        .then(() => workflowReviewHistoryEditsRef.current.get(key)?.catch(() => undefined))
-        .then(() =>
-          recordedWorkflowRunner.run({
-            node,
-            versionConfig: savedNode.config,
-            providerCatalog,
-            resume,
-            newHistory: !sourceNode.config.historyRunId,
-            ...(decisionResolution === undefined ? {} : { decisionResolution }),
-            signal: session.signal,
-            onCheckpoint: (checkpoint, versionHistory) => {
-              // checkpoint 落卡是机器驱动的连续写入：走时间窗折叠，撤销栈不随跑批灌满。
-              runWithCoalescedHistory(() =>
-                patchNode("knowledgeVideoWorkflow", key, (currentNode) => ({
-                  ...currentNode,
-                  config: {
-                    ...currentNode.config,
-                    checkpoint,
-                    ...(versionHistory ? { versionHistory } : {}),
-                  },
-                })),
-              );
-            },
-            onProgress: (runState) => {
-              setKnowledgeVideoWorkflowRuns((current) => ({ ...current, [key]: runState }));
-            },
-          }),
-        )
-        .then((checkpoint) => {
-          if (checkpoint.phase === "done") {
-            toast.success(
-              node.config.productScene
-                ? "产品场景图审核完成"
-                : node.config.reelbench
-                  ? "视频拉片与分镜合成完成"
-                  : node.config.musicVideo
-                    ? "音乐 MV 制作完成"
-                    : node.config.xhsCover
-                      ? "小红书封面制作完成"
-                      : node.config.remotion
-                        ? "动画逻辑图制作完成"
-                        : node.config.commerce
-                          ? "剧情带货制作完成"
-                          : node.config.brandVideo
-                            ? "品牌视觉短片制作完成"
-                            : node.config.comicDrama
-                              ? "漫剧制作完成"
-                              : node.config.film
-                                ? "影视制作完成"
-                                : "知识视频制作完成",
-              {
-                description: node.config.productScene
-                  ? "逐张审核记录已保存，可从节点导出已选用图片。"
-                  : node.config.reelbench
-                    ? "镜头表、质检结果与本地报告已保存在工作流节点中。"
-                    : node.config.xhsCover
-                      ? "封面方案、提示词与交付物已保存在工作流节点中。"
-                      : node.config.remotion
-                        ? "动画、预览图和可编辑工程已保存在工作流节点中。"
-                        : checkpoint.documentsOnly
-                          ? "制作文档与提示词已保存在工作流节点中。"
-                          : "完整成片与过程文档已保存在工作流节点中。",
-              },
-            );
-          } else if (checkpoint.phase === "awaiting_approval") {
-            toast.info("工作流需要一项确认", {
-              description: checkpoint.decision?.question ?? "请在节点内确认后继续。",
-            });
-          }
-        })
-        .catch((error: unknown) => {
-          const message = formatWorkflowFailure(error);
-          setKnowledgeVideoWorkflowRuns((current) => ({
-            ...current,
-            [key]: { phase: "failed", progress: 0, message: "工作流执行失败。", error: message },
-          }));
-        })
-        .finally(() => {
-          workflowSessions.endHistoryRun(historyRunId);
-          setActiveWorkflowHistoryIds(workflowSessions.historyRunIds());
-          session.end();
-        });
-    },
-    [
-      recordedWorkflowRunner,
-      snapshotV2,
-      recoverWorkflowHistory,
-      patchNode,
-      runWithCoalescedHistory,
-      providerCatalog,
-      workflowSessions,
-      setKnowledgeVideoWorkflowRuns,
-    ],
-  );
-
-  const restoreStoredWorkflow = useCallback(
-    async (
-      record: WorkflowHistoryRecord,
-      action: "resume" | "restart" | "locate",
-      resolution?: string,
-    ) => {
-      if (!workflowSessions.beginHistoryAction(record.id)) return;
-      try {
-        await recoverWorkflowHistory();
-        const latest = (await workflowHistoryClient.get(record.id)).record;
-        if (latest.canvasId !== canvasId)
-          throw workflowUsageError("task_identity", "请先打开这条工作流所属的画布。");
-        if (workflowSessions.isHistoryRunActive(latest.id) && action !== "locate")
-          throw workflowUsageError(
-            "task_pending",
-            "这条工作流正在运行，请先在画布中暂停后再处理。",
-          );
-        const document = snapshotV2({});
-        const nodes = document.knowledgeVideoWorkflowNodes ?? [];
-        const activeNode = nodes.find(
-          (item) => item.config.historyRunId === latest.id && workflowSessions.isRunning(item.key),
-        );
-        if (activeNode && action === "locate") {
-          selectNode(activeNode.key);
-          void flowInstanceRef.current?.setCenter(
-            activeNode.x +
-              (activeNode.measured?.width ?? knowledgeVideoWorkflowNodeWidth(window.innerWidth)) /
-                2,
-            activeNode.y + 100,
-            { zoom: zoom / 100, duration: 200 },
-          );
-          setHistoryOpen(false);
-          return;
-        }
-        const anchor = viewportCenterBoardCoordinates();
-        const occupiedKeys = new Set(
-          [
-            ...document.assetNodes,
-            ...document.genNodes,
-            ...document.resultNodes,
-            ...(document.outputNodes ?? []),
-            ...(document.screenplayNodes ?? []),
-            ...(document.storyboardNodes ?? []),
-            ...(document.viralRemixNodes ?? []),
-            ...(document.videoComposerNodes ?? []),
-            ...(document.videoDownloaderNodes ?? []),
-            ...(document.frameExtractorNodes ?? []),
-            ...nodes,
-          ].map((item) => item.key),
-        );
-        let restored = restoreWorkflowHistoryNode(
-          latest,
-          nodes.map((node) =>
-            withCanvasWorkflowMaterials(node, workflowCanvasInputsFromDocument(document, node.key)),
-          ),
-          {
-            restart: action === "restart",
-            occupiedKeys,
-            newKey: `workflow-restored-${crypto.randomUUID()}`,
-            position: nearestAvailableNodePosition(
-              {
-                x: anchor.x - knowledgeVideoWorkflowNodeWidth(window.innerWidth) / 2,
-                y: anchor.y - 180,
-                width: knowledgeVideoWorkflowNodeWidth(window.innerWidth),
-                height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-              },
-              occupiedNodeRects,
-            ),
-          },
-        );
-        if (restored.replace) {
-          // The history owns a full input snapshot; the live canvas continues to own its edges.
-          const original = nodes.find((node) => node.key === restored.node.key);
-          restored = {
-            ...restored,
-            node: withLiveWorkflowCanvasInputs(restored.node, original),
-          };
-          patchNode("knowledgeVideoWorkflow", restored.node.key, () => restored.node);
-        } else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
-        selectNode(restored.node.key);
-        void flowInstanceRef.current?.setCenter(
-          restored.node.x +
-            (restored.node.measured?.width ?? knowledgeVideoWorkflowNodeWidth(window.innerWidth)) /
-              2,
-          restored.node.y + 180,
-          { zoom: zoom / 100, duration: 200 },
-        );
-        if (action !== "locate") {
-          runKnowledgeVideoWorkflow(
-            restored.node.key,
-            action === "resume",
-            resolution,
-            restored.node,
-          );
-        }
-        setHistoryOpen(false);
-        if (!restored.replace)
-          toast.success(
-            action === "restart" ? "已按历史输入重新制作" : "工作流已从历史记录恢复到画布",
-          );
-      } finally {
-        workflowSessions.endHistoryAction(record.id);
-      }
-    },
-    [
-      canvasId,
-      recoverWorkflowHistory,
-      snapshotV2,
-      selectNode,
-      zoom,
-      viewportCenterBoardCoordinates,
-      occupiedNodeRects,
-      patchNode,
-      addNode,
-      workflowSessions,
-      runKnowledgeVideoWorkflow,
-    ],
-  );
-  const resumeHistoryWorkflow = useCallback(
-    (record: WorkflowHistoryRecord, resolution?: string) =>
-      restoreStoredWorkflow(record, "resume", resolution),
-    [restoreStoredWorkflow],
-  );
-  const restartHistoryWorkflow = useCallback(
-    (record: WorkflowHistoryRecord) => restoreStoredWorkflow(record, "restart"),
-    [restoreStoredWorkflow],
-  );
-  const locateHistoryWorkflow = useCallback(
-    (record: WorkflowHistoryRecord) => {
-      void restoreStoredWorkflow(record, "locate").catch((error: unknown) =>
-        toast.error("恢复工作流失败", { description: <ErrorAlert error={error} workflow /> }),
-      );
-    },
-    [restoreStoredWorkflow],
-  );
-  const openWorkflowHistory = useCallback(
-    (key: string) => {
-      const node = canvasNodesNow("knowledgeVideoWorkflow").find((item) => item.key === key);
-      setHistoryInitialTab("workflow");
-      setHistoryInitialWorkflowId(node?.config.historyRunId ?? null);
-      setHistoryOpen(true);
-    },
-    [canvasNodesNow],
-  );
-
-  const handlePickMusicVideoMaterial = useCallback(
-    async (key: string, role: "song" | "character") => {
-      try {
-        const picked = await pickPromptMultimodalFiles({
-          title: role === "song" ? "选择 MV 原曲" : "添加 MV 人物参考图",
-          kinds: role === "song" ? ["audio"] : ["image"],
-        });
-        if (!picked.length) return;
-        if (role === "song" && picked.length !== 1) {
-          toast.error("选择 MV 原曲失败", {
-            description: (
-              <ErrorAlert
-                error={workflowUsageError("materials", "一次请选择一首完整歌曲")}
-                workflow
-              />
-            ),
-          });
-          return;
-        }
-        patchNode("knowledgeVideoWorkflow", key, (node) => {
-          const options = node.config.musicVideo;
-          if (
-            !options ||
-            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
-          )
-            return node;
-          const refs = [...options.characterReferences];
-          const paths = new Set(refs.map(workflowMaterialPathKey));
-          for (const item of role === "character" ? picked : []) {
-            if (
-              item.kind === "image" &&
-              item.byteSize > 0 &&
-              !paths.has(workflowMaterialPathKey(item))
-            ) {
-              paths.add(workflowMaterialPathKey(item));
-              refs.push(item);
-            }
-          }
-          return {
-            ...node,
-            config: {
-              ...node.config,
-              musicVideo:
-                role === "song"
-                  ? { ...options, songPath: picked[0]!.localPath, songName: picked[0]!.displayName }
-                  : { ...options, characterReferences: refs },
-            },
-          };
-        });
-      } catch (error) {
-        toast.error("选择 MV 素材失败", {
-          description: (
-            <ErrorAlert
-              error={workflowUsageError("materials", "未能选择 MV 原曲或人物参考图。", error)}
-              workflow
-            />
-          ),
-        });
-      }
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handlePickReverseVideo = useCallback(
-    async (key: string) => {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const selection = await open({
-          multiple: false,
-          directory: false,
-          title: "选择要反推的本地视频",
-          filters: [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv", "avi", "m4v"] }],
-        });
-        if (typeof selection !== "string" || !selection) return;
-        patchNode("knowledgeVideoWorkflow", key, (node) => {
-          if (
-            !node.config.reverseVideo ||
-            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
-          )
-            return node;
-          return {
-            ...node,
-            config: {
-              ...node.config,
-              reverseVideo: {
-                ...node.config.reverseVideo,
-                sourceUrl: "",
-                localVideoPath: selection,
-                localVideoName: selection.split(/[\\/]/).at(-1) ?? "本地视频",
-              },
-            },
-          };
-        });
-      } catch (error) {
-        toast.error("选择视频失败", {
-          description: (
-            <ErrorAlert
-              error={workflowUsageError("materials", "未能选择要反推的本地视频。", error)}
-              workflow
-            />
-          ),
-        });
-      }
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handleRemoveReverseVideo = useCallback(
-    (key: string) => {
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        if (
-          !node.config.reverseVideo ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        return {
-          ...node,
-          config: {
-            ...node.config,
-            reverseVideo: {
-              ...node.config.reverseVideo,
-              localVideoPath: "",
-              localVideoName: "",
-            },
-          },
-        };
-      });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handlePickReelbenchVideo = useCallback(
-    async (key: string) => {
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const selection = await open({
-          multiple: false,
-          directory: false,
-          title: "选择要拉片的本地视频",
-          filters: [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv", "avi", "m4v"] }],
-        });
-        if (typeof selection !== "string" || !selection) return;
-        patchNode("knowledgeVideoWorkflow", key, (node) => {
-          if (
-            !node.config.reelbench ||
-            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
-          )
-            return node;
-          return {
-            ...node,
-            config: {
-              ...node.config,
-              reelbench: {
-                ...node.config.reelbench,
-                sourceUrl: "",
-                localVideoPath: selection,
-                localVideoName: selection.split(/[\\/]/).at(-1) ?? "本地视频",
-              },
-            },
-          };
-        });
-      } catch (error) {
-        toast.error("选择视频失败", {
-          description: (
-            <ErrorAlert
-              error={workflowUsageError("materials", "未能选择要拉片的本地视频。", error)}
-              workflow
-            />
-          ),
-        });
-      }
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handleRemoveReelbenchVideo = useCallback(
-    (key: string) => {
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        if (
-          !node.config.reelbench ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        return {
-          ...node,
-          config: {
-            ...node.config,
-            reelbench: {
-              ...node.config.reelbench,
-              localVideoPath: "",
-              localVideoName: "",
-            },
-          },
-        };
-      });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handlePickWorkflowMaterials = useCallback(
-    async (key: string) => {
-      const picked = await pickPromptMultimodalFiles({ title: "为工作流添加参考素材" });
-      if (!picked.length) return;
-      let rejected = 0;
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        if (
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        const materials = [...(node.config.materials ?? [])];
-        const generalPaths = new Set(materials.map(workflowMaterialPathKey));
-        for (const item of picked) {
-          const path = workflowMaterialPathKey(item);
-          if (generalPaths.has(path) || !Number.isFinite(item.byteSize) || item.byteSize <= 0) {
-            rejected++;
-            continue;
-          }
-          generalPaths.add(path);
-          materials.push(item);
-        }
-        return { ...node, config: { ...node.config, materials } };
-      });
-      if (rejected)
-        toast.info(`${rejected} 项参考素材未添加`, {
-          description: "重复文件会跳过，不支持空文件。",
-        });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handleRemoveWorkflowMaterial = useCallback(
-    (key: string, localPath: string) => {
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        if (
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        return {
-          ...node,
-          config: {
-            ...node.config,
-            materials: (node.config.materials ?? []).filter((item) => item.localPath !== localPath),
-          },
-        };
-      });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handlePickCoverImages = useCallback(
-    async (key: string, role: "portrait" | "material") => {
-      const picked = await pickPromptMultimodalFiles({
-        title: role === "portrait" ? "添加同一人物的封面参考图" : "添加封面截图、产品图或标志",
-        kinds: ["image"],
-      });
-      if (!picked.length) return;
-      let rejected = 0;
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        const options = node.config.xhsCover;
-        if (
-          !options ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        const field = role === "portrait" ? "portraits" : "materials";
-        const items = [...options[field]];
-        const existing = [...options.portraits, ...options.materials];
-        const paths = new Set(existing.map(workflowMaterialPathKey));
-        for (const item of picked) {
-          if (
-            item.kind !== "image" ||
-            paths.has(workflowMaterialPathKey(item)) ||
-            items.length >= (role === "portrait" ? 3 : 5) ||
-            !Number.isFinite(item.byteSize) ||
-            item.byteSize <= 0
-          ) {
-            rejected++;
-            continue;
-          }
-          paths.add(workflowMaterialPathKey(item));
-          items.push(item);
-        }
-        return { ...node, config: { ...node.config, xhsCover: { ...options, [field]: items } } };
-      });
-      if (rejected)
-        toast.info(`${rejected} 张图片未添加`, {
-          description: "人物参考图最多 3 张、补充图片最多 5 张，仅支持非空图片，重复图片会跳过。",
-        });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handleRemoveCoverImage = useCallback(
-    (key: string, role: "portrait" | "material", path: string) => {
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        const options = node.config.xhsCover;
-        if (
-          !options ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        const field = role === "portrait" ? "portraits" : "materials";
-        return {
-          ...node,
-          config: {
-            ...node.config,
-            xhsCover: {
-              ...options,
-              [field]: options[field].filter((item) => item.localPath !== path),
-            },
-          },
-        };
-      });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handlePickCommerceMaterials = useCallback(
-    async (key: string) => {
-      const picked = await pickPromptMultimodalFiles({
-        title: "为带货工作流添加商品原图和资料",
-        kinds: ["image", "document"],
-      });
-      if (!picked.length) return;
-      let rejected = 0;
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        const options = node.config.commerce;
-        if (
-          !options ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        const materials = [...options.materials];
-        const paths = new Set(materials.map(workflowMaterialPathKey));
-        for (const item of picked) {
-          if (
-            (item.kind !== "image" && item.kind !== "document") ||
-            paths.has(workflowMaterialPathKey(item)) ||
-            !Number.isFinite(item.byteSize) ||
-            item.byteSize <= 0
-          ) {
-            rejected++;
-            continue;
-          }
-          paths.add(workflowMaterialPathKey(item));
-          materials.push(item);
-        }
-        return { ...node, config: { ...node.config, commerce: { ...options, materials } } };
-      });
-      if (rejected)
-        toast.info(`${rejected} 项产品资料未添加`, {
-          description: "支持非空图片与文档，重复文件会跳过。",
-        });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const handleRemoveCommerceMaterial = useCallback(
-    (key: string, localPath: string) => {
-      patchNode("knowledgeVideoWorkflow", key, (node) => {
-        const options = node.config.commerce;
-        if (
-          !options ||
-          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
-        )
-          return node;
-        return {
-          ...node,
-          config: {
-            ...node.config,
-            commerce: {
-              ...options,
-              materials: options.materials.filter((item) => item.localPath !== localPath),
-            },
-          },
-        };
-      });
-    },
-    [patchNode, workflowSessions],
-  );
-
-  const executeKnowledgeVideoWorkflow = useCallback(
-    (key: string) => {
-      if (workflowSessions.isRunning(key)) return;
-      const document = snapshotV2({});
-      const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
-      if (!source) return;
-      const node = withCanvasWorkflowMaterials(
-        source,
-        workflowCanvasInputsFromDocument(document, key),
-      );
-      const plan = createWorkflowExecutionPlan(node, "restart");
-      patchNode("knowledgeVideoWorkflow", key, (current) => ({
-        ...current,
-        config: {
-          ...current.config,
-          executionPlan: plan,
-          checkpoint: {
-            ...createKnowledgeVideoWorkflowConfig(
-              {
-                prompt: current.config.models.text,
-                image: current.config.models.image,
-                video: current.config.models.video,
-              },
-              current.config.catalogResolved,
-            ).checkpoint,
-            executionPlan: plan,
-            phase: "awaiting_approval",
-          },
-        },
-      }));
-      setKnowledgeVideoWorkflowRuns((current) => ({
-        ...current,
-        [key]: {
-          phase: "awaiting_approval",
-          progress: 0,
-          message: "请检查执行计划并确认后开始。",
-          error: null,
-        },
-      }));
-    },
-    [snapshotV2, patchNode, workflowSessions, setKnowledgeVideoWorkflowRuns],
-  );
-  const approveKnowledgeVideoWorkflowPlan = useCallback(
-    (key: string) => {
-      if (workflowSessions.isRunning(key)) return;
-      const document = snapshotV2({});
-      const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
-      if (!source) return;
-      const node = withCanvasWorkflowMaterials(
-        source,
-        workflowCanvasInputsFromDocument(document, key),
-      );
-      const plan = getWorkflowExecutionPlan(node);
-      if (!plan) return;
-      try {
-        if (!isWorkflowExecutionPlanCurrent(plan, node)) {
-          const changedInput = plan.inputSignature !== workflowExecutionInputSignature(node);
-          const refreshed =
-            plan.scope === "delivery" && !changedInput
-              ? createWorkflowDeliveryPlan(node)
-              : createWorkflowExecutionPlan(node, changedInput ? "restart" : plan.executionIntent);
-          patchNode("knowledgeVideoWorkflow", key, (current) => ({
-            ...current,
-            config: {
-              ...current.config,
-              executionPlan: refreshed,
-              checkpoint: {
-                ...(changedInput
-                  ? createKnowledgeVideoWorkflowConfig(
-                      {
-                        prompt: current.config.models.text,
-                        image: current.config.models.image,
-                        video: current.config.models.video,
-                      },
-                      current.config.catalogResolved,
-                    ).checkpoint
-                  : current.config.checkpoint),
-                executionPlan: refreshed,
-                phase: "awaiting_approval",
-              },
-            },
-          }));
-          toast.info("输入已改变，执行计划已更新，请重新检查后确认。");
-          return;
-        }
-        const approved = approveWorkflowExecutionPlan(plan, node);
-        const approvedNode = {
-          ...source,
-          config: {
-            ...source.config,
-            executionPlan: approved,
-            checkpoint: {
-              ...(plan.executionIntent === "restart"
-                ? createKnowledgeVideoWorkflowConfig(
-                    {
-                      prompt: source.config.models.text,
-                      image: source.config.models.image,
-                      video: source.config.models.video,
-                    },
-                    source.config.catalogResolved,
-                  ).checkpoint
-                : source.config.checkpoint),
-              executionPlan: approved,
-            },
-          },
-        };
-        patchNode("knowledgeVideoWorkflow", key, () => approvedNode);
-        runKnowledgeVideoWorkflow(key, plan.executionIntent === "resume", undefined, approvedNode);
-      } catch (error) {
-        toast.error("执行计划无法确认", { description: <ErrorAlert error={error} workflow /> });
-      }
-    },
-    [snapshotV2, patchNode, workflowSessions, runKnowledgeVideoWorkflow],
-  );
-  const continueKnowledgeVideoWorkflow = useCallback(
-    (key: string, resolution?: string) => runKnowledgeVideoWorkflow(key, true, resolution),
-    [runKnowledgeVideoWorkflow],
-  );
-  const redoKnowledgeVideoWorkflowShot = useCallback(
-    (key: string, shotId: string) => {
-      if (workflowSessions.isRunning(key)) return;
-      const node = canvasNodesNow("knowledgeVideoWorkflow").find(
-        (candidate) => candidate.key === key,
-      );
-      const checkpoint: KnowledgeVideoWorkflowCheckpoint | undefined = node?.config.checkpoint;
-      const run: KnowledgeVideoWorkflowShotRun | undefined = checkpoint?.shotRuns[shotId];
-      const shot = checkpoint?.shots.find((item) => item.id === shotId);
-      if (!node || !checkpoint || !run || !shot) return;
-      const supersededTaskId = run.videoTaskId ?? null;
-      const nextRun: KnowledgeVideoWorkflowShotRun = {
-        ...run,
-        redoRequested: true,
-        videoTaskId: null,
-        clipPath: null,
-        qcStatus: "pending",
-        retryCount: 0,
-        repairPrompt: null,
-        qcReport: "用户要求重做此镜头，已重新提交生成。",
-        ...(supersededTaskId
-          ? { supersededTaskIds: [...(run.supersededTaskIds ?? []), supersededTaskId] }
-          : {}),
-      };
-      const nextCheckpoint: KnowledgeVideoWorkflowCheckpoint = {
-        ...checkpoint,
-        phase: "paused",
-        lastActivePhase: checkpoint.lastActivePhase ?? "generating",
-        activeCompositionJobId: null,
-        finalPath: null,
-        error: null,
-        decision: null,
-        shotRuns: { ...checkpoint.shotRuns, [shotId]: nextRun },
-        updatedAt: Date.now(),
-      };
-      patchNode("knowledgeVideoWorkflow", key, (currentNode) => ({
-        ...currentNode,
-        config: { ...currentNode.config, checkpoint: nextCheckpoint },
-      }));
-      toast.info("正在重做该镜头", {
-        description: `镜头 ${shot.sequence} 只重跑这一个分镜，其他镜头保持不变。`,
-      });
-      runKnowledgeVideoWorkflow(key, true);
-    },
-    [canvasNodesNow, patchNode, workflowSessions, runKnowledgeVideoWorkflow],
-  );
-  const cancelKnowledgeVideoWorkflow = useCallback(
-    (key: string) => {
-      workflowSessions.abort(key);
-      const node = canvasNodesNow("knowledgeVideoWorkflow").find(
-        (candidate) => candidate.key === key,
-      );
-      const jobId = node?.config.checkpoint.activeCompositionJobId;
-      if (jobId) void videoComposerClient.cancelJob(jobId).catch(() => undefined);
-    },
-    [canvasNodesNow, workflowSessions],
-  );
-  const removeKnowledgeVideoWorkflow = useCallback(
-    (key: string) => {
-      workflowSessions.abort(key);
-      workflowSessions.remove(key);
-      removeCanvasNode(key);
-      setKnowledgeVideoWorkflowRuns((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [removeCanvasNode, workflowSessions, setKnowledgeVideoWorkflowRuns],
-  );
-  const revealKnowledgeVideoWorkflowResult = useCallback(
-    (key: string) => {
-      const checkpoint = canvasNodesNow("knowledgeVideoWorkflow").find((node) => node.key === key)
-        ?.config.checkpoint;
-      const path =
-        checkpoint?.xhsCover?.finalPath ??
-        checkpoint?.xhsCover?.imagePath ??
-        checkpoint?.finalPath ??
-        checkpoint?.remotion?.renderJob?.gifPath ??
-        checkpoint?.remotion?.renderJob?.videoPath ??
-        checkpoint?.remotion?.renderJob?.previewPath;
-      if (path) void revealDesktopItem(path).catch(() => undefined);
-    },
-    [canvasNodesNow],
-  );
-
-  const revealRemotionProject = useCallback(
-    (key: string) => {
-      const path = canvasNodesNow("knowledgeVideoWorkflow").find((node) => node.key === key)?.config
-        .checkpoint.remotion?.renderJob?.projectPath;
-      if (path)
-        void revealDesktopItem(path).catch((error: unknown) =>
-          toast.error("打开动画工程失败", {
-            description: (
-              <ErrorAlert
-                error={workflowUsageError("storage", "未能打开已保存的动画工程。", error)}
-                workflow
-              />
-            ),
-          }),
-        );
-    },
-    [canvasNodesNow],
-  );
-
-  const exportFilmDocuments = useCallback(
-    (key: string) => {
-      const node = canvasNodesNow("knowledgeVideoWorkflow").find((item) => item.key === key);
-      if (!node) return;
-      // 导出正文、文档标题与四件套打包全部由注册表按工作流类型分发；
-      // 无文档交付的类型（或正文为空）在此静默返回，与原闸门同语义。
-      const delivery = workflowKindDefinitionOf(workflowKindOf(node.config));
-      const content = delivery.deliveryMarkdown?.(node.config.checkpoint) ?? "";
-      if (!content || delivery.deliveryTitle == null) return;
-      const title = delivery.deliveryTitle;
-      const fileName = markdownDocumentExportName(content, key, title);
-      void (async () => {
-        try {
-          if (delivery.deliveryBundle) {
-            const files = delivery.deliveryBundle(node.config.checkpoint);
-            const bundleTitle = delivery.deliveryBundleTitle ?? title;
-            if (isDesktopRuntime()) {
-              const folder = await saveWorkflowBundleToDesktop(files, bundleTitle);
-              if (!folder) return;
-              toast.success(`${bundleTitle}四件套已导出`, { description: folder });
-            } else {
-              for (const file of files) {
-                const url = URL.createObjectURL(
-                  new Blob([file.content], { type: `${file.mediaType};charset=utf-8` }),
-                );
-                const anchor = document.createElement("a");
-                anchor.href = url;
-                anchor.download = file.fileName;
-                anchor.click();
-                URL.revokeObjectURL(url);
-              }
-              toast.success(`${bundleTitle}四件套已导出`);
-            }
-            return;
-          }
-          if (isDesktopRuntime()) {
-            if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
-          } else {
-            const url = URL.createObjectURL(
-              new Blob([content], { type: "text/markdown;charset=utf-8" }),
-            );
-            const anchor = document.createElement("a");
-            anchor.href = url;
-            anchor.download = fileName;
-            anchor.click();
-            URL.revokeObjectURL(url);
-          }
-          toast.success(`${title}已导出`);
-        } catch (error) {
-          toast.error(`${title}导出失败`, {
-            description: (
-              <ErrorAlert
-                error={workflowUsageError("storage", `${title}未能保存到所选位置。`, error)}
-                workflow
-              />
-            ),
-          });
-        }
-      })();
-    },
-    [canvasNodesNow],
+    [snapshotV2, patchNode, sessions, workflowSessionRegistry],
   );
 
   const updateImageNodeConfig = useCallback(
@@ -11086,12 +9999,12 @@ export function WorkspaceApp({
   );
 
   const undo = useCallback(
-    () => undoCanvasOperation(new Set(workflowSessions.runningKeys())),
-    [undoCanvasOperation, workflowSessions],
+    () => undoCanvasOperation(new Set(workflowSessionRegistry.runningKeys())),
+    [undoCanvasOperation, workflowSessionRegistry],
   );
   const redo = useCallback(
-    () => redoCanvasOperation(new Set(workflowSessions.runningKeys())),
-    [redoCanvasOperation, workflowSessions],
+    () => redoCanvasOperation(new Set(workflowSessionRegistry.runningKeys())),
+    [redoCanvasOperation, workflowSessionRegistry],
   );
 
   // 文本输入框内默认不触发这些快捷键，继续使用浏览器原生的文本撤销行为。
@@ -11161,7 +10074,7 @@ export function WorkspaceApp({
         return;
       }
       if (entry?.type === "knowledgeVideoWorkflow") {
-        removeKnowledgeVideoWorkflow(key);
+        sessions.remove(key);
         return;
       }
       if (entry?.type === "output") {
@@ -11176,7 +10089,7 @@ export function WorkspaceApp({
       removeAssetNode,
       removeFrameExtractorNode,
       removeGenNode,
-      removeKnowledgeVideoWorkflow,
+      sessions,
       removeOutputNode,
       removeResultNode,
       removeScreenplayNode,
@@ -11847,35 +10760,12 @@ export function WorkspaceApp({
             ignoreLegacyNodeDrag,
             handleGenNodeSizeChange,
             updateKnowledgeVideoWorkflowConfig,
-            undoKnowledgeVideoWorkflowVersion,
-            redoKnowledgeVideoWorkflowVersion,
-            restoreKnowledgeVideoWorkflowVersion,
-            executeKnowledgeVideoWorkflow,
-            approveKnowledgeVideoWorkflowPlan,
-            continueKnowledgeVideoWorkflow,
-            cancelKnowledgeVideoWorkflow,
-            redoKnowledgeVideoWorkflowShot,
-            removeKnowledgeVideoWorkflow,
-            revealKnowledgeVideoWorkflowResult,
-            openWorkflowHistory,
-            handlePickWorkflowMaterials,
-            handleRemoveWorkflowMaterial,
-            handlePickReverseVideo,
-            handlePickReelbenchVideo,
-            handlePickMusicVideoMaterial,
-            handleRemoveReverseVideo,
-            handleRemoveReelbenchVideo,
+            sessions,
             importDownloaderCookies,
             downloaderEngineStatus,
             downloaderCookieBusy,
             selectDownloaderCookieBrowser,
             clearDownloaderCookies,
-            exportFilmDocuments,
-            revealRemotionProject,
-            handlePickCommerceMaterials,
-            handleRemoveCommerceMaterial,
-            handlePickCoverImages,
-            handleRemoveCoverImage,
           ],
           () => ({
             id: node.key,
@@ -11908,35 +10798,11 @@ export function WorkspaceApp({
                   onNodeDragStart={ignoreLegacyNodeDrag}
                   onSizeChange={handleGenNodeSizeChange}
                   onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
-                  onUndoVersion={undoKnowledgeVideoWorkflowVersion}
-                  onRedoVersion={redoKnowledgeVideoWorkflowVersion}
-                  onRestoreVersion={restoreKnowledgeVideoWorkflowVersion}
-                  onExecute={executeKnowledgeVideoWorkflow}
-                  onApprovePlan={approveKnowledgeVideoWorkflowPlan}
-                  onContinue={continueKnowledgeVideoWorkflow}
-                  onCancel={cancelKnowledgeVideoWorkflow}
-                  onRedoShot={redoKnowledgeVideoWorkflowShot}
-                  onRemove={removeKnowledgeVideoWorkflow}
-                  onRevealResult={revealKnowledgeVideoWorkflowResult}
-                  onOpenHistory={openWorkflowHistory}
-                  onPickMaterials={handlePickWorkflowMaterials}
-                  onRemoveMaterial={handleRemoveWorkflowMaterial}
-                  onPickReverseVideo={handlePickReverseVideo}
-                  onPickReelbenchVideo={handlePickReelbenchVideo}
-                  onPickMusicVideoMaterial={handlePickMusicVideoMaterial}
-                  onExportDocuments={exportFilmDocuments}
-                  onRemoveReverseVideo={handleRemoveReverseVideo}
-                  onRemoveReelbenchVideo={handleRemoveReelbenchVideo}
                   onOpenDownloadSettings={importDownloaderCookies}
                   downloadCookieStatus={downloaderEngineStatus}
                   downloadCookieBusy={downloaderCookieBusy}
                   onSelectDownloadCookieBrowser={selectDownloaderCookieBrowser}
                   onClearDownloadCookies={clearDownloaderCookies}
-                  onRevealRemotionProject={revealRemotionProject}
-                  onPickCommerceMaterials={handlePickCommerceMaterials}
-                  onRemoveCommerceMaterial={handleRemoveCommerceMaterial}
-                  onPickCoverImages={handlePickCoverImages}
-                  onRemoveCoverImage={handleRemoveCoverImage}
                 />
               ),
             },
@@ -11954,35 +10820,12 @@ export function WorkspaceApp({
       ignoreLegacyNodeDrag,
       handleGenNodeSizeChange,
       updateKnowledgeVideoWorkflowConfig,
-      undoKnowledgeVideoWorkflowVersion,
-      redoKnowledgeVideoWorkflowVersion,
-      restoreKnowledgeVideoWorkflowVersion,
-      executeKnowledgeVideoWorkflow,
-      approveKnowledgeVideoWorkflowPlan,
-      continueKnowledgeVideoWorkflow,
-      redoKnowledgeVideoWorkflowShot,
-      cancelKnowledgeVideoWorkflow,
-      removeKnowledgeVideoWorkflow,
-      revealKnowledgeVideoWorkflowResult,
-      openWorkflowHistory,
-      handlePickWorkflowMaterials,
-      handleRemoveWorkflowMaterial,
-      handlePickReverseVideo,
-      handlePickReelbenchVideo,
-      handlePickMusicVideoMaterial,
-      handleRemoveReverseVideo,
-      handleRemoveReelbenchVideo,
+      sessions,
       importDownloaderCookies,
       downloaderEngineStatus,
       downloaderCookieBusy,
       selectDownloaderCookieBrowser,
       clearDownloaderCookies,
-      exportFilmDocuments,
-      revealRemotionProject,
-      handlePickCommerceMaterials,
-      handleRemoveCommerceMaterial,
-      handlePickCoverImages,
-      handleRemoveCoverImage,
       canvasStore,
     ],
   );
@@ -13383,917 +12226,931 @@ export function WorkspaceApp({
   if (!active) return null;
 
   return (
-    <main className="workspace-shell">
-      <Suspense
-        fallback={
+    <WorkflowSessionsProvider value={sessions}>
+      <main className="workspace-shell">
+        <Suspense
+          fallback={
+            <div className="canvas-load-notice" role="status">
+              <strong>正在加载画布助手…</strong>
+            </div>
+          }
+        >
+          <CanvasAgentPanel
+            controller={canvasAgent}
+            catalog={providerCatalog}
+            disabled={!canvasHydrated}
+          />
+        </Suspense>
+        {!canvasHydrated ? (
           <div className="canvas-load-notice" role="status">
-            <strong>正在加载画布助手…</strong>
-          </div>
-        }
-      >
-        <CanvasAgentPanel
-          controller={canvasAgent}
-          catalog={providerCatalog}
-          disabled={!canvasHydrated}
-        />
-      </Suspense>
-      {!canvasHydrated ? (
-        <div className="canvas-load-notice" role="status">
-          <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
-          {canvasPersistence.error ? (
-            <>
-              <p>{canvasPersistence.error}</p>
-              <button type="button" onClick={canvasPersistence.retry}>
-                重试读取画布
-              </button>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-      <div className="workspace-content" inert={settingsOpen || !canvasHydrated ? true : undefined}>
-        <a className="skip-link" href="#canvas-workspace">
-          跳到画布
-        </a>
-        <header className="workspace-header">
-          <div className="brand-lockup" aria-label="无限画布">
-            <span className="brand-mark" aria-hidden="true">
-              <Icon name="bounding-box" size="2xl" />
-            </span>
-            <span className="brand-name">无限画布</span>
-          </div>
-          <div
-            className={`save-state${canvasPersistence.error ? " save-state--error" : ""}`}
-            title={canvasPersistence.error ?? undefined}
-            role="status"
-          >
+            <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
             {canvasPersistence.error ? (
-              <Icon name="warning-circle" aria-hidden="true" size="sm" />
-            ) : (
-              <Icon name="check-circle" aria-hidden="true" size="sm" />
-            )}
-            {canvasPersistence.status === "saved"
-              ? "已保存"
-              : canvasPersistence.status === "saving"
-                ? "正在保存…"
-                : canvasPersistence.status === "pending"
-                  ? "待保存"
-                  : canvasPersistence.status === "loading"
-                    ? "正在读取…"
-                    : "保存失败"}
-            {canvasPersistence.error && canvasHydrated ? (
-              <button type="button" onClick={canvasPersistence.retry}>
-                重试保存
-              </button>
+              <>
+                <p>{canvasPersistence.error}</p>
+                <button type="button" onClick={canvasPersistence.retry}>
+                  重试读取画布
+                </button>
+              </>
             ) : null}
           </div>
-          <div className="workspace-header__navigation">
-            {canvasNavigation}
-            <WorkflowRepository
-              expanded={workflowRepositoryExpanded}
-              onToggle={toggleWorkflowRepository}
-              onInsert={(kind) => void insertWorkflow(kind)}
-            />
-            <button
-              ref={setNodeMenuTriggerElement}
-              type="button"
-              className="canvas-add-node-trigger"
-              aria-label="添加节点"
-              aria-haspopup="menu"
-              aria-expanded={connectionQuickAdd !== null}
-              title="添加节点（也可右键画布空白处）"
-              onClick={(event) => {
-                if (connectionQuickAdd) {
-                  closeConnectionQuickAdd();
-                  return;
-                }
-                const bounds = event.currentTarget.getBoundingClientRect();
-                setConnectionQuickAdd({
-                  connection: null,
-                  position: { x: bounds.left, y: bounds.bottom + 8 },
-                  boardPosition: viewportCenterBoardCoordinates(),
-                });
-              }}
+        ) : null}
+        <div
+          className="workspace-content"
+          inert={settingsOpen || !canvasHydrated ? true : undefined}
+        >
+          <a className="skip-link" href="#canvas-workspace">
+            跳到画布
+          </a>
+          <header className="workspace-header">
+            <div className="brand-lockup" aria-label="无限画布">
+              <span className="brand-mark" aria-hidden="true">
+                <Icon name="bounding-box" size="2xl" />
+              </span>
+              <span className="brand-name">无限画布</span>
+            </div>
+            <div
+              className={`save-state${canvasPersistence.error ? " save-state--error" : ""}`}
+              title={canvasPersistence.error ?? undefined}
+              role="status"
             >
-              <Icon name="plus" aria-hidden="true" size="lg" />
-              <span>节点</span>
-            </button>
-          </div>
-          <div className="header-actions">
-            <button
-              type="button"
-              className="mobile-panel-trigger"
-              aria-label="打开素材库侧板"
-              aria-controls="asset-panel"
-              aria-expanded={mobilePanel === "assets"}
-              onClick={(event) => toggleMobilePanel("assets", event.currentTarget)}
-            >
-              <Icon name="stack-simple" aria-hidden="true" size="lg" />
-              <span>素材</span>
-            </button>
-            <button
-              type="button"
-              className="header-icon"
-              aria-label="打开历史记录"
-              aria-controls="generation-history-dialog"
-              aria-expanded={historyOpen}
-              data-tooltip="历史记录"
-              onMouseEnter={preloadHistoryDialog}
-              onFocus={preloadHistoryDialog}
-              onClick={() => {
-                setHistoryInitialTab("generation");
-                setHistoryInitialWorkflowId(null);
-                setHistoryOpen(true);
-              }}
-            >
-              <Icon name="clock" aria-hidden="true" size="lg" />
-            </button>
-            <button
-              type="button"
-              className="header-icon"
-              aria-label="清空画布"
-              data-tooltip="清空画布上的节点与连线"
-              onClick={openClearCanvasDialog}
-            >
-              <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
-            </button>
-            <button
-              ref={settingsTriggerRef}
-              type="button"
-              className="header-icon"
-              aria-label="打开全局设置"
-              aria-controls="global-settings-dialog"
-              aria-expanded={settingsOpen}
-              data-tooltip="全局设置"
-              onMouseEnter={preloadProviderSettingsDialog}
-              onFocus={preloadProviderSettingsDialog}
-              onClick={() => {
-                setMobilePanel(null);
-                setSettingsOpen(true);
-              }}
-            >
-              <Icon name="gear-six" aria-hidden="true" size="lg" />
-            </button>
-            {isDesktopRuntime() ? (
+              {canvasPersistence.error ? (
+                <Icon name="warning-circle" aria-hidden="true" size="sm" />
+              ) : (
+                <Icon name="check-circle" aria-hidden="true" size="sm" />
+              )}
+              {canvasPersistence.status === "saved"
+                ? "已保存"
+                : canvasPersistence.status === "saving"
+                  ? "正在保存…"
+                  : canvasPersistence.status === "pending"
+                    ? "待保存"
+                    : canvasPersistence.status === "loading"
+                      ? "正在读取…"
+                      : "保存失败"}
+              {canvasPersistence.error && canvasHydrated ? (
+                <button type="button" onClick={canvasPersistence.retry}>
+                  重试保存
+                </button>
+              ) : null}
+            </div>
+            <div className="workspace-header__navigation">
+              {canvasNavigation}
+              <WorkflowRepository
+                expanded={workflowRepositoryExpanded}
+                onToggle={toggleWorkflowRepository}
+                onInsert={(kind) => void insertWorkflow(kind)}
+              />
+              <button
+                ref={setNodeMenuTriggerElement}
+                type="button"
+                className="canvas-add-node-trigger"
+                aria-label="添加节点"
+                aria-haspopup="menu"
+                aria-expanded={connectionQuickAdd !== null}
+                title="添加节点（也可右键画布空白处）"
+                onClick={(event) => {
+                  if (connectionQuickAdd) {
+                    closeConnectionQuickAdd();
+                    return;
+                  }
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  setConnectionQuickAdd({
+                    connection: null,
+                    position: { x: bounds.left, y: bounds.bottom + 8 },
+                    boardPosition: viewportCenterBoardCoordinates(),
+                  });
+                }}
+              >
+                <Icon name="plus" aria-hidden="true" size="lg" />
+                <span>节点</span>
+              </button>
+            </div>
+            <div className="header-actions">
+              <button
+                type="button"
+                className="mobile-panel-trigger"
+                aria-label="打开素材库侧板"
+                aria-controls="asset-panel"
+                aria-expanded={mobilePanel === "assets"}
+                onClick={(event) => toggleMobilePanel("assets", event.currentTarget)}
+              >
+                <Icon name="stack-simple" aria-hidden="true" size="lg" />
+                <span>素材</span>
+              </button>
               <button
                 type="button"
                 className="header-icon"
-                aria-label="管理功能组件"
-                aria-controls="runtime-components-dialog"
-                aria-expanded={runtimeComponentsOpen}
-                data-tooltip="功能组件"
+                aria-label="打开历史记录"
+                aria-controls="generation-history-dialog"
+                aria-expanded={historyOpen}
+                data-tooltip="历史记录"
+                onMouseEnter={preloadHistoryDialog}
+                onFocus={preloadHistoryDialog}
                 onClick={() => {
-                  setRuntimeComponentFeatureId(null);
-                  setRuntimeComponentsOpen(true);
+                  setHistoryInitialTab("generation");
+                  setHistoryInitialWorkflowId(null);
+                  setHistoryOpen(true);
                 }}
               >
-                <Icon name="download-simple" aria-hidden="true" size="lg" />
+                <Icon name="clock" aria-hidden="true" size="lg" />
               </button>
-            ) : null}
-          </div>
-        </header>
-
-        <AssetPanel
-          mobileOpen={mobilePanel === "assets"}
-          onCloseMobilePanel={closeMobilePanel}
-          uploadActionLabel={uploadActionLabel}
-          onImportLocalAssets={() => {
-            void handleImportLocalAssets(undefined, {
-              destination:
-                assetLibrarySource === "local"
-                  ? "local"
-                  : cloudCollection === "object_storage"
-                    ? "object_storage"
-                    : "cloud",
-            });
-          }}
-          isOffline={isOffline}
-          source={assetLibrarySource}
-          cloudCollection={cloudCollection}
-          onCloudCollectionChange={(next) => {
-            if (next === cloudCollection) return;
-            setAssetSearch("");
-            committedAssetSearchRef.current = "";
-            setCommittedAssetSearch("");
-            setPickedAssets([]);
-            setCloudCollection(next);
-          }}
-          onSourceChange={(next) => {
-            setAssetLibrarySource(next);
-            persistWorkspaceUi(activeAssetProviderId, next);
-            setAssetSearch("");
-            if (!isDesktopRuntime()) return;
-            if (next === "local") refreshLocalAssets("initial");
-            else setAssetsLoading(Boolean(assetProvider));
-          }}
-          providerId={assetProvider?.id ?? null}
-          availableProviders={availableAssetProviders}
-          onProviderChange={(nextId) => {
-            const nextProvider = availableAssetProviders.find((provider) => provider.id === nextId);
-            if (nextProvider) handleAssetProviderChanged(nextProvider.id);
-          }}
-          onOpenRealPersonDialog={() => setRealPersonDialogOpen(true)}
-          assetsLoading={selectedAssetsLoading}
-          libraryError={selectedLibraryError}
-          assetsError={selectedAssetsError}
-          onRetryLocal={() => refreshLocalAssets("manual")}
-          onRetryCloud={() => {
-            if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
-          }}
-          onRetryObjectStorage={() => refreshObjectStorageAssets("manual")}
-          pullingBucket={pullingBucket}
-          onPullBucket={() => {
-            void handlePullObjectStorageBucket();
-          }}
-          uploads={assetUploads}
-          onDismissUpload={dismissAssetUpload}
-          groups={assetGroups}
-          groupsLoading={groupsLoading}
-          groupsError={groupsError}
-          selectedGroupId={selectedAssetGroupId}
-          onGroupChange={handleAssetGroupChanged}
-          onRefreshGroups={refreshAssetGroups}
-          onCreateGroup={() => setNewGroupDialogOpen(true)}
-          onDeleteGroup={(groupId) => {
-            if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
-          }}
-          localGroups={localAssetGroups}
-          localGroupsLoading={localGroupsLoading}
-          localGroupsError={localGroupsError}
-          selectedLocalGroupId={selectedLocalAssetGroupId}
-          onLocalGroupChange={handleLocalAssetGroupChanged}
-          onRefreshLocalGroups={refreshLocalAssetGroups}
-          onCreateLocalGroup={() => setNewLocalGroupDialogOpen(true)}
-          onDeleteLocalGroup={handleDeleteLocalAssetGroup}
-          onMovePickedLocalAssets={(groupId) => {
-            handleMoveLocalAssets(pickedAssets, groupId);
-          }}
-          onDeletePickedLocalAssets={() => {
-            setDeletingPickedLocalAssets(true);
-            void handleDeleteLocalAssets(pickedAssets).finally(() =>
-              setDeletingPickedLocalAssets(false),
-            );
-          }}
-          deletingPickedLocalAssets={deletingPickedLocalAssets}
-          kind={assetKind}
-          getKindCount={(tabKind) =>
-            // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
-            // 云端：面板打开时扫一次全库得到的类型计数（上传/删除按增量维护）。
-            !isDesktopRuntime()
-              ? libraryAssets.filter((asset) => asset.kind === tabKind).length
-              : assetLibrarySource === "local"
-                ? localAssetKindTotals[tabKind]
-                : cloudCollection === "object_storage"
-                  ? objectStorageKindTotals[tabKind]
-                  : (cloudAssetKindTotals?.[tabKind] ?? null)
-          }
-          onKindChange={(tabKind) => {
-            setAssetKind(tabKind);
-            setAssetSearch("");
-          }}
-          search={assetSearch}
-          onSearchChange={setAssetSearch}
-          searchPending={assetSearchPending}
-          uploadGroupName={uploadGroupName}
-          resultSummary={
-            !isDesktopRuntime()
-              ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
-              : assetLibrarySource === "local"
-                ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                : cloudCollection === "object_storage"
-                  ? `找到 ${objectStorageTotal} 个${ASSET_KIND_LABELS[assetKind]}对象`
-                  : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
-          }
-          visibleAssets={visibleAssets}
-          onPreviewAsset={handlePreviewAsset}
-          onDropAssetToCanvas={handleDropAssetToCanvas}
-          {...(cloudCollection === "library"
-            ? { onPreviewUnavailable: handleUnavailableCloudAsset }
-            : {})}
-          multiSelect={assetMultiSelect}
-          pickedCount={pickedAssets.length}
-          pickOrderByKey={pickOrderByKey}
-          onToggleMultiSelect={toggleAssetMultiSelect}
-          onTogglePickedAsset={togglePickedAsset}
-          onPlacePickedAssets={handlePlacePickedAssets}
-          onClearPickedAssets={() => setPickedAssets([])}
-          localPage={localAssetPageNumber}
-          localTotalPages={localAssetTotalPages}
-          localTotal={localAssetTotal}
-          cloudPage={
-            cloudCollection === "object_storage" ? objectStoragePageNumber : cloudAssetPageNumber
-          }
-          cloudTotalPages={
-            cloudCollection === "object_storage" ? objectStorageTotalPages : cloudAssetTotalPages
-          }
-          cloudTotal={cloudCollection === "object_storage" ? objectStorageTotal : cloudAssetTotal}
-          cloudHasMore={
-            cloudCollection === "object_storage"
-              ? objectStoragePageNumber < objectStorageTotalPages
-              : cloudAssetHasMore
-          }
-          onLocalPageChange={goToLocalAssetPage}
-          onCloudPageChange={
-            cloudCollection === "object_storage" ? goToObjectStoragePage : goToCloudAssetPage
-          }
-        />
-
-        <section
-          id="canvas-workspace"
-          className="canvas-stage"
-          aria-label="无限画布工作区"
-          tabIndex={-1}
-        >
-          <AppUpdateBanner />
-          <div
-            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}`}
-            ref={canvasViewportRef}
-          >
-            {externalMediaDropHover ? (
-              <div className="canvas-external-media-drop-hint" role="status">
-                松开以将素材放入画布并保存到本地素材库
-              </div>
-            ) : null}
-            <LiveCanvasFlow
-              className="canvas-react-flow"
-              nodes={flowNodes}
-              edges={flowEdges}
-              onlyRenderVisibleElements={canvasViewportMeasured}
-              nodeTypes={CANVAS_FLOW_NODE_TYPES}
-              edgeTypes={CANVAS_FLOW_EDGE_TYPES}
-              minZoom={MIN_ZOOM / 100}
-              maxZoom={MAX_ZOOM / 100}
-              panOnDrag={nodeMarquee ? [1] : [0, 1]}
-              selectionOnDrag={nodeMarquee}
-              selectionMode={nodeMarquee ? SelectionMode.Partial : SelectionMode.Full}
-              {...(nodeMarquee ? { onSelectionEnd: handleNodeSelectionEnd } : {})}
-              zoomOnScroll
-              zoomOnPinch
-              zoomOnDoubleClick={false}
-              preventScrolling
-              connectionRadius={CANVAS_CONNECTION_RADIUS}
-              deleteKeyCode={null}
-              onInit={handleFlowInit}
-              onNodesChange={handleFlowNodesChange}
-              onNodeDragStop={handleFlowNodeDragStop}
-              onEdgesChange={handleFlowEdgesChange}
-              onConnect={handleFlowConnect}
-              onConnectStart={handleConnectStart}
-              onConnectEnd={handleConnectEnd}
-              onMoveStart={() => {
-                closeConnectionQuickAdd();
-                setIsPanning(true);
-              }}
-              onMoveEnd={handleFlowMoveEnd}
-              onPaneClick={() => {
-                selectNode(null);
-                selectEdge(null);
-                setMarqueeNodeKeys(new Set());
-              }}
-              onPaneContextMenu={(event) => {
-                event.preventDefault();
-                const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
-                if (!boardPosition) return;
-                setConnectionQuickAdd({
-                  connection: null,
-                  position: { x: event.clientX, y: event.clientY },
-                  boardPosition,
-                });
-              }}
-              onNodeClick={(event, node) => {
-                if (nodeMarquee) {
-                  if (!canvasNodeKeySetRef.current.has(node.id)) return;
-                  setMarqueeNodeKeys((current) => {
-                    if (!event.shiftKey && !event.ctrlKey && !event.metaKey)
-                      return new Set([node.id]);
-                    const next = new Set(current);
-                    if (next.has(node.id)) next.delete(node.id);
-                    else next.add(node.id);
-                    return next;
-                  });
-                  selectNode(null);
-                  selectEdge(null);
-                  return;
-                }
-                setMarqueeNodeKeys(new Set());
-                selectNode(node.id);
-                selectEdge(null);
-              }}
-              onEdgeClick={(_, edge) => {
-                if (nodeMarquee) return;
-                if (edge.selectable !== false) {
-                  selectEdge(edge.id);
-                  selectNode(null);
-                }
-              }}
-              aria-label="无限画布节点编辑器"
-              attributionPosition="bottom-left"
-            >
-              {nodeMarquee ? (
-                <CanvasMarqueeSelectionReader
-                  selectableKeysRef={canvasNodeKeySetRef}
-                  readSelectionRef={readNodeSelectionRef}
-                />
-              ) : null}
-              {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
-              <Background
-                id="canvas-grid-minor"
-                variant={BackgroundVariant.Lines}
-                gap={40}
-                lineWidth={1}
-                className="canvas-flow-bg canvas-flow-bg--minor"
-              />
-              <Background
-                id="canvas-grid-major"
-                variant={BackgroundVariant.Lines}
-                gap={200}
-                lineWidth={1}
-                className="canvas-flow-bg canvas-flow-bg--major"
-              />
-            </LiveCanvasFlow>
-
-            {connectionQuickAdd && quickAddEndpointExists ? (
-              <ConnectionQuickAddMenu
-                position={connectionQuickAdd.position}
-                connectionMode={connectionQuickAdd.connection !== null}
-                triggerElement={nodeMenuTriggerElement}
-                onSelect={handleConnectionQuickAdd}
-                onClose={closeConnectionQuickAdd}
-              />
-            ) : null}
-
-            {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
-            {!hasCanvasNodes ? (
-              <div className="canvas-empty-hint">
-                <div className="canvas-empty-hint__art" aria-hidden="true">
-                  <Icon name="bounding-box" size="3xl" />
-                </div>
-                <strong>画布为空</strong>
-                <span>
-                  右键画布空白处或点击顶部「节点」添加节点；本机素材可从素材库上传，再拖入画布。
-                </span>
-              </div>
-            ) : null}
-          </div>
-
-          <div className="canvas-viewport-dock">
-            <div
-              className="canvas-node-selection-control"
-              role="group"
-              aria-label="选择与编辑画布节点"
-            >
               <button
                 type="button"
-                aria-pressed={nodeMarquee}
-                aria-label={nodeMarquee ? "退出节点框选" : "框选节点"}
-                data-tooltip={nodeMarquee ? "拖拽框选节点；中键拖动画布" : "框选节点"}
+                className="header-icon"
+                aria-label="清空画布"
+                data-tooltip="清空画布上的节点与连线"
+                onClick={openClearCanvasDialog}
+              >
+                <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
+              </button>
+              <button
+                ref={settingsTriggerRef}
+                type="button"
+                className="header-icon"
+                aria-label="打开全局设置"
+                aria-controls="global-settings-dialog"
+                aria-expanded={settingsOpen}
+                data-tooltip="全局设置"
+                onMouseEnter={preloadProviderSettingsDialog}
+                onFocus={preloadProviderSettingsDialog}
                 onClick={() => {
-                  setNodeMarquee((enabled) => !enabled);
-                  setMarqueeNodeKeys(new Set());
-                  selectNode(null);
-                  selectEdge(null);
+                  setMobilePanel(null);
+                  setSettingsOpen(true);
                 }}
               >
-                <Icon name="bounding-box" aria-hidden="true" size="md" />
-              </button>
-              <button
-                type="button"
-                aria-label={`将选中素材或产物成组，当前 ${selectedCanvasNodeKeys.size} 个`}
-                data-tooltip={
-                  selectedCanvasNodeKeys.size > 0 && !canGroupSelectedNodes
-                    ? "仅支持至少两个素材或产物成组"
-                    : "将选中素材或产物成组"
-                }
-                disabled={!canGroupSelectedNodes}
-                onClick={groupSelectedCanvasNodes}
-              >
-                <Icon name="stack-simple" aria-hidden="true" size="md" />
-              </button>
-              <button
-                type="button"
-                aria-label={`复制选中节点到剪贴板，当前 ${selectedCanvasNodeKeys.size} 个`}
-                aria-keyshortcuts="Control+C"
-                data-tooltip="复制到剪贴板 · Ctrl+C"
-                disabled={selectedCanvasNodeKeys.size === 0}
-                onClick={copySelectedCanvasNodes}
-              >
-                <Icon name="copy-simple" aria-hidden="true" size="md" />
+                <Icon name="gear-six" aria-hidden="true" size="lg" />
               </button>
               {isDesktopRuntime() ? (
                 <button
                   type="button"
-                  aria-label="按名称批量交付选中产物"
-                  data-tooltip="按名称批量交付 · 附任务清单"
-                  disabled={artifactDeliveryBusy || selectedCanvasNodeKeys.size === 0}
-                  onClick={() => void exportSelectedArtifacts()}
+                  className="header-icon"
+                  aria-label="管理功能组件"
+                  aria-controls="runtime-components-dialog"
+                  aria-expanded={runtimeComponentsOpen}
+                  data-tooltip="功能组件"
+                  onClick={() => {
+                    setRuntimeComponentFeatureId(null);
+                    setRuntimeComponentsOpen(true);
+                  }}
                 >
-                  <Icon name="download-simple" aria-hidden="true" size="md" />
+                  <Icon name="download-simple" aria-hidden="true" size="lg" />
                 </button>
               ) : null}
-              <button
-                type="button"
-                aria-label="粘贴已复制节点"
-                aria-keyshortcuts="Control+V"
-                data-tooltip={canPasteCanvasNodes ? "粘贴 · Ctrl+V" : "请先复制画布节点"}
-                disabled={!canPasteCanvasNodes}
-                onClick={() => pasteCopiedCanvasNodes()}
-              >
-                <Icon name="clipboard" aria-hidden="true" size="md" />
-              </button>
-              <button
-                type="button"
-                aria-label={`删除选中节点，当前 ${selectedCanvasNodeKeys.size} 个`}
-                aria-keyshortcuts="Delete"
-                data-tooltip="删除选中节点 · Delete"
-                disabled={selectedCanvasNodeKeys.size === 0}
-                onClick={deleteSelectedCanvasNodes}
-              >
-                <Icon name="trash-simple" aria-hidden="true" size="md" />
-              </button>
-            </div>
-            <div className="canvas-home-control" role="group" aria-label="画布视图归位">
-              <button
-                type="button"
-                aria-label="回到画布起始位置"
-                data-tooltip="回到内容"
-                onClick={resetCanvasViewport}
-              >
-                <Icon name="crosshair-simple" aria-hidden="true" size="md" />
-              </button>
-            </div>
-
-            <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
-              <button
-                type="button"
-                aria-label="撤销画布操作"
-                aria-keyshortcuts="Control+Z"
-                data-tooltip="撤销 · Ctrl+Z"
-                disabled={pastCount === 0}
-                onClick={undo}
-              >
-                <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
-              </button>
-              <button
-                type="button"
-                aria-label="重做画布操作"
-                aria-keyshortcuts="Control+Shift+Z"
-                data-tooltip="重做 · Ctrl+Shift+Z"
-                disabled={futureCount === 0}
-                onClick={redo}
-              >
-                <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
-              </button>
-            </div>
-
-            <div className="zoom-control" role="group" aria-label="画布缩放控制">
-              <button
-                type="button"
-                aria-label="缩小画布"
-                aria-keyshortcuts="-"
-                data-tooltip="缩小画布 · -"
-                onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
-              >
-                <Icon name="minus" aria-hidden="true" size="md" />
-              </button>
-              <button
-                type="button"
-                className="zoom-control__reset"
-                aria-label={`重置画布缩放为 ${DEFAULT_ZOOM}%`}
-                aria-keyshortcuts="0"
-                data-tooltip="重置缩放 · 0"
-                onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
-              >
-                <Icon name="corners-out" aria-hidden="true" size="sm" />
-                <output aria-live="polite">{zoom}%</output>
-              </button>
-              <button
-                type="button"
-                aria-label="放大画布"
-                aria-keyshortcuts="+"
-                data-tooltip="放大画布 · +"
-                onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
-              >
-                <Icon name="plus" aria-hidden="true" size="md" />
-              </button>
-            </div>
-          </div>
-        </section>
-
-        {mobilePanel ? (
-          <button
-            type="button"
-            className="mobile-panel-backdrop"
-            aria-label="关闭侧板"
-            onClick={closeMobilePanel}
-          />
-        ) : null}
-      </div>
-      {runtimeComponentsOpen ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="runtime-components-dialog"
-              label="功能组件"
-              onClose={() => setRuntimeComponentsOpen(false)}
-            />
-          }
-        >
-          <RuntimeComponentsPanel
-            initialFeatureId={runtimeComponentFeatureId}
-            onClose={() => setRuntimeComponentsOpen(false)}
-          />
-        </Suspense>
-      ) : null}
-      {settingsOpen ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="global-settings-dialog"
-              label="全局设置"
-              onClose={closeSettings}
-            />
-          }
-        >
-          <ProviderSettingsDialog
-            open
-            onClose={closeSettings}
-            onCatalogChanged={refreshProviderCatalog}
-            activeAssetProviderId={assetProvider?.id ?? null}
-            onAssetProviderChanged={handleAssetProviderChanged}
-            onAssetLibraryLoaded={handleAssetLibraryLoaded}
-            onAssetLibraryLoading={handleAssetLibraryLoading}
-            onAssetLibraryLoadFailed={handleAssetLibraryLoadFailed}
-          />
-        </Suspense>
-      ) : null}
-      {historyOpen ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="generation-history-dialog"
-              label="历史记录"
-              onClose={closeHistory}
-            />
-          }
-        >
-          <HistoryDialog
-            open
-            onClose={closeHistory}
-            canvasId={canvasId}
-            initialTab={historyInitialTab}
-            initialWorkflowId={historyInitialWorkflowId}
-            initialTaskId={historyInitialTaskId}
-            onResumeWorkflow={resumeHistoryWorkflow}
-            onRestartWorkflow={restartHistoryWorkflow}
-            onLocateWorkflow={locateHistoryWorkflow}
-            onRegenerateGeneration={regenerateGenerationFromHistory}
-            onPromoteSeedanceDraft={promoteSeedanceDraftFromHistory}
-            activeWorkflowIds={activeWorkflowHistoryIds}
-          />
-        </Suspense>
-      ) : null}
-      {previewAsset ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="asset-source-dialog"
-              label="媒体预览"
-              onClose={() => setPreviewAsset(null)}
-            />
-          }
-        >
-          <AssetSourceDialog
-            asset={previewAsset}
-            onClose={() => setPreviewAsset(null)}
-            onDelete={
-              previewAsset.source === "cloud" && previewAsset.providerConnectionId
-                ? () => handleDeleteAsset(previewAsset)
-                : previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                  ? () => void handleDeleteLocalAssets([previewAsset])
-                  : null
-            }
-            localGroups={
-              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                ? localAssetGroups
-                : undefined
-            }
-            onMoveToGroup={
-              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                ? (groupId) => {
-                    handleMoveLocalAssets([previewAsset], groupId);
-                    // 弹窗保持打开：立即反映新分组，列表由处理器后台重查。
-                    setPreviewAsset({ ...previewAsset, groupId });
-                  }
-                : null
-            }
-            onRename={
-              previewAsset.source === "cloud" &&
-              previewAsset.providerConnectionId &&
-              renamingAssetId == null
-                ? (name) => handleRenameAsset(previewAsset, name)
-                : null
-            }
-          />
-        </Suspense>
-      ) : null}
-      {realPersonDialogOpen && assetProvider ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="real-person-asset-dialog"
-              label="明星真人素材"
-              onClose={() => setRealPersonDialogOpen(false)}
-            />
-          }
-        >
-          <RealPersonAssetDialog
-            providerConnectionId={assetProvider.id}
-            providerDisplayName={assetProvider.displayName}
-            onClose={() => setRealPersonDialogOpen(false)}
-            onUploadToGroup={handleImportLocalAssets}
-          />
-        </Suspense>
-      ) : null}
-      {newGroupDialogOpen && assetProvider ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="asset-group-create-dialog"
-              label="新建素材分组"
-              onClose={() => setNewGroupDialogOpen(false)}
-            />
-          }
-        >
-          <AssetGroupCreateDialog
-            providerDisplayName={assetProvider.displayName}
-            busy={creatingGroup}
-            onClose={() => setNewGroupDialogOpen(false)}
-            onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
-          />
-        </Suspense>
-      ) : null}
-      {newLocalGroupDialogOpen ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="local-asset-group-create-dialog"
-              label="新建本地素材分组"
-              onClose={() => setNewLocalGroupDialogOpen(false)}
-            />
-          }
-        >
-          <AssetGroupCreateDialog
-            scope="local"
-            busy={creatingLocalGroup}
-            onClose={() => setNewLocalGroupDialogOpen(false)}
-            onCreate={handleCreateLocalAssetGroup}
-          />
-        </Suspense>
-      ) : null}
-      {previewOutputNode ? (
-        <CanvasOutputLightbox
-          node={previewOutputNode}
-          onClose={() => setPreviewOutputNodeKey(null)}
-        />
-      ) : null}
-      {previewAssetNode ? (
-        <CanvasAssetLightbox node={previewAssetNode} onClose={() => setPreviewAssetNodeKey(null)} />
-      ) : null}
-      {active &&
-      whiteModelStudioNodeKey &&
-      whiteModelStudioEntry?.type === "gen" &&
-      (whiteModelStudioEntry.data.kind === "video" || whiteModelStudioEntry.data.kind === "image")
-        ? (() => {
-            const studioNode = whiteModelStudioEntry.data;
-            if (
-              !studioNode ||
-              (studioNode.kind !== "video" && studioNode.kind !== "image") ||
-              !studioNode.config.whiteModelStudio
-            )
-              return null;
-            const purpose = studioNode.kind === "image" ? "blocking" : "video";
-            return (
-              <Suspense
-                fallback={
-                  <DeferredDialogFallback
-                    id="white-model-studio"
-                    label={purpose === "blocking" ? "白模站位导演台" : "Blender 白模工作台"}
-                    onClose={() => setWhiteModelStudioNodeKey(null)}
-                  />
-                }
-              >
-                <WhiteModelStudioDialog
-                  purpose={purpose}
-                  draft={studioNode.config.whiteModelStudio}
-                  imageInputs={studioImageInputsFromMedia(canvasInputsFor(studioNode.key).media)}
-                  onDraftChange={updateWhiteModelStudioDraft}
-                  onClose={() => setWhiteModelStudioNodeKey(null)}
-                  onUse={useWhiteModelVideo}
-                  onExportBlocking={useWhiteModelBlocking}
-                />
-              </Suspense>
-            );
-          })()
-        : null}
-      {active && videoPreparation ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="video-preparation"
-              label="视频准备"
-              onClose={() => setVideoPreparation(null)}
-            />
-          }
-        >
-          <VideoPreparationDialog
-            source={videoPreparation}
-            onClose={() => setVideoPreparation(null)}
-            onUseOutput={usePreparedVideoOutput}
-            onUseAiOutput={useAiMediaOutput}
-          />
-        </Suspense>
-      ) : null}
-      {active && videoLocalEdit ? (
-        <Suspense
-          fallback={
-            <DeferredDialogFallback
-              id="video-local-edit"
-              label="视频局部编辑"
-              onClose={() => setVideoLocalEdit(null)}
-            />
-          }
-        >
-          <VideoLocalEditDialog
-            source={videoLocalEdit.source}
-            candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
-            canUploadToLibrary={assetProvider != null}
-            resolveFrame={resolveVideoLocalEditFrame}
-            onClose={() => setVideoLocalEdit(null)}
-            onApply={applyVideoLocalEdit}
-          />
-        </Suspense>
-      ) : null}
-      <dialog
-        ref={clearCanvasDialogRef}
-        className="confirm-dialog"
-        aria-labelledby="clear-canvas-dialog-title"
-        aria-describedby="clear-canvas-dialog-desc"
-      >
-        <form
-          method="dialog"
-          className="confirm-dialog__form"
-          onSubmit={(event) => {
-            // 表单提交（按 Enter 或点「确认清空」）时阻止默认关闭，由 confirmClearCanvas
-            // 显式 close()，确保先清空再关闭（避免 close 触发后 setState 在已卸载 dialog 上）。
-            event.preventDefault();
-          }}
-        >
-          <header className="confirm-dialog__header">
-            <span className="confirm-dialog__badge" aria-hidden="true">
-              <Icon name="warning" size="xl" />
-            </span>
-            <div>
-              <p className="confirm-dialog__eyebrow">危险操作 · 不可撤销</p>
-              <h2 id="clear-canvas-dialog-title" className="confirm-dialog__title">
-                确认清空画布？
-              </h2>
             </div>
           </header>
-          <div className="confirm-dialog__body">
-            <p id="clear-canvas-dialog-desc" className="confirm-dialog__desc">
-              将移除画布上所有节点与连线，任务历史会保留。此操作不可撤销。
-            </p>
-            <ul className="confirm-dialog__facts">
-              <li className="confirm-dialog__fact confirm-dialog__fact--removed">
-                <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                  <Icon name="trash-simple" size="sm" />
-                </span>
-                <span className="confirm-dialog__fact-label">画布节点与连线</span>
-                <span className="confirm-dialog__fact-state">将被移除</span>
-              </li>
-              <li className="confirm-dialog__fact confirm-dialog__fact--kept">
-                <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                  <Icon name="check-circle" size="sm" />
-                </span>
-                <span className="confirm-dialog__fact-label">任务历史</span>
-                <span className="confirm-dialog__fact-state">保留 · 可复现审计</span>
-              </li>
-            </ul>
-          </div>
-          <div className="confirm-dialog__actions">
-            <button type="button" className="confirm-dialog__btn" onClick={closeClearCanvasDialog}>
-              取消
-            </button>
+
+          <AssetPanel
+            mobileOpen={mobilePanel === "assets"}
+            onCloseMobilePanel={closeMobilePanel}
+            uploadActionLabel={uploadActionLabel}
+            onImportLocalAssets={() => {
+              void handleImportLocalAssets(undefined, {
+                destination:
+                  assetLibrarySource === "local"
+                    ? "local"
+                    : cloudCollection === "object_storage"
+                      ? "object_storage"
+                      : "cloud",
+              });
+            }}
+            isOffline={isOffline}
+            source={assetLibrarySource}
+            cloudCollection={cloudCollection}
+            onCloudCollectionChange={(next) => {
+              if (next === cloudCollection) return;
+              setAssetSearch("");
+              committedAssetSearchRef.current = "";
+              setCommittedAssetSearch("");
+              setPickedAssets([]);
+              setCloudCollection(next);
+            }}
+            onSourceChange={(next) => {
+              setAssetLibrarySource(next);
+              persistWorkspaceUi(activeAssetProviderId, next);
+              setAssetSearch("");
+              if (!isDesktopRuntime()) return;
+              if (next === "local") refreshLocalAssets("initial");
+              else setAssetsLoading(Boolean(assetProvider));
+            }}
+            providerId={assetProvider?.id ?? null}
+            availableProviders={availableAssetProviders}
+            onProviderChange={(nextId) => {
+              const nextProvider = availableAssetProviders.find(
+                (provider) => provider.id === nextId,
+              );
+              if (nextProvider) handleAssetProviderChanged(nextProvider.id);
+            }}
+            onOpenRealPersonDialog={() => setRealPersonDialogOpen(true)}
+            assetsLoading={selectedAssetsLoading}
+            libraryError={selectedLibraryError}
+            assetsError={selectedAssetsError}
+            onRetryLocal={() => refreshLocalAssets("manual")}
+            onRetryCloud={() => {
+              if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
+            }}
+            onRetryObjectStorage={() => refreshObjectStorageAssets("manual")}
+            pullingBucket={pullingBucket}
+            onPullBucket={() => {
+              void handlePullObjectStorageBucket();
+            }}
+            uploads={assetUploads}
+            onDismissUpload={dismissAssetUpload}
+            groups={assetGroups}
+            groupsLoading={groupsLoading}
+            groupsError={groupsError}
+            selectedGroupId={selectedAssetGroupId}
+            onGroupChange={handleAssetGroupChanged}
+            onRefreshGroups={refreshAssetGroups}
+            onCreateGroup={() => setNewGroupDialogOpen(true)}
+            onDeleteGroup={(groupId) => {
+              if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
+            }}
+            localGroups={localAssetGroups}
+            localGroupsLoading={localGroupsLoading}
+            localGroupsError={localGroupsError}
+            selectedLocalGroupId={selectedLocalAssetGroupId}
+            onLocalGroupChange={handleLocalAssetGroupChanged}
+            onRefreshLocalGroups={refreshLocalAssetGroups}
+            onCreateLocalGroup={() => setNewLocalGroupDialogOpen(true)}
+            onDeleteLocalGroup={handleDeleteLocalAssetGroup}
+            onMovePickedLocalAssets={(groupId) => {
+              handleMoveLocalAssets(pickedAssets, groupId);
+            }}
+            onDeletePickedLocalAssets={() => {
+              setDeletingPickedLocalAssets(true);
+              void handleDeleteLocalAssets(pickedAssets).finally(() =>
+                setDeletingPickedLocalAssets(false),
+              );
+            }}
+            deletingPickedLocalAssets={deletingPickedLocalAssets}
+            kind={assetKind}
+            getKindCount={(tabKind) =>
+              // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
+              // 云端：面板打开时扫一次全库得到的类型计数（上传/删除按增量维护）。
+              !isDesktopRuntime()
+                ? libraryAssets.filter((asset) => asset.kind === tabKind).length
+                : assetLibrarySource === "local"
+                  ? localAssetKindTotals[tabKind]
+                  : cloudCollection === "object_storage"
+                    ? objectStorageKindTotals[tabKind]
+                    : (cloudAssetKindTotals?.[tabKind] ?? null)
+            }
+            onKindChange={(tabKind) => {
+              setAssetKind(tabKind);
+              setAssetSearch("");
+            }}
+            search={assetSearch}
+            onSearchChange={setAssetSearch}
+            searchPending={assetSearchPending}
+            uploadGroupName={uploadGroupName}
+            resultSummary={
+              !isDesktopRuntime()
+                ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                : assetLibrarySource === "local"
+                  ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                  : cloudCollection === "object_storage"
+                    ? `找到 ${objectStorageTotal} 个${ASSET_KIND_LABELS[assetKind]}对象`
+                    : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+            }
+            visibleAssets={visibleAssets}
+            onPreviewAsset={handlePreviewAsset}
+            onDropAssetToCanvas={handleDropAssetToCanvas}
+            {...(cloudCollection === "library"
+              ? { onPreviewUnavailable: handleUnavailableCloudAsset }
+              : {})}
+            multiSelect={assetMultiSelect}
+            pickedCount={pickedAssets.length}
+            pickOrderByKey={pickOrderByKey}
+            onToggleMultiSelect={toggleAssetMultiSelect}
+            onTogglePickedAsset={togglePickedAsset}
+            onPlacePickedAssets={handlePlacePickedAssets}
+            onClearPickedAssets={() => setPickedAssets([])}
+            localPage={localAssetPageNumber}
+            localTotalPages={localAssetTotalPages}
+            localTotal={localAssetTotal}
+            cloudPage={
+              cloudCollection === "object_storage" ? objectStoragePageNumber : cloudAssetPageNumber
+            }
+            cloudTotalPages={
+              cloudCollection === "object_storage" ? objectStorageTotalPages : cloudAssetTotalPages
+            }
+            cloudTotal={cloudCollection === "object_storage" ? objectStorageTotal : cloudAssetTotal}
+            cloudHasMore={
+              cloudCollection === "object_storage"
+                ? objectStoragePageNumber < objectStorageTotalPages
+                : cloudAssetHasMore
+            }
+            onLocalPageChange={goToLocalAssetPage}
+            onCloudPageChange={
+              cloudCollection === "object_storage" ? goToObjectStoragePage : goToCloudAssetPage
+            }
+          />
+
+          <section
+            id="canvas-workspace"
+            className="canvas-stage"
+            aria-label="无限画布工作区"
+            tabIndex={-1}
+          >
+            <AppUpdateBanner />
+            <div
+              className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}`}
+              ref={canvasViewportRef}
+            >
+              {externalMediaDropHover ? (
+                <div className="canvas-external-media-drop-hint" role="status">
+                  松开以将素材放入画布并保存到本地素材库
+                </div>
+              ) : null}
+              <LiveCanvasFlow
+                className="canvas-react-flow"
+                nodes={flowNodes}
+                edges={flowEdges}
+                onlyRenderVisibleElements={canvasViewportMeasured}
+                nodeTypes={CANVAS_FLOW_NODE_TYPES}
+                edgeTypes={CANVAS_FLOW_EDGE_TYPES}
+                minZoom={MIN_ZOOM / 100}
+                maxZoom={MAX_ZOOM / 100}
+                panOnDrag={nodeMarquee ? [1] : [0, 1]}
+                selectionOnDrag={nodeMarquee}
+                selectionMode={nodeMarquee ? SelectionMode.Partial : SelectionMode.Full}
+                {...(nodeMarquee ? { onSelectionEnd: handleNodeSelectionEnd } : {})}
+                zoomOnScroll
+                zoomOnPinch
+                zoomOnDoubleClick={false}
+                preventScrolling
+                connectionRadius={CANVAS_CONNECTION_RADIUS}
+                deleteKeyCode={null}
+                onInit={handleFlowInit}
+                onNodesChange={handleFlowNodesChange}
+                onNodeDragStop={handleFlowNodeDragStop}
+                onEdgesChange={handleFlowEdgesChange}
+                onConnect={handleFlowConnect}
+                onConnectStart={handleConnectStart}
+                onConnectEnd={handleConnectEnd}
+                onMoveStart={() => {
+                  closeConnectionQuickAdd();
+                  setIsPanning(true);
+                }}
+                onMoveEnd={handleFlowMoveEnd}
+                onPaneClick={() => {
+                  selectNode(null);
+                  selectEdge(null);
+                  setMarqueeNodeKeys(new Set());
+                }}
+                onPaneContextMenu={(event) => {
+                  event.preventDefault();
+                  const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
+                  if (!boardPosition) return;
+                  setConnectionQuickAdd({
+                    connection: null,
+                    position: { x: event.clientX, y: event.clientY },
+                    boardPosition,
+                  });
+                }}
+                onNodeClick={(event, node) => {
+                  if (nodeMarquee) {
+                    if (!canvasNodeKeySetRef.current.has(node.id)) return;
+                    setMarqueeNodeKeys((current) => {
+                      if (!event.shiftKey && !event.ctrlKey && !event.metaKey)
+                        return new Set([node.id]);
+                      const next = new Set(current);
+                      if (next.has(node.id)) next.delete(node.id);
+                      else next.add(node.id);
+                      return next;
+                    });
+                    selectNode(null);
+                    selectEdge(null);
+                    return;
+                  }
+                  setMarqueeNodeKeys(new Set());
+                  selectNode(node.id);
+                  selectEdge(null);
+                }}
+                onEdgeClick={(_, edge) => {
+                  if (nodeMarquee) return;
+                  if (edge.selectable !== false) {
+                    selectEdge(edge.id);
+                    selectNode(null);
+                  }
+                }}
+                aria-label="无限画布节点编辑器"
+                attributionPosition="bottom-left"
+              >
+                {nodeMarquee ? (
+                  <CanvasMarqueeSelectionReader
+                    selectableKeysRef={canvasNodeKeySetRef}
+                    readSelectionRef={readNodeSelectionRef}
+                  />
+                ) : null}
+                {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
+                <Background
+                  id="canvas-grid-minor"
+                  variant={BackgroundVariant.Lines}
+                  gap={40}
+                  lineWidth={1}
+                  className="canvas-flow-bg canvas-flow-bg--minor"
+                />
+                <Background
+                  id="canvas-grid-major"
+                  variant={BackgroundVariant.Lines}
+                  gap={200}
+                  lineWidth={1}
+                  className="canvas-flow-bg canvas-flow-bg--major"
+                />
+              </LiveCanvasFlow>
+
+              {connectionQuickAdd && quickAddEndpointExists ? (
+                <ConnectionQuickAddMenu
+                  position={connectionQuickAdd.position}
+                  connectionMode={connectionQuickAdd.connection !== null}
+                  triggerElement={nodeMenuTriggerElement}
+                  onSelect={handleConnectionQuickAdd}
+                  onClose={closeConnectionQuickAdd}
+                />
+              ) : null}
+
+              {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
+              {!hasCanvasNodes ? (
+                <div className="canvas-empty-hint">
+                  <div className="canvas-empty-hint__art" aria-hidden="true">
+                    <Icon name="bounding-box" size="3xl" />
+                  </div>
+                  <strong>画布为空</strong>
+                  <span>
+                    右键画布空白处或点击顶部「节点」添加节点；本机素材可从素材库上传，再拖入画布。
+                  </span>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="canvas-viewport-dock">
+              <div
+                className="canvas-node-selection-control"
+                role="group"
+                aria-label="选择与编辑画布节点"
+              >
+                <button
+                  type="button"
+                  aria-pressed={nodeMarquee}
+                  aria-label={nodeMarquee ? "退出节点框选" : "框选节点"}
+                  data-tooltip={nodeMarquee ? "拖拽框选节点；中键拖动画布" : "框选节点"}
+                  onClick={() => {
+                    setNodeMarquee((enabled) => !enabled);
+                    setMarqueeNodeKeys(new Set());
+                    selectNode(null);
+                    selectEdge(null);
+                  }}
+                >
+                  <Icon name="bounding-box" aria-hidden="true" size="md" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`将选中素材或产物成组，当前 ${selectedCanvasNodeKeys.size} 个`}
+                  data-tooltip={
+                    selectedCanvasNodeKeys.size > 0 && !canGroupSelectedNodes
+                      ? "仅支持至少两个素材或产物成组"
+                      : "将选中素材或产物成组"
+                  }
+                  disabled={!canGroupSelectedNodes}
+                  onClick={groupSelectedCanvasNodes}
+                >
+                  <Icon name="stack-simple" aria-hidden="true" size="md" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`复制选中节点到剪贴板，当前 ${selectedCanvasNodeKeys.size} 个`}
+                  aria-keyshortcuts="Control+C"
+                  data-tooltip="复制到剪贴板 · Ctrl+C"
+                  disabled={selectedCanvasNodeKeys.size === 0}
+                  onClick={copySelectedCanvasNodes}
+                >
+                  <Icon name="copy-simple" aria-hidden="true" size="md" />
+                </button>
+                {isDesktopRuntime() ? (
+                  <button
+                    type="button"
+                    aria-label="按名称批量交付选中产物"
+                    data-tooltip="按名称批量交付 · 附任务清单"
+                    disabled={artifactDeliveryBusy || selectedCanvasNodeKeys.size === 0}
+                    onClick={() => void exportSelectedArtifacts()}
+                  >
+                    <Icon name="download-simple" aria-hidden="true" size="md" />
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label="粘贴已复制节点"
+                  aria-keyshortcuts="Control+V"
+                  data-tooltip={canPasteCanvasNodes ? "粘贴 · Ctrl+V" : "请先复制画布节点"}
+                  disabled={!canPasteCanvasNodes}
+                  onClick={() => pasteCopiedCanvasNodes()}
+                >
+                  <Icon name="clipboard" aria-hidden="true" size="md" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`删除选中节点，当前 ${selectedCanvasNodeKeys.size} 个`}
+                  aria-keyshortcuts="Delete"
+                  data-tooltip="删除选中节点 · Delete"
+                  disabled={selectedCanvasNodeKeys.size === 0}
+                  onClick={deleteSelectedCanvasNodes}
+                >
+                  <Icon name="trash-simple" aria-hidden="true" size="md" />
+                </button>
+              </div>
+              <div className="canvas-home-control" role="group" aria-label="画布视图归位">
+                <button
+                  type="button"
+                  aria-label="回到画布起始位置"
+                  data-tooltip="回到内容"
+                  onClick={resetCanvasViewport}
+                >
+                  <Icon name="crosshair-simple" aria-hidden="true" size="md" />
+                </button>
+              </div>
+
+              <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
+                <button
+                  type="button"
+                  aria-label="撤销画布操作"
+                  aria-keyshortcuts="Control+Z"
+                  data-tooltip="撤销 · Ctrl+Z"
+                  disabled={pastCount === 0}
+                  onClick={undo}
+                >
+                  <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
+                </button>
+                <button
+                  type="button"
+                  aria-label="重做画布操作"
+                  aria-keyshortcuts="Control+Shift+Z"
+                  data-tooltip="重做 · Ctrl+Shift+Z"
+                  disabled={futureCount === 0}
+                  onClick={redo}
+                >
+                  <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
+                </button>
+              </div>
+
+              <div className="zoom-control" role="group" aria-label="画布缩放控制">
+                <button
+                  type="button"
+                  aria-label="缩小画布"
+                  aria-keyshortcuts="-"
+                  data-tooltip="缩小画布 · -"
+                  onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
+                >
+                  <Icon name="minus" aria-hidden="true" size="md" />
+                </button>
+                <button
+                  type="button"
+                  className="zoom-control__reset"
+                  aria-label={`重置画布缩放为 ${DEFAULT_ZOOM}%`}
+                  aria-keyshortcuts="0"
+                  data-tooltip="重置缩放 · 0"
+                  onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
+                >
+                  <Icon name="corners-out" aria-hidden="true" size="sm" />
+                  <output aria-live="polite">{zoom}%</output>
+                </button>
+                <button
+                  type="button"
+                  aria-label="放大画布"
+                  aria-keyshortcuts="+"
+                  data-tooltip="放大画布 · +"
+                  onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
+                >
+                  <Icon name="plus" aria-hidden="true" size="md" />
+                </button>
+              </div>
+            </div>
+          </section>
+
+          {mobilePanel ? (
             <button
               type="button"
-              className="confirm-dialog__btn confirm-dialog__btn--danger"
-              onClick={confirmClearCanvas}
-            >
-              <Icon name="trash-simple" aria-hidden="true" size="sm" />
-              确认清空
-            </button>
-          </div>
-        </form>
-      </dialog>
-    </main>
+              className="mobile-panel-backdrop"
+              aria-label="关闭侧板"
+              onClick={closeMobilePanel}
+            />
+          ) : null}
+        </div>
+        {runtimeComponentsOpen ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="runtime-components-dialog"
+                label="功能组件"
+                onClose={() => setRuntimeComponentsOpen(false)}
+              />
+            }
+          >
+            <RuntimeComponentsPanel
+              initialFeatureId={runtimeComponentFeatureId}
+              onClose={() => setRuntimeComponentsOpen(false)}
+            />
+          </Suspense>
+        ) : null}
+        {settingsOpen ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="global-settings-dialog"
+                label="全局设置"
+                onClose={closeSettings}
+              />
+            }
+          >
+            <ProviderSettingsDialog
+              open
+              onClose={closeSettings}
+              onCatalogChanged={refreshProviderCatalog}
+              activeAssetProviderId={assetProvider?.id ?? null}
+              onAssetProviderChanged={handleAssetProviderChanged}
+              onAssetLibraryLoaded={handleAssetLibraryLoaded}
+              onAssetLibraryLoading={handleAssetLibraryLoading}
+              onAssetLibraryLoadFailed={handleAssetLibraryLoadFailed}
+            />
+          </Suspense>
+        ) : null}
+        {historyOpen ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="generation-history-dialog"
+                label="历史记录"
+                onClose={closeHistory}
+              />
+            }
+          >
+            <HistoryDialog
+              open
+              onClose={closeHistory}
+              canvasId={canvasId}
+              initialTab={historyInitialTab}
+              initialWorkflowId={historyInitialWorkflowId}
+              initialTaskId={historyInitialTaskId}
+              onResumeWorkflow={sessions.resumeHistory}
+              onRestartWorkflow={sessions.restartHistory}
+              onLocateWorkflow={sessions.locateHistory}
+              onRegenerateGeneration={regenerateGenerationFromHistory}
+              onPromoteSeedanceDraft={promoteSeedanceDraftFromHistory}
+              activeWorkflowIds={activeWorkflowHistoryIds}
+            />
+          </Suspense>
+        ) : null}
+        {previewAsset ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="asset-source-dialog"
+                label="媒体预览"
+                onClose={() => setPreviewAsset(null)}
+              />
+            }
+          >
+            <AssetSourceDialog
+              asset={previewAsset}
+              onClose={() => setPreviewAsset(null)}
+              onDelete={
+                previewAsset.source === "cloud" && previewAsset.providerConnectionId
+                  ? () => handleDeleteAsset(previewAsset)
+                  : previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                    ? () => void handleDeleteLocalAssets([previewAsset])
+                    : null
+              }
+              localGroups={
+                previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                  ? localAssetGroups
+                  : undefined
+              }
+              onMoveToGroup={
+                previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                  ? (groupId) => {
+                      handleMoveLocalAssets([previewAsset], groupId);
+                      // 弹窗保持打开：立即反映新分组，列表由处理器后台重查。
+                      setPreviewAsset({ ...previewAsset, groupId });
+                    }
+                  : null
+              }
+              onRename={
+                previewAsset.source === "cloud" &&
+                previewAsset.providerConnectionId &&
+                renamingAssetId == null
+                  ? (name) => handleRenameAsset(previewAsset, name)
+                  : null
+              }
+            />
+          </Suspense>
+        ) : null}
+        {realPersonDialogOpen && assetProvider ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="real-person-asset-dialog"
+                label="明星真人素材"
+                onClose={() => setRealPersonDialogOpen(false)}
+              />
+            }
+          >
+            <RealPersonAssetDialog
+              providerConnectionId={assetProvider.id}
+              providerDisplayName={assetProvider.displayName}
+              onClose={() => setRealPersonDialogOpen(false)}
+              onUploadToGroup={handleImportLocalAssets}
+            />
+          </Suspense>
+        ) : null}
+        {newGroupDialogOpen && assetProvider ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="asset-group-create-dialog"
+                label="新建素材分组"
+                onClose={() => setNewGroupDialogOpen(false)}
+              />
+            }
+          >
+            <AssetGroupCreateDialog
+              providerDisplayName={assetProvider.displayName}
+              busy={creatingGroup}
+              onClose={() => setNewGroupDialogOpen(false)}
+              onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
+            />
+          </Suspense>
+        ) : null}
+        {newLocalGroupDialogOpen ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="local-asset-group-create-dialog"
+                label="新建本地素材分组"
+                onClose={() => setNewLocalGroupDialogOpen(false)}
+              />
+            }
+          >
+            <AssetGroupCreateDialog
+              scope="local"
+              busy={creatingLocalGroup}
+              onClose={() => setNewLocalGroupDialogOpen(false)}
+              onCreate={handleCreateLocalAssetGroup}
+            />
+          </Suspense>
+        ) : null}
+        {previewOutputNode ? (
+          <CanvasOutputLightbox
+            node={previewOutputNode}
+            onClose={() => setPreviewOutputNodeKey(null)}
+          />
+        ) : null}
+        {previewAssetNode ? (
+          <CanvasAssetLightbox
+            node={previewAssetNode}
+            onClose={() => setPreviewAssetNodeKey(null)}
+          />
+        ) : null}
+        {active &&
+        whiteModelStudioNodeKey &&
+        whiteModelStudioEntry?.type === "gen" &&
+        (whiteModelStudioEntry.data.kind === "video" || whiteModelStudioEntry.data.kind === "image")
+          ? (() => {
+              const studioNode = whiteModelStudioEntry.data;
+              if (
+                !studioNode ||
+                (studioNode.kind !== "video" && studioNode.kind !== "image") ||
+                !studioNode.config.whiteModelStudio
+              )
+                return null;
+              const purpose = studioNode.kind === "image" ? "blocking" : "video";
+              return (
+                <Suspense
+                  fallback={
+                    <DeferredDialogFallback
+                      id="white-model-studio"
+                      label={purpose === "blocking" ? "白模站位导演台" : "Blender 白模工作台"}
+                      onClose={() => setWhiteModelStudioNodeKey(null)}
+                    />
+                  }
+                >
+                  <WhiteModelStudioDialog
+                    purpose={purpose}
+                    draft={studioNode.config.whiteModelStudio}
+                    imageInputs={studioImageInputsFromMedia(canvasInputsFor(studioNode.key).media)}
+                    onDraftChange={updateWhiteModelStudioDraft}
+                    onClose={() => setWhiteModelStudioNodeKey(null)}
+                    onUse={useWhiteModelVideo}
+                    onExportBlocking={useWhiteModelBlocking}
+                  />
+                </Suspense>
+              );
+            })()
+          : null}
+        {active && videoPreparation ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="video-preparation"
+                label="视频准备"
+                onClose={() => setVideoPreparation(null)}
+              />
+            }
+          >
+            <VideoPreparationDialog
+              source={videoPreparation}
+              onClose={() => setVideoPreparation(null)}
+              onUseOutput={usePreparedVideoOutput}
+              onUseAiOutput={useAiMediaOutput}
+            />
+          </Suspense>
+        ) : null}
+        {active && videoLocalEdit ? (
+          <Suspense
+            fallback={
+              <DeferredDialogFallback
+                id="video-local-edit"
+                label="视频局部编辑"
+                onClose={() => setVideoLocalEdit(null)}
+              />
+            }
+          >
+            <VideoLocalEditDialog
+              source={videoLocalEdit.source}
+              candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
+              canUploadToLibrary={assetProvider != null}
+              resolveFrame={resolveVideoLocalEditFrame}
+              onClose={() => setVideoLocalEdit(null)}
+              onApply={applyVideoLocalEdit}
+            />
+          </Suspense>
+        ) : null}
+        <dialog
+          ref={clearCanvasDialogRef}
+          className="confirm-dialog"
+          aria-labelledby="clear-canvas-dialog-title"
+          aria-describedby="clear-canvas-dialog-desc"
+        >
+          <form
+            method="dialog"
+            className="confirm-dialog__form"
+            onSubmit={(event) => {
+              // 表单提交（按 Enter 或点「确认清空」）时阻止默认关闭，由 confirmClearCanvas
+              // 显式 close()，确保先清空再关闭（避免 close 触发后 setState 在已卸载 dialog 上）。
+              event.preventDefault();
+            }}
+          >
+            <header className="confirm-dialog__header">
+              <span className="confirm-dialog__badge" aria-hidden="true">
+                <Icon name="warning" size="xl" />
+              </span>
+              <div>
+                <p className="confirm-dialog__eyebrow">危险操作 · 不可撤销</p>
+                <h2 id="clear-canvas-dialog-title" className="confirm-dialog__title">
+                  确认清空画布？
+                </h2>
+              </div>
+            </header>
+            <div className="confirm-dialog__body">
+              <p id="clear-canvas-dialog-desc" className="confirm-dialog__desc">
+                将移除画布上所有节点与连线，任务历史会保留。此操作不可撤销。
+              </p>
+              <ul className="confirm-dialog__facts">
+                <li className="confirm-dialog__fact confirm-dialog__fact--removed">
+                  <span className="confirm-dialog__fact-icon" aria-hidden="true">
+                    <Icon name="trash-simple" size="sm" />
+                  </span>
+                  <span className="confirm-dialog__fact-label">画布节点与连线</span>
+                  <span className="confirm-dialog__fact-state">将被移除</span>
+                </li>
+                <li className="confirm-dialog__fact confirm-dialog__fact--kept">
+                  <span className="confirm-dialog__fact-icon" aria-hidden="true">
+                    <Icon name="check-circle" size="sm" />
+                  </span>
+                  <span className="confirm-dialog__fact-label">任务历史</span>
+                  <span className="confirm-dialog__fact-state">保留 · 可复现审计</span>
+                </li>
+              </ul>
+            </div>
+            <div className="confirm-dialog__actions">
+              <button
+                type="button"
+                className="confirm-dialog__btn"
+                onClick={closeClearCanvasDialog}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="confirm-dialog__btn confirm-dialog__btn--danger"
+                onClick={confirmClearCanvas}
+              >
+                <Icon name="trash-simple" aria-hidden="true" size="sm" />
+                确认清空
+              </button>
+            </div>
+          </form>
+        </dialog>
+      </main>
+    </WorkflowSessionsProvider>
   );
 }

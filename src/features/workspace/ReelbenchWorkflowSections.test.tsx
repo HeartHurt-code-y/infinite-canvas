@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ReelbenchShotDraft } from "../../lib/reelbenchBackend";
 import { catalog, node } from "../../test/videoWorkflowFixtures";
-import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { LegacySessionNode } from "../../test/workflowSessionsStub";
 import { ReelbenchConfiguration, ReelbenchDeliverables } from "./ReelbenchWorkflowSections";
 import {
   createReelbenchCheckpoint,
@@ -121,7 +121,7 @@ describe("Reelbench shot review", () => {
       onRevealResult: vi.fn(),
       onPickReelbenchVideo,
     };
-    const view = render(<KnowledgeVideoWorkflowNode node={source} {...props} />);
+    const view = render(<LegacySessionNode node={source} {...props} />);
     expect(screen.getByRole("alert")).not.toHaveTextContent("requested format is not available");
     const rawReelbenchError = screen.getByText(/requested format is not available/);
     expect(rawReelbenchError).not.toBeVisible();
@@ -134,7 +134,7 @@ describe("Reelbench shot review", () => {
     expect(onPickReelbenchVideo).toHaveBeenCalledWith(base.key);
 
     view.rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         node={{
           ...source,
           config: {
@@ -166,7 +166,7 @@ describe("Reelbench shot review", () => {
       },
     };
     view.rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         node={{
           ...source,
           config: {

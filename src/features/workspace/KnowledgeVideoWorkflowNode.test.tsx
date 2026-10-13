@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import { defaultModelOperationSchema } from "../../lib/modelCapabilities";
-import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import {
+  KnowledgeVideoWorkflowNode,
+  type KnowledgeVideoWorkflowNodeProps,
+} from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider, type WorkflowSessions } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
 import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import { createBrandVideoCheckpoint, createBrandVideoOptions } from "./brandVideoWorkflowModel";
@@ -88,12 +93,29 @@ function commonProps(node: KnowledgeVideoWorkflowNodeData) {
     node,
     providerCatalog: catalog,
     onChange: vi.fn<(config: KnowledgeVideoWorkflowConfig) => void>(),
-    onExecute: vi.fn(),
-    onContinue: vi.fn(),
-    onCancel: vi.fn(),
-    onRemove: vi.fn(),
-    onRevealResult: vi.fn(),
   };
+}
+
+function wrapNode(props: KnowledgeVideoWorkflowNodeProps, sessions: WorkflowSessions) {
+  return (
+    <WorkflowSessionsProvider value={sessions}>
+      <KnowledgeVideoWorkflowNode {...props} />
+    </WorkflowSessionsProvider>
+  );
+}
+
+function renderNode(
+  props: KnowledgeVideoWorkflowNodeProps,
+  sessions = createWorkflowSessionsStub(),
+) {
+  return { sessions, ...render(wrapNode(props, sessions)) };
+}
+
+/** 用显式假回调覆写会话桩的个别动作；断言仍直接指向传入的 vi.fn。 */
+function stubWith<K extends keyof WorkflowSessions>(
+  overrides: Partial<Pick<WorkflowSessions, K>>,
+): WorkflowSessions {
+  return { ...createWorkflowSessionsStub(), ...overrides };
 }
 
 describe("KnowledgeVideoWorkflowNode", () => {
@@ -102,7 +124,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     const film = createAiFilmWorkflowOptions();
     const videoNode = createNode({ ...base, brief: "保留这份用户自己的制作要求", film });
     const props = commonProps(videoNode);
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions, rerender } = renderNode(props);
     expect(screen.getByRole("region", { name: "工作流使用指南" })).toHaveTextContent("已有剧本");
     expect(screen.getByLabelText("图片生成模型")).toBeRequired();
     expect(screen.getByLabelText("视频生成模型")).toBeRequired();
@@ -110,7 +132,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       ...videoNode.config,
       film: { ...film, deliverable: "documents" },
     });
-    rerender(<KnowledgeVideoWorkflowNode {...props} node={documentsNode} />);
+    rerender(wrapNode({ ...props, node: documentsNode }, sessions));
     expect(screen.getByLabelText("图片生成模型")).not.toBeRequired();
     expect(screen.getByLabelText("视频生成模型")).not.toBeRequired();
     expect(screen.getByLabelText("图片生成模型")).toHaveAccessibleDescription(
@@ -118,7 +140,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     );
     expect(screen.getByLabelText("影视制作要求")).toHaveValue("保留这份用户自己的制作要求");
     expect(props.onChange).not.toHaveBeenCalled();
-    expect(props.onExecute).not.toHaveBeenCalled();
+    expect(sessions.execute).not.toHaveBeenCalled();
   });
 
   it.each([2, 20])(
@@ -148,7 +170,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
         },
       });
       const props = commonProps(source);
-      render(<KnowledgeVideoWorkflowNode {...props} />);
+      renderNode(props);
       fireEvent.click(screen.getByRole("button", { name: "编辑分镜" }));
       expect(screen.getByRole("spinbutton", { name: "时长（秒，按当前模型能力）" })).toHaveValue(
         durationSeconds,
@@ -169,12 +191,12 @@ describe("KnowledgeVideoWorkflowNode", () => {
       checkpoint: { ...base.checkpoint, brandVideo: createBrandVideoCheckpoint() },
     });
     const props = commonProps(source);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions } = renderNode(props);
     expect(screen.getByText("品牌视觉短片工作流")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.queryByText("图片生成")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
-    expect(props.onExecute).toHaveBeenCalledWith(source.key);
+    expect(sessions.execute).toHaveBeenCalledWith(source.key);
   });
 
   it("requires a text model when product port or Logo inspection is enabled", () => {
@@ -203,20 +225,23 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(productNode);
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions, rerender } = renderNode(props);
     expect(screen.getByLabelText("产品视觉检查模型")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        node={{
-          ...productNode,
-          config: {
-            ...productNode.config,
-            models: { ...productNode.config.models, text: base.models.text },
-          },
-        }}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          node={{
+            ...productNode,
+            config: {
+              ...productNode.config,
+              models: { ...productNode.config.models, text: base.models.text },
+            },
+          }}
+        />
+        ,
+      </WorkflowSessionsProvider>,
     );
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
   });
@@ -264,11 +289,11 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(productNode);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions } = renderNode(props);
     expect(screen.getByRole("button", { name: "导出已选用 1 张" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "重做第 1 张" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "按当前输入重新创建计划" }));
-    expect(props.onExecute).toHaveBeenCalledWith(productNode.key);
+    expect(sessions.execute).toHaveBeenCalledWith(productNode.key);
   });
   it("keeps old product-scene saves without a mode on the text-to-image composite path", () => {
     const base = createKnowledgeVideoWorkflowConfig(selections, true);
@@ -297,14 +322,14 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(productNode);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions } = renderNode(props);
     expect(screen.getByText("产品场景图工作流")).toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("composite");
     expect(screen.queryByLabelText("策划与审核模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
-    expect(props.onExecute).toHaveBeenCalledWith(productNode.key);
+    expect(sessions.execute).toHaveBeenCalledWith(productNode.key);
   });
   it("requires an image-reference model for new AI camera generation without text or video models", () => {
     const base = createKnowledgeVideoWorkflowConfig(selections, true);
@@ -331,26 +356,29 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(productNode);
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions, rerender } = renderNode(props);
     expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("reference");
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        node={{
-          ...productNode,
-          config: {
-            ...productNode.config,
-            models: {
-              ...productNode.config.models,
-              image: {
-                providerId: "project-provider",
-                modelDefinitionId: "project-image-edit-only",
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          node={{
+            ...productNode,
+            config: {
+              ...productNode.config,
+              models: {
+                ...productNode.config.models,
+                image: {
+                  providerId: "project-provider",
+                  modelDefinitionId: "project-image-edit-only",
+                },
               },
             },
-          },
-        }}
-      />,
+          }}
+        />
+        ,
+      </WorkflowSessionsProvider>,
     );
     expect(screen.queryByLabelText("策划与审核模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
@@ -369,14 +397,14 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(animationNode);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions } = renderNode(props);
     expect(screen.getByText("动画逻辑图工作流")).toBeInTheDocument();
     expect(screen.getByLabelText("动画制作要求")).toHaveValue(animationNode.config.brief);
     expect(screen.queryByLabelText("图片生成模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
-    expect(props.onExecute).toHaveBeenCalledWith(animationNode.key);
+    expect(sessions.execute).toHaveBeenCalledWith(animationNode.key);
   });
 
   it("uses animation progress and preserves restart controls after failure", () => {
@@ -394,14 +422,14 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(animationNode);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions } = renderNode(props);
     expect(screen.getByRole("progressbar", { name: "动画制作进度" })).toBeInTheDocument();
     expect(screen.getByText("本地渲染")).toBeInTheDocument();
     expect(screen.queryByText("合成")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "按当前资料重新制作" }));
-    expect(props.onExecute).toHaveBeenCalledWith(animationNode.key);
+    expect(sessions.execute).toHaveBeenCalledWith(animationNode.key);
     fireEvent.click(screen.getByRole("button", { name: "重试当前步骤" }));
-    expect(props.onContinue).toHaveBeenCalledWith(animationNode.key);
+    expect(sessions.continueRun).toHaveBeenCalledWith(animationNode.key);
   });
 
   it("locks animation configuration for decisions and excludes GIF from the film result player", () => {
@@ -424,24 +452,27 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const props = commonProps(animationNode);
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { sessions, rerender } = renderNode(props);
     expect(screen.getByLabelText("动画制作要求")).toBeDisabled();
     expect(screen.getByLabelText("动画模板")).toBeDisabled();
     expect(screen.getByLabelText("策划与审核模型")).toBeDisabled();
     expect(screen.queryByText("AI影视工作流")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "采用推荐并继续" }));
-    expect(props.onContinue).toHaveBeenCalledWith(animationNode.key, "保留现有数值");
+    expect(sessions.continueRun).toHaveBeenCalledWith(animationNode.key, "保留现有数值");
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        node={{
-          ...animationNode,
-          config: {
-            ...animationNode.config,
-            checkpoint: { ...animationNode.config.checkpoint, phase: "done" },
-          },
-        }}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          node={{
+            ...animationNode,
+            config: {
+              ...animationNode.config,
+              checkpoint: { ...animationNode.config.checkpoint, phase: "done" },
+            },
+          }}
+        />
+        ,
+      </WorkflowSessionsProvider>,
     );
     expect(screen.queryByText("完整成片已就绪")).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "最终交付物" })).not.toBeInTheDocument();
@@ -455,7 +486,9 @@ describe("KnowledgeVideoWorkflowNode", () => {
         film: createAiFilmWorkflowOptions(),
       } as KnowledgeVideoWorkflowConfig);
       return (
-        <KnowledgeVideoWorkflowNode {...commonProps(createNode(config))} onChange={setConfig} />
+        <WorkflowSessionsProvider value={createWorkflowSessionsStub()}>
+          <KnowledgeVideoWorkflowNode {...commonProps(createNode(config))} onChange={setConfig} />
+        </WorkflowSessionsProvider>
       );
     }
     render(<Harness />);
@@ -504,7 +537,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const onExport = vi.fn();
-    render(<KnowledgeVideoWorkflowNode {...commonProps(source)} onExportDocuments={onExport} />);
+    renderNode(commonProps(source), stubWith({ exportDocuments: onExport }));
     expect(screen.getByRole("region", { name: "影视阶段交付物" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("完整剧本 · v2"));
     expect(screen.getByText("# 最新剧本正文")).toBeInTheDocument();
@@ -522,7 +555,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     };
 
-    render(<KnowledgeVideoWorkflowNode {...commonProps(createNode(config))} />);
+    renderNode(commonProps(createNode(config)));
 
     // 小白用户看到的是「还差几项、分别是什么」，而不是一个灰掉的按钮。
     expect(screen.getByText("还差 1 项必填内容")).toBeInTheDocument();
@@ -540,15 +573,14 @@ describe("KnowledgeVideoWorkflowNode", () => {
 
   it("keeps the default view simple and starts after the brief is filled", () => {
     const onExecute = vi.fn();
+    const sessions = stubWith({ execute: onExecute });
 
     function Harness() {
       const [config, setConfig] = useState(createKnowledgeVideoWorkflowConfig(selections, true));
       return (
-        <KnowledgeVideoWorkflowNode
-          {...commonProps(createNode(config))}
-          onChange={setConfig}
-          onExecute={onExecute}
-        />
+        <WorkflowSessionsProvider value={sessions}>
+          <KnowledgeVideoWorkflowNode {...commonProps(createNode(config))} onChange={setConfig} />
+        </WorkflowSessionsProvider>
       );
     }
 
@@ -570,7 +602,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
   });
 
   it("shows only project models in the collapsed model configuration", () => {
-    render(<KnowledgeVideoWorkflowNode {...commonProps(createNode())} />);
+    renderNode(commonProps(createNode()));
 
     fireEvent.click(screen.getByText("模型配置"));
     expect(document.querySelectorAll(".canvas-knowledge-workflow__model-slot")).toHaveLength(3);
@@ -585,17 +617,17 @@ describe("KnowledgeVideoWorkflowNode", () => {
 
   it("shows compact progress and pauses only the following steps", () => {
     const onCancel = vi.fn();
-    render(
-      <KnowledgeVideoWorkflowNode
-        {...commonProps(createNode())}
-        runState={{
+    renderNode(
+      {
+        ...commonProps(createNode()),
+        runState: {
           phase: "generating",
           progress: 58,
           message: "正在生成第 3 个镜头",
           error: null,
-        }}
-        onCancel={onCancel}
-      />,
+        },
+      },
+      stubWith({ cancel: onCancel }),
     );
 
     expect(
@@ -621,7 +653,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
         error: "已暂停",
       },
     });
-    render(<KnowledgeVideoWorkflowNode {...commonProps(pausedNode)} />);
+    renderNode(commonProps(pausedNode));
 
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent("生成");
     expect(
@@ -647,7 +679,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
 
-    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onContinue={onContinue} />);
+    renderNode(commonProps(node), stubWith({ continueRun: onContinue }));
 
     const decision = screen.getByRole("region", { name: "需要确认" });
     expect(within(decision).getByText("更适合面向管理者还是一线员工？")).toBeInTheDocument();
@@ -706,7 +738,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
 
-    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onContinue={onContinue} />);
+    renderNode(commonProps(node), stubWith({ continueRun: onContinue }));
 
     const decision = screen.getByRole("region", { name: "需要确认" });
     expect(within(decision).queryByRole("textbox")).not.toBeInTheDocument();
@@ -754,13 +786,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
 
-    render(
-      <KnowledgeVideoWorkflowNode
-        {...commonProps(node)}
-        onRevealResult={onRevealResult}
-        onExecute={onExecute}
-      />,
-    );
+    renderNode(commonProps(node), stubWith({ revealResult: onRevealResult, execute: onExecute }));
 
     expect(screen.getByRole("region", { name: "最终交付物" })).toBeInTheDocument();
     expect(screen.getByText("完整成片已就绪")).toBeInTheDocument();
@@ -816,7 +842,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     };
     const node = createNode({ ...base, brief: "重做测试", checkpoint });
     const onRedoShot = vi.fn();
-    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onRedoShot={onRedoShot} />);
+    renderNode(commonProps(node), stubWith({ redoShot: onRedoShot }));
 
     expect(screen.getByRole("region", { name: "分镜视频" })).toBeInTheDocument();
     expect(screen.getByLabelText("镜头 1 视频预览")).toBeInTheDocument();
@@ -871,7 +897,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       finalPath: "C:\\output\\final.mp4",
     };
     const node = createNode({ ...base, brief: "重做测试", checkpoint });
-    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onRedoShot={vi.fn()} />);
+    renderNode(commonProps(node));
 
     expect(screen.getByRole("region", { name: "分镜视频" })).toBeInTheDocument();
     expect(screen.getByText("待重做")).toBeInTheDocument();
@@ -914,13 +940,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     };
     const node = createNode({ ...base, brief: "编辑测试", checkpoint });
     const onChange = vi.fn();
-    render(
-      <KnowledgeVideoWorkflowNode
-        {...commonProps(node)}
-        onChange={onChange}
-        onRedoShot={vi.fn()}
-      />,
-    );
+    renderNode({ ...commonProps(node), onChange });
 
     fireEvent.click(screen.getByRole("button", { name: "编辑分镜" }));
     expect(screen.getByLabelText("视频提示词")).toBeInTheDocument();

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { catalog, node } from "../../test/videoWorkflowFixtures";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
-import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { LegacySessionNode } from "../../test/workflowSessionsStub";
 import {
   ReverseVideoConfiguration,
   ReverseVideoDeliverables,
@@ -300,7 +300,7 @@ describe("ReverseVideoConfiguration", () => {
 describe("reverse-video workflow node", () => {
   it("requires only a project text model and a video, while preserving history and download controls", () => {
     const props = nodeProps();
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    render(<LegacySessionNode {...props} />);
     expect(screen.getByText("短视频反推工作流")).toBeInTheDocument();
     expect(screen.queryByLabelText("图片生成模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
@@ -317,7 +317,7 @@ describe("reverse-video workflow node", () => {
   it("requires an unambiguous single source before submitting analysis", () => {
     const props = nodeProps();
     const { rerender } = render(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...props}
         node={{
           ...props.node,
@@ -333,7 +333,7 @@ describe("reverse-video workflow node", () => {
     );
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...props}
         node={{
           ...props.node,
@@ -364,7 +364,7 @@ describe("reverse-video workflow node", () => {
         },
       },
     };
-    render(<KnowledgeVideoWorkflowNode {...props} node={workflowNode} />);
+    render(<LegacySessionNode {...props} node={workflowNode} />);
     expect(screen.getByText("校验").closest("li")).toHaveAttribute("aria-current", "step");
     expect(screen.getByLabelText("反推补充方向")).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "你的回答（可选）" }), {
@@ -376,7 +376,7 @@ describe("reverse-video workflow node", () => {
 
   it("locks active inputs, shows automatic stages and offers pause then breakpoint retry", async () => {
     const props = nodeProps(reverseNode("generating"));
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const { rerender } = render(<LegacySessionNode {...props} />);
     expect(screen.getByLabelText("反推补充方向")).toBeDisabled();
     expect(screen.getByLabelText("视觉反推与审核模型")).toBeDisabled();
     expect(screen.queryByRole("button", { name: "查看执行计划" })).not.toBeInTheDocument();
@@ -391,7 +391,7 @@ describe("reverse-video workflow node", () => {
       localVideoPath: "",
     });
     rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...props}
         node={{
           ...failed,
@@ -419,7 +419,7 @@ describe("reverse-video workflow node", () => {
     expect(props.onPickReverseVideo).toHaveBeenCalledWith(props.node.key);
 
     rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...props}
         node={{
           ...failed,

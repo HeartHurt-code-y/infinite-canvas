@@ -3,6 +3,8 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { node, catalog } from "../../test/videoWorkflowFixtures";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
 import {
   comicDramaDeliveryMarkdown,
@@ -193,16 +195,13 @@ describe("comic drama node", () => {
         },
       });
       return (
-        <KnowledgeVideoWorkflowNode
-          node={{ ...source, config }}
-          providerCatalog={catalog}
-          onChange={setConfig}
-          onExecute={vi.fn()}
-          onContinue={vi.fn()}
-          onCancel={vi.fn()}
-          onRemove={vi.fn()}
-          onRevealResult={vi.fn()}
-        />
+        <WorkflowSessionsProvider value={createWorkflowSessionsStub()}>
+          <KnowledgeVideoWorkflowNode
+            node={{ ...source, config }}
+            providerCatalog={catalog}
+            onChange={setConfig}
+          />
+        </WorkflowSessionsProvider>
       );
     }
     render(<Harness />);

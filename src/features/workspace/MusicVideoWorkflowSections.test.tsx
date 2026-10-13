@@ -2,7 +2,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { catalog, node } from "../../test/videoWorkflowFixtures";
-import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { LegacySessionNode } from "../../test/workflowSessionsStub";
 import {
   MUSIC_VIDEO_APPROVAL,
   createMusicVideoCheckpoint,
@@ -44,7 +44,7 @@ describe("MV workflow user controls", () => {
   it("requires a real song, routes the picker to this node, and gates reference characters", () => {
     const callbacks = props();
     const source = { ...node(), key: "mv-one", config: config() };
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...callbacks} node={source} />);
+    const { rerender } = render(<LegacySessionNode {...callbacks} node={source} />);
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "选择歌曲" }));
     expect(callbacks.onPickMusicVideoMaterial).toHaveBeenCalledWith("mv-one", "song");
@@ -56,17 +56,15 @@ describe("MV workflow user controls", () => {
         songName: "歌曲",
       },
     };
-    rerender(<KnowledgeVideoWorkflowNode {...callbacks} node={{ ...source, config: withSong }} />);
+    rerender(<LegacySessionNode {...callbacks} node={{ ...source, config: withSong }} />);
     // Complete the asynchronous picker lifecycle before testing readiness.
     return Promise.resolve().then(() => {
-      rerender(
-        <KnowledgeVideoWorkflowNode {...callbacks} node={{ ...source, config: withSong }} />,
-      );
+      rerender(<LegacySessionNode {...callbacks} node={{ ...source, config: withSong }} />);
       expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
       fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
       expect(callbacks.onExecute).toHaveBeenCalledWith("mv-one");
       rerender(
-        <KnowledgeVideoWorkflowNode
+        <LegacySessionNode
           {...callbacks}
           node={{
             ...source,
@@ -85,7 +83,7 @@ describe("MV workflow user controls", () => {
   it("marks only the original song as required and lists it as the single gap", () => {
     const callbacks = props();
     const source = { ...node(), key: "mv-gap", config: config() };
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...callbacks} node={source} />);
+    const { rerender } = render(<LegacySessionNode {...callbacks} node={source} />);
     // 未选歌曲：节点 footer 说明还差什么，歌曲标签带红色星号。
     expect(screen.getByText("还差 1 项必填内容")).toBeInTheDocument();
     expect(
@@ -101,7 +99,7 @@ describe("MV workflow user controls", () => {
     const formatLabel = screen.getByText(/^画幅$/).closest("label")!;
     expect(formatLabel.querySelectorAll(".workflow-required-mark__asterisk")).toHaveLength(0);
     rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...callbacks}
         node={{
           ...source,
@@ -145,7 +143,7 @@ describe("MV workflow user controls", () => {
     };
     const plan = createWorkflowExecutionPlan(source);
     const { rerender } = render(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...callbacks}
         node={{
           ...source,
@@ -165,7 +163,7 @@ describe("MV workflow user controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "确认计划并执行" }));
     expect(callbacks.onApprovePlan).toHaveBeenCalledWith(source.key);
     rerender(
-      <KnowledgeVideoWorkflowNode
+      <LegacySessionNode
         {...callbacks}
         node={{
           ...source,
@@ -234,7 +232,7 @@ describe("MV workflow user controls", () => {
         });
       });
       return (
-        <KnowledgeVideoWorkflowNode
+        <LegacySessionNode
           {...callbacks}
           node={{ ...node(), config: value }}
           onChange={(next) => setValue((previous) => recordWorkflowVersion(previous, next))}

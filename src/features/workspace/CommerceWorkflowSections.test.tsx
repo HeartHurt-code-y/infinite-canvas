@@ -6,6 +6,8 @@ import type { PickedPromptMaterial } from "../../lib/backend";
 import { catalog, node } from "../../test/videoWorkflowFixtures";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
 import {
   createCommerceCheckpoint,
   createCommerceOptions,
@@ -26,11 +28,6 @@ function nodeProps(config: KnowledgeVideoWorkflowConfig) {
     node: { ...node(), config },
     providerCatalog: catalog,
     onChange: vi.fn(),
-    onExecute: vi.fn(),
-    onContinue: vi.fn(),
-    onCancel: vi.fn(),
-    onRemove: vi.fn(),
-    onRevealResult: vi.fn(),
   };
 }
 
@@ -43,29 +40,28 @@ describe("commerce workflow node", () => {
         brief: "",
         commerce: { ...createCommerceOptions(), productName: "咖啡杯" },
       });
+      const sessions = createWorkflowSessionsStub();
+      sessions.pickCommerceMaterials = async (key) => {
+        await onPick(key);
+        setConfig((current) => ({
+          ...current,
+          commerce: { ...current.commerce!, materials: [productImage] },
+        }));
+      };
+      sessions.removeCommerceMaterial = (_key, localPath) =>
+        setConfig((current) => ({
+          ...current,
+          commerce: {
+            ...current.commerce!,
+            materials: current.commerce!.materials.filter(
+              (material) => material.localPath !== localPath,
+            ),
+          },
+        }));
       return (
-        <KnowledgeVideoWorkflowNode
-          {...nodeProps(config)}
-          onChange={setConfig}
-          onPickCommerceMaterials={async (key) => {
-            await onPick(key);
-            setConfig((current) => ({
-              ...current,
-              commerce: { ...current.commerce!, materials: [productImage] },
-            }));
-          }}
-          onRemoveCommerceMaterial={(_, localPath) =>
-            setConfig((current) => ({
-              ...current,
-              commerce: {
-                ...current.commerce!,
-                materials: current.commerce!.materials.filter(
-                  (material) => material.localPath !== localPath,
-                ),
-              },
-            }))
-          }
-        />
+        <WorkflowSessionsProvider value={sessions}>
+          <KnowledgeVideoWorkflowNode {...nodeProps(config)} onChange={setConfig} />
+        </WorkflowSessionsProvider>
       );
     }
     render(<Harness />);
@@ -104,7 +100,11 @@ describe("commerce workflow node", () => {
           video: { providerId: "", modelDefinitionId: "" },
         },
       });
-      return <KnowledgeVideoWorkflowNode {...nodeProps(config)} onChange={setConfig} />;
+      return (
+        <WorkflowSessionsProvider value={createWorkflowSessionsStub()}>
+          <KnowledgeVideoWorkflowNode {...nodeProps(config)} onChange={setConfig} />
+        </WorkflowSessionsProvider>
+      );
     }
     render(<Harness />);
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
@@ -130,24 +130,29 @@ describe("commerce workflow node", () => {
       checkpoint: { ...node().config.checkpoint, phase: "awaiting_approval" },
     };
     const props = nodeProps(config);
+    const sessions = createWorkflowSessionsStub();
     const { rerender } = render(
-      <KnowledgeVideoWorkflowNode {...props} onPickCommerceMaterials={vi.fn(async () => {})} />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode {...props} />
+      </WorkflowSessionsProvider>,
     );
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     expect(screen.getByLabelText("带货商品名称")).toBeDisabled();
     expect(screen.getByRole("button", { name: "添加商品资料" })).toBeDisabled();
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        node={{
-          ...props.node,
-          config: { ...config, checkpoint: { ...config.checkpoint, phase: "failed" } },
-        }}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          node={{
+            ...props.node,
+            config: { ...config, checkpoint: { ...config.checkpoint, phase: "failed" } },
+          }}
+        />
+      </WorkflowSessionsProvider>,
     );
     expect(screen.getByLabelText("带货商品名称")).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "按当前资料重新制作" }));
-    expect(props.onExecute).toHaveBeenCalledWith(props.node.key);
+    expect(sessions.execute).toHaveBeenCalledWith(props.node.key);
   });
 
   it("reports picker failure without discarding existing metadata", async () => {

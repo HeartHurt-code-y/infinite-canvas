@@ -2,6 +2,9 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { catalog, node } from "../../test/videoWorkflowFixtures";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
+import type { WorkflowSessions } from "./useWorkflowSessions";
 import { workflowVersionState } from "./workflowVersionHistory";
 
 vi.mock("./workflowVersionHistory", () => ({ workflowVersionState: vi.fn() }));
@@ -39,6 +42,28 @@ function propsFor(key: string) {
   };
 }
 
+/** 节点经 context 读取会话动作；propsFor 里的假回调映射进会话桩，断言保持指向原 mock。 */
+function sessionsFor(props: ReturnType<typeof propsFor>): WorkflowSessions {
+  const sessions = createWorkflowSessionsStub();
+  sessions.execute = props.onExecute;
+  sessions.continueRun = props.onContinue;
+  sessions.cancel = props.onCancel;
+  sessions.remove = props.onRemove;
+  sessions.revealResult = props.onRevealResult;
+  sessions.undoVersion = props.onUndoVersion;
+  sessions.redoVersion = props.onRedoVersion;
+  sessions.restoreVersion = props.onRestoreVersion;
+  return sessions;
+}
+
+function ProviderFor({ props }: { readonly props: ReturnType<typeof propsFor> }) {
+  return (
+    <WorkflowSessionsProvider value={sessionsFor(props)}>
+      <KnowledgeVideoWorkflowNode {...props} />
+    </WorkflowSessionsProvider>
+  );
+}
+
 beforeEach(() => {
   vi.mocked(workflowVersionState).mockImplementation((config) => view(config.brief));
 });
@@ -49,8 +74,8 @@ describe("workflow-local version controls", () => {
     const second = propsFor("workflow-two");
     render(
       <>
-        <KnowledgeVideoWorkflowNode {...first} />
-        <KnowledgeVideoWorkflowNode {...second} />
+        <ProviderFor props={first} />
+        <ProviderFor props={second} />
       </>,
     );
     const controls = screen.getAllByRole("group", { name: "当前工作流版本控制" });
@@ -79,13 +104,20 @@ describe("workflow-local version controls", () => {
 
   it("disables version actions when this workflow starts running, including an already-open dialog", () => {
     const props = propsFor("workflow-one");
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const sessions = sessionsFor(props);
+    const { rerender } = render(
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode {...props} />
+      </WorkflowSessionsProvider>,
+    );
     fireEvent.click(screen.getByRole("button", { name: "查看当前工作流版本历史" }));
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        runState={{ phase: "generating", progress: 45, message: "正在制作", error: null }}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          runState={{ phase: "generating", progress: 45, message: "正在制作", error: null }}
+        />
+      </WorkflowSessionsProvider>,
     );
     for (const name of [
       "回到上一个工作流版本",
@@ -117,7 +149,7 @@ describe("workflow-local version controls", () => {
       pastCount: 0,
       futureCount: 0,
     });
-    render(<KnowledgeVideoWorkflowNode {...propsFor("empty-workflow")} />);
+    render(<ProviderFor props={propsFor("empty-workflow")} />);
     const controls = screen.getByRole("group", { name: "当前工作流版本控制" });
     for (const button of within(controls).getAllByRole("button")) expect(button).toBeDisabled();
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import { defaultModelOperationSchema } from "../../lib/modelCapabilities";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
 import { createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
 import { createCommerceOptions } from "./commerceWorkflowModel";
@@ -76,25 +78,22 @@ function renderWorkflowBrief(
       ...options.config,
     }));
     return (
-      <KnowledgeVideoWorkflowNode
-        node={{
-          key: "knowledge-workflow-ime",
-          kind: "knowledge_video_workflow",
-          x: 100 + revision,
-          y: 120,
-          config,
-        }}
-        providerCatalog={catalog}
-        onChange={(nextConfig) => {
-          publishedConfigs.push(nextConfig);
-          setConfig(nextConfig);
-        }}
-        onExecute={vi.fn()}
-        onContinue={vi.fn()}
-        onCancel={vi.fn()}
-        onRemove={vi.fn()}
-        onRevealResult={vi.fn()}
-      />
+      <WorkflowSessionsProvider value={createWorkflowSessionsStub()}>
+        <KnowledgeVideoWorkflowNode
+          node={{
+            key: "knowledge-workflow-ime",
+            kind: "knowledge_video_workflow",
+            x: 100 + revision,
+            y: 120,
+            config,
+          }}
+          providerCatalog={catalog}
+          onChange={(nextConfig) => {
+            publishedConfigs.push(nextConfig);
+            setConfig(nextConfig);
+          }}
+        />
+      </WorkflowSessionsProvider>
     );
   }
 

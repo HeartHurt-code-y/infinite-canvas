@@ -132,4 +132,20 @@ export default defineConfig([
       "react-refresh/only-export-components": "off",
     },
   },
+  {
+    // 工作流会话控制器：deep hook 与其 context Provider 同文件导出是有意为之
+    // （Provider 只是 value 透传，与 hook 生命周期强耦合），Fast refresh 不受影响。
+    files: ["src/features/workspace/useWorkflowSessions.tsx"],
+    rules: {
+      "react-refresh/only-export-components": "off",
+    },
+  },
+  {
+    // 测试专用：会话桩 + 区块测试的旧 props 适配组件同为非组件/组件混合导出，
+    // 只被测试引用，Fast refresh 无意义。
+    files: ["src/test/workflowSessionsStub.tsx"],
+    rules: {
+      "react-refresh/only-export-components": "off",
+    },
+  },
 ]);

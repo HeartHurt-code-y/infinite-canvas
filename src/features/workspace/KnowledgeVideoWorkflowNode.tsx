@@ -27,6 +27,7 @@ import type {
   NodeModelSelection,
 } from "./workspaceModel";
 import { isTextGenerationModel, isVideoGenerationModel } from "./workspaceModel";
+import { useWorkflowSessionActions } from "./useWorkflowSessions";
 import { AI_FILM_STAGES, AI_FILM_STAGE_LABELS, type AiFilmStage } from "./aiFilmWorkflowModel";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
 import {
@@ -301,30 +302,6 @@ export interface KnowledgeVideoWorkflowNodeProps {
   ) => void;
   readonly onSizeChange?: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onChange: (config: KnowledgeVideoWorkflowConfig) => void;
-  readonly onExecute: (key: string) => void;
-  readonly onApprovePlan?: (key: string) => void;
-  readonly onContinue: (key: string, resolution?: string) => void;
-  readonly onCancel: (key: string) => void;
-  readonly onRedoShot?: (key: string, shotId: string) => void;
-  readonly onRemove: (key: string) => void;
-  readonly onRevealResult: (key: string) => void;
-  readonly onOpenHistory?: (key: string) => void;
-  readonly onUndoVersion?: (key: string) => void;
-  readonly onRedoVersion?: (key: string, versionId?: string) => void;
-  readonly onRestoreVersion?: (key: string, versionId: string) => void;
-  readonly onExportDocuments?: (key: string) => void;
-  readonly onRevealRemotionProject?: (key: string) => void;
-  readonly onPickMaterials?: (key: string) => Promise<void>;
-  readonly onRemoveMaterial?: (key: string, localPath: string) => void;
-  readonly onPickCommerceMaterials?: (key: string) => Promise<void>;
-  readonly onRemoveCommerceMaterial?: (key: string, localPath: string) => void;
-  readonly onPickCoverImages?: (key: string, role: "portrait" | "material") => Promise<void>;
-  readonly onRemoveCoverImage?: (key: string, role: "portrait" | "material", path: string) => void;
-  readonly onPickReverseVideo?: (key: string) => Promise<void> | void;
-  readonly onPickReelbenchVideo?: (key: string) => Promise<void> | void;
-  readonly onPickMusicVideoMaterial?: (key: string, role: "song" | "character") => Promise<void>;
-  readonly onRemoveReverseVideo?: (key: string) => void;
-  readonly onRemoveReelbenchVideo?: (key: string) => void;
   readonly onOpenDownloadSettings?: (key: string) => void;
   readonly downloadCookieStatus?: VideoDownloaderEngineStatus | null;
   readonly downloadCookieBusy?: boolean;
@@ -346,36 +323,40 @@ export function KnowledgeVideoWorkflowNode({
   onNodeDragStart,
   onSizeChange,
   onChange,
-  onExecute,
-  onApprovePlan,
-  onContinue,
-  onCancel,
-  onRedoShot,
-  onRemove,
-  onRevealResult,
-  onOpenHistory,
-  onUndoVersion,
-  onRedoVersion,
-  onRestoreVersion,
-  onExportDocuments,
-  onRevealRemotionProject,
-  onPickMaterials,
-  onRemoveMaterial,
-  onPickCommerceMaterials,
-  onRemoveCommerceMaterial,
-  onPickCoverImages,
-  onRemoveCoverImage,
-  onPickReverseVideo,
-  onPickReelbenchVideo,
-  onPickMusicVideoMaterial,
-  onRemoveReverseVideo,
-  onRemoveReelbenchVideo,
   onOpenDownloadSettings,
   downloadCookieStatus,
   downloadCookieBusy,
   onSelectDownloadCookieBrowser,
   onClearDownloadCookies,
 }: KnowledgeVideoWorkflowNodeProps) {
+  // 会话动作经 context 下发（useWorkflowSessions）；局部沿用 onXxx 命名，
+  // 组件正文对这些回调的使用与 props 时代逐字一致。
+  const {
+    execute: onExecute,
+    approvePlan: onApprovePlan,
+    continueRun: onContinue,
+    cancel: onCancel,
+    redoShot: onRedoShot,
+    remove: onRemove,
+    revealResult: onRevealResult,
+    openHistory: onOpenHistory,
+    undoVersion: onUndoVersion,
+    redoVersion: onRedoVersion,
+    restoreVersion: onRestoreVersion,
+    exportDocuments: onExportDocuments,
+    revealRemotionProject: onRevealRemotionProject,
+    pickMaterials: onPickMaterials,
+    removeMaterial: onRemoveMaterial,
+    pickCommerceMaterials: onPickCommerceMaterials,
+    removeCommerceMaterial: onRemoveCommerceMaterial,
+    pickCoverImages: onPickCoverImages,
+    removeCoverImage: onRemoveCoverImage,
+    pickReverseVideo: onPickReverseVideo,
+    pickReelbenchVideo: onPickReelbenchVideo,
+    pickMusicVideoMaterial: onPickMusicVideoMaterial,
+    removeReverseVideo: onRemoveReverseVideo,
+    removeReelbenchVideo: onRemoveReelbenchVideo,
+  } = useWorkflowSessionActions();
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const latestNodeRef = useRef(node);
   const pickingMaterialsRef = useRef(false);
@@ -1924,7 +1905,7 @@ export function KnowledgeVideoWorkflowNode({
                         <button
                           type="button"
                           className="canvas-knowledge-workflow__secondary"
-                          onClick={() => onRedoShot!(node.key, shot.id)}
+                          onClick={() => onRedoShot(node.key, shot.id)}
                         >
                           重做此镜头
                         </button>

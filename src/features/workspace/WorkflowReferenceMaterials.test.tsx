@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { PickedPromptMaterial } from "../../lib/backend";
 import { catalog, node } from "../../test/videoWorkflowFixtures";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { WorkflowSessionsProvider, type WorkflowSessions } from "./useWorkflowSessions";
+import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
 import { createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
 import { createCommerceOptions } from "./commerceWorkflowModel";
@@ -35,6 +37,30 @@ function nodeProps(overrides: Partial<KnowledgeVideoWorkflowConfig> = {}) {
     onPickMaterials: vi.fn(async () => {}),
     onRemoveMaterial: vi.fn(),
   };
+}
+
+/** 节点经 context 读取会话动作；nodeProps 里的假回调映射进会话桩，断言保持指向原 mock。 */
+function sessionsOf(props: ReturnType<typeof nodeProps>): WorkflowSessions {
+  const sessions = createWorkflowSessionsStub();
+  sessions.execute = props.onExecute;
+  sessions.continueRun = props.onContinue;
+  sessions.cancel = props.onCancel;
+  sessions.remove = props.onRemove;
+  sessions.revealResult = props.onRevealResult;
+  sessions.pickMaterials = props.onPickMaterials;
+  sessions.removeMaterial = props.onRemoveMaterial;
+  return sessions;
+}
+
+function nodeElement(
+  props: ReturnType<typeof nodeProps>,
+  sessions: WorkflowSessions = sessionsOf(props),
+) {
+  return (
+    <WorkflowSessionsProvider value={sessions}>
+      <KnowledgeVideoWorkflowNode {...props} />
+    </WorkflowSessionsProvider>
+  );
 }
 
 const templates: readonly [string, Partial<KnowledgeVideoWorkflowConfig>][] = [
@@ -85,27 +111,30 @@ describe("workflow reference materials", () => {
   it("shows multiple connected text outputs and enables a workflow with an otherwise empty brief", () => {
     const props = nodeProps({ brief: "" });
     const onUnlink = vi.fn();
+    const sessions = sessionsOf(props);
     render(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        connectedTexts={[
-          {
-            key: "source:script",
-            sourceKey: "source",
-            edgeId: "source->workflow",
-            name: "上游剧本",
-            text: "完整剧本内容",
-          },
-          {
-            key: "source:storyboard",
-            sourceKey: "source",
-            edgeId: "source->workflow",
-            name: "上游分镜",
-            text: "完整分镜内容",
-          },
-        ]}
-        onUnlink={onUnlink}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          connectedTexts={[
+            {
+              key: "source:script",
+              sourceKey: "source",
+              edgeId: "source->workflow",
+              name: "上游剧本",
+              text: "完整剧本内容",
+            },
+            {
+              key: "source:storyboard",
+              sourceKey: "source",
+              edgeId: "source->workflow",
+              name: "上游分镜",
+              text: "完整分镜内容",
+            },
+          ]}
+          onUnlink={onUnlink}
+        />
+      </WorkflowSessionsProvider>,
     );
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     const list = screen.getByRole("list", { name: "工作流连线文本" });
@@ -129,23 +158,28 @@ describe("workflow reference materials", () => {
         mediaType: "image" as const,
       },
     };
+    const sessions = sessionsOf(props);
     const { rerender } = render(
-      <KnowledgeVideoWorkflowNode {...props} connectedInputs={[input]} />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode {...props} connectedInputs={[input]} />
+      </WorkflowSessionsProvider>,
     );
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     expect(screen.getByText(/全部参考资料 8 项/)).toBeVisible();
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        connectedInputs={[
-          input,
-          {
-            ...input,
-            edgeId: "second->workflow",
-            target: { ...input.target, path: "C:\\frames\\two.png" },
-          },
-        ]}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          connectedInputs={[
+            input,
+            {
+              ...input,
+              edgeId: "second->workflow",
+              target: { ...input.target, path: "C:\\frames\\two.png" },
+            },
+          ]}
+        />
+      </WorkflowSessionsProvider>,
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
@@ -153,7 +187,7 @@ describe("workflow reference materials", () => {
   });
 
   it.each(templates)("shows shared multimodal references in %s", (title, options) => {
-    render(<KnowledgeVideoWorkflowNode {...nodeProps(options)} />);
+    render(nodeElement(nodeProps(options)));
     expect(screen.getByText(title)).toBeInTheDocument();
     const references = screen.getByRole("region", { name: "工作流参考素材" });
     expect(
@@ -173,7 +207,7 @@ describe("workflow reference materials", () => {
       { ...material, kind: "document", localPath: "C:\\notes.json", displayName: "资料.json" },
     ];
     const props = nodeProps({ materials });
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    render(nodeElement(props));
     const references = screen.getByRole("region", { name: "工作流参考素材" });
     // 缩略图是装饰性图片（aria-hidden 子树内的 img，无可访问名称），文件名由旁边的标题文本提供。
     const thumb = Array.from(references.querySelectorAll<HTMLImageElement>("img")).find(
@@ -198,7 +232,7 @@ describe("workflow reference materials", () => {
       localPath: "C:\\references\\motion.mp4",
       displayName: "动作参考.mp4",
     };
-    render(<KnowledgeVideoWorkflowNode {...nodeProps({ materials: [video] })} />);
+    render(nodeElement(nodeProps({ materials: [video] })));
     const references = screen.getByRole("region", { name: "工作流参考素材" });
     const thumb = references.querySelector<HTMLElement>(".auto-size-thumb")!;
     const frame = thumb.querySelector<HTMLVideoElement>("video")!;
@@ -236,7 +270,7 @@ describe("workflow reference materials", () => {
       materials: [productFiles[0]!],
       commerce: { ...createCommerceOptions(), materials: productFiles },
     });
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    render(nodeElement(props));
     const references = screen.getByRole("region", { name: "工作流参考素材" });
     expect(within(references).getByText(/全部参考资料 8 项 · 8.0 MB/)).toBeVisible();
     expect(
@@ -262,7 +296,7 @@ describe("workflow reference materials", () => {
       ...material,
       localPath: `C:\\references\\${index}.png`,
     }));
-    render(<KnowledgeVideoWorkflowNode {...nodeProps({ materials })} />);
+    render(nodeElement(nodeProps({ materials })));
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     expect(screen.queryByText(/可选择已有专用资料作为参考/)).not.toBeInTheDocument();
   });
@@ -276,30 +310,29 @@ describe("workflow reference materials", () => {
     const props = nodeProps({
       commerce: { ...createCommerceOptions(), materials: [largeProduct] },
     });
-    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    const sessions = sessionsOf(props);
+    const { rerender } = render(nodeElement(props, sessions));
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     rerender(
-      <KnowledgeVideoWorkflowNode
-        {...props}
-        node={{
-          ...props.node,
-          config: {
-            ...props.node.config,
-            materials: [{ ...largeProduct, localPath: "c:/PRODUCTS/cup.png" }],
-          },
-        }}
-      />,
+      <WorkflowSessionsProvider value={sessions}>
+        <KnowledgeVideoWorkflowNode
+          {...props}
+          node={{
+            ...props.node,
+            config: {
+              ...props.node.config,
+              materials: [{ ...largeProduct, localPath: "c:/PRODUCTS/cup.png" }],
+            },
+          }}
+        />
+      </WorkflowSessionsProvider>,
     );
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     expect(screen.getByText(/全部参考资料 1 项 · 32.0 MB/)).toBeVisible();
   });
 
   it("shows large material sizes and permits execution", () => {
-    render(
-      <KnowledgeVideoWorkflowNode
-        {...nodeProps({ materials: [{ ...material, byteSize: 15 * 1024 * 1024 }] })}
-      />,
-    );
+    render(nodeElement(nodeProps({ materials: [{ ...material, byteSize: 15 * 1024 * 1024 }] })));
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
@@ -310,9 +343,7 @@ describe("workflow reference materials", () => {
   });
 
   it.each([0, Number.NaN])("keeps invalid file-size metadata blocked: %s", (byteSize) => {
-    render(
-      <KnowledgeVideoWorkflowNode {...nodeProps({ materials: [{ ...material, byteSize }] })} />,
-    );
+    render(nodeElement(nodeProps({ materials: [{ ...material, byteSize }] })));
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
   });
 
@@ -323,7 +354,7 @@ describe("workflow reference materials", () => {
         materials: [material],
         checkpoint: { ...node().config.checkpoint, phase },
       });
-      render(<KnowledgeVideoWorkflowNode {...props} />);
+      render(nodeElement(props));
       expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeDisabled();
       expect(
         screen.getByRole("button", { name: `移除工作流参考素材：${material.displayName}` }),
@@ -338,7 +369,7 @@ describe("workflow reference materials", () => {
     });
     const props = nodeProps({ materials: [material] });
     props.onPickMaterials.mockImplementation(() => pendingPick);
-    render(<KnowledgeVideoWorkflowNode {...props} />);
+    render(nodeElement(props));
     fireEvent.click(screen.getByRole("button", { name: "添加工作流多模态参考素材" }));
     expect(props.onPickMaterials).toHaveBeenCalledWith(props.node.key);
     expect(screen.getByText("正在选择素材…")).toBeVisible();
@@ -370,7 +401,7 @@ describe("workflow reference materials", () => {
       });
       const props = nodeProps({ checkpoint: { ...node().config.checkpoint, phase } });
       props.onPickMaterials.mockImplementation(() => pendingPick);
-      render(<KnowledgeVideoWorkflowNode {...props} />);
+      render(nodeElement(props));
       const action =
         phase === "paused" ? "继续制作" : phase === "failed" ? "重试当前步骤" : "规划新一版";
       fireEvent.click(screen.getByRole("button", { name: "添加工作流多模态参考素材" }));
@@ -389,7 +420,7 @@ describe("workflow reference materials", () => {
         materials: [material],
         checkpoint: { ...node().config.checkpoint, phase: "paused" },
       });
-      render(<KnowledgeVideoWorkflowNode {...props} />);
+      render(nodeElement(props));
       fireEvent.click(screen.getByRole("button", { name: "按当前资料重新制作" }));
       expect(props.onExecute).toHaveBeenCalledWith(props.node.key);
       expect(props.onContinue).not.toHaveBeenCalled();
@@ -404,9 +435,9 @@ describe("workflow reference materials", () => {
     const props = nodeProps({
       commerce: { ...createCommerceOptions(), productName: "咖啡杯", materials: [material] },
     });
-    render(
-      <KnowledgeVideoWorkflowNode {...props} onPickCommerceMaterials={vi.fn(() => pendingPick)} />,
-    );
+    const sessions = sessionsOf(props);
+    sessions.pickCommerceMaterials = vi.fn(() => pendingPick);
+    render(nodeElement(props, sessions));
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     fireEvent.click(screen.getByRole("button", { name: "添加商品资料" }));
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeDisabled();
