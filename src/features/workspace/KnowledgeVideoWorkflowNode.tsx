@@ -55,15 +55,9 @@ import {
   ReverseVideoConfiguration,
   ReverseVideoDeliverables,
 } from "./ReverseVideoWorkflowSections";
-import {
-  reverseVideoInputReady,
-  reverseVideoSourceUrl,
-} from "./reverseVideoWorkflowModel";
+import { reverseVideoInputReady, reverseVideoSourceUrl } from "./reverseVideoWorkflowModel";
 import { ReelbenchConfiguration, ReelbenchDeliverables } from "./ReelbenchWorkflowSections";
-import {
-  reelbenchInputReady,
-  reelbenchInputSignature,
-} from "./reelbenchWorkflowModel";
+import { reelbenchInputReady, reelbenchInputSignature } from "./reelbenchWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 import { WorkflowFieldHelp, WorkflowGuide } from "./WorkflowGuidance";
 import { WorkflowPlanReview } from "./WorkflowPlanReview";

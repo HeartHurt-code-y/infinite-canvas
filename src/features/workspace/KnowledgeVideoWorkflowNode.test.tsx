@@ -504,9 +504,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
       },
     });
     const onExport = vi.fn();
-    render(
-      <KnowledgeVideoWorkflowNode {...commonProps(source)} onExportDocuments={onExport} />,
-    );
+    render(<KnowledgeVideoWorkflowNode {...commonProps(source)} onExportDocuments={onExport} />);
     expect(screen.getByRole("region", { name: "影视阶段交付物" })).toBeInTheDocument();
     fireEvent.click(screen.getByText("完整剧本 · v2"));
     expect(screen.getByText("# 最新剧本正文")).toBeInTheDocument();

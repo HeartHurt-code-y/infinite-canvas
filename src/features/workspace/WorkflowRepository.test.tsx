@@ -129,9 +129,7 @@ describe("WorkflowRepository", () => {
     const dialog = screen.getByRole("dialog", { name: "工作流仓库" });
     expect(within(dialog).getAllByRole("heading")).toHaveLength(11);
     // 打开后自动聚焦首个可用插入动作（注册表顺序的第一张卡）。
-    expect(
-      within(dialog).getByRole("button", { name: "添加产品场景图工作流节点" }),
-    ).toHaveFocus();
+    expect(within(dialog).getByRole("button", { name: "添加产品场景图工作流节点" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(toggle).toHaveFocus();

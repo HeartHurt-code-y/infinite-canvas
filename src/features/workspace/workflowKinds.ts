@@ -29,30 +29,28 @@
  *   的 as_str 一一对应，workflowKinds.test.ts 与 Rust 测试两侧锁死。
  */
 import type { IconName } from "../../components/Icon";
-import type { KnowledgeVideoWorkflowCheckpoint, KnowledgeVideoWorkflowConfig } from "./workspaceModel";
-import type { WorkflowRequirements } from "./workflowFieldRequirements";
 import type {
-  KnowledgeVideoWorkflowRunner,
-  RecordedClients,
-} from "./workflowRunnerContract";
+  KnowledgeVideoWorkflowCheckpoint,
+  KnowledgeVideoWorkflowConfig,
+} from "./workspaceModel";
+import type { WorkflowRequirements } from "./workflowFieldRequirements";
+import type { KnowledgeVideoWorkflowRunner, RecordedClients } from "./workflowRunnerContract";
 import type {
   CreateKnowledgeVideoDirectorWorkflowOptions,
   WorkflowTemplateSubgraph,
 } from "./workflowTemplates";
 import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
-import {
-  comicDramaDeliveryBundle,
-  comicDramaDeliveryMarkdown,
-} from "./comicDramaWorkflowModel";
-import {
-  musicVideoDeliveryBundle,
-  musicVideoDeliveryMarkdown,
-} from "./musicVideoWorkflowModel";
+import { comicDramaDeliveryBundle, comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
+import { musicVideoDeliveryBundle, musicVideoDeliveryMarkdown } from "./musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { brandVideoDeliveryMarkdown } from "./brandVideoWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
 import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
-import { productSceneQualityEnabled, productSceneRequirements, createProductSceneOptions } from "./productSceneWorkflowModel";
+import {
+  productSceneQualityEnabled,
+  productSceneRequirements,
+  createProductSceneOptions,
+} from "./productSceneWorkflowModel";
 import { reelbenchRequirements, createReelbenchOptions } from "./reelbenchWorkflowModel";
 import { reverseVideoRequirements, createReverseVideoOptions } from "./reverseVideoWorkflowModel";
 import { musicVideoRequirements, createMusicVideoOptions } from "./musicVideoWorkflowModel";
@@ -217,10 +215,10 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
     insertTitle: "视频拉片与分镜合成",
     insertToastDescription:
       "选择本地视频，确认计划后测量切点、标注镜头，批量审核并导出报告和同步分镜视频。",
-    requirements: (config) =>
-      reelbenchRequirements(config.reelbench ?? createReelbenchOptions()),
+    requirements: (config) => reelbenchRequirements(config.reelbench ?? createReelbenchOptions()),
     historyRoles: () => ["text"] as const,
-    createRunner: (clients) => createReelbenchWorkflowRunner({ promptClient: clients.promptClient }),
+    createRunner: (clients) =>
+      createReelbenchWorkflowRunner({ promptClient: clients.promptClient }),
     loadTemplate: () =>
       import("./workflowTemplates").then((module) => module.createReelbenchWorkflow),
     repository: {
@@ -443,7 +441,8 @@ export const WORKFLOW_KINDS: readonly WorkflowKindDefinition[] = [
     nodeTitle: "品牌视觉短片工作流",
     historyTitle: "品牌视频",
     insertTitle: "品牌视觉短片",
-    insertToastDescription: "填写系列或节日创意，选择已定稿模特及商品参考，审核首镜后制作品牌短片。",
+    insertToastDescription:
+      "填写系列或节日创意，选择已定稿模特及商品参考，审核首镜后制作品牌短片。",
     requirements: (config) =>
       brandVideoRequirements(config.brandVideo ?? createBrandVideoOptions()),
     historyRoles: (config) =>

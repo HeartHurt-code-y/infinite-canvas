@@ -50,7 +50,7 @@ const RUST_WORKFLOW_KIND_AS_STR = [
 const configWith = (field: string): KnowledgeVideoWorkflowConfig =>
   field === ""
     ? ({ brief: "" } as unknown as KnowledgeVideoWorkflowConfig)
-    : ({ brief: "", [field]: {} }) as unknown as KnowledgeVideoWorkflowConfig;
+    : ({ brief: "", [field]: {} } as unknown as KnowledgeVideoWorkflowConfig);
 
 const FAKE_CLIENTS = {
   promptClient: {},

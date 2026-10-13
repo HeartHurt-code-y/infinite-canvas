@@ -25,9 +25,7 @@ describe("workflow parameter descriptions", () => {
     expect(input).toHaveAccessibleDescription("填写实物名称，例如便携咖啡杯。");
     rerender(<Field invalid />);
     await waitFor(() =>
-      expect(input).toHaveAccessibleDescription(
-        "请填写产品名称 填写实物名称，例如便携咖啡杯。",
-      ),
+      expect(input).toHaveAccessibleDescription("请填写产品名称 填写实物名称，例如便携咖啡杯。"),
     );
     rerender(<Field invalid={false} />);
     await waitFor(() =>
@@ -92,9 +90,7 @@ describe("workflow parameter descriptions", () => {
     expect(input).toHaveAccessibleDescription("填写实物名称，例如便携咖啡杯。");
     fireEvent.click(input);
     await waitFor(() =>
-      expect(input).toHaveAccessibleDescription(
-        "请填写产品名称 填写实物名称，例如便携咖啡杯。",
-      ),
+      expect(input).toHaveAccessibleDescription("请填写产品名称 填写实物名称，例如便携咖啡杯。"),
     );
   });
 
