@@ -16,6 +16,7 @@ pub mod credentials;
 pub mod downloader;
 pub mod error;
 pub mod frame_extractor;
+pub(crate) mod gateway_profile;
 mod gpt_image_style_library;
 pub mod image_normalize;
 pub mod local_base64_assets;

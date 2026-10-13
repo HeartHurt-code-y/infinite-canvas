@@ -15,11 +15,8 @@ use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
-    model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
-    provider::{
-        ImageSource, ProviderRuntime, ResultDownloadAuth, is_pixverse_gateway_task,
-        is_seedance_draft_gateway_task, redact_url_string,
-    },
+    gateway_profile::GatewayProfile,
+    provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
     result_transfer::{
         self, TransferPolicy, TransferProgress, download_result, is_retryable_transfer,
         production_policy,
@@ -188,14 +185,10 @@ impl LocalResultService {
     }
 
     fn is_sp25_video_result(&self, task_id: &str) -> BackendResult<bool> {
-        // 按次系列、RD 与草稿样片网关使用带签名直链，重查原任务续签。
+        // 已注册网关家族（按次系列、RD、PixVerse、草稿样片）使用带签名直链，
+        // 重查原任务续签。
         let task = self.storage.get_task_execution(task_id)?;
-        Ok(task
-            .remote_model_id_snapshot
-            .as_deref()
-            .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model))
-            || is_seedance_draft_gateway_task(&task)
-            || is_pixverse_gateway_task(&task))
+        Ok(GatewayProfile::from_task(&task).is_some())
     }
 
     fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {

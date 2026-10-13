@@ -2,6 +2,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     error::{BackendError, BackendResult},
+    gateway_profile::GatewayProfile,
     provider_adapter::{
         ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH, BAILIAN_VIDEO_PATH,
         DASHSCOPE_VIDEO_ENVELOPE, GRSAI_ADAPTER_ID,
@@ -485,8 +486,6 @@ fn is_wan_30_video_model(model_id: &str) -> bool {
     identity.contains("wan3.0-video") || identity.contains("wan3-0-video")
 }
 
-pub(crate) const MOYU_PIXVERSE_VIDEO_PROFILE: &str = "moyu_pixverse_video_v1";
-
 /// 只接受文档的完整型号，避免把 PixVerse-V5 或未来后缀型号误套 V6/C1 能力。
 pub(crate) fn is_pixverse_video_model(model_id: &str) -> bool {
     model_id.eq_ignore_ascii_case("PixVerse-V6") || model_id.eq_ignore_ascii_case("PixVerse-C1")
@@ -535,7 +534,7 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
     }
     Some(json!({
         "resultType": "video",
-        "requestProfileId": MOYU_PIXVERSE_VIDEO_PROFILE,
+        "requestProfileId": GatewayProfile::PixVerse.profile_id(),
         "profileVersion": 1,
         "request": {
             "path": GATEWAY_VIDEO_PATH,
@@ -557,8 +556,6 @@ pub(crate) fn is_seedance_25_video_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
     identity.contains("seedance-2-5") || identity.contains("seedance-2.5")
 }
-
-pub(crate) const MOYU_SEEDANCE_DRAFT_PROFILE: &str = "moyu_seedance_25_draft_v1";
 
 pub(crate) fn is_seedance_draft_video_model(model_id: &str) -> bool {
     model_id == "doubao-seedance-2-5-260628"
@@ -584,7 +581,7 @@ fn apply_seedance_draft_video_dialect(
             durations.extend((4..=30).map(Value::from));
             json!({
                 "resultType": "video",
-                "requestProfileId": MOYU_SEEDANCE_DRAFT_PROFILE,
+                "requestProfileId": GatewayProfile::SeedanceDraft.profile_id(),
                 "profileVersion": 1,
                 "request": {
                     "path": GATEWAY_VIDEO_PATH,
@@ -616,7 +613,7 @@ fn apply_seedance_draft_video_dialect(
         }
         RequestDialect::VolcengineArk
             if operation.get("requestProfileId").and_then(Value::as_str)
-                == Some(MOYU_SEEDANCE_DRAFT_PROFILE) =>
+                == Some(GatewayProfile::SeedanceDraft.profile_id()) =>
         {
             // default_operation_schema 按名称提供通用国内 Seedance 档案；端点随后
             // 仍由本连接的方言统一改写，恢复方舟档案不改变其他模型或适配器。
@@ -741,7 +738,7 @@ fn sp25_per_use_video_operation_schema(model_id: &str) -> Option<Value> {
     });
     Some(json!({
         "resultType": "video",
-        "requestProfileId": "sp25_per_use_video_v1",
+        "requestProfileId": GatewayProfile::Sp25PerUse.profile_id(),
         "profileVersion": 1,
         "request": {
             "path": "/v1/video/generations",
@@ -846,7 +843,7 @@ fn rd_video_operation_schema(model_id: &str) -> Option<Value> {
     });
     Some(json!({
         "resultType": "video",
-        "requestProfileId": "rd_video_v1",
+        "requestProfileId": GatewayProfile::RdVideo.profile_id(),
         "profileVersion": 1,
         "request": {
             "path": "/v1/video/generations",
@@ -2444,7 +2441,7 @@ pub fn refresh_pixverse_video_defaults(schema: &mut Value, model_id: &str) -> bo
         return false;
     };
     let has_current_profile = operation.get("requestProfileId").and_then(Value::as_str)
-        == Some(MOYU_PIXVERSE_VIDEO_PROFILE)
+        == Some(GatewayProfile::PixVerse.profile_id())
         && operation
             .get("request")
             .and_then(|request| request.get("mediaEncoding"))
@@ -2693,7 +2690,7 @@ pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) ->
         && schema
             .pointer("/video_generation/requestProfileId")
             .and_then(Value::as_str)
-            == Some(MOYU_SEEDANCE_DRAFT_PROFILE)
+            == Some(GatewayProfile::SeedanceDraft.profile_id())
     {
         // 已按网关草稿合同迁移的档案不再走旧国内能力补齐，避免每次打开都先
         // 加回 1080p/联网搜索、再由连接方言删除，造成无意义的重复写入。
@@ -2784,7 +2781,9 @@ pub fn refresh_rd_video_defaults(schema: &mut Value, model_id: &str) -> bool {
     else {
         return false;
     };
-    if operation.get("requestProfileId").and_then(Value::as_str) == Some("rd_video_v1") {
+    if operation.get("requestProfileId").and_then(Value::as_str)
+        == Some(GatewayProfile::RdVideo.profile_id())
+    {
         return false;
     }
     let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
@@ -3402,7 +3401,10 @@ mod tests {
             assert!(is_pixverse_video_model(model_id));
             let operation =
                 default_operation_schema(model_id, GenerationOperation::VideoGeneration);
-            assert_eq!(operation["requestProfileId"], MOYU_PIXVERSE_VIDEO_PROFILE);
+            assert_eq!(
+                operation["requestProfileId"],
+                GatewayProfile::PixVerse.profile_id()
+            );
             assert_eq!(operation["request"]["parameterContainer"], "root");
             assert_eq!(
                 operation["request"]["mediaEncoding"],
@@ -3464,7 +3466,7 @@ mod tests {
             );
             assert_eq!(
                 schema["video_generation"]["requestProfileId"],
-                MOYU_PIXVERSE_VIDEO_PROFILE
+                GatewayProfile::PixVerse.profile_id()
             );
         }
         let advertised = json!({ "operations": {
@@ -3518,7 +3520,10 @@ mod tests {
             RequestDialect::OpenAiCompatible
         ));
         let video = &repaired["video_generation"];
-        assert_eq!(video["requestProfileId"], MOYU_PIXVERSE_VIDEO_PROFILE);
+        assert_eq!(
+            video["requestProfileId"],
+            GatewayProfile::PixVerse.profile_id()
+        );
         assert_eq!(video["request"]["path"], "/v1/video/generations");
         assert_eq!(video["request"]["parameterContainer"], "root");
         assert!(video["request"].get("contentContainer").is_none());
@@ -4129,7 +4134,10 @@ mod tests {
             RequestDialect::OpenAiCompatible
         ));
         let gateway = &schema["video_generation"];
-        assert_eq!(gateway["requestProfileId"], MOYU_SEEDANCE_DRAFT_PROFILE);
+        assert_eq!(
+            gateway["requestProfileId"],
+            GatewayProfile::SeedanceDraft.profile_id()
+        );
         assert_eq!(gateway["request"]["path"], "/v1/video/generations");
         assert_eq!(gateway["parameters"]["duration"]["default"], 5);
         assert_eq!(

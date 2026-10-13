@@ -12,11 +12,11 @@ use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
+    gateway_profile::{DEFAULT_VIDEO_POLL_INTERVAL, GatewayPollCadence, GatewayProfile},
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
     model_schema::{
-        RequestDialect, apply_request_dialect, default_model_schema, is_pixverse_video_model,
-        is_rd_video_model, is_seedance_draft_video_model, is_sp25_per_use_video_model,
+        RequestDialect, apply_request_dialect, default_model_schema, is_seedance_draft_video_model,
         normalize_parameters, refresh_pixverse_video_defaults,
     },
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
@@ -34,46 +34,29 @@ use super::{
 };
 
 const MAX_AUTOMATIC_RETRIES: u32 = 3;
-const DEFAULT_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const WAN_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
-const PIXVERSE_INITIAL_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-const PIXVERSE_LATER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
-const PIXVERSE_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// 视频任务的轮询策略：家族任务按网关家族档案的节奏（`GatewayProfile::poll_cadence`），
+/// 其余任务按模型推导的恒定间隔（万相系 15 秒，其他 5 秒）。
 #[derive(Clone, Copy)]
 struct VideoPollingPolicy {
-    initial_interval: std::time::Duration,
-    pixverse: bool,
+    family: Option<GatewayProfile>,
+    cadence: GatewayPollCadence,
 }
 
 impl VideoPollingPolicy {
     fn for_model(model_id: Option<&str>, dialect: RequestDialect) -> Self {
-        Self {
-            initial_interval: video_poll_interval(model_id),
-            pixverse: dialect == RequestDialect::OpenAiCompatible
-                && model_id.is_some_and(is_pixverse_video_model),
-        }
-    }
-
-    fn interval(self, elapsed: std::time::Duration) -> std::time::Duration {
-        if self.pixverse && elapsed >= PIXVERSE_INITIAL_POLL_WINDOW {
-            PIXVERSE_LATER_POLL_INTERVAL
-        } else {
-            self.initial_interval
-        }
+        let family = model_id
+            .and_then(GatewayProfile::from_model_id)
+            .filter(|family| family.available_on(dialect));
+        let cadence = family
+            .map(GatewayProfile::poll_cadence)
+            .unwrap_or_else(|| GatewayPollCadence::uniform(video_poll_interval(model_id)));
+        Self { family, cadence }
     }
 
     fn next_wait(self, elapsed: std::time::Duration) -> Option<std::time::Duration> {
-        let interval = self.interval(elapsed);
-        if self.pixverse {
-            let remaining = PIXVERSE_POLL_WINDOW.checked_sub(elapsed)?;
-            if remaining.is_zero() {
-                return None;
-            }
-            Some(interval.min(remaining))
-        } else {
-            Some(interval)
-        }
+        self.cadence.next_poll_wait(elapsed)
     }
 }
 
@@ -119,7 +102,7 @@ struct SuccessfulObservation {
 }
 
 /// 冻结任务时以绑定的远端模型 ID 为准。旧库中的 model_definitions 可能仍存着
-/// Seedance 通用档案；按次、RD 与 PixVerse 型号必须使用已知的专属协议，不能让旧档案决定
+/// Seedance 通用档案；已注册家族必须使用已知的专属协议，不能让旧档案决定
 /// 素材暂存或付费请求的形状。其他型号和操作继续沿用已保存的自定义 Schema。
 fn operation_schema_for_start(
     stored_operations: &Value,
@@ -128,25 +111,30 @@ fn operation_schema_for_start(
     dialect: RequestDialect,
 ) -> Option<Value> {
     if operation == GenerationOperation::VideoGeneration
-        && dialect == RequestDialect::OpenAiCompatible
-        && let Some(model_id) = remote_model_id.filter(|id| is_pixverse_video_model(id))
+        && let Some(model_id) = remote_model_id
+        && let Some(family) = GatewayProfile::from_model_id(model_id)
     {
-        let mut refreshed = stored_operations.clone();
-        if refreshed.get(operation.as_str()).is_none() {
-            return default_model_schema(model_id, &[operation])
-                .get(operation.as_str())
-                .cloned();
+        match family {
+            // PixVerse 的已知合同属于兼容网关；同名模型在其他连接上，不能把
+            // 供应商自定义的原生路径替换成魔芋路径。
+            GatewayProfile::PixVerse if dialect == RequestDialect::OpenAiCompatible => {
+                if stored_operations.get(operation.as_str()).is_none() {
+                    return default_model_schema(model_id, &[operation])
+                        .get(operation.as_str())
+                        .cloned();
+                }
+                let mut refreshed = stored_operations.clone();
+                refresh_pixverse_video_defaults(&mut refreshed, model_id);
+                return refreshed.get(operation.as_str()).cloned();
+            }
+            // 按次与 RD 必须整体使用代码内的规范契约。
+            GatewayProfile::Sp25PerUse | GatewayProfile::RdVideo => {
+                return default_model_schema(model_id, &[operation])
+                    .get(operation.as_str())
+                    .cloned();
+            }
+            _ => {}
         }
-        refresh_pixverse_video_defaults(&mut refreshed, model_id);
-        return refreshed.get(operation.as_str()).cloned();
-    }
-    if operation == GenerationOperation::VideoGeneration
-        && let Some(model_id) =
-            remote_model_id.filter(|id| is_sp25_per_use_video_model(id) || is_rd_video_model(id))
-    {
-        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration])
-            .get(operation.as_str())
-            .cloned();
     }
     stored_operations.get(operation.as_str()).cloned()
 }
@@ -1025,7 +1013,10 @@ impl GenerationTaskService {
             let mut backoff_ms = None;
             for retry_index in 0..=MAX_AUTOMATIC_RETRIES {
                 if poll_policy.next_wait(poll_started.elapsed()).is_none() {
-                    self.stop_expired_video_polling(task_id)?;
+                    self.stop_expired_video_polling(
+                        task_id,
+                        poll_policy.cadence.window_secs().unwrap_or_default(),
+                    )?;
                     return Ok(());
                 }
                 let attempt_id = Uuid::new_v4().to_string();
@@ -1090,11 +1081,11 @@ impl GenerationTaskService {
                             return Ok(());
                         }
                         let mut delay = retry_delay_ms(retry_index + 1);
-                        if poll_policy.pixverse {
-                            delay =
-                                delay
-                                    .max(poll_policy.interval(poll_started.elapsed()).as_millis()
-                                        as u64);
+                        if let Some(floor) = poll_policy
+                            .cadence
+                            .retry_delay_floor(poll_started.elapsed())
+                        {
+                            delay = delay.max(floor.as_millis() as u64);
                         }
                         warn!(
                             "[generation] 视频状态查询失败，进入查询重试: taskId={task_id}, 第 {}/{MAX_AUTOMATIC_RETRIES} 次查询重试, 退避 {delay}ms（只重试查询，不会重新提交生成）",
@@ -1111,12 +1102,9 @@ impl GenerationTaskService {
                         )?;
                         self.emit_retry_notice(task_id, retry_index + 1, delay, Some(&error), true);
                         let retry_wait = std::time::Duration::from_millis(delay);
-                        let retry_wait = if poll_policy.pixverse {
-                            retry_wait
-                                .min(PIXVERSE_POLL_WINDOW.saturating_sub(poll_started.elapsed()))
-                        } else {
-                            retry_wait
-                        };
+                        let retry_wait = poll_policy
+                            .cadence
+                            .bound_retry_wait(retry_wait, poll_started.elapsed());
                         tokio::time::sleep(retry_wait).await;
                         backoff_ms = Some(delay);
                     }
@@ -1141,7 +1129,11 @@ impl GenerationTaskService {
             );
             let kind = if image_task { "图片" } else { "视频" };
             let remote_status = observation.remote_status.to_ascii_uppercase();
-            let remote_status = if poll_policy.pixverse && remote_status.trim().is_empty() {
+            let remote_status = if poll_policy
+                .family
+                .is_some_and(GatewayProfile::empty_remote_status_means_pending)
+                && remote_status.trim().is_empty()
+            {
                 "PENDING"
             } else {
                 remote_status.as_str()
@@ -1438,21 +1430,24 @@ impl GenerationTaskService {
                 }
             }
             let Some(poll_interval) = poll_policy.next_wait(poll_started.elapsed()) else {
-                self.stop_expired_video_polling(task_id)?;
+                self.stop_expired_video_polling(
+                    task_id,
+                    poll_policy.cadence.window_secs().unwrap_or_default(),
+                )?;
                 return Ok(());
             };
             let _ = tokio::time::timeout(poll_interval, wake.notified()).await;
         }
     }
 
-    fn stop_expired_video_polling(&self, task_id: &str) -> BackendResult<()> {
+    fn stop_expired_video_polling(&self, task_id: &str, window_secs: u64) -> BackendResult<()> {
         let task = self.storage.get_task_execution(task_id)?;
         let reason = json!({
             "kind": "remote_polling_window_expired",
             "message": "已达到 10 分钟自动查询时限，可手动查询原任务继续获取结果，不会重新提交生成",
             "remoteTaskId": task.remote_task_id,
             "queryOnly": true,
-            "windowSeconds": PIXVERSE_POLL_WINDOW.as_secs(),
+            "windowSeconds": window_secs,
         });
         self.commit_fact(
             task_id,

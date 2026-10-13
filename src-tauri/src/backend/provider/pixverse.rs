@@ -1,6 +1,26 @@
 //! PixVerse gateway contract: images/IDs at the root, feature switches in metadata.
 //! Source: https://doc.moyu.info/9520931m0.md
-use super::*;
+//!
+//! 对父模块的接口面只有五个函数：[`prepare_pixverse_video_body`]（本地图片
+//! 上传 + 提交体）、`build_pixverse_video_body`（纯请求体）、
+//! [`parse_pixverse_video_task_id`] 与 [`parse_observation`]（响应解析）、
+//! `ambiguous_submission_error`（模糊失败包装）。家族身份的判定不在本模块，
+//! 见 `gateway_profile::GatewayProfile`。
+use reqwest::multipart;
+use serde_json::{Map, Value, json};
+use url::Url;
+use uuid::Uuid;
+
+use crate::backend::error::{BackendError, BackendResult};
+use crate::backend::storage::{GenerationLifecycleFact, TaskExecutionRecord};
+
+use super::{
+    CapturedHttpResponse, GenerationObservation, ProviderRuntime, ResolvedGeneration,
+    ResolvedProviderContext, endpoint, ensure_request_encoding, insert_mapped_parameters,
+    mapped_parameters, parse_video_observation, redact_request_value,
+    require_public_reference_url_value_with, require_success, sanitize_url, valid_sp25_task_id,
+    video_prompt,
+};
 
 impl ProviderRuntime {
     pub(super) async fn prepare_pixverse_video_body(
@@ -321,8 +341,16 @@ pub(super) fn parse_observation(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::backend::{storage::NewTask, types::UpsertProviderConnectionCommand};
+    use crate::backend::credentials::CredentialStore;
+    use crate::backend::model_schema::default_model_schema;
+    use crate::backend::provider::{CompiledContentItem, GenerationSubmission, ResolvedMedia};
+    use crate::backend::storage::{GenerationTaskLifecycle, NewTask, Storage};
+    use crate::backend::types::{
+        GenerationOperation, MediaType, UpsertProviderConnectionCommand, VideoTaskType,
+    };
     use std::{
         io::{Read, Write},
         net::{TcpListener, TcpStream},

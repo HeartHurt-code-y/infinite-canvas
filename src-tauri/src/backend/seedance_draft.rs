@@ -2,7 +2,8 @@ use serde_json::{Value, json};
 
 use super::{
     error::{BackendError, BackendResult},
-    model_schema::{MOYU_SEEDANCE_DRAFT_PROFILE, is_seedance_draft_video_model},
+    gateway_profile::GatewayProfile,
+    model_schema::is_seedance_draft_video_model,
     provider_adapter::MOYU_ADAPTER_ID,
     storage::TaskExecutionRecord,
     types::{
@@ -40,7 +41,7 @@ pub(crate) fn prepare_promotion(
             .as_ref()
             .and_then(|schema| schema.get("requestProfileId"))
             .and_then(Value::as_str)
-            != Some(MOYU_SEEDANCE_DRAFT_PROFILE)
+            != Some(GatewayProfile::SeedanceDraft.profile_id())
         || task
             .logical_request
             .get("seedanceDraftSourceTaskId")
@@ -130,7 +131,7 @@ mod tests {
                 "modelDefinitionId": "model-original", "outputName": "海边样片",
                 "workflowRunId": "old-approved-workflow", "prompt": [{"kind":"text","text":"海边"}],
                 "parameters": {"draft": true, "duration": 5, "ratio": "16:9", "resolution": "480p", "generate_audio": true},
-                "modelOperationSchemaSnapshot": {"requestProfileId": MOYU_SEEDANCE_DRAFT_PROFILE},
+                "modelOperationSchemaSnapshot": {"requestProfileId": GatewayProfile::SeedanceDraft.profile_id()},
                 "generationCount": 1
             }),
             resolved_request: None,
@@ -160,7 +161,7 @@ mod tests {
                 .model_operation_schema_snapshot
                 .as_ref()
                 .unwrap()["requestProfileId"],
-            MOYU_SEEDANCE_DRAFT_PROFILE
+            GatewayProfile::SeedanceDraft.profile_id()
         );
         assert_eq!(
             prepared.command.output_name.as_deref(),

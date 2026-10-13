@@ -6,10 +6,7 @@ use serde_json::{Value, json};
 use super::{Storage, now_ms};
 use crate::backend::{
     error::{BackendError, BackendResult},
-    model_schema::{
-        RequestDialect, is_pixverse_video_model, is_rd_video_model, is_seedance_draft_video_model,
-        is_sp25_per_use_video_model,
-    },
+    gateway_profile::GatewayProfile,
     types::{
         GenerationOperation, GenerationResultRecord, GenerationTaskStatus, MediaType, QueryHealth,
         SaveStatus, TokenUsage,
@@ -1135,14 +1132,10 @@ fn is_sp25_video_result_task(
         params![task_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    Ok(model_id.as_deref().is_some_and(|model| {
-        is_sp25_per_use_video_model(model)
-            || is_rd_video_model(model)
-            || (is_pixverse_video_model(model)
-                && RequestDialect::for_adapter(&adapter_id) == RequestDialect::OpenAiCompatible)
-            || (is_seedance_draft_video_model(model)
-                && RequestDialect::for_adapter(&adapter_id) == RequestDialect::OpenAiCompatible)
-    }) && task_remote_id == result.remote_task_id)
+    Ok(
+        GatewayProfile::for_frozen_snapshot(model_id.as_deref(), &adapter_id).is_some()
+            && task_remote_id == result.remote_task_id,
+    )
 }
 
 fn upsert_result(

@@ -19,11 +19,11 @@ use self::pixverse::{build_pixverse_video_body, parse_pixverse_video_task_id};
 use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
+    gateway_profile::GatewayProfile,
     model_schema::{
-        GRSAI_IMAGE_PROFILE, MOYU_SEEDANCE_DRAFT_PROFILE, RequestDialect, apply_request_dialect,
-        default_model_schema, grsai_pixel_dimensions, infer_catalog_schema,
-        is_grsai_pixel_image_model, is_pixverse_video_model, is_rd_video_model,
-        is_seedance_25_video_model, is_seedance_draft_video_model, is_sp25_per_use_video_model,
+        GRSAI_IMAGE_PROFILE, RequestDialect, apply_request_dialect, default_model_schema,
+        grsai_pixel_dimensions, infer_catalog_schema, is_grsai_pixel_image_model,
+        is_pixverse_video_model, is_seedance_25_video_model, is_seedance_draft_video_model,
         operations_from_schema, provider_scoped_model_definition_id, schema_for_enabled_operations,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
@@ -1461,30 +1461,41 @@ impl ProviderRuntime {
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
-                let sp25_per_use =
-                    resolved.operation_schema["requestProfileId"] == "sp25_per_use_video_v1";
-                let rd_video = resolved.operation_schema["requestProfileId"] == "rd_video_v1";
-                let pixverse =
-                    resolved.operation_schema["requestProfileId"] == "moyu_pixverse_video_v1";
-                let seedance_draft = is_seedance_draft_gateway_task(task);
-                let body = if sp25_per_use {
-                    self.prepare_sp25_video_body(task, attempt_id, &context, resolved)
-                        .await?
-                } else if rd_video {
-                    self.prepare_rd_video_body(task, attempt_id, &context, resolved)
-                        .await?
-                } else if pixverse {
-                    self.prepare_pixverse_video_body(task, attempt_id, &context, resolved)
-                        .await?
-                } else {
-                    finalize_video_body(
+                // 提交分派以冻结档案为权威；草稿样片由任务快照识别（转正片
+                // 请求沿用草稿任务身份，冻结档案同样是草稿合同）。
+                let seedance_draft_task =
+                    GatewayProfile::from_task(task) == Some(GatewayProfile::SeedanceDraft);
+                let family = match GatewayProfile::from_operation_schema(&resolved.operation_schema)
+                {
+                    Some(
+                        family @ (GatewayProfile::Sp25PerUse
+                        | GatewayProfile::RdVideo
+                        | GatewayProfile::PixVerse),
+                    ) => Some(family),
+                    _ if seedance_draft_task => Some(GatewayProfile::SeedanceDraft),
+                    _ => None,
+                };
+                let body = match family {
+                    Some(GatewayProfile::Sp25PerUse) => {
+                        self.prepare_sp25_video_body(task, attempt_id, &context, resolved)
+                            .await?
+                    }
+                    Some(GatewayProfile::RdVideo) => {
+                        self.prepare_rd_video_body(task, attempt_id, &context, resolved)
+                            .await?
+                    }
+                    Some(GatewayProfile::PixVerse) => {
+                        self.prepare_pixverse_video_body(task, attempt_id, &context, resolved)
+                            .await?
+                    }
+                    Some(GatewayProfile::SeedanceDraft) | None => finalize_video_body(
                         &context.adapter_id,
                         &resolved.operation_schema,
                         build_video_body(task, resolved)?,
-                    )
+                    ),
                 };
                 let path = request_path(&resolved.operation_schema, "/v1/video/generations")?;
-                let response = if sp25_per_use || rd_video || seedance_draft || pixverse {
+                let response = if family.is_some() {
                     // 按次、RD 与 Seedance 草稿样片都是独立计费的提交；通用网关的
                     // 「不认识字段就剥离重发」不得改变一次付费提交的请求体，尤其
                     // 不能因剥离 draft 而意外创建正片。
@@ -1500,29 +1511,26 @@ impl ProviderRuntime {
                         },
                     )
                     .await
-                    .map_err(|error| {
-                        if pixverse {
+                    .map_err(|error| match family {
+                        Some(GatewayProfile::PixVerse) => {
                             pixverse::ambiguous_submission_error(error)
-                        } else if seedance_draft {
-                            seedance_ambiguous_submission_error(error)
-                        } else {
-                            sp25_ambiguous_submission_error(error)
                         }
+                        Some(GatewayProfile::SeedanceDraft) => {
+                            seedance_ambiguous_submission_error(error)
+                        }
+                        _ => sp25_ambiguous_submission_error(error),
                     })?
                 } else {
                     self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
                         .await?
                 };
-                let task_id = if sp25_per_use {
-                    parse_sp25_video_task_id(&response)?
-                } else if pixverse {
-                    parse_pixverse_video_task_id(&response)?
-                } else if seedance_draft {
-                    parse_seedance_draft_task_id(&response)?
-                } else {
-                    parse_video_task_id(&response)?
+                let task_id = match family {
+                    Some(GatewayProfile::Sp25PerUse) => parse_sp25_video_task_id(&response)?,
+                    Some(GatewayProfile::PixVerse) => parse_pixverse_video_task_id(&response)?,
+                    Some(GatewayProfile::SeedanceDraft) => parse_seedance_draft_task_id(&response)?,
+                    Some(GatewayProfile::RdVideo) | None => parse_video_task_id(&response)?,
                 };
-                if seedance_draft
+                if family == Some(GatewayProfile::SeedanceDraft)
                     && resolved.parameters["draft_task_id"].as_str() == Some(task_id.as_str())
                 {
                     return Err(seedance_ambiguous_submission_error(BackendError::protocol(
@@ -1691,27 +1699,18 @@ impl ProviderRuntime {
     }
 
     /// 已成功任务的签名下载 URL 可过期；只重查冻结任务，不重新提交收费请求。
-    /// 按次系列、RD 与 Seedance 草稿样片共用同一续签路径；后者的 task_id、
-    /// SUCCESS 状态与签名结果地址来自网关的 data 信封。
+    /// 按次系列、RD、PixVerse 与 Seedance 草稿样片共用同一续签路径；后两者的
+    /// 任务身份、SUCCESS 状态与签名结果地址有各自的信封形状。
     pub(crate) async fn refresh_sp25_video_url(
         &self,
         task: &TaskExecutionRecord,
     ) -> BackendResult<String> {
-        let seedance_draft = is_seedance_draft_gateway_task(task);
-        let refreshable = seedance_draft
-            || is_pixverse_gateway_task(task)
-            || task
-                .remote_model_id_snapshot
-                .as_deref()
-                .is_some_and(|model| {
-                    is_sp25_per_use_video_model(model) || is_rd_video_model(model)
-                });
-        if !refreshable {
-            return Err(BackendError::validation(
+        let family = GatewayProfile::from_task(task).ok_or_else(|| {
+            BackendError::validation(
                 "当前视频请求档案不支持重新查询下载链接",
                 json!({ "taskId": task.id }),
-            ));
-        }
+            )
+        })?;
         let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
             BackendError::validation("远程任务 ID 缺失", json!({ "taskId": task.id }))
         })?;
@@ -1734,27 +1733,25 @@ impl ProviderRuntime {
             ));
         }
         let payload: Value = serde_json::from_str(&response.body)?;
-        let observed_id = if seedance_draft {
-            payload
+        let observed_id = match family {
+            // 草稿样片的任务身份与状态在网关的 data 信封里。
+            GatewayProfile::SeedanceDraft => payload
                 .pointer("/data/task_id")
-                .or_else(|| payload.get("task_id"))
-        } else {
-            payload.get("task_id")
+                .or_else(|| payload.get("task_id")),
+            _ => payload.get("task_id"),
         }
         .and_then(Value::as_str);
-        let succeeded = if seedance_draft {
-            payload
+        let succeeded = match family {
+            GatewayProfile::SeedanceDraft => payload
                 .pointer("/data/status")
                 .or_else(|| payload.get("status"))
                 .and_then(Value::as_str)
-                .is_some_and(|status| matches!(status, "SUCCESS" | "succeeded"))
-        } else if is_pixverse_gateway_task(task) {
-            payload
+                .is_some_and(|status| matches!(status, "SUCCESS" | "succeeded")),
+            GatewayProfile::PixVerse => payload
                 .get("status")
                 .and_then(Value::as_str)
-                .is_some_and(|status| status.eq_ignore_ascii_case("success"))
-        } else {
-            payload.get("status").and_then(Value::as_str) == Some("succeeded")
+                .is_some_and(|status| status.eq_ignore_ascii_case("success")),
+            _ => payload.get("status").and_then(Value::as_str) == Some("succeeded"),
         };
         if observed_id != Some(remote_task_id) || !succeeded {
             return Err(BackendError::protocol(
@@ -1809,7 +1806,7 @@ impl ProviderRuntime {
             .await?;
         let observation = if image_task {
             parse_image_observation(&response)?
-        } else if is_pixverse_gateway_task(task) {
+        } else if GatewayProfile::from_task(task) == Some(GatewayProfile::PixVerse) {
             pixverse::parse_observation(
                 &response,
                 task.remote_task_id.as_deref().unwrap_or_default(),
@@ -4217,28 +4214,13 @@ fn build_rd_video_body(
     Ok(Value::Object(body))
 }
 
-pub(crate) fn is_pixverse_gateway_task(task: &TaskExecutionRecord) -> bool {
-    task.remote_model_id_snapshot
-        .as_deref()
-        .is_some_and(is_pixverse_video_model)
-        && RequestDialect::for_adapter(&task.adapter_id_snapshot)
-            == RequestDialect::OpenAiCompatible
-}
-
-pub(crate) fn is_seedance_draft_gateway_task(task: &TaskExecutionRecord) -> bool {
-    task.remote_model_id_snapshot
-        .as_deref()
-        .is_some_and(is_seedance_draft_video_model)
-        && RequestDialect::for_adapter(&task.adapter_id_snapshot)
-            == RequestDialect::OpenAiCompatible
-}
-
 fn build_seedance_draft_promotion_body(
     model: &str,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<Value> {
     if !is_seedance_draft_video_model(model)
-        || resolved.operation_schema["requestProfileId"] != MOYU_SEEDANCE_DRAFT_PROFILE
+        || GatewayProfile::from_operation_schema(&resolved.operation_schema)
+            != Some(GatewayProfile::SeedanceDraft)
     {
         return Err(BackendError::validation(
             "草稿转正片仅支持已接入的 Seedance 草稿样片网关协议",
@@ -4293,8 +4275,8 @@ fn build_video_body(
         ensure_request_encoding(&resolved.operation_schema, "json")?;
         return build_seedance_draft_promotion_body(model, resolved);
     }
-    let seedance_draft =
-        resolved.operation_schema["requestProfileId"] == MOYU_SEEDANCE_DRAFT_PROFILE;
+    let seedance_draft = GatewayProfile::from_operation_schema(&resolved.operation_schema)
+        == Some(GatewayProfile::SeedanceDraft);
     if seedance_draft && !is_seedance_draft_video_model(model) {
         return Err(BackendError::validation(
             "Seedance 草稿样片协议与远程模型不一致",
