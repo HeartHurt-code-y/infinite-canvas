@@ -80,10 +80,9 @@ jobs:
             src-tauri/resources/ai-media-runtime
             src-tauri/resources/ai-media-quality-runtime
             .cache/runtime-components/packages
-          key: macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/runtime-component-zip.py', 'scripts/macos-runtime-signature.mjs', 'scripts/ai-media/**', 'tools/blender/**', 'tools/remotion-runtime/*.mjs', 'tools/remotion-runtime/*.tsx', 'tools/remotion-runtime/package.json', 'tools/remotion-runtime/pnpm-lock.yaml', 'src-tauri/skills/gpt-image-2-style-library/**') }}
-          restore-keys: |
-            macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-
-            macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-
+          # Some legacy preparers only validate existing bytes, rather than their
+          # complete recipe identity. Exact keys prevent restoring an older recipe.
+          key: macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/runtime-component-zip.py', 'scripts/macos-runtime-signature.mjs', 'scripts/ai-media/**', 'tools/blender/**', 'tools/remotion-runtime/*.mjs', 'tools/remotion-runtime/*.tsx', 'tools/remotion-runtime/package.json', 'tools/remotion-runtime/pnpm-lock.yaml', 'src-tauri/skills/gpt-image-2-style-library/**', '!scripts/**/*.test.mjs', '!tools/**/*.test.mjs') }}
       - name: Report runtime component cache
         env:
           CACHE_HIT: ${{ steps.runtime-components-cache.outputs.cache-hit }}
