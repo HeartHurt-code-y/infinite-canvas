@@ -1,5 +1,5 @@
 import { Icon } from "./Icon";
-import { backendErrorDetails, backendErrorMessage } from "../lib/backend";
+import { backendErrorDetails, backendErrorMessage, formatRawBackendError } from "../lib/backend";
 import { workflowErrorPresentation } from "../lib/workflowErrors";
 import "./ErrorAlert.css";
 
@@ -17,7 +17,8 @@ import "./ErrorAlert.css";
  * 这里一次性做对的四件事
  * ---------------------
  *   1. 只显示人能读的摘要：原始 payload / 堆栈交给 `backendErrorMessage` 剥掉，
- *      只留「发生了什么」，永远不把 JSON 直接当正文（详见 `backend.ts`）。
+ *      只留「发生了什么」（详见 `backend.ts`）。模型调用明确使用 `raw` 时按用户要求
+ *      直接显示完整原始错误字符串，不提取摘要或折叠。
  *   2. 不靠颜色单独传达（WCAG 1.4.1）：红色之外同时有警告图标与文字，
  *      色弱用户和灰度打印都还能认出这是错误。
  *   3. 语义与朗读：`role="alert"` 让错误出现时立刻被朗读；控件用
@@ -36,18 +37,24 @@ export interface ErrorAlertProps {
   readonly hint?: string | undefined;
   /** Workflow usage errors include guidance; marked model failures retain their complete response. */
   readonly workflow?: boolean;
+  /** 模型调用按原始错误直接展示；普通错误仍保留摘要和可展开详情。 */
+  readonly raw?: boolean;
 }
 
-export function ErrorAlert({ error, id, hint, workflow = false }: ErrorAlertProps) {
-  const presentation = workflow ? workflowErrorPresentation(error) : null;
-  const details = presentation ? presentation.details : backendErrorDetails(error);
-  const summary = presentation ? presentation.summary : backendErrorMessage(error);
+export function ErrorAlert({ error, id, hint, workflow = false, raw = false }: ErrorAlertProps) {
+  const presentation = workflow && !raw ? workflowErrorPresentation(error) : null;
+  const details = raw ? null : presentation ? presentation.details : backendErrorDetails(error);
+  const summary = raw
+    ? formatRawBackendError(error)
+    : presentation
+      ? presentation.summary
+      : backendErrorMessage(error);
   return (
     <div className="error-alert">
       <div className="error-alert__summary" id={id} role="alert">
         <Icon name="warning-circle" aria-hidden="true" size="sm" />
         <div className="error-alert__text">
-          <span>{summary}</span>
+          <span style={raw ? { whiteSpace: "pre-wrap" } : undefined}>{summary}</span>
           {presentation?.origin === "workflow" ? (
             <dl className="error-alert__guidance">
               <div>

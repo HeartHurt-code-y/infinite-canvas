@@ -1,6 +1,6 @@
 import type { GenerationOperation, ModelOperationSchema } from "./backend";
 import { perTaskVideoProfile } from "./perTaskVideo";
-import { SEEDANCE_DRAFT_MODEL_ID, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
+import { isSeedanceDraftModel, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -1093,7 +1093,7 @@ export function defaultModelOperationSchema(
         return [operation, { resultType: "text", parameters: {} }];
       }
       const wan30 = isWan30VideoModel(modelId);
-      const draftProfile = modelId.toLowerCase() === SEEDANCE_DRAFT_MODEL_ID;
+      const draftProfile = isSeedanceDraftModel(modelId);
       const pixverse = isPixverseVideoModel(modelId);
       return [
         operation,

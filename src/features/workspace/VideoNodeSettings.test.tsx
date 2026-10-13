@@ -11,6 +11,7 @@ import { VideoNodeSettings } from "./PromptNodeViews";
 import type { ConnectedAssetInput, VideoNodeConfig } from "./workspaceModel";
 
 const DOMESTIC = "doubao-seedance-2-5-260628";
+const DOMESTIC_ALIAS = "doubao-seedance-2.5";
 const OVERSEAS = "dreamina-seedance-2.5";
 const PER_TASK = "sp2.5-720p-30s-ch5";
 const RD = "rd-seedance-2.5-720p";
@@ -28,6 +29,7 @@ const catalog: readonly ProviderCatalogEntry[] = [
     },
     models: [
       DOMESTIC,
+      DOMESTIC_ALIAS,
       OVERSEAS,
       RD,
       "wan3.0-video",
@@ -129,54 +131,60 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
-  it("explicitly opts into 480p draft generation and explains the manual paid final step", () => {
-    const { changed } = mountSettings(DOMESTIC, [], catalog, {
-      parameterValues: { resolution: "720p", duration: 5, ratio: "16:9" },
-    });
-    const draft = screen.getByRole("checkbox", { name: "先生成草稿样片" });
-    expect(draft).not.toBeChecked();
-    expect(screen.getByLabelText("分辨率")).toHaveValue("720p");
-    expect(
-      within(screen.getByLabelText("分辨率")).queryByRole("option", { name: "1080p" }),
-    ).not.toBeInTheDocument();
-    fireEvent.click(draft);
-    expect(draft).toBeChecked();
-    expect(screen.getByLabelText("分辨率")).toBeDisabled();
-    expect(changed.mock.lastCall?.[0].parameterValues).toEqual({
-      resolution: "480p",
-      duration: 5,
-      ratio: "16:9",
-      draft: true,
-    });
-    expect(screen.getByText(/人工发起 1080p 正片/)).toHaveTextContent("独立付费任务");
-    expect(screen.getByText(/无需额外配置令牌分组/)).toBeInTheDocument();
-    fireEvent.click(draft);
-    expect(changed.mock.lastCall?.[0].parameterValues["draft"]).toBe(false);
-  });
+  it.each([DOMESTIC, DOMESTIC_ALIAS])(
+    "opts into 480p draft generation and explains the manual final step for %s",
+    (modelId) => {
+      const { changed } = mountSettings(modelId, [], catalog, {
+        parameterValues: { resolution: "720p", duration: 5, ratio: "16:9" },
+      });
+      const draft = screen.getByRole("checkbox", { name: "先生成草稿样片" });
+      expect(draft).not.toBeChecked();
+      expect(screen.getByLabelText("分辨率")).toHaveValue("720p");
+      expect(
+        within(screen.getByLabelText("分辨率")).queryByRole("option", { name: "1080p" }),
+      ).not.toBeInTheDocument();
+      fireEvent.click(draft);
+      expect(draft).toBeChecked();
+      expect(screen.getByLabelText("分辨率")).toBeDisabled();
+      expect(changed.mock.lastCall?.[0].parameterValues).toEqual({
+        resolution: "480p",
+        duration: 5,
+        ratio: "16:9",
+        draft: true,
+      });
+      expect(screen.getByText(/人工发起 1080p 正片/)).toHaveTextContent("独立付费任务");
+      expect(screen.getByText(/无需额外配置令牌分组/)).toBeInTheDocument();
+      fireEvent.click(draft);
+      expect(changed.mock.lastCall?.[0].parameterValues["draft"]).toBe(false);
+    },
+  );
 
-  it("does not offer Moyu draft generation on the Ark dialect or another Seedance model", () => {
-    const arkCatalog = catalog.map((entry) => ({
-      ...entry,
-      provider: { ...entry.provider, adapterId: "volcengine_ark_v1" },
-    }));
-    const { unmount } = render(
-      <VideoNodeSettings
-        config={{
-          modelSelection: { providerId: "provider", modelDefinitionId: DOMESTIC },
-          generationCount: 1,
-          parameterValues: {},
-          catalogResolved: true,
-        }}
-        providerCatalog={arkCatalog}
-        hasMediaInputs={false}
-        onChange={vi.fn()}
-      />,
-    );
-    expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
-    unmount();
-    mountSettings(OVERSEAS, []);
-    expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
-  });
+  it.each([DOMESTIC, DOMESTIC_ALIAS])(
+    "does not offer Moyu draft generation on the Ark dialect for %s or another Seedance model",
+    (modelId) => {
+      const arkCatalog = catalog.map((entry) => ({
+        ...entry,
+        provider: { ...entry.provider, adapterId: "volcengine_ark_v1" },
+      }));
+      const { unmount } = render(
+        <VideoNodeSettings
+          config={{
+            modelSelection: { providerId: "provider", modelDefinitionId: modelId },
+            generationCount: 1,
+            parameterValues: {},
+            catalogResolved: true,
+          }}
+          providerCatalog={arkCatalog}
+          hasMediaInputs={false}
+          onChange={vi.fn()}
+        />,
+      );
+      expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
+      unmount();
+      mountSettings(OVERSEAS, []);
+      expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
+    },
+  );
 
   it.each([DOMESTIC, OVERSEAS])(
     "offers edit defaults and keeps parameters editable on %s",

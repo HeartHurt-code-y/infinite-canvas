@@ -3814,6 +3814,11 @@ fn build_grsai_image_body(
 /// 使用 `GET /v1/videos/{task_id}`。路径会经过与提交路径相同的合法性校验。
 fn video_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
     let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
+    // 草稿及其正片的查询端点属于已提交任务的冻结网关合同。之后修改或
+    // 替换模型绑定不能让原任务转向另一个接口；签名结果续查使用同一路径。
+    if GatewayProfile::from_task(task) == Some(GatewayProfile::SeedanceDraft) {
+        return checked_observe_path(format!("/v1/video/generations/{remote_task_id}"));
+    }
     let operation_schema = storage
         .list_model_definitions()?
         .into_iter()
@@ -7984,6 +7989,10 @@ mod tests {
                     if model.starts_with("dreamina") {
                         assert!(body.get("omni_reference_task_type").is_none());
                         assert!(body["metadata"].get("omni_reference_task_type").is_none());
+                    } else if GatewayProfile::from_operation_schema(&generation.operation_schema)
+                        == Some(GatewayProfile::SeedanceDraft)
+                    {
+                        assert!(body["metadata"].get("omni_reference_task_type").is_none());
                     } else {
                         assert_eq!(body["metadata"]["omni_reference_task_type"], "edit");
                     }
@@ -8426,22 +8435,125 @@ mod tests {
 
     #[test]
     fn seedance_draft_text_request_places_actual_prompt_in_content() {
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let (task, mut generation) =
+                seedance_task_fixture(model, VideoTaskType::Auto, RequestDialect::OpenAiCompatible);
+            generation.parameters = json!({ "draft": true, "duration": 5, "resolution": "480p", "ratio": "16:9", "generate_audio": true });
+            let body = build_video_body(&task, &generation).expect("draft text request");
+            assert_eq!(body["model"], model);
+            assert_eq!(body["prompt"], "占位");
+            assert_eq!(
+                body["metadata"]["content"],
+                json!([{ "type": "text", "text": "A train arrives" }])
+            );
+            assert_eq!(body["metadata"]["draft"], true);
+            assert_eq!(body["metadata"]["duration"], 5);
+            assert_eq!(body["metadata"]["resolution"], "480p");
+            assert!(body.get("draft").is_none());
+        }
+    }
+
+    #[test]
+    fn seedance_draft_request_preserves_all_documented_media_roles_and_input_order() {
         let (task, mut generation) = seedance_task_fixture(
             "doubao-seedance-2-5-260628",
             VideoTaskType::Auto,
             RequestDialect::OpenAiCompatible,
         );
-        generation.parameters = json!({ "draft": true, "duration": 5, "resolution": "480p", "ratio": "16:9", "generate_audio": true });
-        let body = build_video_body(&task, &generation).expect("draft text request");
-        assert_eq!(body["prompt"], "占位");
-        assert_eq!(
-            body["metadata"]["content"],
-            json!([{ "type": "text", "text": "A train arrives" }])
+        generation.parameters = json!({
+            "draft": true, "duration": 30, "resolution": "480p",
+            "ratio": "adaptive", "generate_audio": false
+        });
+        // The prompt reference order differs from canvas input order. The real
+        // prompt and each media role must survive in the gateway's content array.
+        generation.content = vec![
+            CompiledContentItem::Text("保持产品，参考音频1".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Image,
+                type_position: 1,
+            },
+        ];
+        for (position, role, url, input_order, prompt_index) in [
+            (
+                1,
+                "reference_image",
+                "https://example.com/product.png",
+                3,
+                Some(1),
+            ),
+            (2, "first_frame", "https://example.com/first.png", 1, None),
+            (3, "last_frame", "https://example.com/last.png", 2, None),
+        ] {
+            let mut media = resolved_media(MediaType::Image, position, role, url, prompt_index);
+            media.content_index = Some(input_order);
+            generation.images.push(media);
+        }
+        let mut video = resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://example.com/motion.mp4",
+            None,
         );
-        assert_eq!(body["metadata"]["draft"], true);
-        assert_eq!(body["metadata"]["duration"], 5);
-        assert_eq!(body["metadata"]["resolution"], "480p");
-        assert!(body.get("draft").is_none());
+        video.content_index = Some(4);
+        generation.videos.push(video);
+        let mut audio = resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_audio",
+            "https://example.com/music.mp3",
+            None,
+        );
+        audio.content_index = Some(5);
+        generation.audios.push(audio);
+
+        let body = build_video_body(&task, &generation).expect("draft media request");
+        assert_eq!(
+            body,
+            json!({
+                "model": "doubao-seedance-2-5-260628", "prompt": "占位",
+                "metadata": {
+                    "draft": true, "duration": 30, "resolution": "480p",
+                    "ratio": "adaptive", "generate_audio": false,
+                    "content": [
+                        { "type": "text", "text": "保持产品，参考音频1图片1" },
+                        { "type": "image_url", "image_url": { "url": "https://example.com/first.png" }, "role": "first_frame" },
+                        { "type": "image_url", "image_url": { "url": "https://example.com/last.png" }, "role": "last_frame" },
+                        { "type": "image_url", "image_url": { "url": "https://example.com/product.png" }, "role": "reference_image" },
+                        { "type": "video_url", "video_url": { "url": "https://example.com/motion.mp4" }, "role": "reference_video" },
+                        { "type": "audio_url", "audio_url": { "url": "https://example.com/music.mp3" }, "role": "reference_audio" }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn seedance_draft_documented_https_ip_base_uses_gateway_catalog_submit_and_query_paths() {
+        let base = "https://47.94.250.161/";
+        let schema = video_schema_for_dialect(
+            "doubao-seedance-2-5-260628",
+            RequestDialect::OpenAiCompatible,
+        );
+        let submit_path = request_path(&schema, "/v1/video/generations").unwrap();
+        let query_path =
+            video_observe_path_from_schema(Some(&schema), "cgt-existing-draft").unwrap();
+        for (path, expected) in [
+            (
+                model_catalog_path(MOYU_ADAPTER_ID),
+                "https://47.94.250.161/v1/models",
+            ),
+            (
+                submit_path.as_str(),
+                "https://47.94.250.161/v1/video/generations",
+            ),
+            (
+                query_path.as_str(),
+                "https://47.94.250.161/v1/video/generations/cgt-existing-draft",
+            ),
+        ] {
+            assert_eq!(endpoint(base, path).unwrap().as_str(), expected);
+        }
     }
 
     #[test]
@@ -8547,6 +8659,19 @@ mod tests {
         TaskExecutionRecord,
         std::thread::JoinHandle<Vec<(String, Value)>>,
     ) {
+        seedance_draft_mock_runtime_for_model("doubao-seedance-2-5-260628", status, payload)
+    }
+
+    fn seedance_draft_mock_runtime_for_model(
+        model: &str,
+        status: u16,
+        payload: Value,
+    ) -> (
+        tempfile::TempDir,
+        ProviderRuntime,
+        TaskExecutionRecord,
+        std::thread::JoinHandle<Vec<(String, Value)>>,
+    ) {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
@@ -8633,7 +8758,7 @@ mod tests {
                 provider: &provider,
                 api_key_ref: &provider.api_key_ref,
                 model_definition_id: "draft-model",
-                remote_model_id: Some("doubao-seedance-2-5-260628"),
+                remote_model_id: Some(model),
                 logical_request: &json!({}),
             })
             .unwrap();
@@ -8660,59 +8785,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seedance_draft_observation_keeps_frozen_gateway_after_current_binding_changes() {
+        use super::super::types::{ProviderModelSelection, ReplaceProviderModelBindingsCommand};
+
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let (_directory, runtime, mut task, server) = seedance_draft_mock_runtime_for_model(
+                model,
+                200,
+                json!({
+                    "data": { "task_id": "cgt-existing-draft", "status": "IN_PROGRESS", "progress": "50%" }
+                }),
+            );
+            runtime
+                .lifecycle
+                .commit(
+                    &task.id,
+                    GenerationLifecycleFact::RecoveryRemoteResumed {
+                        remote_task_id: "cgt-existing-draft".into(),
+                    },
+                )
+                .unwrap();
+            runtime
+                .lifecycle
+                .commit(
+                    &task.id,
+                    GenerationLifecycleFact::BeginObservation {
+                        attempt_id: "query-original".into(),
+                        backoff_ms: None,
+                    },
+                )
+                .unwrap();
+            task = runtime.storage.get_task_execution(&task.id).unwrap();
+            task.logical_request["modelOperationSchemaSnapshot"] =
+                video_schema_for_dialect(model, RequestDialect::OpenAiCompatible);
+            // A later disabled/replaced binding can keep a different request path.
+            // The already submitted draft must continue using its original gateway.
+            runtime
+                .storage
+                .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
+                    provider_connection_id: task.provider_connection_id.clone(),
+                    selections: vec![ProviderModelSelection {
+                        model_definition_id: task.model_definition_id.clone(),
+                        display_name: "替换后的模型".into(),
+                        remote_model_id: "replacement-video-model".into(),
+                        enabled: false,
+                        enabled_operations: vec![GenerationOperation::VideoGeneration],
+                        operation_schema: json!({
+                            "request": { "observePath": "/v1/replacement/tasks/{task_id}" }
+                        }),
+                        token_group: None,
+                    }],
+                })
+                .unwrap();
+            runtime
+                .storage
+                .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                    id: task.provider_connection_id.clone(),
+                    display_name: "替换后的连接".into(),
+                    adapter_id: ARK_ADAPTER_ID.into(),
+                    base_url: "https://example.invalid/api/v3".into(),
+                    enabled: true,
+                })
+                .unwrap();
+
+            let (observation, _) = runtime.observe(&task, "query-original").await.unwrap();
+            assert_eq!(observation.remote_status, "IN_PROGRESS");
+            assert_eq!(observation.progress, Some(50.0));
+            let captured = server.join().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert!(
+                captured[0]
+                    .0
+                    .starts_with("GET /v1/video/generations/cgt-existing-draft HTTP/1.1")
+            );
+            assert!(
+                captured[0]
+                    .0
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer sk-frozen-test")
+            );
+            assert_eq!(captured[0].1, Value::Null);
+            assert_eq!(task.remote_task_id.as_deref(), Some("cgt-existing-draft"));
+            assert_eq!(task.remote_model_id_snapshot.as_deref(), Some(model));
+        }
+    }
+
+    #[tokio::test]
     async fn seedance_draft_gateway_rejection_never_strips_draft_or_resubmits() {
-        let (_directory, runtime, task, server) = seedance_draft_mock_runtime(
-            400,
-            json!({
-                "error": { "message": "unknown parameter: draft" }
-            }),
-        );
-        let schema = video_schema_for_dialect(
-            "doubao-seedance-2-5-260628",
-            RequestDialect::OpenAiCompatible,
-        );
-        let request = resolved(schema, json!({ "draft": true, "resolution": "480p" }));
-        assert!(runtime.submit(&task, "submit-1", &request).await.is_err());
-        let captured = server.join().unwrap();
-        assert_eq!(
-            captured.len(),
-            1,
-            "rejecting draft cannot cause a second paid request"
-        );
-        assert!(
-            captured[0]
-                .0
-                .starts_with("POST /v1/video/generations HTTP/1.1")
-        );
-        assert_eq!(captured[0].1["metadata"]["draft"], true);
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let (_directory, runtime, task, server) = seedance_draft_mock_runtime_for_model(
+                model,
+                400,
+                json!({
+                    "error": { "message": "unknown parameter: draft" }
+                }),
+            );
+            let schema = video_schema_for_dialect(model, RequestDialect::OpenAiCompatible);
+            let request = resolved(schema, json!({ "draft": true, "resolution": "480p" }));
+            assert!(runtime.submit(&task, "submit-1", &request).await.is_err());
+            let captured = server.join().unwrap();
+            assert_eq!(
+                captured.len(),
+                1,
+                "rejecting draft cannot cause a second paid request"
+            );
+            assert!(
+                captured[0]
+                    .0
+                    .starts_with("POST /v1/video/generations HTTP/1.1")
+            );
+            assert_eq!(captured[0].1["metadata"]["draft"], true);
+            assert_eq!(captured[0].1["model"], model);
+        }
     }
 
     #[tokio::test]
     async fn seedance_draft_promotion_submits_once_and_observes_a_new_remote_identity() {
-        let (_directory, runtime, task, server) =
-            seedance_draft_mock_runtime(200, json!({ "task_id": "cgt-final-new" }));
-        let schema = video_schema_for_dialect(
-            "doubao-seedance-2-5-260628",
-            RequestDialect::OpenAiCompatible,
-        );
-        let mut request = resolved(schema, json!({ "draft_task_id": "cgt-draft-source" }));
-        request.content.clear();
-        request.rendered_prompt.clear();
-        let (submission, _) = runtime.submit(&task, "submit-1", &request).await.unwrap();
-        assert!(
-            matches!(submission, GenerationSubmission::RemoteVideoTask { task_id } if task_id == "cgt-final-new")
-        );
-        let captured = server.join().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert_eq!(
-            captured[0].1["metadata"],
-            json!({ "content": [{ "type": "draft_task", "draft_task": { "id": "cgt-draft-source" } }] })
-        );
-        assert!(
-            captured[0]
-                .0
-                .contains("authorization: Bearer sk-frozen-test")
-        );
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let (_directory, runtime, task, server) = seedance_draft_mock_runtime_for_model(
+                model,
+                200,
+                json!({ "task_id": "cgt-final-new" }),
+            );
+            let schema = video_schema_for_dialect(model, RequestDialect::OpenAiCompatible);
+            let mut request = resolved(schema, json!({ "draft_task_id": "cgt-draft-source" }));
+            request.content.clear();
+            request.rendered_prompt.clear();
+            let (submission, _) = runtime.submit(&task, "submit-1", &request).await.unwrap();
+            assert!(
+                matches!(submission, GenerationSubmission::RemoteVideoTask { task_id } if task_id == "cgt-final-new")
+            );
+            let captured = server.join().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].1["model"], model);
+            assert_eq!(
+                captured[0].1["metadata"],
+                json!({ "content": [{ "type": "draft_task", "draft_task": { "id": "cgt-draft-source" } }] })
+            );
+            assert!(
+                captured[0]
+                    .0
+                    .contains("authorization: Bearer sk-frozen-test")
+            );
+        }
     }
 
     #[tokio::test]
@@ -8739,27 +8954,30 @@ mod tests {
 
     #[tokio::test]
     async fn seedance_draft_url_refresh_checks_enveloped_identity_and_both_result_paths() {
-        for nested in [false, true] {
-            let mut payload =
-                json!({ "data": { "task_id": "cgt-existing-final", "status": "SUCCESS" } });
-            if nested {
-                payload["data"]["data"] = json!({ "data": { "content": { "video_url": "https://cdn.example.com/fresh.mp4" } } });
-            } else {
-                payload["data"]["result_url"] = json!("https://cdn.example.com/fresh.mp4");
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            for nested in [false, true] {
+                let mut payload =
+                    json!({ "data": { "task_id": "cgt-existing-final", "status": "SUCCESS" } });
+                if nested {
+                    payload["data"]["data"] = json!({ "data": { "content": { "video_url": "https://cdn.example.com/fresh.mp4" } } });
+                } else {
+                    payload["data"]["result_url"] = json!("https://cdn.example.com/fresh.mp4");
+                }
+                let (_directory, runtime, mut task, server) =
+                    seedance_draft_mock_runtime_for_model(model, 200, payload);
+                task.remote_task_id = Some("cgt-existing-final".into());
+                assert_eq!(
+                    runtime.refresh_sp25_video_url(&task).await.unwrap(),
+                    "https://cdn.example.com/fresh.mp4"
+                );
+                let captured = server.join().unwrap();
+                assert_eq!(captured.len(), 1);
+                assert!(
+                    captured[0]
+                        .0
+                        .starts_with("GET /v1/video/generations/cgt-existing-final HTTP/1.1")
+                );
             }
-            let (_directory, runtime, mut task, server) = seedance_draft_mock_runtime(200, payload);
-            task.remote_task_id = Some("cgt-existing-final".into());
-            assert_eq!(
-                runtime.refresh_sp25_video_url(&task).await.unwrap(),
-                "https://cdn.example.com/fresh.mp4"
-            );
-            let captured = server.join().unwrap();
-            assert_eq!(captured.len(), 1);
-            assert!(
-                captured[0]
-                    .0
-                    .starts_with("GET /v1/video/generations/cgt-existing-final HTTP/1.1")
-            );
         }
         let (_directory, runtime, mut task, server) = seedance_draft_mock_runtime(
             200,

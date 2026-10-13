@@ -274,6 +274,7 @@ mod tests {
             ("PixVerse-V6", GatewayProfile::PixVerse),
             ("pixverse-c1", GatewayProfile::PixVerse),
             ("doubao-seedance-2-5-260628", GatewayProfile::SeedanceDraft),
+            ("doubao-seedance-2.5", GatewayProfile::SeedanceDraft),
         ];
         for (model_id, expected) in samples {
             assert_eq!(
@@ -300,6 +301,22 @@ mod tests {
         for family in [GatewayProfile::Sp25PerUse, GatewayProfile::RdVideo] {
             assert!(family.available_on(RequestDialect::OpenAiCompatible));
             assert!(family.available_on(RequestDialect::VolcengineArk));
+        }
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            assert_eq!(
+                GatewayProfile::for_frozen_snapshot(
+                    Some(model),
+                    super::super::provider_adapter::MOYU_ADAPTER_ID
+                ),
+                Some(GatewayProfile::SeedanceDraft)
+            );
+            assert_eq!(
+                GatewayProfile::for_frozen_snapshot(
+                    Some(model),
+                    super::super::provider_adapter::ARK_ADAPTER_ID
+                ),
+                None
+            );
         }
     }
 

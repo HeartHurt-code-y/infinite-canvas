@@ -11,6 +11,7 @@ import {
   modelParameterCapabilities,
   modelSupportsBatchCount,
 } from "./modelCapabilities";
+import { isSeedanceDraftModel, supportsSeedanceDraft } from "./seedanceDraft";
 
 describe("model capabilities", () => {
   it.each(["PixVerse-V6", "PixVerse-C1"])(
@@ -343,76 +344,103 @@ describe("model capabilities", () => {
     expect(repaired.map((capability) => capability.key)).toContain("priority");
   });
 
-  it("offers direct 480p/720p generation and a draft for later 1080p promotion", () => {
-    const seedance25 = modelParameterCapabilities(
-      defaultModelOperationSchema("doubao-seedance-2-5-260628", ["video_generation"]),
-      "video_generation",
-      "doubao-seedance-2-5-260628",
-    );
-    expect(seedance25.map((capability) => capability.key)).toEqual([
-      "ratio",
-      "resolution",
-      "duration",
-      "generate_audio",
-      "draft",
-    ]);
-    expect(seedance25.find((capability) => capability.key === "resolution")?.options).toEqual([
-      { value: "720p", label: "720p" },
-      { value: "480p", label: "480p" },
-    ]);
-    expect(seedance25.find((capability) => capability.key === "duration")?.defaultValue).toBe(5);
-    expect(seedance25.find((capability) => capability.key === "duration")?.options).toHaveLength(
-      28,
-    );
-    expect(seedance25.some((capability) => capability.key === "omni_reference_task_type")).toBe(
-      false,
-    );
-    expect(seedance25.some((capability) => capability.key === "priority")).toBe(false);
-    expect(seedance25.find((capability) => capability.key === "draft")).toMatchObject({
-      type: "boolean",
-      defaultValue: false,
-      optional: false,
-    });
-    const savedCatalog = modelParameterCapabilities(
-      {
-        video_generation: {
-          requestProfileId: "moyu_seedance_25_draft_v1",
-          parameters: {
-            duration: { type: "integer", default: 20 },
-            resolution: { type: "string", enum: ["1080p"], default: "1080p" },
+  it.each(["doubao-seedance-2-5-260628", "doubao-seedance-2.5"])(
+    "offers direct 480p/720p generation and a draft for later 1080p promotion on %s",
+    (modelId) => {
+      const schema = defaultModelOperationSchema(modelId, ["video_generation"]);
+      expect(schema["video_generation"]).toMatchObject({
+        requestProfileId: "moyu_seedance_25_draft_v1",
+      });
+      const seedance25 = modelParameterCapabilities(schema, "video_generation", modelId);
+      expect(seedance25.map((capability) => capability.key)).toEqual([
+        "ratio",
+        "resolution",
+        "duration",
+        "generate_audio",
+        "draft",
+      ]);
+      expect(seedance25.find((capability) => capability.key === "resolution")?.options).toEqual([
+        { value: "720p", label: "720p" },
+        { value: "480p", label: "480p" },
+      ]);
+      expect(seedance25.find((capability) => capability.key === "duration")?.defaultValue).toBe(5);
+      expect(seedance25.find((capability) => capability.key === "duration")?.options).toHaveLength(
+        28,
+      );
+      expect(seedance25.some((capability) => capability.key === "omni_reference_task_type")).toBe(
+        false,
+      );
+      expect(seedance25.some((capability) => capability.key === "priority")).toBe(false);
+      expect(seedance25.find((capability) => capability.key === "draft")).toMatchObject({
+        type: "boolean",
+        defaultValue: false,
+        optional: false,
+      });
+      const savedCatalog = modelParameterCapabilities(
+        {
+          video_generation: {
+            requestProfileId: "moyu_seedance_25_draft_v1",
+            parameters: {
+              duration: { type: "integer", default: 20 },
+              resolution: { type: "string", enum: ["1080p"], default: "1080p" },
+            },
           },
         },
-      },
-      "video_generation",
-      "doubao-seedance-2-5-260628",
-    );
-    expect(savedCatalog.find((capability) => capability.key === "resolution")?.options).toEqual([
-      { value: "720p", label: "720p" },
-      { value: "480p", label: "480p" },
-    ]);
-    expect(savedCatalog.find((capability) => capability.key === "duration")?.defaultValue).toBe(5);
-    expect(savedCatalog.find((capability) => capability.key === "draft")).toBeDefined();
-    const ark = modelParameterCapabilities(
-      {
-        video_generation: {
-          requestProfileId: "volcengine_ark_video_v1",
-          parameters: {
-            resolution: { type: "string", enum: ["720p", "480p", "1080p"], default: "1080p" },
-            web_search: { type: "boolean", default: false },
+        "video_generation",
+        modelId,
+      );
+      expect(savedCatalog.find((capability) => capability.key === "resolution")?.options).toEqual([
+        { value: "720p", label: "720p" },
+        { value: "480p", label: "480p" },
+      ]);
+      expect(savedCatalog.find((capability) => capability.key === "duration")?.defaultValue).toBe(
+        5,
+      );
+      expect(savedCatalog.find((capability) => capability.key === "draft")).toBeDefined();
+      const ark = modelParameterCapabilities(
+        {
+          video_generation: {
+            requestProfileId: "volcengine_ark_video_v1",
+            parameters: {
+              resolution: { type: "string", enum: ["720p", "480p", "1080p"], default: "1080p" },
+              web_search: { type: "boolean", default: false },
+            },
           },
         },
-      },
-      "video_generation",
-      "doubao-seedance-2-5-260628",
-    );
-    expect(ark.find((capability) => capability.key === "resolution")?.defaultValue).toBe("1080p");
-    expect(ark.find((capability) => capability.key === "resolution")?.options).toContainEqual({
-      value: "1080p",
-      label: "1080p",
-    });
-    expect(ark.find((capability) => capability.key === "draft")).toBeUndefined();
-    expect(ark.find((capability) => capability.key === "web_search")).toBeDefined();
+        "video_generation",
+        modelId,
+      );
+      expect(ark.find((capability) => capability.key === "resolution")?.defaultValue).toBe("1080p");
+      expect(ark.find((capability) => capability.key === "resolution")?.options).toContainEqual({
+        value: "1080p",
+        label: "1080p",
+      });
+      expect(ark.find((capability) => capability.key === "draft")).toBeUndefined();
+      expect(ark.find((capability) => capability.key === "web_search")).toBeDefined();
+    },
+  );
+
+  it.each([
+    "doubao-seedance-2.5-fast",
+    "doubao-seedance-2-5-260628-preview",
+    "dreamina-seedance-2.5",
+    "rd-seedance-2.5-480p",
+  ])("does not apply the Moyu draft contract to a similar model name %s", (modelId) => {
+    expect(isSeedanceDraftModel(modelId)).toBe(false);
+    expect(supportsSeedanceDraft("moyu_v1", modelId)).toBe(false);
+    expect(
+      defaultModelOperationSchema(modelId, ["video_generation"])["video_generation"],
+    ).not.toHaveProperty("requestProfileId", "moyu_seedance_25_draft_v1");
   });
+
+  it.each(["doubao-seedance-2-5-260628", "doubao-seedance-2.5"])(
+    "limits draft generation on %s to the Moyu adapter",
+    (modelId) => {
+      expect(isSeedanceDraftModel(modelId)).toBe(true);
+      expect(supportsSeedanceDraft("moyu_v1", modelId)).toBe(true);
+      expect(supportsSeedanceDraft("volcengine_ark_v1", modelId)).toBe(false);
+    },
+  );
 
   it("treats an explicitly empty parameter schema as authoritative", () => {
     const capabilities = modelParameterCapabilities(

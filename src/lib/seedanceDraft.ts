@@ -3,8 +3,14 @@ import type { GenerationTaskDetail } from "./backend";
 export const SEEDANCE_DRAFT_MODEL_ID = "doubao-seedance-2-5-260628";
 export const SEEDANCE_DRAFT_PROFILE_ID = "moyu_seedance_25_draft_v1";
 
+/** Both catalog IDs use the same draft contract; preserve the selected remote ID. */
+export function isSeedanceDraftModel(modelId: string): boolean {
+  const normalized = modelId.toLowerCase();
+  return normalized === SEEDANCE_DRAFT_MODEL_ID || normalized === "doubao-seedance-2.5";
+}
+
 export function supportsSeedanceDraft(adapterId: string, modelId: string): boolean {
-  return adapterId === "moyu_v1" && modelId.toLowerCase() === SEEDANCE_DRAFT_MODEL_ID;
+  return adapterId === "moyu_v1" && isSeedanceDraftModel(modelId);
 }
 
 function record(value: unknown): Record<string, unknown> | null {

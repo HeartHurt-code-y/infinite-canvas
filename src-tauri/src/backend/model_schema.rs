@@ -558,7 +558,10 @@ pub(crate) fn is_seedance_25_video_model(model_id: &str) -> bool {
 }
 
 pub(crate) fn is_seedance_draft_video_model(model_id: &str) -> bool {
-    model_id == "doubao-seedance-2-5-260628"
+    matches!(
+        model_id,
+        "doubao-seedance-2-5-260628" | "doubao-seedance-2.5"
+    )
 }
 
 /// 同名模型在方舟上保留原生能力，只有 OpenAI 兼容网关采用本次草稿样片合同。
@@ -3983,10 +3986,9 @@ mod tests {
             repaired["video_generation"]["request"]["parameterContainer"],
             "metadata"
         );
-        assert!(
-            repaired["video_generation"]["request"]
-                .get("observePath")
-                .is_none()
+        assert_eq!(
+            repaired["video_generation"]["request"]["observePath"],
+            "/v1/video/generations/{task_id}"
         );
 
         // 其他家族自己的端点不受影响：Vidu 的 `/v1/videos` 轮询
@@ -4118,67 +4120,68 @@ mod tests {
 
     #[test]
     fn seedance_draft_gateway_schema_overrides_catalog_labels_and_keeps_ark_contract() {
-        let model = "doubao-seedance-2-5-260628";
-        let mut schema = infer_catalog_schema(
-            &json!({ "id": model, "capabilities": ["text_generation"] }),
-            model,
-            "文本模型",
-        );
-        assert_eq!(
-            operations_from_schema(&schema),
-            [GenerationOperation::VideoGeneration]
-        );
-        assert!(apply_request_dialect(
-            &mut schema,
-            model,
-            RequestDialect::OpenAiCompatible
-        ));
-        let gateway = &schema["video_generation"];
-        assert_eq!(
-            gateway["requestProfileId"],
-            GatewayProfile::SeedanceDraft.profile_id()
-        );
-        assert_eq!(gateway["request"]["path"], "/v1/video/generations");
-        assert_eq!(gateway["parameters"]["duration"]["default"], 5);
-        assert_eq!(
-            gateway["parameters"]["resolution"]["enum"],
-            json!(["720p", "480p"])
-        );
-        assert_eq!(gateway["parameters"]["draft"]["default"], false);
-        assert!(gateway["parameters"].get("web_search").is_none());
-        assert!(gateway["parameters"].get("output_format").is_none());
-        assert!(!apply_request_dialect(
-            &mut schema,
-            model,
-            RequestDialect::OpenAiCompatible
-        ));
-        assert!(!refresh_seedance_25_video_defaults(&mut schema, model));
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let mut schema = infer_catalog_schema(
+                &json!({ "id": model, "capabilities": ["text_generation"] }),
+                model,
+                "文本模型",
+            );
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration]
+            );
+            assert!(apply_request_dialect(
+                &mut schema,
+                model,
+                RequestDialect::OpenAiCompatible
+            ));
+            let gateway = &schema["video_generation"];
+            assert_eq!(
+                gateway["requestProfileId"],
+                GatewayProfile::SeedanceDraft.profile_id()
+            );
+            assert_eq!(gateway["request"]["path"], "/v1/video/generations");
+            assert_eq!(gateway["parameters"]["duration"]["default"], 5);
+            assert_eq!(
+                gateway["parameters"]["resolution"]["enum"],
+                json!(["720p", "480p"])
+            );
+            assert_eq!(gateway["parameters"]["draft"]["default"], false);
+            assert!(gateway["parameters"].get("web_search").is_none());
+            assert!(gateway["parameters"].get("output_format").is_none());
+            assert!(!apply_request_dialect(
+                &mut schema,
+                model,
+                RequestDialect::OpenAiCompatible
+            ));
+            assert!(!refresh_seedance_25_video_defaults(&mut schema, model));
 
-        assert!(apply_request_dialect(
-            &mut schema,
-            model,
-            RequestDialect::VolcengineArk
-        ));
-        let ark = &schema["video_generation"];
-        assert_eq!(ark["request"]["path"], "/contents/generations/tasks");
-        assert_eq!(ark["request"]["parameterContainer"], "root");
-        assert_eq!(ark["parameters"]["duration"]["default"], -1);
-        assert!(
-            ark["parameters"]["resolution"]["enum"]
-                .as_array()
-                .unwrap()
-                .contains(&json!("1080p"))
-        );
-        assert!(ark["parameters"].get("web_search").is_some());
-        assert!(ark["parameters"].get("draft").is_none());
-        assert!(!apply_request_dialect(
-            &mut schema,
-            model,
-            RequestDialect::VolcengineArk
-        ));
+            assert!(apply_request_dialect(
+                &mut schema,
+                model,
+                RequestDialect::VolcengineArk
+            ));
+            let ark = &schema["video_generation"];
+            assert_eq!(ark["request"]["path"], "/contents/generations/tasks");
+            assert_eq!(ark["request"]["parameterContainer"], "root");
+            assert_eq!(ark["parameters"]["duration"]["default"], -1);
+            assert!(
+                ark["parameters"]["resolution"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("1080p"))
+            );
+            assert!(ark["parameters"].get("web_search").is_some());
+            assert!(ark["parameters"].get("draft").is_none());
+            assert!(!apply_request_dialect(
+                &mut schema,
+                model,
+                RequestDialect::VolcengineArk
+            ));
+        }
 
         for other in [
-            "doubao-seedance-2.5",
+            "doubao-seedance-2.5-other",
             "doubao-seedance-2-5-260629",
             "dreamina-seedance-2.5",
             "rd-seedance-2.5-720p",

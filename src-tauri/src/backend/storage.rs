@@ -4351,6 +4351,14 @@ mod tests {
                     "provider-moyu-ai",
                 ),
                 (
+                    "remote::provider-moyu-ai::doubao-seedance-2-5-260628",
+                    "provider-moyu-ai",
+                ),
+                (
+                    "remote::provider-volcengine-ark::doubao-seedance-2.5",
+                    "provider-volcengine-ark",
+                ),
+                (
                     "remote::provider-volcengine-ark::doubao-seedance-2-5-260628",
                     "provider-volcengine-ark",
                 ),
@@ -4398,33 +4406,50 @@ mod tests {
                 .clone()
         };
 
-        // 网关连接：原生端点被改回 `/v1/video/generations`，参数回到 metadata 容器，
-        // 原生轮询路径被移除（否则轮询仍会打到方舟端点）。
-        let gateway = request("remote::provider-moyu-ai::doubao-seedance-2.5");
-        assert_eq!(gateway["path"], "/v1/video/generations");
-        assert_eq!(gateway["parameterContainer"], "metadata");
-        assert!(gateway.get("observePath").is_none());
-        // 能力参数原样保留：只改端点，不动参数表（`1080p` 由既有的能力升级补齐）。
-        let gateway_parameters = &definitions
-            .iter()
-            .find(|model| model.id == "remote::provider-moyu-ai::doubao-seedance-2.5")
-            .expect("gateway definition")
-            .operations["video_generation"]["parameters"];
-        assert_eq!(
-            gateway_parameters["resolution"]["enum"],
-            json!(["720p", "480p", "1080p"])
-        );
-        assert_eq!(
-            gateway_parameters["web_search"]["transform"],
-            "web_search_tool"
-        );
+        for model_id in ["doubao-seedance-2.5", "doubao-seedance-2-5-260628"] {
+            // 两个精确型号在网关连接上都迁移到草稿样片合同，保留原型号身份。
+            let gateway_id = format!("remote::provider-moyu-ai::{model_id}");
+            let gateway = request(&gateway_id);
+            assert_eq!(gateway["path"], "/v1/video/generations");
+            assert_eq!(gateway["parameterContainer"], "metadata");
+            assert_eq!(gateway["observePath"], "/v1/video/generations/{task_id}");
+            let gateway_definition = definitions
+                .iter()
+                .find(|model| model.id == gateway_id)
+                .expect("gateway definition");
+            assert_eq!(
+                gateway_definition.remote_model_id.as_deref(),
+                Some(model_id)
+            );
+            assert_eq!(
+                gateway_definition.operations["video_generation"]["requestProfileId"],
+                super::super::gateway_profile::GatewayProfile::SeedanceDraft.profile_id()
+            );
+            let gateway_parameters =
+                &gateway_definition.operations["video_generation"]["parameters"];
+            assert_eq!(
+                gateway_parameters["resolution"]["enum"],
+                json!(["720p", "480p"])
+            );
+            assert_eq!(gateway_parameters["draft"]["default"], false);
+            assert!(gateway_parameters.get("web_search").is_none());
+            assert!(gateway_parameters.get("omni_reference_task_type").is_none());
 
-        // 方舟连接：保持原生端点，参数与 content 平铺在根级并声明原生轮询路径。
-        let ark = request("remote::provider-volcengine-ark::doubao-seedance-2-5-260628");
-        assert_eq!(ark["path"], "/contents/generations/tasks");
-        assert_eq!(ark["parameterContainer"], "root");
-        assert_eq!(ark["contentContainer"], "root");
-        assert_eq!(ark["observePath"], "/contents/generations/tasks/{task_id}");
+            // 方舟连接：保持原生端点，参数与 content 平铺在根级并声明原生轮询路径。
+            let ark_id = format!("remote::provider-volcengine-ark::{model_id}");
+            let ark = request(&ark_id);
+            assert_eq!(ark["path"], "/contents/generations/tasks");
+            assert_eq!(ark["parameterContainer"], "root");
+            assert_eq!(ark["contentContainer"], "root");
+            assert_eq!(ark["observePath"], "/contents/generations/tasks/{task_id}");
+            let ark_definition = definitions.iter().find(|model| model.id == ark_id).unwrap();
+            assert_eq!(ark_definition.remote_model_id.as_deref(), Some(model_id));
+            assert!(
+                ark_definition.operations["video_generation"]["parameters"]
+                    .get("draft")
+                    .is_none()
+            );
+        }
 
         // 幂等：再次打开不会继续改写已经落定的契约。
         drop(storage);

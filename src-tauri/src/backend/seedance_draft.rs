@@ -140,38 +140,41 @@ mod tests {
 
     #[test]
     fn seedance_draft_promotion_preserves_identity_without_media_or_defaults() {
-        let task = draft_task();
-        let prepared = prepare_promotion(&task).unwrap();
-        assert_eq!(prepared.provider.base_url, task.base_url_snapshot);
-        assert_eq!(prepared.provider.api_key_ref, task.api_key_ref_snapshot);
-        assert_eq!(
-            prepared.remote_model_id,
-            task.remote_model_id_snapshot.unwrap()
-        );
-        assert_eq!(
-            prepared.command.parameters,
-            json!({"draft_task_id":"cgt-20260930102030-abcde"})
-        );
-        assert!(prepared.command.prompt.is_empty());
-        assert!(prepared.command.explicit_media.is_empty());
-        assert!(prepared.command.workflow_run_id.is_none());
-        assert_eq!(
-            prepared
-                .command
-                .model_operation_schema_snapshot
-                .as_ref()
-                .unwrap()["requestProfileId"],
-            GatewayProfile::SeedanceDraft.profile_id()
-        );
-        assert_eq!(
-            prepared.command.output_name.as_deref(),
-            Some("海边样片_正片")
-        );
-        assert_eq!(
-            prepared.logical_request["seedanceDraftSourceTaskId"],
-            "local-draft"
-        );
-        assert_eq!(prepared.logical_request["canvasId"], "canvas-original");
+        for model in ["doubao-seedance-2-5-260628", "doubao-seedance-2.5"] {
+            let mut task = draft_task();
+            task.remote_model_id_snapshot = Some(model.into());
+            let prepared = prepare_promotion(&task).unwrap();
+            assert_eq!(prepared.provider.base_url, task.base_url_snapshot);
+            assert_eq!(prepared.provider.api_key_ref, task.api_key_ref_snapshot);
+            assert_eq!(
+                prepared.remote_model_id,
+                task.remote_model_id_snapshot.unwrap()
+            );
+            assert_eq!(
+                prepared.command.parameters,
+                json!({"draft_task_id":"cgt-20260930102030-abcde"})
+            );
+            assert!(prepared.command.prompt.is_empty());
+            assert!(prepared.command.explicit_media.is_empty());
+            assert!(prepared.command.workflow_run_id.is_none());
+            assert_eq!(
+                prepared
+                    .command
+                    .model_operation_schema_snapshot
+                    .as_ref()
+                    .unwrap()["requestProfileId"],
+                GatewayProfile::SeedanceDraft.profile_id()
+            );
+            assert_eq!(
+                prepared.command.output_name.as_deref(),
+                Some("海边样片_正片")
+            );
+            assert_eq!(
+                prepared.logical_request["seedanceDraftSourceTaskId"],
+                "local-draft"
+            );
+            assert_eq!(prepared.logical_request["canvasId"], "canvas-original");
+        }
     }
 
     #[test]

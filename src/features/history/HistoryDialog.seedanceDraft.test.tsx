@@ -71,31 +71,54 @@ function clientFor(detail = DRAFT): GenerationTaskClient {
   };
 }
 
+function draftForModel(modelId: string): GenerationTaskDetail {
+  const modelDefinitionId = `remote::provider-1::${modelId}`;
+  return {
+    ...DRAFT,
+    summary: { ...DRAFT.summary, modelDefinitionId, remoteModelIdSnapshot: modelId },
+    logicalRequest: {
+      ...(DRAFT.logicalRequest as Record<string, unknown>),
+      modelDefinitionId,
+    },
+    calls: DRAFT.calls.map((call) => ({
+      ...call,
+      request: {
+        adapterId: "moyu_v1",
+        body: { model: modelId, metadata: { draft: true } },
+      },
+    })),
+  };
+}
+
 describe("Seedance draft review in history", () => {
-  it("waits for manual review and starts one separate final task without replaying prompt or parameters", async () => {
-    const client = clientFor();
-    let finish: (id: string) => void = () => undefined;
-    const promote = vi.fn(
-      () =>
-        new Promise<string>((resolve) => {
-          finish = resolve;
-        }),
-    );
-    render(
-      <HistoryDialog open onClose={vi.fn()} client={client} onPromoteSeedanceDraft={promote} />,
-    );
-    const button = await screen.findByRole("button", { name: "样片已审核，生成 1080p 正片" });
-    expect(promote).not.toHaveBeenCalled();
-    expect(screen.getByText(/正片固定 1080p/)).toHaveTextContent("独立付费任务");
-    fireEvent.click(button);
-    expect(button).toBeDisabled();
-    fireEvent.click(button);
-    expect(promote).toHaveBeenCalledTimes(1);
-    expect(promote).toHaveBeenCalledWith(DRAFT);
-    finish("final-local-1");
-    await waitFor(() => expect(client.get).toHaveBeenCalledWith("final-local-1"));
-    expect(client.start).not.toHaveBeenCalled();
-  });
+  it.each([SEEDANCE_DRAFT_MODEL_ID, "doubao-seedance-2.5"])(
+    "waits for review and starts one separate final task without replaying %s",
+    async (modelId) => {
+      const draft = draftForModel(modelId);
+      const client = clientFor(draft);
+      let finish: (id: string) => void = () => undefined;
+      const promote = vi.fn(
+        () =>
+          new Promise<string>((resolve) => {
+            finish = resolve;
+          }),
+      );
+      render(
+        <HistoryDialog open onClose={vi.fn()} client={client} onPromoteSeedanceDraft={promote} />,
+      );
+      const button = await screen.findByRole("button", { name: "样片已审核，生成 1080p 正片" });
+      expect(promote).not.toHaveBeenCalled();
+      expect(screen.getByText(/正片固定 1080p/)).toHaveTextContent("独立付费任务");
+      fireEvent.click(button);
+      expect(button).toBeDisabled();
+      fireEvent.click(button);
+      expect(promote).toHaveBeenCalledTimes(1);
+      expect(promote).toHaveBeenCalledWith(draft);
+      finish("final-local-1");
+      await waitFor(() => expect(client.get).toHaveBeenCalledWith("final-local-1"));
+      expect(client.start).not.toHaveBeenCalled();
+    },
+  );
 
   it("preserves the draft and displays a failed final submission for deliberate retry", async () => {
     const promote = vi.fn(() => Promise.reject(new Error("服务暂时不可用")));
@@ -107,6 +130,52 @@ describe("Seedance draft review in history", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("服务暂时不可用");
     expect(screen.getByRole("button", { name: "样片已审核，生成 1080p 正片" })).toBeEnabled();
     expect(client.start).not.toHaveBeenCalled();
+  });
+
+  it("directly shows the complete promotion error payload and links it to the submit button", async () => {
+    const error = {
+      kind: "validation",
+      message: "validation error: 该样片尚未完成，请稍后查询状态。",
+      details: { remoteTaskId: "draft-remote-1", providerStatus: "IN_PROGRESS" },
+    };
+    const promote = vi.fn<() => Promise<string>>().mockRejectedValue(error);
+    const client = clientFor();
+    render(
+      <HistoryDialog open onClose={vi.fn()} client={client} onPromoteSeedanceDraft={promote} />,
+    );
+    const button = await screen.findByRole("button", { name: "样片已审核，生成 1080p 正片" });
+    fireEvent.click(button);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("该样片尚未完成，请稍后查询状态。");
+    expect(alert).toHaveTextContent("validation error:");
+    expect(alert).toHaveTextContent('"providerStatus": "IN_PROGRESS"');
+    expect(alert).toHaveTextContent('"remoteTaskId": "draft-remote-1"');
+    expect(alert).toHaveTextContent('"kind": "validation"');
+    expect(button).toHaveAttribute("aria-describedby", alert.id);
+    expect(screen.queryByText("展开完整报错")).not.toBeInTheDocument();
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(client.start).not.toHaveBeenCalled();
+  });
+
+  it("preserves a multiline raw promotion error string without summarizing or folding it", async () => {
+    const error = 'HTTP 429\n{"error":{"message":"provider rate limit","request_id":"req-raw-1"}}';
+    const promote = vi.fn<() => Promise<string>>().mockRejectedValue(error);
+    render(
+      <HistoryDialog
+        open
+        onClose={vi.fn()}
+        client={clientFor()}
+        onPromoteSeedanceDraft={promote}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "样片已审核，生成 1080p 正片" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("HTTP 429");
+    expect(alert).toHaveTextContent('"request_id":"req-raw-1"');
+    expect(alert.querySelector("span")?.textContent).toBe(error);
+    expect(alert.querySelector("span")).toHaveStyle({ whiteSpace: "pre-wrap" });
+    expect(screen.queryByText("展开完整报错")).not.toBeInTheDocument();
+    expect(promote).toHaveBeenCalledTimes(1);
   });
 
   it.each(["running", "failed"] as const)(

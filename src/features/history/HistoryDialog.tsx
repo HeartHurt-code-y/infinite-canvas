@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import {
   useCallback,
   useEffect,
@@ -663,7 +664,7 @@ export function HistoryDialog({
   const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
   const [draftPromotionBusy, setDraftPromotionBusy] = useState(false);
-  const [draftPromotionError, setDraftPromotionError] = useState<string | null>(null);
+  const [draftPromotionError, setDraftPromotionError] = useState<unknown>(null);
   const draftPromotionBusyRef = useRef(false);
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
@@ -883,7 +884,7 @@ export function HistoryDialog({
       setSelectedTaskId(taskId);
       setListRevision((value) => value + 1);
     } catch (error: unknown) {
-      setDraftPromotionError(formatRawBackendError(error));
+      setDraftPromotionError(error);
     } finally {
       draftPromotionBusyRef.current = false;
       setDraftPromotionBusy(false);
@@ -1254,6 +1255,9 @@ export function HistoryDialog({
                         type="button"
                         className="history-regenerate__primary"
                         disabled={draftPromotionBusy || !canPromoteSeedanceDraft(detail)}
+                        aria-describedby={
+                          draftPromotionError != null ? "history-draft-promotion-error" : undefined
+                        }
                         onClick={() => void submitDraftPromotion(detail)}
                       >
                         {draftPromotionBusy ? "提交正片中…" : "样片已审核，生成 1080p 正片"}
@@ -1262,10 +1266,12 @@ export function HistoryDialog({
                     {summary.status !== "succeeded" ? (
                       <p className="history-empty-note">样片成功后才能生成正片。</p>
                     ) : null}
-                    {draftPromotionError ? (
-                      <p role="alert" className="history-regenerate__error">
-                        {draftPromotionError}
-                      </p>
+                    {draftPromotionError != null ? (
+                      <ErrorAlert
+                        raw
+                        id="history-draft-promotion-error"
+                        error={draftPromotionError}
+                      />
                     ) : null}
                   </section>
                 ) : null}
