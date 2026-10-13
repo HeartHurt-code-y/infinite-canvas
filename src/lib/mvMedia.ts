@@ -1,7 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
 import { isDesktopRuntime, type VideoCompositionJobRecord } from "./backend";
 import { videoCompositionJobRecordSchema } from "./backendSchemas";
+import { invokeDesktop } from "./ipc";
 
 export interface MvMusicWindow {
   readonly id: string;
@@ -141,7 +141,7 @@ const lyricsAlignmentSchema = v.object({
 });
 async function call<T extends v.GenericSchema>(name: string, schema: T, command: unknown) {
   if (!isDesktopRuntime()) throw new Error("MV 音频处理和原曲合成需要在桌面应用中执行。");
-  const result: unknown = await invoke(name, { command });
+  const result: unknown = await invokeDesktop(name, v.unknown(), { command });
   const parsed = v.safeParse(schema, result);
   if (!parsed.success) throw new Error("MV 本地媒体处理返回了无效结果。");
   return parsed.output;
@@ -157,7 +157,7 @@ export const mvMediaClient: MvMediaClient = {
     call("check_mv_media_alignment", alignmentSchema, { finalPath, expectedDurationSeconds }),
   clipSignature: async (path) => {
     if (!isDesktopRuntime()) throw new Error("口型人工验收需要在桌面应用中读取实际片段。");
-    const value: unknown = await invoke("mv_clip_signature", { path });
+    const value: unknown = await invokeDesktop("mv_clip_signature", v.unknown(), { path });
     const parsed = v.safeParse(sha256Schema, value);
     if (!parsed.success) throw new Error("片段 SHA-256 检查返回了无效结果。");
     return parsed.output;

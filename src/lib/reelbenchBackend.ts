@@ -1,6 +1,5 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import { isDesktopRuntime } from "./backend";
+import * as v from "valibot";
+import { invokeDesktop, isDesktopRuntime, subscribeBackendEvent } from "./ipc";
 
 export interface ReelbenchShot {
   id: string;
@@ -71,11 +70,87 @@ export interface ReelbenchVideoExport {
   durationSeconds: number;
 }
 
-function desktopOnly(): void {
-  if (!isDesktopRuntime()) {
-    throw new Error("拉片分析与视频合成需要桌面应用。 ");
-  }
-}
+const reelbenchShotSchema = v.object({
+  id: v.string(),
+  start: v.number(),
+  end: v.number(),
+  seconds: v.number(),
+  motion: v.nullable(v.number()),
+  size: v.string(),
+  category: v.string(),
+  camera: v.string(),
+  transitionIn: v.string(),
+  subjects: v.array(v.string()),
+  frame: v.string(),
+  onscreenText: v.string(),
+  audio: v.string(),
+  rhythm: v.string(),
+  rhythmNote: v.string(),
+  note: v.string(),
+  frameAPath: v.string(),
+  frameBPath: v.string(),
+});
+
+const reelbenchShotDraftSchema = v.object({
+  runId: v.string(),
+  videoPath: v.string(),
+  outputDir: v.string(),
+  sourceIdentity: v.object({
+    sizeBytes: v.number(),
+    modifiedUnixMs: v.number(),
+    sha256: v.string(),
+  }),
+  meta: v.object({
+    durationSeconds: v.number(),
+    fps: v.number(),
+    width: v.number(),
+    height: v.number(),
+    hasAudio: v.boolean(),
+  }),
+  sceneThreshold: v.number(),
+  minShotSeconds: v.number(),
+  seedCuts: v.array(v.number()),
+  manualCuts: v.array(v.number()),
+  cast: v.array(v.object({ id: v.string(), name: v.string(), note: v.string() })),
+  trackPath: v.string(),
+  sheets: v.array(
+    v.object({
+      fromId: v.string(),
+      toId: v.string(),
+      shotIds: v.array(v.string()),
+      frameAPath: v.string(),
+      frameBPath: v.string(),
+    }),
+  ),
+  shots: v.array(reelbenchShotSchema),
+});
+
+const reelbenchValidationSchema = v.object({
+  ok: v.boolean(),
+  gates: v.array(
+    v.object({
+      id: v.string(),
+      ok: v.boolean(),
+      skipped: v.boolean(),
+      issues: v.array(v.string()),
+    }),
+  ),
+  hints: v.array(v.string()),
+});
+
+const reelbenchVideoExportSchema = v.object({
+  videoPath: v.string(),
+  width: v.number(),
+  height: v.number(),
+  durationSeconds: v.number(),
+});
+
+const reelbenchProgressSchema = v.object({
+  runId: v.string(),
+  phase: v.picklist(["probe", "cuts", "motion", "frames", "sheets", "export"]),
+  current: v.number(),
+  total: v.number(),
+});
 
 export const reelbenchBackendClient = {
   async analyze(command: {
@@ -84,8 +159,7 @@ export const reelbenchBackendClient = {
     sceneThreshold?: number;
     minShotSeconds?: number;
   }): Promise<ReelbenchShotDraft> {
-    desktopOnly();
-    return invoke<ReelbenchShotDraft>("analyze_reelbench_video", { command });
+    return invokeDesktop("analyze_reelbench_video", reelbenchShotDraftSchema, { command });
   },
 
   async recut(command: {
@@ -93,13 +167,11 @@ export const reelbenchBackendClient = {
     splitCuts: number[];
     mergeCuts: number[];
   }): Promise<ReelbenchShotDraft> {
-    desktopOnly();
-    return invoke<ReelbenchShotDraft>("recut_reelbench_video", { command });
+    return invokeDesktop("recut_reelbench_video", reelbenchShotDraftSchema, { command });
   },
 
   async validate(command: { draft: ReelbenchShotDraft }): Promise<ReelbenchValidation> {
-    desktopOnly();
-    return invoke<ReelbenchValidation>("validate_reelbench_shots", command);
+    return invokeDesktop("validate_reelbench_shots", reelbenchValidationSchema, command);
   },
 
   async exportVideo(command: {
@@ -107,12 +179,17 @@ export const reelbenchBackendClient = {
     scale?: number;
     lang?: "zh" | "en";
   }): Promise<ReelbenchVideoExport> {
-    desktopOnly();
-    return invoke<ReelbenchVideoExport>("export_reelbench_video", { command });
+    return invokeDesktop("export_reelbench_video", reelbenchVideoExportSchema, { command });
   },
 
   onProgress(listener: (progress: ReelbenchProgress) => void): Promise<() => void> {
-    desktopOnly();
-    return listen<ReelbenchProgress>("reelbench-progress", (event) => listener(event.payload));
+    // 与其他客户端不同：拉片进度事件要区分「非桌面」与「订阅失败」，保持原有
+    // desktopOnly 的人话报错，而不是静默拿到一个永远不触发的订阅。
+    if (!isDesktopRuntime()) {
+      return Promise.reject(new Error("拉片分析与视频合成需要桌面应用。 "));
+    }
+    return Promise.resolve(
+      subscribeBackendEvent("reelbench-progress", reelbenchProgressSchema, listener),
+    );
   },
 };

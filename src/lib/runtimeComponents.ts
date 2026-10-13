@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
 
@@ -104,12 +104,12 @@ async function invokeStrict<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   requireDesktop();
-  return v.parse(schema, await invoke(command, args));
+  return invokeDesktop(command, schema, args);
 }
 
 async function mutate(command: string, args?: Record<string, unknown>): Promise<void> {
   requireDesktop();
-  await invoke(command, args);
+  await invokeDesktopVoid(command, args);
 }
 
 export const runtimeComponentsClient = {

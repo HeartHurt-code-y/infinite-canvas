@@ -11,6 +11,7 @@ describe("brand design desktop delivery", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(open).mockReset();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
   it("reads an unchanged local source through native image normalization and validates its identity", async () => {

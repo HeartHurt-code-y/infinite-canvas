@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime, type MediaReferenceTarget } from "./backend";
 
@@ -117,10 +117,9 @@ export function isVideoPreparationActive(job: VideoPreparationJob): boolean {
 export const videoPreparationClient = {
   async probe(source: MediaReferenceTarget): Promise<VideoPreparationProbe> {
     requireDesktop();
-    return v.parse(
-      probeSchema,
-      await invoke("probe_video_preparation", { source: v.parse(sourceSchema, source) }),
-    );
+    return invokeDesktop("probe_video_preparation", probeSchema, {
+      source: v.parse(sourceSchema, source),
+    });
   },
   async start(command: StartVideoPreparationCommand): Promise<VideoPreparationJob> {
     requireDesktop();
@@ -128,41 +127,31 @@ export const videoPreparationClient = {
     if (validated.endSeconds != null && validated.endSeconds <= validated.startSeconds) {
       throw new Error("结束时间必须大于开始时间。");
     }
-    return v.parse(jobSchema, await invoke("start_video_preparation", { command: validated }));
+    return invokeDesktop("start_video_preparation", jobSchema, { command: validated });
   },
   async get(jobId: string): Promise<VideoPreparationJob> {
     requireDesktop();
-    return v.parse(
-      jobSchema,
-      await invoke("get_video_preparation_job", { jobId: v.parse(text, jobId) }),
-    );
+    return invokeDesktop("get_video_preparation_job", jobSchema, { jobId: v.parse(text, jobId) });
   },
   async list(): Promise<VideoPreparationJob[]> {
     requireDesktop();
-    return v.parse(v.array(jobSchema), await invoke("list_video_preparation_jobs"));
+    return invokeDesktop("list_video_preparation_jobs", v.array(jobSchema));
   },
   async retry(jobId: string): Promise<VideoPreparationJob> {
     requireDesktop();
-    return v.parse(
-      jobSchema,
-      await invoke("retry_video_preparation_job", { jobId: v.parse(text, jobId) }),
-    );
+    return invokeDesktop("retry_video_preparation_job", jobSchema, { jobId: v.parse(text, jobId) });
   },
   async cancel(jobId: string): Promise<VideoPreparationJob> {
     requireDesktop();
-    return v.parse(
-      jobSchema,
-      await invoke("cancel_video_preparation_job", { jobId: v.parse(text, jobId) }),
-    );
+    return invokeDesktop("cancel_video_preparation_job", jobSchema, {
+      jobId: v.parse(text, jobId),
+    });
   },
   async rename(jobId: string, name: string): Promise<VideoPreparationJob> {
     requireDesktop();
-    return v.parse(
-      jobSchema,
-      await invoke("rename_video_preparation_output", {
-        jobId: v.parse(text, jobId),
-        name: v.parse(text, name),
-      }),
-    );
+    return invokeDesktop("rename_video_preparation_output", jobSchema, {
+      jobId: v.parse(text, jobId),
+      name: v.parse(text, name),
+    });
   },
 };

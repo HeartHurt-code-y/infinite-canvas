@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 import * as v from "valibot";
 import type { WhiteModelBinding } from "./whiteModelControl";
 import {
@@ -180,26 +180,23 @@ export async function getBlenderEngine(
   executablePath?: string | null,
 ): Promise<BlenderEngineStatus> {
   const path = (executablePath ?? "").trim();
-  return v.parse(
-    engineSchema,
-    await invoke("get_blender_engine", { executablePath: path || null }),
-  );
+  return invokeDesktop("get_blender_engine", engineSchema, { executablePath: path || null });
 }
 export async function startBlenderRender(request: BlenderRenderRequest): Promise<BlenderRenderJob> {
-  return v.parse(jobSchema, await invoke("start_blender_render", { request }));
+  return invokeDesktop("start_blender_render", jobSchema, { request });
 }
 export async function getBlenderRender(jobId: string): Promise<BlenderRenderJob> {
-  return v.parse(jobSchema, await invoke("get_blender_render", { jobId }));
+  return invokeDesktop("get_blender_render", jobSchema, { jobId });
 }
 export async function cancelBlenderRender(jobId: string): Promise<BlenderRenderJob> {
-  return v.parse(jobSchema, await invoke("cancel_blender_render", { jobId }));
+  return invokeDesktop("cancel_blender_render", jobSchema, { jobId });
 }
 export async function openBlenderProject(
   executablePath: string | null,
   projectPath: string,
 ): Promise<void> {
   const path = (executablePath ?? "").trim();
-  await invoke("open_blender_project", {
+  await invokeDesktopVoid("open_blender_project", {
     executablePath: path || null,
     projectPath,
   });

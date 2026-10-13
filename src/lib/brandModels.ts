@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
 
@@ -223,7 +223,7 @@ export function selectBrandModelVersion(
 
 export async function listBrandModels(): Promise<readonly BrandModelProfile[]> {
   requireDesktop();
-  return v.parse(v.array(profileSchema), await invoke("list_brand_models"));
+  return invokeDesktop("list_brand_models", v.array(profileSchema));
 }
 
 export async function saveBrandModelVersion(
@@ -233,7 +233,7 @@ export async function saveBrandModelVersion(
   const missing = brandModelVersionRequirements(input);
   if (missing.length > 0) throw new Error(missing.map((entry) => entry.hint).join("\n"));
   const command = v.parse(saveInputSchema, input);
-  const profile = v.parse(profileSchema, await invoke("save_brand_model_version", { command }));
+  const profile = await invokeDesktop("save_brand_model_version", profileSchema, { command });
   if (command.profileId && profile.id !== command.profileId)
     throw new Error("模特保存结果不匹配，请刷新模特库后重试。");
   return profile;
@@ -244,7 +244,7 @@ export async function approveBrandModelVersion(
 ): Promise<BrandModelProfile> {
   requireDesktop();
   const command = v.parse(versionInputSchema, input);
-  const profile = v.parse(profileSchema, await invoke("approve_brand_model_version", { command }));
+  const profile = await invokeDesktop("approve_brand_model_version", profileSchema, { command });
   if (
     profile.id !== command.profileId ||
     !profile.versions.some(
@@ -264,7 +264,7 @@ export async function validateBrandModelVersion(
 ): Promise<BrandModelVersion> {
   requireDesktop();
   const command = v.parse(versionInputSchema, input);
-  const version = v.parse(versionSchema, await invoke("validate_brand_model_version", { command }));
+  const version = await invokeDesktop("validate_brand_model_version", versionSchema, { command });
   if (
     version.status !== "approved" ||
     version.id !== command.versionId ||
@@ -281,7 +281,7 @@ export async function archiveBrandModel(input: {
 }): Promise<BrandModelProfile> {
   requireDesktop();
   const command = v.parse(v.strictObject({ profileId: text, archived: v.boolean() }), input);
-  const profile = v.parse(profileSchema, await invoke("archive_brand_model", { command }));
+  const profile = await invokeDesktop("archive_brand_model", profileSchema, { command });
   if (profile.id !== command.profileId || profile.archived !== command.archived)
     throw new Error("模特归档状态不匹配，请刷新模特库后重试。");
   return profile;

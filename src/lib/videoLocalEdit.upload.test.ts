@@ -55,6 +55,7 @@ beforeEach(() => {
   startUpload.mockReset();
   getJob.mockReset();
   logged.length = 0;
+  vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
 });
 
 describe("video edit frame library upload", () => {

@@ -1,7 +1,19 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import * as v from "valibot";
 import type { SeedanceTaskMode } from "./seedanceTasks";
+import {
+  formatRawBackendError,
+  frontendLog,
+  invokeDesktop,
+  invokeDesktopVoid,
+  isDesktopRuntime,
+  subscribeBackendEvent,
+} from "./ipc";
+
+// IPC 收口在 ./ipc：invoke/listen 只在那里出现。这里 re-export 公共守卫与
+// 错误类型，保持既有 `from "./backend"` 导入路径稳定。
+export { isDesktopRuntime, frontendLog, formatRawBackendError, BackendContractError } from "./ipc";
+export type { BackendContractIssue, FrontendLogLevel } from "./ipc";
 
 import {
   assetGroupSchema,
@@ -51,7 +63,6 @@ import {
   stagingStateChangedEventSchema,
   stringSchema,
   tosBucketPullSummarySchema,
-  unknownSchema,
   videoComposerEngineStatusSchema,
   workspaceUiPrefsSchema,
   videoCompositionJobRecordSchema,
@@ -266,81 +277,6 @@ export interface ProviderSettingsClient {
     providerConnectionId: string,
     groupName: string,
   ): Promise<void>;
-}
-
-export function isDesktopRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
-class DesktopInvocationError extends Error {
-  readonly kind = "desktop";
-  readonly details: { readonly command: string; readonly runtime: "browser-preview" };
-
-  constructor(command: string) {
-    super("该连接操作只能在桌面应用中执行。");
-    this.name = "DesktopInvocationError";
-    this.details = { command, runtime: "browser-preview" };
-  }
-}
-
-export interface BackendContractIssue {
-  readonly path: string;
-  readonly message: string;
-}
-
-/**
- * Raised when a successful Tauri invocation returns a payload that violates the
- * frontend/backend contract. The raw payload is deliberately omitted so secrets
- * and provider responses cannot leak into logs through error formatting.
- */
-export class BackendContractError extends Error {
-  readonly kind = "backend-contract";
-  readonly details: {
-    readonly command: string;
-    readonly issues: readonly BackendContractIssue[];
-  };
-
-  constructor(command: string, issues: readonly BackendContractIssue[]) {
-    const summary = issues
-      .slice(0, 3)
-      .map((issue) => `${issue.path || "<root>"}: ${issue.message}`)
-      .join("; ");
-    super(`桌面后端返回了不符合契约的数据（${command}）：${summary}`);
-    this.name = "BackendContractError";
-    this.details = { command, issues };
-  }
-}
-
-function parseBackendPayload<TSchema extends v.GenericSchema>(
-  command: string,
-  schema: TSchema,
-  payload: unknown,
-): v.InferOutput<TSchema> {
-  const result = v.safeParse(schema, payload);
-  if (result.success) return result.output;
-  throw new BackendContractError(
-    command,
-    result.issues.map((issue) => ({
-      path: v.getDotPath(issue) ?? "",
-      message: issue.message,
-    })),
-  );
-}
-
-async function invokeDesktop<TSchema extends v.GenericSchema>(
-  command: string,
-  schema: TSchema,
-  args?: Record<string, unknown>,
-): Promise<v.InferOutput<TSchema>> {
-  if (!isDesktopRuntime()) {
-    throw new DesktopInvocationError(command);
-  }
-  const payload = await invoke<unknown>(command, args);
-  return parseBackendPayload(command, schema, payload);
-}
-
-async function invokeDesktopVoid(command: string, args?: Record<string, unknown>): Promise<void> {
-  await invokeDesktop(command, unknownSchema, args);
 }
 
 export const providerSettingsClient: ProviderSettingsClient = {
@@ -971,42 +907,7 @@ export interface StagingStateChangedEvent {
 export function subscribeStagingEvents(
   handler: (payload: StagingStateChangedEvent) => void,
 ): () => void {
-  if (!isDesktopRuntime()) return () => undefined;
-  const unlistenPromise = listen("staging:state-changed", (event) => {
-    try {
-      handler(
-        parseBackendPayload(
-          "event:staging:state-changed",
-          stagingStateChangedEventSchema,
-          event.payload,
-        ),
-      );
-    } catch (error) {
-      frontendLog("error", formatRawBackendError(error));
-    }
-  });
-  return () => {
-    void unlistenPromise.then(
-      (unlisten) => unlisten(),
-      () => undefined,
-    );
-  };
-}
-
-export function formatRawBackendError(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) {
-    return JSON.stringify(
-      { ...error, name: error.name, message: error.message, stack: error.stack },
-      null,
-      2,
-    );
-  }
-  try {
-    return JSON.stringify(error, null, 2);
-  } catch {
-    return String(error);
-  }
+  return subscribeBackendEvent("staging:state-changed", stagingStateChangedEventSchema, handler);
 }
 
 /*
@@ -1536,39 +1437,6 @@ export function promptMultimodalDefinitionForPath(
   const dotIndex = fileName.lastIndexOf(".");
   const extension = dotIndex >= 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
   return PROMPT_MATERIAL_BY_EXTENSION[extension] ?? null;
-}
-
-export type FrontendLogLevel = "info" | "warn" | "error";
-
-/**
- * 前端结构化日志：桌面运行时通过 tauri-plugin-log 写入与后端一致的日志文件
- * （与 [staging]/[generation] 等前缀同通道，便于串联排查）；
- * 浏览器/测试环境回退到 console。日志写入失败永远静默，不影响业务流程。
- */
-export function frontendLog(level: FrontendLogLevel, message: string): void {
-  if (isDesktopRuntime()) {
-    void (async () => {
-      const pluginLog = await import("@tauri-apps/plugin-log");
-      if (level === "error") {
-        await pluginLog.error(message);
-      } else if (level === "warn") {
-        await pluginLog.warn(message);
-      } else {
-        await pluginLog.info(message);
-      }
-    })().catch(() => undefined);
-    return;
-  }
-  // Tauri log 插件不可用（如纯浏览器调试）时的兜底输出，console 在此为有意降级。
-  /* eslint-disable no-console */
-  if (level === "error") {
-    console.error(message);
-  } else if (level === "warn") {
-    console.warn(message);
-  } else {
-    console.info(message);
-  }
-  /* eslint-enable no-console */
 }
 
 export type GenerationTaskStatus =
@@ -2141,7 +2009,6 @@ let generationEventSubscriptionCount = 0;
 export function subscribeGenerationEvents(
   handler: (eventName: GenerationEventName, payload: unknown) => void,
 ): () => void {
-  if (!isDesktopRuntime()) return () => undefined;
   // 订阅期数只在挂载时增长一次；调用方必须保证不会反复重建订阅——`result-ready` 与
   // `result-saved` 之间如果有一次退订/重订，图片结果的那次保存事件就会被静默丢弃，
   // 卡片永久停在「正在保存本地副本」。这里把期数记进日志，便于日后回看是否又出现抖动。
@@ -2152,25 +2019,13 @@ export function subscribeGenerationEvents(
       `[generation] 生成事件订阅被重复建立（第 ${generationEventSubscriptionCount} 次）：处理器引用不稳定会导致事件丢失`,
     );
   }
-  const unlistenPromises = GENERATION_EVENT_NAMES.map((name) =>
-    listen(name, (event) => {
-      try {
-        handler(
-          name,
-          parseBackendPayload(`event:${name}`, GENERATION_EVENT_SCHEMAS[name], event.payload),
-        );
-      } catch (error) {
-        frontendLog("error", formatRawBackendError(error));
-      }
-    }),
+  const unlistenFns = GENERATION_EVENT_NAMES.map((name) =>
+    subscribeBackendEvent(name, GENERATION_EVENT_SCHEMAS[name], (payload) =>
+      handler(name, payload),
+    ),
   );
   return () => {
-    for (const promise of unlistenPromises) {
-      void promise.then(
-        (unlisten) => unlisten(),
-        () => undefined,
-      );
-    }
+    for (const unlisten of unlistenFns) unlisten();
   };
 }
 

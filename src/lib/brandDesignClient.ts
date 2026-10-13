@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
@@ -40,7 +40,7 @@ function requireDesktop() {
 export async function readBrandDesignImage(path: string): Promise<BrandDesignImage> {
   requireDesktop();
   if (!path.trim()) throw new Error("请选择已保存到本机的图片文件。");
-  return v.parse(imageSchema, await invoke("read_brand_design_image", { command: { path } }));
+  return invokeDesktop("read_brand_design_image", imageSchema, { command: { path } });
 }
 
 export async function exportBrandDesignBundle(
@@ -54,10 +54,9 @@ export async function exportBrandDesignBundle(
     title: "选择品牌设计交付目录",
   });
   if (!directory || Array.isArray(directory)) return null;
-  const result = v.parse(
-    exportSchema,
-    await invoke("export_brand_design_bundle", { command: { directory, files, manifest } }),
-  );
+  const result = await invokeDesktop("export_brand_design_bundle", exportSchema, {
+    command: { directory, files, manifest },
+  });
   if (result.count !== files.length) throw new Error("设计交付文件数量不匹配，请检查导出结果。");
   return result;
 }

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime, type MediaReferenceTarget } from "./backend";
 
@@ -144,10 +144,9 @@ export const aiMediaClient = {
   async runtimeStatus(mode: AiMediaMode = "lite"): Promise<AiMediaRuntimeStatus> {
     requireDesktop();
     const requestedMode = v.parse(modeSchema, mode);
-    const status = v.parse(
-      runtimeSchema,
-      await invoke("get_ai_media_runtime_status", { mode: requestedMode }),
-    );
+    const status = await invokeDesktop("get_ai_media_runtime_status", runtimeSchema, {
+      mode: requestedMode,
+    });
     if (status.mode != null && status.mode !== requestedMode)
       throw new Error("返回的 AI 组件与所选处理引擎不匹配。");
     return status;
@@ -155,13 +154,10 @@ export const aiMediaClient = {
   async importRuntime(rootPath: string, mode: AiMediaMode = "lite"): Promise<AiMediaRuntimeStatus> {
     requireDesktop();
     const requestedMode = v.parse(modeSchema, mode);
-    const status = v.parse(
-      runtimeSchema,
-      await invoke("import_ai_media_runtime", {
-        rootPath: v.parse(text, rootPath.trim()),
-        mode: requestedMode,
-      }),
-    );
+    const status = await invokeDesktop("import_ai_media_runtime", runtimeSchema, {
+      rootPath: v.parse(text, rootPath.trim()),
+      mode: requestedMode,
+    });
     if (status.mode != null && status.mode !== requestedMode)
       throw new Error("导入的 AI 组件与所选处理引擎不匹配。");
     return status;
@@ -176,35 +172,32 @@ export const aiMediaClient = {
       (validated.mode === "quality" && validated.device === "directml")
     )
       throw new Error("处理设备与所选引擎不兼容。");
-    const job = v.parse(jobSchema, await invoke("start_ai_media_job", { command: validated }));
+    const job = await invokeDesktop("start_ai_media_job", jobSchema, { command: validated });
     if (job.mode !== validated.mode) throw new Error("创建的 AI 任务与所选处理引擎不匹配。");
     return job;
   },
   async list(): Promise<AiMediaJob[]> {
     requireDesktop();
-    return v.parse(v.array(jobSchema), await invoke("list_ai_media_jobs"));
+    return invokeDesktop("list_ai_media_jobs", v.array(jobSchema));
   },
   async get(jobId: string): Promise<AiMediaJob> {
     requireDesktop();
-    return v.parse(jobSchema, await invoke("get_ai_media_job", { jobId: v.parse(text, jobId) }));
+    return invokeDesktop("get_ai_media_job", jobSchema, { jobId: v.parse(text, jobId) });
   },
   async retry(jobId: string): Promise<AiMediaJob> {
     requireDesktop();
-    return v.parse(jobSchema, await invoke("retry_ai_media_job", { jobId: v.parse(text, jobId) }));
+    return invokeDesktop("retry_ai_media_job", jobSchema, { jobId: v.parse(text, jobId) });
   },
   async cancel(jobId: string): Promise<AiMediaJob> {
     requireDesktop();
-    return v.parse(jobSchema, await invoke("cancel_ai_media_job", { jobId: v.parse(text, jobId) }));
+    return invokeDesktop("cancel_ai_media_job", jobSchema, { jobId: v.parse(text, jobId) });
   },
   async rename(jobId: string, resultIndex: number, name: string): Promise<AiMediaJob> {
     requireDesktop();
-    return v.parse(
-      jobSchema,
-      await invoke("rename_ai_media_output", {
-        jobId: v.parse(text, jobId),
-        resultIndex: v.parse(index, resultIndex),
-        name: v.parse(text, name.trim()),
-      }),
-    );
+    return invokeDesktop("rename_ai_media_output", jobSchema, {
+      jobId: v.parse(text, jobId),
+      resultIndex: v.parse(index, resultIndex),
+      name: v.parse(text, name.trim()),
+    });
   },
 };

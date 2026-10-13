@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 import * as v from "valibot";
 import {
   frontendLog,
@@ -46,10 +46,9 @@ export async function prepareVideoEditSource(
     if (!fallbackSrc) throw new Error("缺少待编辑视频来源，请重新连接视频。");
     return { src: fallbackSrc, release: async () => {} };
   }
-  const prepared = v.parse(
-    preparedSourceSchema,
-    await invoke("prepare_video_edit_source", { target: resolvedTarget }),
-  );
+  const prepared = await invokeDesktop("prepare_video_edit_source", preparedSourceSchema, {
+    target: resolvedTarget,
+  });
   let released = false;
   return {
     src: toMediaSrc(prepared.path),
@@ -57,7 +56,7 @@ export async function prepareVideoEditSource(
       if (released) return;
       released = true;
       try {
-        await invoke("release_video_edit_source", { previewId: prepared.previewId });
+        await invokeDesktopVoid("release_video_edit_source", { previewId: prepared.previewId });
       } catch {
         frontendLog("warn", "视频编辑临时预览清理失败，将在后续启动时回收。");
       }
@@ -67,7 +66,7 @@ export async function prepareVideoEditSource(
 
 export async function saveVideoEditFrame(imageDataUrl: string) {
   if (!isDesktopRuntime()) throw new Error("保存视频标注帧需要在桌面应用中运行。");
-  return v.parse(savedFrameSchema, await invoke("save_video_edit_frame", { imageDataUrl }));
+  return invokeDesktop("save_video_edit_frame", savedFrameSchema, { imageDataUrl });
 }
 
 /**

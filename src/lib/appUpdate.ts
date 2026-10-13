@@ -1,5 +1,7 @@
 import { useSyncExternalStore } from "react";
+import * as v from "valibot";
 import { formatRawBackendError, frontendLog, isDesktopRuntime } from "./backend";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 
 export const SKIPPED_UPDATE_STORAGE_KEY = "infinite-canvas:skipped-app-update-version";
 export const APP_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
@@ -20,22 +22,44 @@ export interface RuntimeComponentMigrationStatus {
   readonly ready: boolean;
   readonly preparing: boolean;
   readonly error: string | null;
+  readonly currentComponent?: string | null | undefined;
   readonly completedBytes: number;
   readonly totalBytes: number;
   readonly completedComponents: number;
   readonly totalComponents: number;
+  /** 仅 `get_runtime_component_update_status`（资源更新版）返回；迁移版没有。 */
   readonly reusedBytes?: number | undefined;
   readonly downloadedBytes?: number | undefined;
 }
 
-interface MacDeltaUpdateStatus {
-  readonly preparing: boolean;
-  readonly ready: boolean;
-  readonly error: string | null;
-  readonly downloadedBytes: number;
-  readonly totalBytes: number;
-  readonly reusedBytes: number;
-}
+// 与 Rust `MacDeltaUpdateStatus`（camelCase 序列化）同源的 IPC 契约；更新轮询
+// 每 500–750ms 一次，必须校验后再驱动进度条。类型从 schema 推导，不再手写。
+const macDeltaStatusSchema = v.object({
+  preparing: v.boolean(),
+  ready: v.boolean(),
+  error: v.nullable(v.string()),
+  downloadedBytes: v.number(),
+  totalBytes: v.number(),
+  reusedBytes: v.number(),
+});
+
+const migrationStatusSchema = v.object({
+  ready: v.boolean(),
+  preparing: v.boolean(),
+  error: v.nullable(v.string()),
+  currentComponent: v.optional(v.nullable(v.string())),
+  completedComponents: v.number(),
+  totalComponents: v.number(),
+  completedBytes: v.number(),
+  totalBytes: v.number(),
+});
+
+// `RuntimeResourceUpdateStatus`（Rust resource_update.rs）：同一形状再加两个字节字段。
+const resourceUpdateStatusSchema = v.object({
+  ...migrationStatusSchema.entries,
+  reusedBytes: v.number(),
+  downloadedBytes: v.number(),
+});
 
 export interface AppUpdateProgressEvent {
   readonly event: "Started" | "Progress" | "Finished";
@@ -734,11 +758,10 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         resourceManifest,
         download: async (onProgress) => {
           if (offersMacDelta) {
-            const { invoke } = await import("@tauri-apps/api/core");
             let done = false;
             let lastDownloaded = 0;
             let started = false;
-            const preparation = invoke<boolean>("prepare_macos_delta_update", {
+            const preparation = invokeDesktop("prepare_macos_delta_update", v.boolean(), {
               version: update.version,
             });
             void preparation
@@ -748,8 +771,9 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
               .catch(() => undefined);
             try {
               while (!done) {
-                const progress = await invoke<MacDeltaUpdateStatus>(
+                const progress = await invokeDesktop(
                   "get_macos_delta_update_status",
+                  macDeltaStatusSchema,
                 );
                 if (!started && progress.totalBytes > 0) {
                   onProgress({ event: "Started", data: { contentLength: progress.totalBytes } });
@@ -766,8 +790,9 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
               }
               macDeltaPrepared = await preparation;
               if (macDeltaPrepared) {
-                const progress = await invoke<MacDeltaUpdateStatus>(
+                const progress = await invokeDesktop(
                   "get_macos_delta_update_status",
+                  macDeltaStatusSchema,
                 );
                 if (!started) {
                   onProgress({ event: "Started", data: { contentLength: progress.totalBytes } });
@@ -795,10 +820,11 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         },
         install: async (onProgress, beforeInstall) => {
           if (macDeltaPrepared) {
-            const { invoke } = await import("@tauri-apps/api/core");
             try {
               await beforeInstall?.();
-              await invoke("install_prepared_macos_delta_update", { version: update.version });
+              await invokeDesktopVoid("install_prepared_macos_delta_update", {
+                version: update.version,
+              });
               return;
             } catch (error) {
               const raw = error instanceof Error ? error.message : formatRawBackendError(error);
@@ -826,10 +852,10 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
     },
     async waitForRuntimeComponents(onProgress) {
       if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
-      const { invoke } = await import("@tauri-apps/api/core");
       for (;;) {
-        const status = await invoke<RuntimeComponentMigrationStatus>(
+        const status = await invokeDesktop(
           "get_runtime_component_migration_status",
+          migrationStatusSchema,
         );
         onProgress(status);
         if (status.ready) return;
@@ -840,9 +866,8 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
     },
     async prepareRuntimeComponents(request, onProgress) {
       if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
-      const { invoke } = await import("@tauri-apps/api/core");
       let settled = false;
-      const preparation = invoke<void>("prepare_runtime_components_for_update", {
+      const preparation = invokeDesktopVoid("prepare_runtime_components_for_update", {
         version: request.version,
         manifestUrl: request.url,
         signature: request.signature,
@@ -859,15 +884,16 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
       );
       try {
         while (!settled) {
-          const status = await invoke<RuntimeComponentMigrationStatus>(
+          const status = await invokeDesktop(
             "get_runtime_component_update_status",
+            resourceUpdateStatusSchema,
           );
           onProgress(status);
           if (!settled) await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
         }
         await preparation;
         onProgress(
-          await invoke<RuntimeComponentMigrationStatus>("get_runtime_component_update_status"),
+          await invokeDesktop("get_runtime_component_update_status", resourceUpdateStatusSchema),
         );
       } catch (error) {
         void preparation.catch(() => undefined);

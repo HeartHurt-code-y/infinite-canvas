@@ -15,6 +15,7 @@ describe("runtime component IPC and feature gates", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.desktop.mockReturnValue(true);
+    (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = {};
   });
 
   it("opens the missing feature without installing or submitting anything", async () => {
@@ -93,7 +94,7 @@ describe("runtime component IPC and feature gates", () => {
         "import_runtime_component_archive",
         { componentId: "blender", path: "C:/Downloads/blender.zip" },
       ],
-      ["cancel_runtime_component_install", undefined],
+      ["cancel_runtime_component_install"],
     ]);
   });
 

@@ -53,7 +53,10 @@ function fixture(status: "draft" | "approved" = "approved"): BrandModelProfile {
 }
 
 describe("durable brand model client", () => {
-  beforeEach(() => vi.mocked(invoke).mockReset());
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
+  });
 
   it("reports every missing save requirement and prevents incomplete native submissions", async () => {
     const command = { brandName: "  ", name: "", description: "", invariants: "", references: [] };

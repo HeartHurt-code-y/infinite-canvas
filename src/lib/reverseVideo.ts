@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
 
@@ -108,14 +108,14 @@ function requireDesktop(): void {
 export const reverseVideoClient: ReverseVideoClient = {
   async saveEvidence(command) {
     requireDesktop();
-    return v.parse(evidenceSchema, await invoke("save_reverse_video_evidence", { command }));
+    return invokeDesktop("save_reverse_video_evidence", evidenceSchema, { command });
   },
   async getLearning() {
     requireDesktop();
-    return v.parse(learningSchema, await invoke("get_reverse_video_learning"));
+    return invokeDesktop("get_reverse_video_learning", learningSchema);
   },
   async deliver(command) {
     requireDesktop();
-    return v.parse(deliverySchema, await invoke("deliver_reverse_video", { command }));
+    return invokeDesktop("deliver_reverse_video", deliverySchema, { command });
   },
 };

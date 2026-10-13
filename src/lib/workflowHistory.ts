@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import { isDesktopRuntime, type GenerationTaskSummary } from "./backend";
 import { WORKFLOW_KIND_IDS, type WorkflowKind } from "../features/workspace/workflowKinds";
@@ -147,7 +147,7 @@ async function desktop<T extends v.GenericSchema>(
   args?: Record<string, unknown>,
 ): Promise<v.InferOutput<T>> {
   if (!isDesktopRuntime()) throw new Error("工作流历史记录需要在桌面应用中使用。");
-  const result: unknown = await invoke(name, args);
+  const result: unknown = await invokeDesktop(name, v.unknown(), args);
   const parsed = v.safeParse(schema, result);
   if (!parsed.success) throw new Error("工作流历史记录格式无效，请保留当前画布并重试读取。");
   return parsed.output;

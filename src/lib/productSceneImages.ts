@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 import { open } from "@tauri-apps/plugin-dialog";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
@@ -195,25 +195,24 @@ function requireDesktop() {
 export const productSceneImageClient: ProductSceneImageClient = {
   async prepare(command) {
     requireDesktop();
-    const result = v.parse(preparedSchema, await invoke("prepare_product_scene_view", { command }));
+    const result = await invokeDesktop("prepare_product_scene_view", preparedSchema, { command });
     if (command.preservePhoto && result.photoPreserved !== true)
       throw new Error("当前桌面后端未确认整张原片保留，请重启更新后的桌面应用再导入。");
     return result;
   },
   async prepareLogo(command) {
     requireDesktop();
-    return v.parse(preparedSchema, await invoke("prepare_product_scene_logo", { command }));
+    return invokeDesktop("prepare_product_scene_logo", preparedSchema, { command });
   },
   async validateLogo(command) {
     requireDesktop();
-    await invoke("validate_product_scene_logo", { command });
+    await invokeDesktopVoid("validate_product_scene_logo", { command });
   },
   async applyLogo(command) {
     requireDesktop();
-    const result = v.parse(
-      logoCompositeSchema,
-      await invoke("apply_product_scene_logo", { command }),
-    );
+    const result = await invokeDesktop("apply_product_scene_logo", logoCompositeSchema, {
+      command,
+    });
     if (
       ![2048, 1536, 1152].includes(result.width) ||
       result.height !== 2048 ||
@@ -224,13 +223,17 @@ export const productSceneImageClient: ProductSceneImageClient = {
   },
   async validateViews(command) {
     requireDesktop();
-    const protectedValidated = await invoke("validate_product_scene_views", { command });
+    // 旧版桌面端可能返回 undefined；这里必须走下方「未确认原片保护检查」的
+    // 人话拦截而不是契约错误，所以不做严格布尔校验（`!== true` 即校验）。
+    const protectedValidated = await invokeDesktop("validate_product_scene_views", v.unknown(), {
+      command,
+    });
     if (command.views.some((view) => view.region != null) && protectedValidated !== true)
       throw new Error("当前桌面后端未确认原片保护检查，已阻止生成；请重启更新后的桌面应用。");
   },
   async compose(command) {
     requireDesktop();
-    const result = v.parse(compositeSchema, await invoke("compose_product_scene", { command }));
+    const result = await invokeDesktop("compose_product_scene", compositeSchema, { command });
     const { width } = productSceneOutputSize(command.aspectRatio);
     if (result.width !== width || result.height !== 2048)
       throw new Error("产品场景图交付尺寸不匹配，请重新合成。");
@@ -251,9 +254,12 @@ export const productSceneImageClient: ProductSceneImageClient = {
       feather > 0.1
     )
       throw new Error("原片保护范围无效，请重新框选完整商品及必要的手腕或背景。");
-    const result = v.parse(
+    const result = await invokeDesktop(
+      "compose_product_scene_protected",
       protectedCompositeSchema,
-      await invoke("compose_product_scene_protected", { command }),
+      {
+        command,
+      },
     );
     if (
       result.width !== productSceneOutputSize(command.aspectRatio).width ||
@@ -264,10 +270,9 @@ export const productSceneImageClient: ProductSceneImageClient = {
   },
   async normalizeGenerated(command) {
     requireDesktop();
-    const result = v.parse(
-      generatedImageSchema,
-      await invoke("normalize_product_scene_image", { command }),
-    );
+    const result = await invokeDesktop("normalize_product_scene_image", generatedImageSchema, {
+      command,
+    });
     if (
       result.width !== productSceneOutputSize(command.aspectRatio).width ||
       result.height !== 2048
@@ -283,9 +288,10 @@ export const productSceneImageClient: ProductSceneImageClient = {
       title: "选择产品场景图导出目录",
     });
     if (!directory || Array.isArray(directory)) return null;
-    return v.parse(
+    return invokeDesktop(
+      "export_product_scenes",
       v.object({ directory: nonempty, count: v.pipe(dimension, v.maxValue(500)) }),
-      await invoke("export_product_scenes", { command: { ...command, directory } }),
+      { command: { ...command, directory } },
     );
   },
 };

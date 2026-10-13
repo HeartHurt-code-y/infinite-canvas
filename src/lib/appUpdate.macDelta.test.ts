@@ -60,6 +60,7 @@ describe("macOS delta update client", () => {
         return Promise.resolve({
           preparing: false,
           ready: true,
+          error: null,
           downloadedBytes: 20,
           totalBytes: 20,
           reusedBytes: 80,
@@ -94,6 +95,7 @@ describe("macOS delta update client", () => {
         return Promise.resolve({
           preparing: false,
           ready: false,
+          error: null,
           downloadedBytes: 0,
           totalBytes: 0,
           reusedBytes: 0,
@@ -118,6 +120,7 @@ describe("macOS delta update client", () => {
         return Promise.resolve({
           preparing: false,
           ready: true,
+          error: null,
           downloadedBytes: 20,
           totalBytes: 20,
           reusedBytes: 80,
@@ -147,6 +150,7 @@ describe("macOS delta update client", () => {
         return Promise.resolve({
           preparing: false,
           ready: true,
+          error: null,
           downloadedBytes: 20,
           totalBytes: 20,
           reusedBytes: 80,

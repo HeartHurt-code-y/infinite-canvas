@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeDesktop } from "./ipc";
 import * as v from "valibot";
 import {
   isDesktopRuntime,
@@ -409,5 +409,5 @@ export function blockingAssignmentsFromDraft(
 
 export async function saveWhiteModelStill(imageDataUrl: string) {
   if (!isDesktopRuntime()) throw new Error("导出站位图需要在桌面应用中运行。");
-  return v.parse(savedStillSchema, await invoke("save_white_model_still", { imageDataUrl }));
+  return invokeDesktop("save_white_model_still", savedStillSchema, { imageDataUrl });
 }

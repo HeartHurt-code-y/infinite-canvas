@@ -39,6 +39,7 @@ describe("protected product photograph IPC", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockReset();
     vi.mocked(open).mockReset();
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
   it("prepares a complete source photograph through the native preservePhoto operation", async () => {

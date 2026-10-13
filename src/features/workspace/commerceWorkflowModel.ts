@@ -54,7 +54,7 @@ export interface CommerceSource {
   readonly title: string;
   readonly text: string;
   readonly status: "fetched" | "failed";
-  readonly error?: string | null;
+  readonly error?: string | null | undefined;
 }
 export interface CommerceFact {
   readonly id: string;

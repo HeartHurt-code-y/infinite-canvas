@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
 import { isDesktopRuntime } from "./backend";
+import { invokeDesktop } from "./ipc";
 
 export interface SpeechVoice {
   readonly id: string;
@@ -100,7 +100,11 @@ const requestStatusSchema = v.object({
 
 async function call<T extends v.GenericSchema>(name: string, schema: T, command?: unknown) {
   if (!isDesktopRuntime()) throw new Error("自动配音需要在桌面应用中执行。");
-  const result: unknown = await invoke(name, command === undefined ? undefined : { command });
+  const result: unknown = await invokeDesktop(
+    name,
+    v.unknown(),
+    command === undefined ? undefined : { command },
+  );
   const parsed = v.safeParse(schema, result);
   if (!parsed.success) throw new Error("语音后端返回了无效结果。");
   return parsed.output;

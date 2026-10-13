@@ -60,11 +60,11 @@ export interface AnimationRenderJob {
   readonly status: "running" | "succeeded" | "failed" | "cancelled";
   readonly progress: number;
   readonly message: string;
-  readonly error?: string | null;
-  readonly gifPath?: string | null;
-  readonly videoPath?: string | null;
-  readonly previewPath?: string | null;
-  readonly projectPath?: string | null;
+  readonly error?: string | null | undefined;
+  readonly gifPath?: string | null | undefined;
+  readonly videoPath?: string | null | undefined;
+  readonly previewPath?: string | null | undefined;
+  readonly projectPath?: string | null | undefined;
   readonly createdAt: number;
   readonly updatedAt: number;
 }

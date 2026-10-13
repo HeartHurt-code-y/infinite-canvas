@@ -12,6 +12,7 @@ vi.mock("./backend", () => ({
 }));
 
 beforeEach(() => {
+  vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   vi.mocked(isDesktopRuntime).mockReturnValue(true);
   vi.mocked(invoke)
     .mockReset()

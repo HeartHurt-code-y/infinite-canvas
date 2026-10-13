@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
+import { generationResultRecordSchema } from "./backendSchemas";
 import { isDesktopRuntime, type GenerationResultRecord } from "./backend";
+import { invokeDesktop } from "./ipc";
 
 export interface CoverImageClient {
   resumeResult(command: {
@@ -23,11 +24,11 @@ const coverImageSchema = v.object({
 export const coverImageClient: CoverImageClient = {
   async resumeResult(command) {
     if (!isDesktopRuntime()) throw new Error("恢复封面保存需要在桌面应用中执行。");
-    return invoke<GenerationResultRecord>("resume_cover_image_result", { command });
+    return invokeDesktop("resume_cover_image_result", generationResultRecordSchema, { command });
   },
   async normalize(command) {
     if (!isDesktopRuntime()) throw new Error("封面尺寸处理需要在桌面应用中执行。");
-    const result: unknown = await invoke("normalize_cover_image", { command });
+    const result: unknown = await invokeDesktop("normalize_cover_image", v.unknown(), { command });
     const parsed = v.safeParse(coverImageSchema, result);
     if (!parsed.success) throw new Error("封面处理未返回完整的 1080×1440 图片。");
     return parsed.output;

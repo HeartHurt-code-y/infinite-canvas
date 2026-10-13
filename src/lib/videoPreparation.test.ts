@@ -38,6 +38,7 @@ describe("videoPreparationClient", () => {
   beforeEach(() => {
     invoke.mockReset();
     desktop.mockReturnValue(true);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
   it("submits measured stable identity and selected global stream index", async () => {

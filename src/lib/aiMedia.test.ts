@@ -61,6 +61,7 @@ describe("aiMediaClient", () => {
   beforeEach(() => {
     invoke.mockReset();
     desktop.mockReturnValue(true);
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: {} });
   });
 
   it("keeps the original generation identity, measured content and global audio stream", async () => {

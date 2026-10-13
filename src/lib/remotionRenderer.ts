@@ -1,9 +1,10 @@
-import { invoke } from "@tauri-apps/api/core";
+import * as v from "valibot";
 import type {
   AnimationPlan,
   AnimationRenderJob,
   RemotionWorkflowOptions,
 } from "../features/workspace/remotionWorkflowModel";
+import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 
 export interface RemotionRendererClient {
   preflight(): Promise<{ readonly ready: boolean; readonly message: string }>;
@@ -14,9 +15,29 @@ export interface RemotionRendererClient {
   get(jobId: string): Promise<AnimationRenderJob>;
   cancel(jobId: string): Promise<void>;
 }
+
+const remotionRendererPreflightSchema = v.object({
+  ready: v.boolean(),
+  message: v.string(),
+});
+
+const remotionRenderJobSchema = v.object({
+  id: v.string(),
+  status: v.picklist(["running", "succeeded", "failed", "cancelled"]),
+  progress: v.number(),
+  message: v.string(),
+  error: v.optional(v.nullable(v.string())),
+  gifPath: v.optional(v.nullable(v.string())),
+  videoPath: v.optional(v.nullable(v.string())),
+  previewPath: v.optional(v.nullable(v.string())),
+  projectPath: v.optional(v.nullable(v.string())),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+});
+
 export const remotionRendererClient: RemotionRendererClient = {
-  preflight: () => invoke("remotion_renderer_preflight"),
-  start: (command) => invoke("start_remotion_render", { command }),
-  get: (jobId) => invoke("get_remotion_render", { jobId }),
-  cancel: (jobId) => invoke("cancel_remotion_render", { jobId }),
+  preflight: () => invokeDesktop("remotion_renderer_preflight", remotionRendererPreflightSchema),
+  start: (command) => invokeDesktop("start_remotion_render", remotionRenderJobSchema, { command }),
+  get: (jobId) => invokeDesktop("get_remotion_render", remotionRenderJobSchema, { jobId }),
+  cancel: (jobId) => invokeDesktopVoid("cancel_remotion_render", { jobId }),
 };
