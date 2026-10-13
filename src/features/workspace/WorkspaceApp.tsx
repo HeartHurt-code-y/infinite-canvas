@@ -163,6 +163,7 @@ import {
   type CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { useDeferredSessionState } from "./useDeferredSessionState";
+import { WorkflowSessionRegistry } from "./workflowSessionRegistry";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import {
   createCanvasInputResolver,
@@ -2324,13 +2325,11 @@ export function WorkspaceApp({
     activeRef,
     active,
   );
-  const knowledgeVideoWorkflowAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const [workflowSessions] = useState(() => new WorkflowSessionRegistry());
   const recordedWorkflowRunner = useMemo(
     () => createRecordedWorkflowRunner({ canvasId }),
     [canvasId],
   );
-  const activeWorkflowHistoryIdsRef = useRef(new Set<string>());
-  const workflowHistoryActionsRef = useRef(new Set<string>());
   const [activeWorkflowHistoryIds, setActiveWorkflowHistoryIds] = useState<readonly string[]>([]);
   const recoverWorkflowHistory = services.recoverWorkflowHistory;
   useEffect(() => {
@@ -2526,10 +2525,7 @@ export function WorkspaceApp({
     // 不清空任务历史（生成节点删除/本地结果文件缺失都不能清理历史，详见 MVP 契约）。
     for (const controller of videoComposerAbortControllersRef.current.values()) controller.abort();
     videoComposerAbortControllersRef.current.clear();
-    for (const controller of knowledgeVideoWorkflowAbortControllersRef.current.values()) {
-      controller.abort();
-    }
-    knowledgeVideoWorkflowAbortControllersRef.current.clear();
+    workflowSessions.abortAll();
     // 先撤销拼接产物仅会话内有效的 blob 预览，再原子清空画布持久状态。
     for (const node of canvasNodesOfState(canvasStore.getState(), "output")) {
       if (node.origin === "composition" && node.previewSrc?.startsWith("blob:")) {
@@ -2548,6 +2544,7 @@ export function WorkspaceApp({
     cancelVideoToolBatches,
     clearCanvasState,
     canvasStore,
+    workflowSessions,
     setVideoComposerRuns,
     setVideoDownloaderRuns,
     setFrameExtractorRuns,
@@ -2563,12 +2560,9 @@ export function WorkspaceApp({
         controller.abort();
       }
       videoComposerAbortControllersRef.current.clear();
-      for (const controller of knowledgeVideoWorkflowAbortControllersRef.current.values()) {
-        controller.abort();
-      }
-      knowledgeVideoWorkflowAbortControllersRef.current.clear();
+      workflowSessions.abortAll();
     },
-    [cancelVideoToolBatches, canvasStore],
+    [cancelVideoToolBatches, canvasStore, workflowSessions],
   );
 
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
@@ -2634,9 +2628,9 @@ export function WorkspaceApp({
     if (
       canvasAgent.getState().status !== "idle" ||
       startingNodeKeys.size > 0 ||
-      knowledgeVideoWorkflowAbortControllersRef.current.size > 0 ||
-      activeWorkflowHistoryIdsRef.current.size > 0 ||
-      workflowHistoryActionsRef.current.size > 0 ||
+      workflowSessions.runningCount > 0 ||
+      workflowSessions.historyRunCount > 0 ||
+      workflowSessions.historyActionCount > 0 ||
       videoComposerAbortControllersRef.current.size > 0 ||
       videoDownloadQueuesRef.current.size > 0 ||
       Object.values(videoComposerRuns).some((run) => run.status === "running") ||
@@ -2659,6 +2653,7 @@ export function WorkspaceApp({
     canvasAgent,
     canvasId,
     startingNodeKeys,
+    workflowSessions,
     videoComposerRuns,
     videoDownloaderRuns,
     frameExtractorRuns,
@@ -4901,7 +4896,7 @@ export function WorkspaceApp({
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
       if (
         (config.brandVideo || config.musicVideo || config.productScene || config.reelbench) &&
-        !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
+        !workflowSessions.isRunning(key)
       ) {
         setKnowledgeVideoWorkflowRuns((current) => {
           const next = { ...current };
@@ -4915,7 +4910,7 @@ export function WorkspaceApp({
         previousNode &&
         workflowExecutionInputSignature(previousNode) ===
           workflowExecutionInputSignature({ ...previousNode, config }) &&
-        !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
+        !workflowSessions.isRunning(key)
       ) {
         const node = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
         if (node) {
@@ -4950,7 +4945,7 @@ export function WorkspaceApp({
         }
       }
     },
-    [patchNode, snapshotV2, setKnowledgeVideoWorkflowRuns],
+    [patchNode, snapshotV2, workflowSessions, setKnowledgeVideoWorkflowRuns],
   );
 
   const navigateWorkflowVersion = useCallback(
@@ -4962,9 +4957,9 @@ export function WorkspaceApp({
       if (!source) return;
       const run = knowledgeVideoWorkflowRuns[key];
       if (
-        knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+        workflowSessions.isRunning(key) ||
         (source.config.historyRunId &&
-          workflowHistoryActionsRef.current.has(source.config.historyRunId)) ||
+          workflowSessions.isHistoryActionActive(source.config.historyRunId)) ||
         ["planning", "generating", "qc", "composing"].includes(
           run?.phase ?? source.config.checkpoint.phase,
         )
@@ -4989,6 +4984,7 @@ export function WorkspaceApp({
     [
       snapshotV2,
       knowledgeVideoWorkflowRuns,
+      workflowSessions,
       patchNode,
       scheduleCanvasSave,
       setKnowledgeVideoWorkflowRuns,
@@ -5016,7 +5012,7 @@ export function WorkspaceApp({
       decisionResolution?: string,
       restoredNode?: KnowledgeVideoWorkflowNodeData,
     ) => {
-      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      if (workflowSessions.isRunning(key)) return;
       const document = snapshotV2({});
       const sourceNode =
         restoredNode ??
@@ -5103,17 +5099,17 @@ export function WorkspaceApp({
         resume && sourceNode.config.historyRunId
           ? sourceNode.config.historyRunId
           : crypto.randomUUID();
-      if (activeWorkflowHistoryIdsRef.current.has(historyRunId)) return;
+      if (!workflowSessions.beginHistoryRun(historyRunId)) return;
       const savedNode = { ...sourceNode, config: { ...sourceNode.config, historyRunId } };
       const node = withCanvasWorkflowMaterials(
         savedNode,
         workflowCanvasInputsFromDocument(document, key),
       );
       patchNode("knowledgeVideoWorkflow", key, () => savedNode);
-      activeWorkflowHistoryIdsRef.current.add(historyRunId);
-      setActiveWorkflowHistoryIds([...activeWorkflowHistoryIdsRef.current]);
-      const controller = new AbortController();
-      knowledgeVideoWorkflowAbortControllersRef.current.set(key, controller);
+      setActiveWorkflowHistoryIds(workflowSessions.historyRunIds());
+      const session = workflowSessions.begin(key);
+      // 同步段无重入，这里不会撞上刚被占用的 key；防御性兜底保持守卫语义完整。
+      if (!session) return;
       setKnowledgeVideoWorkflowRuns((current) => ({
         ...current,
         [key]: {
@@ -5133,7 +5129,7 @@ export function WorkspaceApp({
             resume,
             newHistory: !sourceNode.config.historyRunId,
             ...(decisionResolution === undefined ? {} : { decisionResolution }),
-            signal: controller.signal,
+            signal: session.signal,
             onCheckpoint: (checkpoint, versionHistory) => {
               // checkpoint 落卡是机器驱动的连续写入：走时间窗折叠，撤销栈不随跑批灌满。
               runWithCoalescedHistory(() =>
@@ -5202,11 +5198,9 @@ export function WorkspaceApp({
           }));
         })
         .finally(() => {
-          activeWorkflowHistoryIdsRef.current.delete(historyRunId);
-          setActiveWorkflowHistoryIds([...activeWorkflowHistoryIdsRef.current]);
-          if (knowledgeVideoWorkflowAbortControllersRef.current.get(key) === controller) {
-            knowledgeVideoWorkflowAbortControllersRef.current.delete(key);
-          }
+          workflowSessions.endHistoryRun(historyRunId);
+          setActiveWorkflowHistoryIds(workflowSessions.historyRunIds());
+          session.end();
         });
     },
     [
@@ -5216,6 +5210,7 @@ export function WorkspaceApp({
       patchNode,
       runWithCoalescedHistory,
       providerCatalog,
+      workflowSessions,
       setKnowledgeVideoWorkflowRuns,
     ],
   );
@@ -5226,14 +5221,13 @@ export function WorkspaceApp({
       action: "resume" | "restart" | "locate",
       resolution?: string,
     ) => {
-      if (workflowHistoryActionsRef.current.has(record.id)) return;
-      workflowHistoryActionsRef.current.add(record.id);
+      if (!workflowSessions.beginHistoryAction(record.id)) return;
       try {
         await recoverWorkflowHistory();
         const latest = (await workflowHistoryClient.get(record.id)).record;
         if (latest.canvasId !== canvasId)
           throw workflowUsageError("task_identity", "请先打开这条工作流所属的画布。");
-        if (activeWorkflowHistoryIdsRef.current.has(latest.id) && action !== "locate")
+        if (workflowSessions.isHistoryRunActive(latest.id) && action !== "locate")
           throw workflowUsageError(
             "task_pending",
             "这条工作流正在运行，请先在画布中暂停后再处理。",
@@ -5241,9 +5235,7 @@ export function WorkspaceApp({
         const document = snapshotV2({});
         const nodes = document.knowledgeVideoWorkflowNodes ?? [];
         const activeNode = nodes.find(
-          (item) =>
-            item.config.historyRunId === latest.id &&
-            knowledgeVideoWorkflowAbortControllersRef.current.has(item.key),
+          (item) => item.config.historyRunId === latest.id && workflowSessions.isRunning(item.key),
         );
         if (activeNode && action === "locate") {
           selectNode(activeNode.key);
@@ -5324,7 +5316,7 @@ export function WorkspaceApp({
             action === "restart" ? "已按历史输入重新制作" : "工作流已从历史记录恢复到画布",
           );
       } finally {
-        workflowHistoryActionsRef.current.delete(record.id);
+        workflowSessions.endHistoryAction(record.id);
       }
     },
     [
@@ -5337,6 +5329,7 @@ export function WorkspaceApp({
       occupiedNodeRects,
       patchNode,
       addNode,
+      workflowSessions,
       runKnowledgeVideoWorkflow,
     ],
   );
@@ -5390,8 +5383,7 @@ export function WorkspaceApp({
           const options = node.config.musicVideo;
           if (
             !options ||
-            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-            node.config.checkpoint.phase === "awaiting_approval"
+            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
           )
             return node;
           const refs = [...options.characterReferences];
@@ -5428,7 +5420,7 @@ export function WorkspaceApp({
         });
       }
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handlePickReverseVideo = useCallback(
@@ -5445,8 +5437,7 @@ export function WorkspaceApp({
         patchNode("knowledgeVideoWorkflow", key, (node) => {
           if (
             !node.config.reverseVideo ||
-            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-            node.config.checkpoint.phase === "awaiting_approval"
+            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
           )
             return node;
           return {
@@ -5473,7 +5464,7 @@ export function WorkspaceApp({
         });
       }
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handleRemoveReverseVideo = useCallback(
@@ -5481,8 +5472,7 @@ export function WorkspaceApp({
       patchNode("knowledgeVideoWorkflow", key, (node) => {
         if (
           !node.config.reverseVideo ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         return {
@@ -5498,7 +5488,7 @@ export function WorkspaceApp({
         };
       });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handlePickReelbenchVideo = useCallback(
@@ -5515,8 +5505,7 @@ export function WorkspaceApp({
         patchNode("knowledgeVideoWorkflow", key, (node) => {
           if (
             !node.config.reelbench ||
-            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-            node.config.checkpoint.phase === "awaiting_approval"
+            workflowSessions.isRunning(key) ||            node.config.checkpoint.phase === "awaiting_approval"
           )
             return node;
           return {
@@ -5543,7 +5532,7 @@ export function WorkspaceApp({
         });
       }
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handleRemoveReelbenchVideo = useCallback(
@@ -5551,8 +5540,7 @@ export function WorkspaceApp({
       patchNode("knowledgeVideoWorkflow", key, (node) => {
         if (
           !node.config.reelbench ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         return {
@@ -5568,7 +5556,7 @@ export function WorkspaceApp({
         };
       });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handlePickWorkflowMaterials = useCallback(
@@ -5578,8 +5566,7 @@ export function WorkspaceApp({
       let rejected = 0;
       patchNode("knowledgeVideoWorkflow", key, (node) => {
         if (
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         const materials = [...(node.config.materials ?? [])];
@@ -5600,15 +5587,14 @@ export function WorkspaceApp({
           description: "重复文件会跳过，不支持空文件。",
         });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handleRemoveWorkflowMaterial = useCallback(
     (key: string, localPath: string) => {
       patchNode("knowledgeVideoWorkflow", key, (node) => {
         if (
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         return {
@@ -5620,7 +5606,7 @@ export function WorkspaceApp({
         };
       });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handlePickCoverImages = useCallback(
@@ -5635,8 +5621,7 @@ export function WorkspaceApp({
         const options = node.config.xhsCover;
         if (
           !options ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         const field = role === "portrait" ? "portraits" : "materials";
@@ -5664,7 +5649,7 @@ export function WorkspaceApp({
           description: "人物参考图最多 3 张、补充图片最多 5 张，仅支持非空图片，重复图片会跳过。",
         });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handleRemoveCoverImage = useCallback(
@@ -5673,8 +5658,7 @@ export function WorkspaceApp({
         const options = node.config.xhsCover;
         if (
           !options ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         const field = role === "portrait" ? "portraits" : "materials";
@@ -5690,7 +5674,7 @@ export function WorkspaceApp({
         };
       });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handlePickCommerceMaterials = useCallback(
@@ -5705,8 +5689,7 @@ export function WorkspaceApp({
         const options = node.config.commerce;
         if (
           !options ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         const materials = [...options.materials];
@@ -5731,7 +5714,7 @@ export function WorkspaceApp({
           description: "支持非空图片与文档，重复文件会跳过。",
         });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const handleRemoveCommerceMaterial = useCallback(
@@ -5740,8 +5723,7 @@ export function WorkspaceApp({
         const options = node.config.commerce;
         if (
           !options ||
-          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
-          node.config.checkpoint.phase === "awaiting_approval"
+          workflowSessions.isRunning(key) ||          node.config.checkpoint.phase === "awaiting_approval"
         )
           return node;
         return {
@@ -5756,12 +5738,12 @@ export function WorkspaceApp({
         };
       });
     },
-    [patchNode],
+    [patchNode, workflowSessions],
   );
 
   const executeKnowledgeVideoWorkflow = useCallback(
     (key: string) => {
-      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      if (workflowSessions.isRunning(key)) return;
       const document = snapshotV2({});
       const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
       if (!source) return;
@@ -5799,11 +5781,11 @@ export function WorkspaceApp({
         },
       }));
     },
-    [snapshotV2, patchNode, setKnowledgeVideoWorkflowRuns],
+    [snapshotV2, patchNode, workflowSessions, setKnowledgeVideoWorkflowRuns],
   );
   const approveKnowledgeVideoWorkflowPlan = useCallback(
     (key: string) => {
-      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      if (workflowSessions.isRunning(key)) return;
       const document = snapshotV2({});
       const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
       if (!source) return;
@@ -5871,7 +5853,7 @@ export function WorkspaceApp({
         toast.error("执行计划无法确认", { description: <ErrorAlert error={error} workflow /> });
       }
     },
-    [snapshotV2, patchNode, runKnowledgeVideoWorkflow],
+    [snapshotV2, patchNode, workflowSessions, runKnowledgeVideoWorkflow],
   );
   const continueKnowledgeVideoWorkflow = useCallback(
     (key: string, resolution?: string) => runKnowledgeVideoWorkflow(key, true, resolution),
@@ -5879,7 +5861,7 @@ export function WorkspaceApp({
   );
   const redoKnowledgeVideoWorkflowShot = useCallback(
     (key: string, shotId: string) => {
-      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      if (workflowSessions.isRunning(key)) return;
       const node = canvasNodesNow("knowledgeVideoWorkflow").find(
         (candidate) => candidate.key === key,
       );
@@ -5921,23 +5903,23 @@ export function WorkspaceApp({
       });
       runKnowledgeVideoWorkflow(key, true);
     },
-    [canvasNodesNow, patchNode, runKnowledgeVideoWorkflow],
+    [canvasNodesNow, patchNode, workflowSessions, runKnowledgeVideoWorkflow],
   );
   const cancelKnowledgeVideoWorkflow = useCallback(
     (key: string) => {
-      knowledgeVideoWorkflowAbortControllersRef.current.get(key)?.abort();
+      workflowSessions.abort(key);
       const node = canvasNodesNow("knowledgeVideoWorkflow").find(
         (candidate) => candidate.key === key,
       );
       const jobId = node?.config.checkpoint.activeCompositionJobId;
       if (jobId) void videoComposerClient.cancelJob(jobId).catch(() => undefined);
     },
-    [canvasNodesNow],
+    [canvasNodesNow, workflowSessions],
   );
   const removeKnowledgeVideoWorkflow = useCallback(
     (key: string) => {
-      knowledgeVideoWorkflowAbortControllersRef.current.get(key)?.abort();
-      knowledgeVideoWorkflowAbortControllersRef.current.delete(key);
+      workflowSessions.abort(key);
+      workflowSessions.remove(key);
       removeCanvasNode(key);
       setKnowledgeVideoWorkflowRuns((current) => {
         if (!(key in current)) return current;
@@ -5946,7 +5928,7 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [removeCanvasNode, setKnowledgeVideoWorkflowRuns],
+    [removeCanvasNode, workflowSessions, setKnowledgeVideoWorkflowRuns],
   );
   const revealKnowledgeVideoWorkflowResult = useCallback(
     (key: string) => {
@@ -11104,12 +11086,12 @@ export function WorkspaceApp({
   );
 
   const undo = useCallback(
-    () => undoCanvasOperation(new Set(knowledgeVideoWorkflowAbortControllersRef.current.keys())),
-    [undoCanvasOperation],
+    () => undoCanvasOperation(new Set(workflowSessions.runningKeys())),
+    [undoCanvasOperation, workflowSessions],
   );
   const redo = useCallback(
-    () => redoCanvasOperation(new Set(knowledgeVideoWorkflowAbortControllersRef.current.keys())),
-    [redoCanvasOperation],
+    () => redoCanvasOperation(new Set(workflowSessions.runningKeys())),
+    [redoCanvasOperation, workflowSessions],
   );
 
   // 文本输入框内默认不触发这些快捷键，继续使用浏览器原生的文本撤销行为。
