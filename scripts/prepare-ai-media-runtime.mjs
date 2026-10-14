@@ -169,6 +169,12 @@ export async function downloadVerified(url, target, pin) {
   }
 }
 
+// GNU tar（Git Bash 环境）会把带盘符冒号的 C:\ 参数当作远程主机名（-f 与 -C 都会），
+// 因此 tar 的路径参数统一用仓库根的相对路径表达。
+function tarPath(absolutePath) {
+  return path.relative(root, absolutePath).split(path.sep).join("/");
+}
+
 async function execute(executable, args, options = {}) {
   await new Promise((resolve, reject) => {
     const child = spawn(executable, args, { stdio: "inherit", windowsHide: true, ...options });
@@ -179,9 +185,9 @@ async function execute(executable, args, options = {}) {
   });
 }
 
-async function capture(executable, args) {
+async function capture(executable, args, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { windowsHide: true });
+    const child = spawn(executable, args, { windowsHide: true, ...options });
     let output = "";
     let error = "";
     child.stdout.on("data", (chunk) => {
@@ -460,12 +466,14 @@ export async function prepareQuality({
       archive,
       distribution,
     );
-    const files = (await capture("tar", ["-tzf", archive])).split(/\r?\n/).filter(Boolean);
+    const files = (
+      await capture("tar", ["-tzf", tarPath(archive)], { cwd: root })
+    ).split(/\r?\n/).filter(Boolean);
     if (
       files.some((entry) => !safeRelative(entry.replace(/\/$/, "")) || !entry.startsWith("python/"))
     )
       throw new Error("Python 归档包含不安全路径");
-    await execute("tar", ["-xzf", archive, "-C", staging]);
+    await execute("tar", ["-xzf", tarPath(archive), "-C", tarPath(staging)], { cwd: root });
     await flattenInternalLinks(staging);
     const pythonPath = process.platform === "win32" ? "python/python.exe" : "python/bin/python3.11";
     const python = path.join(staging, pythonPath);
@@ -662,13 +670,15 @@ async function standalonePython(destination) {
     archive,
     distribution,
   );
-  const files = (await capture("tar", ["-tzf", archive])).split(/\r?\n/).filter(Boolean);
+  const files = (
+    await capture("tar", ["-tzf", tarPath(archive)], { cwd: root })
+  ).split(/\r?\n/).filter(Boolean);
   if (
     files.some((entry) => !safeRelative(entry.replace(/\/$/, "")) || !entry.startsWith("python/"))
   )
     throw new Error("Python 归档路径越界");
   await mkdir(destination, { recursive: true });
-  await execute("tar", ["-xzf", archive, "-C", destination]);
+  await execute("tar", ["-xzf", tarPath(archive), "-C", tarPath(destination)], { cwd: root });
   await flattenInternalLinks(destination);
   return path.join(
     destination,
