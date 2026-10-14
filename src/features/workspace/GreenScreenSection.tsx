@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { ImeTextarea } from "../../components/ImeTextField";
 import {
   createGreenScreenConfig,
   resolveGreenScreen,
@@ -304,11 +305,11 @@ export function GreenScreenSection({
                     )}
                     <label className="green-screen__field">
                       <span>主体与动作描述</span>
-                      <textarea
+                      <ImeTextarea
                         rows={3}
                         value={current.subject}
                         placeholder="例如：穿银色盔甲的角色全身入镜，0–3 秒拔剑，3–6 秒向左挥剑，保持手脚完整。"
-                        onChange={(event) => update({ subject: event.target.value })}
+                        onValueChange={(subject) => update({ subject })}
                       />
                     </label>
                     <p className="green-screen__hint">
@@ -375,20 +376,20 @@ export function GreenScreenSection({
                 />
                 <label className="green-screen__field">
                   <span>新场景描述</span>
-                  <textarea
+                  <ImeTextarea
                     rows={3}
                     value={current.scene}
                     placeholder="例如：夜晚雨中的街道，角色站在画面左侧，背景霓虹灯映在地面上。"
-                    onChange={(event) => update({ scene: event.target.value })}
+                    onValueChange={(scene) => update({ scene })}
                   />
                 </label>
                 <label className="green-screen__field">
                   <span>光影、时序与特效互动</span>
-                  <textarea
+                  <ImeTextarea
                     rows={3}
                     value={current.integration}
                     placeholder="例如：前景 1 在 0 秒出现，前景 2 在 3 秒从右侧入画；暖色侧光与接触阴影，挥剑时电光跟随剑尖，保留主体原有动作。"
-                    onChange={(event) => update({ integration: event.target.value })}
+                    onValueChange={(integration) => update({ integration })}
                   />
                 </label>
                 <label className="green-screen__field">

@@ -184,9 +184,7 @@ describe("ProductSceneWorkflowSections", () => {
       target: { value: "retro" },
     });
     expect(latest.brandCreative?.style).toBe("retro");
-    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
-      target: { value: "reference" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: /AI 多机位/ }));
     expect(latest.generationMode).toBe("reference");
     expect(latest.views).toEqual([]);
     expect(latest.jewelry?.launch?.design).toEqual(design);
@@ -381,9 +379,7 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
-      target: { value: "protected" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: /珠宝原片保护/ }));
     expect(change).toHaveBeenLastCalledWith(
       expect.objectContaining({
         generationMode: "protected",
@@ -399,12 +395,28 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
-      target: { value: "reference" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: /AI 多机位/ }));
     expect(change).toHaveBeenLastCalledWith(
       expect.objectContaining({ generationMode: "reference", views: [] }),
     );
+  });
+
+  it("explains why the mode picker is locked instead of silently disabling it", () => {
+    const change = vi.fn();
+    render(
+      <ProductSceneConfiguration
+        options={options()}
+        disabled
+        modeLockedHint="正在等待执行计划确认，生成方式暂时不能切换；点下方「返回修改制作设置」后再切换。"
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    // 锁定提示必须说清「去哪里解锁」，不能只靠置灰（AGENTS 报错约定）。
+    expect(screen.getByText(/返回修改制作设置/)).toBeVisible();
+    // 锁定期间整个配置 fieldset 连同单选组一起禁用（真实浏览器的禁用点击
+    // 行为由 fieldset 原生保证，这里只断言禁用态本身）。
+    expect(screen.getByRole("radio", { name: /珠宝原片保护/ })).toBeDisabled();
   });
 
   it("allows unreviewed jewelry acceptance and keeps optional review evidence in one export", async () => {
@@ -823,9 +835,7 @@ describe("ProductSceneWorkflowSections", () => {
       />,
     );
     expect(screen.getByText("参考图原始角度（与目标机位独立）")).toBeVisible();
-    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
-      target: { value: "composite" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: /原图保真合成/ }));
     expect(change).toHaveBeenCalledWith(expect.objectContaining({ generationMode: "composite" }));
   });
   it("rejects generic input links that bypass product preparation and confirmation", () => {
@@ -1404,9 +1414,7 @@ describe("ProductSceneWorkflowSections", () => {
       );
     }
     render(<Harness />);
-    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
-      target: { value: "composite" },
-    });
+    fireEvent.click(screen.getByRole("radio", { name: /原图保真合成/ }));
     expect(latest.generationMode).toBe("composite");
     expect(latest.views).toEqual([]);
   });

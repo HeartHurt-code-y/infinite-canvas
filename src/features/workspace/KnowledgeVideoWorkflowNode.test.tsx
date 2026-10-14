@@ -324,7 +324,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     const props = commonProps(productNode);
     const { sessions } = renderNode(props);
     expect(screen.getByText("产品场景图工作流")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("composite");
+    expect(screen.getByRole("radio", { name: /原图保真合成/ })).toBeChecked();
     expect(screen.queryByLabelText("策划与审核模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
@@ -357,7 +357,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     });
     const props = commonProps(productNode);
     const { sessions, rerender } = renderNode(props);
-    expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("reference");
+    expect(screen.getByRole("radio", { name: /AI 多机位/ })).toBeChecked();
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     rerender(
       <WorkflowSessionsProvider value={sessions}>

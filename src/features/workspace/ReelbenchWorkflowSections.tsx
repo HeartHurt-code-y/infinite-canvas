@@ -748,13 +748,11 @@ export function ReelbenchDeliverables({
                     </label>
                     <label>
                       画面描述
-                      <textarea
+                      <ImeTextarea
                         aria-label="画面描述"
                         value={draftShot.frame ?? ""}
                         rows={3}
-                        onChange={(event) =>
-                          setDraftShot({ ...draftShot, frame: event.currentTarget.value })
-                        }
+                        onValueChange={(frame) => setDraftShot({ ...draftShot, frame })}
                       />
                       <WorkflowFieldHelp>
                         用完整句子写可核对的主体、位置、动作与环境，例如「白色运动鞋置于木桌中央，手从左侧拿起鞋，背景是灰墙」。避免只写「画面精美」或与其他镜完全重复。

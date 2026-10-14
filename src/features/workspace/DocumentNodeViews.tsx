@@ -8,6 +8,7 @@ import {
 } from "../../lib/backend";
 
 import { MarkdownView } from "../../components/MarkdownView";
+import { ImeTextarea } from "../../components/ImeTextField";
 
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
@@ -114,11 +115,8 @@ export function CanvasDocumentSkillNode({
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const composerComposingRef = useRef(false);
-  const publishedComposerRef = useRef(node.config.composer);
   const [exporting, setExporting] = useState(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
-  const [composerInitialValue] = useState(node.config.composer);
   /** 文档区视图：默认「预览」渲染 Markdown；无内容或用户主动编辑时切回「编辑」。 */
   const [documentMode, setDocumentMode] = useState<"edit" | "preview">("preview");
   const copy = DOCUMENT_SKILL_NODE_COPY[node.kind];
@@ -165,35 +163,7 @@ export function CanvasDocumentSkillNode({
     if (conversation) conversation.scrollTop = conversation.scrollHeight;
   }, [node.config.conversation]);
 
-  useEffect(() => {
-    publishedComposerRef.current = node.config.composer;
-    const composer = composerRef.current;
-    if (
-      composer == null ||
-      composerComposingRef.current ||
-      composer.value === node.config.composer
-    ) {
-      return;
-    }
-
-    const focused = document.activeElement === composer;
-    const selectionStart = composer.selectionStart;
-    const selectionEnd = composer.selectionEnd;
-    const selectionDirection = composer.selectionDirection;
-    composer.value = node.config.composer;
-    if (focused) {
-      const valueLength = composer.value.length;
-      composer.setSelectionRange(
-        Math.min(selectionStart, valueLength),
-        Math.min(selectionEnd, valueLength),
-        selectionDirection,
-      );
-    }
-  }, [node.config.composer]);
-
   const publishComposer = (value: string) => {
-    if (value === publishedComposerRef.current) return;
-    publishedComposerRef.current = value;
     onChange({ ...node.config, composer: value });
   };
 
@@ -403,7 +373,7 @@ export function CanvasDocumentSkillNode({
 
         <label className="canvas-prompt-node__field">
           <span>本轮消息</span>
-          <textarea
+          <ImeTextarea
             ref={composerRef}
             className="canvas-screenplay-node__composer"
             aria-label={copy.composerAriaLabel}
@@ -412,23 +382,11 @@ export function CanvasDocumentSkillNode({
                 ? "可留空直接生成，或输入画幅、时长、平台等拆镜要求"
                 : copy.composerPlaceholder
             }
-            defaultValue={composerInitialValue}
+            value={node.config.composer}
             disabled={running}
-            onCompositionStart={() => {
-              composerComposingRef.current = true;
-            }}
-            onCompositionEnd={(event) => {
-              composerComposingRef.current = false;
-              publishComposer(event.currentTarget.value);
-            }}
-            onChange={(event) => {
-              if (composerComposingRef.current || (event.nativeEvent as InputEvent).isComposing) {
-                return;
-              }
-              publishComposer(event.currentTarget.value);
-            }}
+            onValueChange={publishComposer}
             onKeyDown={(event) => {
-              if (composerComposingRef.current || event.nativeEvent.isComposing) return;
+              if (event.nativeEvent.isComposing) return;
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
                 event.preventDefault();
                 onSend(node.key);
@@ -864,13 +822,13 @@ export function CanvasViralRemixNode({
 
         <label className="canvas-prompt-node__field">
           <span>补充复刻方向（可选）</span>
-          <textarea
+          <ImeTextarea
             className="canvas-viral-remix-node__instructions"
             aria-label="爆款视频复刻方向"
             placeholder="例如：保留节奏与运镜，改成国风美妆题材；为空则自动给出忠实复刻与三条二创路线。"
             value={node.config.instructions}
             disabled={running}
-            onChange={(event) => onChange({ ...node.config, instructions: event.target.value })}
+            onValueChange={(instructions) => onChange({ ...node.config, instructions })}
           />
         </label>
 
@@ -1414,14 +1372,12 @@ export function CanvasPromptNode({
             </div>
             <label className="canvas-prompt-node__field">
               锁定原台词（逐字保留时填写，每行“角色：台词”）
-              <textarea
+              <ImeTextarea
                 aria-label="锁定原台词"
                 placeholder={"甲：别走。\n乙：我会回来。"}
                 value={cinematicDialogueGuard.lockedLines}
                 disabled={running}
-                onChange={(event) =>
-                  updateCinematicDialogueGuard({ lockedLines: event.target.value })
-                }
+                onValueChange={(lockedLines) => updateCinematicDialogueGuard({ lockedLines })}
               />
             </label>
             <small>更改这些基准会清除旧输出；未锁定原台词时，逐字保留无法核验。</small>
@@ -1502,7 +1458,7 @@ export function CanvasPromptNode({
         </div>
         <label className="canvas-prompt-node__field">
           <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
-          <textarea
+          <ImeTextarea
             aria-label={node.config.task === "generate" ? "创意或需求" : "待优化提示词"}
             aria-describedby={hasModeHint ? modeHintId : undefined}
             placeholder={
@@ -1536,7 +1492,7 @@ export function CanvasPromptNode({
             }
             value={node.config.sourcePrompt}
             disabled={running}
-            onChange={(event) => onChange({ ...node.config, sourcePrompt: event.target.value })}
+            onValueChange={(sourcePrompt) => onChange({ ...node.config, sourcePrompt })}
             onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
                 event.preventDefault();

@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { ImeTextarea } from "../../components/ImeTextField";
 import type { PromptContentConnection } from "../../lib/promptContent";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
@@ -223,13 +224,11 @@ export function WhiteModelControlSection({
                   />
                   <label className="white-model-control__field">
                     <span>角色 / 道具设定 {index + 1}</span>
-                    <textarea
+                    <ImeTextarea
                       rows={2}
                       value={mapping.description}
                       placeholder="例如：穿银色装甲的机甲战士"
-                      onChange={(event) =>
-                        updateMapping(mapping.id, { description: event.target.value })
-                      }
+                      onValueChange={(description) => updateMapping(mapping.id, { description })}
                     />
                   </label>
                   <button
@@ -262,7 +261,7 @@ export function WhiteModelControlSection({
             </div>
             <label className="white-model-control__field">
               <span>{current.granularity === "coarse" ? "时间线与剧情" : "分段渲染描述"}</span>
-              <textarea
+              <ImeTextarea
                 rows={4}
                 value={current.timeline}
                 placeholder={
@@ -270,7 +269,7 @@ export function WhiteModelControlSection({
                     ? "0–3 秒：角色从前景走向门口，镜头缓慢跟随；3–6 秒：角色转身，描述动作、表情和台词。"
                     : "0–3 秒：金属材质、冷色环境、侧光；3 秒转场进入暖色室内，描述新场景的渲染要求。"
                 }
-                onChange={(event) => update({ timeline: event.target.value })}
+                onValueChange={(timeline) => update({ timeline })}
               />
             </label>
             <WhiteModelBindingSelect
@@ -283,20 +282,20 @@ export function WhiteModelControlSection({
             />
             <label className="white-model-control__field">
               <span>场景处理</span>
-              <textarea
+              <ImeTextarea
                 rows={2}
                 value={current.scene}
                 placeholder="描述背景环境，以及参考图中要使用的场景元素。"
-                onChange={(event) => update({ scene: event.target.value })}
+                onValueChange={(scene) => update({ scene })}
               />
             </label>
             <label className="white-model-control__field">
               <span>材质、风格与整体收束</span>
-              <textarea
+              <ImeTextarea
                 rows={3}
                 value={current.finish}
                 placeholder="补充材质、光影、画质、一致性与音频要求，例如跨场景保持角色材质一致，保留环境声。"
-                onChange={(event) => update({ finish: event.target.value })}
+                onValueChange={(finish) => update({ finish })}
               />
             </label>
             <details className="white-model-control__preview">

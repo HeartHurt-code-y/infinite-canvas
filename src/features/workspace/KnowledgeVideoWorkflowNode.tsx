@@ -970,6 +970,13 @@ export function KnowledgeVideoWorkflowNode({
             options={productSceneOptions}
             disabled={configurationLocked || phase === "awaiting_approval"}
             planningDisabled={configurationLocked}
+            modeLockedHint={
+              phase === "awaiting_approval"
+                ? "正在等待执行计划确认，生成方式暂时不能切换；点下方「返回修改制作设置」后再切换。"
+                : isActivePhase(phase)
+                  ? "制作进行中，生成方式暂时不能切换；点下方「暂停后续步骤」后再切换。"
+                  : undefined
+            }
             onChange={(productScene) => onChange({ ...node.config, productScene })}
             onBusyChange={setPickingMaterials}
             designCandidates={(node.config.checkpoint.productScene?.rows ?? []).flatMap((row) =>
@@ -1915,11 +1922,11 @@ export function KnowledgeVideoWorkflowNode({
                       <div className="canvas-knowledge-workflow__shot-editor">
                         <label>
                           <span>视频提示词</span>
-                          <textarea
+                          <ImeTextarea
                             aria-label="视频提示词"
                             value={shotDraft.videoPrompt}
-                            onChange={(event) =>
-                              setShotDraft({ ...shotDraft, videoPrompt: event.target.value })
+                            onValueChange={(videoPrompt) =>
+                              setShotDraft({ ...shotDraft, videoPrompt })
                             }
                             rows={4}
                           />
@@ -1929,12 +1936,10 @@ export function KnowledgeVideoWorkflowNode({
                         </label>
                         <label>
                           <span>分镜画面描述</span>
-                          <textarea
+                          <ImeTextarea
                             aria-label="分镜画面描述"
                             value={shotDraft.visual}
-                            onChange={(event) =>
-                              setShotDraft({ ...shotDraft, visual: event.target.value })
-                            }
+                            onValueChange={(visual) => setShotDraft({ ...shotDraft, visual })}
                             rows={2}
                           />
                           <WorkflowFieldHelp>
@@ -1943,12 +1948,10 @@ export function KnowledgeVideoWorkflowNode({
                         </label>
                         <label>
                           <span>旁白台词</span>
-                          <textarea
+                          <ImeTextarea
                             aria-label="旁白台词"
                             value={shotDraft.narration}
-                            onChange={(event) =>
-                              setShotDraft({ ...shotDraft, narration: event.target.value })
-                            }
+                            onValueChange={(narration) => setShotDraft({ ...shotDraft, narration })}
                             rows={2}
                           />
                           <WorkflowFieldHelp>

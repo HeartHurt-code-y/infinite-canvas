@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Icon } from "../../../components/Icon";
+import { ImeTextarea } from "../../../components/ImeTextField";
 import { MarkdownView } from "../../../components/MarkdownView";
 import type { ProviderCatalogEntry } from "../../../lib/backend";
 import { whiteModelPlanIssue, type WhiteModelScenePlan } from "../../../lib/whiteModelScene";
@@ -276,7 +277,6 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
   const state = useSyncExternalStore(subscribe, getState, getState);
   const [draft, setDraft] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
-  const composing = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const wasExpanded = useRef(state.expanded);
@@ -319,7 +319,8 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
   };
   const send = () => {
     const text = draft.trim();
-    if (!text || disabled || busy || !hasModel || composing.current) return;
+    // 组合期间的 Enter 已被 onKeyDown 的 isComposing 守卫拦下；这里不再需要第二份组合标记。
+    if (!text || disabled || busy || !hasModel) return;
     followMessages.current = true;
     setDraft("");
     void run(async () => {
@@ -490,26 +491,19 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
               send();
             }}
           >
-            <textarea
+            <ImeTextarea
               ref={inputRef}
               aria-label="给创作助手的消息"
               placeholder="描述你的需求，或继续修改方案…"
               rows={3}
               value={draft}
               disabled={disabled}
-              onChange={(event) => setDraft(event.target.value)}
-              onCompositionStart={() => {
-                composing.current = true;
-              }}
-              onCompositionEnd={() => {
-                composing.current = false;
-              }}
+              onValueChange={setDraft}
               onKeyDown={(event) => {
                 if (
                   event.key === "Enter" &&
                   !event.shiftKey &&
                   !event.nativeEvent.isComposing &&
-                  !composing.current &&
                   event.nativeEvent.keyCode !== 229
                 ) {
                   event.preventDefault();

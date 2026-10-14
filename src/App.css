@@ -8711,7 +8711,9 @@ svg[data-spin="true"] {
 
 .prompt-mention__input {
   min-height: 58px;
-  max-height: 92px;
+  /* 高度跟随内容自然生长（contentEditable 本身如此），这里只负责上限：
+     长提示词就近乎整屏可读，画布卡片仍不失控；「放大」按钮另提供全屏编辑。 */
+  max-height: min(18rem, 40vh);
   padding: var(--space-2xs);
   font-family: var(--font-body);
   font-size: var(--text-xs);

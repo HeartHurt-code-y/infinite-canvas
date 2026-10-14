@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ImeTextarea } from "../../components/ImeTextField";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
@@ -243,13 +244,13 @@ export function RealPersonAssetDialog({
             <span className="real-person-auth__counter">{artistName.length} / 32</span>
 
             <label htmlFor="real-person-artist-desc">用途说明（可选）</label>
-            <textarea
+            <ImeTextarea
               id="real-person-artist-desc"
               value={artistDesc}
               maxLength={300}
               rows={3}
               placeholder="例如：品牌代言人真人素材组"
-              onChange={(event) => setArtistDesc(event.target.value)}
+              onValueChange={setArtistDesc}
             />
             <span className="real-person-auth__counter">{artistDesc.length} / 300</span>
 

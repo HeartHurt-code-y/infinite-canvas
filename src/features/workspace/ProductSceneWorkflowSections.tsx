@@ -1,5 +1,5 @@
 import { WorkflowFieldHelp } from "./WorkflowGuidance";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -34,6 +34,7 @@ import {
   retryProductSceneRow,
   updateProductSceneViewProtection,
   PRODUCT_SCENE_BRAND_STYLES,
+  type ProductSceneGenerationMode,
   type ProductSceneRow,
   type ProductSceneJewelryReview,
   type ProductSceneWorkflowOptions,
@@ -329,10 +330,18 @@ function ProductSceneImagePreview({
   );
 }
 
+/** 生成方式的常显选项；顺序即工作流的历史演进顺序（多机位 → 保真合成 → 原片保护）。 */
+const PRODUCT_SCENE_MODES = [
+  { value: "reference", label: "AI 多机位", hint: "尝试新构图与角度" },
+  { value: "composite", label: "原图保真合成", hint: "沿用原有角度贴入新背景" },
+  { value: "protected", label: "珠宝原片保护", hint: "保留实拍范围与真实佩戴关系" },
+] as const;
+
 export function ProductSceneConfiguration({
   options,
   disabled,
   planningDisabled = disabled,
+  modeLockedHint,
   onChange,
   onBusyChange,
   designCandidates,
@@ -340,11 +349,16 @@ export function ProductSceneConfiguration({
   readonly options: ProductSceneWorkflowOptions;
   readonly disabled: boolean;
   readonly planningDisabled?: boolean;
+  /** 生成方式被锁定时的人话解释：为什么现在不能切换、去哪里解锁。 */
+  readonly modeLockedHint?: string | null | undefined;
   readonly onChange: (options: ProductSceneWorkflowOptions) => void;
   readonly onBusyChange: (busy: boolean) => void;
   readonly designCandidates?: readonly BrandDesignCandidate[];
 }) {
   const [busy, setBusy] = useState(false);
+  // 单选组名按实例唯一：画布上可能同时渲染多张产品场景卡片，静态 name 会让
+  // 不同卡片的选项互相挤掉选中态。
+  const modeGroupName = useId();
   const generationMode = productSceneGenerationMode(options);
   // 竖长原图会让计划自动收窄占比：先按原图尺寸算出来，界面上说明白，用户不必自己试。
   const placementCeiling = useMemo(() => productScenePlacementCeiling(options), [options]);
@@ -487,6 +501,37 @@ export function ProductSceneConfiguration({
     }
   }
 
+  function changeGenerationMode(nextMode: ProductSceneGenerationMode) {
+    if (nextMode === generationMode) return;
+    setEditingProtection(null);
+    setError(null);
+    const normalOptions = { ...options };
+    if (nextMode !== "reference" && normalOptions.brandCreative?.model) {
+      const creative = { ...normalOptions.brandCreative };
+      delete creative.model;
+      normalOptions.brandCreative = creative;
+    }
+    // Keep the editable brand project when changing generation modes.
+    // Source preparation for the next paid operation remains explicit.
+    const nextOptions = { ...normalOptions, generationMode: nextMode };
+    /*
+     * 母版是按「当前模式」准备的，切模式可能让它直接失效：
+     * 保留整张原片的母版是不透明的，原图保真合成贴上去会把原背景一起
+     * 盖在 AI 生成的画面上——用户付了钱才看到一张贴片。已准备的原片
+     * 只能按新模式重新添加，所以这里直接清空，不留着等它失败。
+     */
+    const mastersBecameUnusable =
+      preserveReference && !productScenePreservesSourcePhotos(nextOptions);
+    onChange(
+      nextMode === "protected"
+        ? createJewelrySceneOptions(normalOptions)
+        : {
+            ...nextOptions,
+            ...(generationMode === "protected" || mastersBecameUnusable ? { views: [] } : {}),
+          },
+    );
+  }
+
   const configuration = (
     <fieldset className="product-scene__configuration" disabled={disabled || busy}>
       {/* 缺口清单由节点 footer 统一渲染（idle 状态始终可见、就在「查看执行计划」旁）。
@@ -502,53 +547,37 @@ export function ProductSceneConfiguration({
           填写这次制作的具体商品名称或型号，用来区分商品与制作清单；请替换示例名称。
         </WorkflowFieldHelp>
       </label>
-      <label>
-        生成方式
-        <select
-          aria-label="产品场景生成方式"
-          value={generationMode}
-          onChange={(event) => {
-            const nextMode = event.target.value as "reference" | "composite" | "protected";
-            setEditingProtection(null);
-            setError(null);
-            const normalOptions = { ...options };
-            if (nextMode !== "reference" && normalOptions.brandCreative?.model) {
-              const creative = { ...normalOptions.brandCreative };
-              delete creative.model;
-              normalOptions.brandCreative = creative;
-            }
-            // Keep the editable brand project when changing generation modes.
-            // Source preparation for the next paid operation remains explicit.
-            const nextOptions = { ...normalOptions, generationMode: nextMode };
-            /*
-             * 母版是按「当前模式」准备的，切模式可能让它直接失效：
-             * 保留整张原片的母版是不透明的，原图保真合成贴上去会把原背景一起
-             * 盖在 AI 生成的画面上——用户付了钱才看到一张贴片。已准备的原片
-             * 只能按新模式重新添加，所以这里直接清空，不留着等它失败。
-             */
-            const mastersBecameUnusable =
-              preserveReference && !productScenePreservesSourcePhotos(nextOptions);
-            onChange(
-              nextMode === "protected"
-                ? createJewelrySceneOptions(normalOptions)
-                : {
-                    ...nextOptions,
-                    ...(generationMode === "protected" || mastersBecameUnusable
-                      ? { views: [] }
-                      : {}),
-                  },
-            );
-          }}
-        >
-          <option value="reference">AI 多机位</option>
-          <option value="composite">原图保真合成</option>
-          <option value="protected">珠宝原片保护</option>
-        </select>
+      <div className="product-scene__mode-field">
+        <span className="product-scene__mode-title">生成方式</span>
+        {/*
+         * 三个模式用常显的单选组，不用原生 select：切换是这张卡片最高频的操作，
+         * 原生弹层悬在画布节点上时点击容易落空（要点好几次才切回去），选项差异
+         * （要不要保留原片、会不会产生新角度）也只有展开才看得到。单选组一次
+         * 点击即切换、差异常驻可见，键盘方向键原生可用。
+         */}
+        <div className="product-scene__mode-picker" role="radiogroup" aria-label="产品场景生成方式">
+          {PRODUCT_SCENE_MODES.map((mode) => (
+            <label key={mode.value} className="product-scene__mode-option">
+              <input
+                type="radio"
+                name={modeGroupName}
+                value={mode.value}
+                checked={generationMode === mode.value}
+                onChange={() => changeGenerationMode(mode.value)}
+              />
+              <span className="product-scene__mode-name">{mode.label}</span>
+              <span className="product-scene__mode-hint">{mode.hint}</span>
+            </label>
+          ))}
+        </div>
+        {modeLockedHint != null ? (
+          <small className="product-scene__mode-lock">{modeLockedHint}</small>
+        ) : null}
         <WorkflowFieldHelp>
           AI
           多机位适合尝试新构图与角度，成图需核对商品细节；原图保真合成使用原有角度贴入新背景。珠宝原片保护保留实拍范围和真实佩戴关系，适合展示同一件实物。
         </WorkflowFieldHelp>
-      </label>
+      </div>
       <p>
         {generationMode === "reference"
           ? options.brandCreative
