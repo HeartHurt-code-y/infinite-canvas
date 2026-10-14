@@ -1,5 +1,6 @@
 import * as v from "valibot";
 import { topologicallySortWorkflowSteps } from "../workflowExecutionPlan";
+import { formatValibotIssues } from "../workflowOutputSchemas";
 import { stableJsonSignature } from "../../../lib/workflowSignatures";
 import type { NodeModelSelection } from "../workspaceModel";
 import type { WhiteModelScenePlan } from "../../../lib/whiteModelScene";
@@ -14,8 +15,10 @@ import type {
 const actionSchema = v.strictObject({
   id: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
   tool: v.pipe(v.string(), v.minLength(1)),
-  args: v.record(v.string(), v.unknown()),
-  dependsOn: v.array(v.string()),
+  // 缺失或 null 与「无参数/无依赖」同义，直接归一化，避免为机械缺省烧一轮模型往返；
+  // 未知键仍由 strictObject 拒绝，防止 dependOn 这类拼错键悄悄丢掉真实依赖。
+  args: v.nullish(v.record(v.string(), v.unknown()), () => ({})),
+  dependsOn: v.nullish(v.array(v.string()), () => []),
 });
 const replySchema = v.strictObject({
   message: v.pipe(v.string(), v.maxLength(30_000)),
@@ -282,12 +285,13 @@ export class CanvasAgentController {
         );
         reply = { ...reply, actions: this.validate(reply.actions) };
       } catch (error) {
+        const summary = formatValibotIssues(error);
         if (round >= 1)
-          throw new Error(`助手计划无法执行：${failureText(error)}`, { cause: error });
-        this.append(
-          "tool",
-          `计划未执行，结构校验失败：${failureText(error)}。请根据已注册工具修正。`,
-        );
+          throw new Error(
+            `助手连续两次返回的计划都无法通过结构校验：${summary}。请换个说法重试，或先在画布上手动完成这一步。`,
+            { cause: error },
+          );
+        this.append("tool", `计划未执行，结构校验失败：${summary}。请根据已注册工具修正。`);
         continue;
       }
       this.append("assistant", reply.message);

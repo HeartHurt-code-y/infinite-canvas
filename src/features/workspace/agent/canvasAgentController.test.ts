@@ -126,6 +126,27 @@ describe("画布智能体执行边界", () => {
     expect(view.controller.getState().error).toContain(errorText);
   });
 
+  it("模型省略 args/dependsOn 或显式置 null 时计划照常成立，不消耗修正轮", async () => {
+    const view = harness();
+    view.ask.mockResolvedValue(
+      JSON.stringify({
+        message: "制作计划",
+        actions: [
+          { id: "read-1", tool: "canvas.read" },
+          { id: "create-1", tool: "canvas.create", args: { label: "小人白模" }, dependsOn: null },
+        ],
+      }),
+    );
+    await view.controller.send("请创建白模");
+
+    expect(view.ask).toHaveBeenCalledTimes(1);
+    expect(view.controller.getState().pending?.actions).toEqual([
+      { id: "read-1", tool: "canvas.read", args: {}, dependsOn: [] },
+      { id: "create-1", tool: "canvas.create", args: { label: "小人白模" }, dependsOn: [] },
+    ]);
+    expect(view.controller.getState().error).toBeNull();
+  });
+
   it("写入必须先批准，批准按钮并发点击和完成后再点都不会重复执行", async () => {
     const view = harness();
     await view.controller.send("请创建小人白模");

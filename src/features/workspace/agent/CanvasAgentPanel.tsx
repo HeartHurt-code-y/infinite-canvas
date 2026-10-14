@@ -475,7 +475,7 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
               <button type="button" onClick={() => controller.stop()}>
                 停止后续操作
               </button>
-              <p>已提交的模型请求可能继续运行；本地渲染会请求取消。收起面板不会停止任务。</p>
+              <p>已提交的模型请求可能继续运行。收起面板不会停止任务。</p>
             </div>
           ) : null}
           {state.error || localError ? (

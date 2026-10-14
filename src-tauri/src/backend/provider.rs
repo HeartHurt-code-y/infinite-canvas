@@ -61,6 +61,11 @@ fn model_catalog_path(adapter_id: &str) -> &'static str {
 /// 实测记录见 `docs/integrations/rd-video-api.md`。
 const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 2] = ["101.34.211.152", "maas.aliyuncs.com"];
 
+/// 提交请求「剥离不认识字段后重发」的最大轮数。gpt-image-2.5 系在只讲 OpenAI
+/// images 契约的网关上会被先后拒绝 `aspect_ratio`、`resolution` 两轮，留出余量
+/// 覆盖更多自定义参数；被点名的字段每轮都会真正从请求体删除，循环必然收敛。
+const MAX_STRIP_RESEND_ROUNDS: usize = 4;
+
 /// 返回命中的「没有素材库」主机；地址无法解析时退回原始字符串比对（用户可能只填主机）。
 fn host_without_asset_library(base_url: &str) -> Option<&'static str> {
     let host = Url::parse(base_url)
@@ -1857,12 +1862,15 @@ impl ProviderRuntime {
     }
 
     /// 提交类 JSON 请求的发送：先剔除已记忆的字段；若上游以 4xx 点名拒绝请求体里的
-    /// 某个字段，剥离该字段后重发一次，并把该字段记进进程内记忆。
+    /// 某个字段，剥离该字段后重发，并把该字段记进进程内记忆。
     ///
-    /// 只有「供应商点名了它不认识的字段」这一种证据才会重发，每个请求最多一次；
-    /// 两次请求都完整落在 `provider_calls`（第一次带字段、第二次不带），日志给出
-    /// 字段名与模型，因此不是静默改写。字段值不合法、或错误没点名字段时，响应原样
-    /// 返回，由既有失败路径报错。
+    /// 只有「供应商点名了它不认识的字段」这一种证据才会重发。上游可能连续点名多个
+    /// 字段——实测 gpt-image-2.5 系在只讲 OpenAI images 契约的网关上会先拒
+    /// `aspect_ratio` 再拒 `resolution`，剥一次到不了底——所以这里循环剥离，上限
+    /// `MAX_STRIP_RESEND_ROUNDS` 轮；每一轮都必须真的从请求体里删掉字段，删不动或
+    /// 错误没点名字段时立即停止，响应原样返回，由既有失败路径报错。每轮请求都完整
+    /// 落在 `provider_calls`（带字段与不带字段的请求逐次可查），日志给出字段名与
+    /// 模型，因此不是静默改写。
     ///
     /// 图片编辑的 multipart 契约不在此列：它的参数是表单字段、剥离方式不同，且
     /// gpt-image 编辑接口声明的是 `n`/`size`/`quality` 这类受支持字段。
@@ -1877,45 +1885,47 @@ impl ProviderRuntime {
     ) -> BackendResult<CapturedHttpResponse> {
         let mut body = body;
         self.drop_rejected_fields(task, &mut body);
+        for _round in 0..MAX_STRIP_RESEND_ROUNDS {
+            let request = CapturedJsonRequest {
+                phase,
+                method: Method::POST,
+                path,
+                body: &body,
+            };
+            let response = self
+                .captured_json(task, attempt_id, context, request)
+                .await?;
+            if response.is_success() {
+                return Ok(response);
+            }
+            let Some(field) = unsupported_request_field(&response) else {
+                return Ok(response);
+            };
+            if !remove_request_field(&mut body, &field) {
+                return Ok(response);
+            }
+            warn!(
+                "[provider] 上游拒绝请求字段，剥离后重发: taskId={}, attemptId={}, phase={phase}, HTTP {}, 字段={field}, 模型={}, 该字段已记入本次运行的不支持清单",
+                task.id,
+                attempt_id,
+                response.status,
+                task.remote_model_id_snapshot.as_deref().unwrap_or("")
+            );
+            self.with_rejected_fields(|fields| {
+                fields
+                    .entry(rejected_field_key(task))
+                    .or_default()
+                    .insert(field.clone());
+            });
+        }
+        // 轮次用尽仍被点名：把最后一次请求发完，用它的响应走既有失败路径。
         let request = CapturedJsonRequest {
             phase,
             method: Method::POST,
             path,
             body: &body,
         };
-        let response = self
-            .captured_json(task, attempt_id, context, request)
-            .await?;
-        if response.is_success() {
-            return Ok(response);
-        }
-        let Some(field) = unsupported_request_field(&response) else {
-            return Ok(response);
-        };
-        let mut retry_body = body.clone();
-        if !remove_request_field(&mut retry_body, &field) {
-            return Ok(response);
-        }
-        warn!(
-            "[provider] 上游拒绝请求字段，剥离后重发一次: taskId={}, attemptId={}, phase={phase}, HTTP {}, 字段={field}, 模型={}, 该字段已记入本次运行的不支持清单",
-            task.id,
-            attempt_id,
-            response.status,
-            task.remote_model_id_snapshot.as_deref().unwrap_or("")
-        );
-        self.with_rejected_fields(|fields| {
-            fields
-                .entry(rejected_field_key(task))
-                .or_default()
-                .insert(field);
-        });
-        let retry = CapturedJsonRequest {
-            phase,
-            method: Method::POST,
-            path,
-            body: &retry_body,
-        };
-        self.captured_json(task, attempt_id, context, retry).await
+        self.captured_json(task, attempt_id, context, request).await
     }
 
     /// 通过 `GET {base_url}/v1/videos/{remote_task_id}/content` 获取海外平台视频
@@ -8897,6 +8907,175 @@ mod tests {
             assert_eq!(captured[0].1["metadata"]["draft"], true);
             assert_eq!(captured[0].1["model"], model);
         }
+    }
+
+    /// 复刻 2026-10-14 的实测故障链（konjac.ai）：gpt-image-2.5 系携带
+    /// `aspect_ratio` + `resolution` 提交到只讲 OpenAI images 契约的网关，
+    /// 第一轮被拒 `aspect_ratio`、剥离重发后第二轮又被拒 `resolution`。
+    /// 单次剥离到不了底，任务曾以 400 协议错误告终；现在循环剥离应让第三次
+    /// （仅 model + prompt）请求被网关收下并同步返回图片。
+    #[tokio::test]
+    async fn image_submit_strips_each_named_unknown_field_until_the_gateway_accepts() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut deadline = Instant::now() + Duration::from_secs(5);
+            let mut index = 0usize;
+            while index < 3 && Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let header_end = loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if let Some(position) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break position + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while bytes.len() - header_end < length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                let body: Value =
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
+                requests.push(body.clone());
+                let (status, payload) = match index {
+                    0 => (
+                        400,
+                        json!({"error": { "message": "Unknown parameter: 'aspect_ratio'.", "type": "invalid_request_error", "param": "aspect_ratio", "code": "unknown_parameter" }}),
+                    ),
+                    1 => (
+                        400,
+                        json!({"error": { "message": "Unknown parameter: 'resolution'.", "type": "invalid_request_error", "param": "resolution", "code": "unknown_parameter" }}),
+                    ),
+                    _ => (200, json!({ "data": [{ "b64_json": "aW1hZ2U=" }] })),
+                };
+                let payload = payload.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                index += 1;
+                deadline = Instant::now() + Duration::from_millis(250);
+            }
+            requests
+        });
+
+        let directory = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("backend.sqlite")).unwrap());
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "gpt-image-strip-mock".into(),
+                display_name: "GPT image strip mock".into(),
+                adapter_id: MOYU_ADAPTER_ID.into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .unwrap();
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-frozen-test")
+            .unwrap();
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        lifecycle
+            .create(NewTask {
+                id: "gpt-image-strip-mock-task",
+                canvas_id: "canvas-1",
+                source_node_id: "image-1",
+                operation: GenerationOperation::TextToImage,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "async-image-model",
+                remote_model_id: Some("gpt-image-2.5-sunburst"),
+                logical_request: &json!({}),
+            })
+            .unwrap();
+        for fact in [
+            GenerationLifecycleFact::BeginResolution {
+                attempt_id: "resolve-1".into(),
+            },
+            GenerationLifecycleFact::ResolutionSucceeded {
+                attempt_id: "resolve-1".into(),
+                resolved_request: json!({}),
+            },
+            GenerationLifecycleFact::BeginSubmission {
+                attempt_id: "submit-1".into(),
+                backoff_ms: None,
+            },
+        ] {
+            lifecycle.commit("gpt-image-strip-mock-task", fact).unwrap();
+        }
+        let task = storage
+            .get_task_execution("gpt-image-strip-mock-task")
+            .unwrap();
+        let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
+
+        // openai_image_tasks_v1 档案：aspect_ratio + resolution 走同步提交路径。
+        let schema = json!({
+            "text_to_image": {
+                "resultType": "image",
+                "requestProfileId": "openai_image_tasks_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/images/generations",
+                    "encoding": "json",
+                    "parameterContainer": "root"
+                },
+                "parameters": {
+                    "aspect_ratio": { "type": "string", "default": "3:4" },
+                    "resolution": { "type": "string", "default": "2k" }
+                }
+            }
+        });
+        let request = resolved(schema, json!({ "aspect_ratio": "3:4", "resolution": "2k" }));
+        let (submission, _) = runtime.submit(&task, "submit-1", &request).await.unwrap();
+        assert!(matches!(submission, GenerationSubmission::Images(_)));
+
+        let captured = server.join().unwrap();
+        assert_eq!(
+            captured.len(),
+            3,
+            "两轮 400 各剥离一个字段，第三次请求应被网关收下"
+        );
+        assert!(captured[0].get("aspect_ratio").is_some());
+        assert!(captured[0].get("resolution").is_some());
+        assert!(captured[1].get("aspect_ratio").is_none());
+        assert!(captured[1].get("resolution").is_some());
+        assert!(captured[2].get("aspect_ratio").is_none());
+        assert!(captured[2].get("resolution").is_none());
+        assert_eq!(captured[2]["model"], "gpt-image-2.5-sunburst");
+        assert_eq!(
+            captured[2]["prompt"],
+            json!("A train arrives"),
+            "剥离只去掉被点名的参数，提示词与模型保持原样"
+        );
     }
 
     #[tokio::test]

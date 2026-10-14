@@ -175,18 +175,27 @@ export function parseModelJson(raw: string): unknown {
 }
 
 /**
+ * valibot 校验失败时，把全部 issue 逐条展开为「路径: 消息」（不带前缀），
+ * 调用方按场景自行包装；v.parse 只抛第一条，这里补齐全量便于一次修正。
+ */
+export function formatValibotIssues(error: unknown): string {
+  if (error instanceof Error && "issues" in error) {
+    const issues = (error as { issues: Array<{ path?: Array<{ key: unknown }>; message: string }> })
+      .issues;
+    return issues
+      .map((issue) => {
+        const path = issue.path?.map((p) => String(p.key)).join(".") ?? "(根)";
+        return `${path}: ${issue.message}`;
+      })
+      .join("；");
+  }
+  return String(error);
+}
+
+/**
  * valibot 校验失败时，将错误信息格式化为用户可读的中文消息。
  * 保留原始 issues 路径，便于定位模型输出的具体字段问题。
  */
 export function formatValibotError(error: unknown): string {
-  if (error instanceof Error && "issues" in error) {
-    const issues = (error as { issues: Array<{ path?: Array<{ key: unknown }>; message: string }> })
-      .issues;
-    const messages = issues.map((issue) => {
-      const path = issue.path?.map((p) => String(p.key)).join(".") ?? "(根)";
-      return `${path}: ${issue.message}`;
-    });
-    return `模型输出结构校验失败：${messages.join("；")}`;
-  }
-  return `模型输出结构校验失败：${String(error)}`;
+  return `模型输出结构校验失败：${formatValibotIssues(error)}`;
 }
