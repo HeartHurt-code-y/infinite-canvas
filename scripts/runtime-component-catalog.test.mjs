@@ -196,26 +196,22 @@ test("seven component/features catalog is stable and does not introduce optional
 test("archives remain on the trusted public component prefix", () => {
   const digest = "a".repeat(64);
   const url = runtimeComponentArchiveUrl("pose-runtime", digest, {
-    applicationVersion: "0.2.1",
     platform: "windows-x86_64",
   });
   assert.match(
     url,
-    /\/infinite-canvas\/updates\/components\/windows-x86_64\/0\.2\.1\/pose-runtime-a{64}\.zip$/,
+    /\/infinite-canvas\/updates\/components\/windows-x86_64\/pose-runtime-a{64}\.zip$/,
   );
+  assert.doesNotMatch(url, /\/0\.\d+\.\d+\//);
   assert.throws(
     () =>
       runtimeComponentArchiveUrl("pose-runtime", digest, {
-        applicationVersion: "0.2.1",
         platform: "windows-x86_64",
         publicBaseUrl: "https://example.com/infinite-canvas/updates",
       }),
     /trusted/,
   );
-  assert.throws(
-    () => runtimeComponentArchiveUrl("../x", digest, { applicationVersion: "0.2.1" }),
-    /identity/,
-  );
+  assert.throws(() => runtimeComponentArchiveUrl("../x", digest), /identity/);
 });
 
 test("native component platform keys separate both macOS architectures and reject universal or foreign targets", () => {
@@ -239,7 +235,6 @@ test("native component platform keys separate both macOS architectures and rejec
     assert.equal(catalog.platform, platform);
     assert.match(
       runtimeComponentArchiveUrl("blender", "a".repeat(64), {
-        applicationVersion: "0.2.2",
         platform,
       }),
       new RegExp(`/components/${platform}/`),

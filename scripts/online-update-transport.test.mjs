@@ -218,7 +218,7 @@ test("object scope accepts the Windows installer and both matching Mac DMGs/upda
       "ai-media-quality-runtime",
     ])
       assertOnlineObjectKey(
-        `${TOS_UPDATES_PREFIX}/components/${platform}/0.2.1/${id}-${"a".repeat(64)}.zip`,
+        `${TOS_UPDATES_PREFIX}/components/${platform}/${id}-${"a".repeat(64)}.zip`,
       );
   }
   for (const key of [
@@ -228,10 +228,11 @@ test("object scope accepts the Windows installer and both matching Mac DMGs/upda
     `${PREFIX}backups/other.json`,
     `${PREFIX}extra.exe`,
     `${PREFIX}无限画布_0.2.1_x64-offline-setup.exe`,
-    `${TOS_UPDATES_PREFIX}/components/windows-x86_64/0.2.1/arbitrary-${"a".repeat(64)}.zip`,
-    `${TOS_UPDATES_PREFIX}/components/darwin-universal/0.2.1/blender-${"a".repeat(64)}.zip`,
-    `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/0.2.1/arbitrary-${"a".repeat(64)}.zip`,
-    `${TOS_UPDATES_PREFIX}/components/darwin-x86_64/0.2.1/blender.zip`,
+    `${TOS_UPDATES_PREFIX}/components/windows-x86_64/arbitrary-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/windows-x86_64/0.2.1/blender-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-universal/blender-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/arbitrary-${"a".repeat(64)}.zip`,
+    `${TOS_UPDATES_PREFIX}/components/darwin-x86_64/blender.zip`,
     `${TOS_UPDATES_PREFIX}/components/darwin-aarch64/../blender-${"a".repeat(64)}.zip`,
     `${TOS_UPDATES_PREFIX}/darwin-aarch64/latest.json`,
     `${TOS_UPDATES_PREFIX}/darwin-x86_64/latest.json`,

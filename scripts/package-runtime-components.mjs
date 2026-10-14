@@ -155,7 +155,6 @@ export async function packageRuntimeComponent(
       archive: {
         format: "zip",
         url: runtimeComponentArchiveUrl(component.id, cached.sha256, {
-          applicationVersion,
           platform: identity,
         }),
         size: cached.size,

@@ -478,15 +478,16 @@ export async function validateMacRuntimeComponent(
     ]);
 }
 
+// 组件包以内容哈希寻址（不含应用版本段）：同一份组件内容跨版本复用同一个 TOS 对象，
+// 发布脚本按对象键 HEAD 去重后未变化的组件不再重复上传；sha256 保证对象不可变且唯一。
 export function runtimeComponentArchiveUrl(
   id,
   sha256,
-  { applicationVersion, platform = COMPONENT_PLATFORM, publicBaseUrl = tosUpdatesPublicBaseUrl() },
+  { platform = COMPONENT_PLATFORM, publicBaseUrl = tosUpdatesPublicBaseUrl() } = {},
 ) {
   if (
     !/^[a-z0-9-]+$/.test(id) ||
     !/^[a-f0-9]{64}$/.test(sha256) ||
-    !/^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(applicationVersion) ||
     !COMPONENT_PLATFORMS.has(platform)
   )
     throw new Error("Invalid component archive identity");
@@ -502,7 +503,7 @@ export function runtimeComponentArchiveUrl(
     base.password
   )
     throw new Error("Component archive URLs must use the trusted updater host and prefix");
-  return `${publicBaseUrl.replace(/\/$/, "")}/components/${platform}/${applicationVersion}/${id}-${sha256}.zip`;
+  return `${publicBaseUrl.replace(/\/$/, "")}/components/${platform}/${id}-${sha256}.zip`;
 }
 
 export function buildRuntimeComponentCatalog({

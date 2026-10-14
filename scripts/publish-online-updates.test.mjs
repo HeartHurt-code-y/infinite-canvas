@@ -46,7 +46,7 @@ async function fixture(t, version = "0.2.1", platform = PLATFORM) {
       id,
       localPath,
       format: "zip",
-      url: runtimeComponentArchiveUrl(id, sha256, { applicationVersion: version, platform }),
+      url: runtimeComponentArchiveUrl(id, sha256, { platform }),
       size: body.length,
       sha256,
     });
@@ -565,6 +565,34 @@ test("publishes all nine immutable objects, validates public bytes, and commits 
   );
 });
 
+test("components-only prewarms just the component objects and never touches the feed", async (t) => {
+  const f = await fixture(t);
+  const transport = mockTransport();
+  const report = await publishOnlineEdition({
+    ...f.options,
+    transportFactory: () => transport,
+    componentsOnly: true,
+  });
+  assert.equal(report.published, false);
+  assert.equal(report.componentsOnly, true);
+  assert.equal(report.uploadedObjectCount, 7);
+  assert.equal(report.reusedObjectCount, 0);
+  assert.equal(report.publicObjectsVerified, true);
+  assert.equal(transport.calls.filter(({ method }) => method === "read").length, 0);
+  assert.equal(writes(transport).some(({ objectKey }) => objectKey === FEED_KEY), false);
+  for (const write of writes(transport))
+    assert.ok(write.objectKey.startsWith(tosUpdatesObjectKey(`components/${PLATFORM}/`)));
+  transport.calls.length = 0;
+  const second = await publishOnlineEdition({
+    ...f.options,
+    transportFactory: () => transport,
+    componentsOnly: true,
+  });
+  assert.equal(second.uploadedObjectCount, 0);
+  assert.equal(second.reusedObjectCount, 7);
+  assert.equal(writes(transport).length, 0);
+});
+
 test("an identical second release fully GET-verifies all objects and performs no writes", async (t) => {
   const f = await fixture(t);
   const transport = mockTransport();
@@ -827,16 +855,35 @@ test("parse args accepts only one distribution directory and optional dry-run", 
   assert.deepEqual(parseOnlinePublishArgs(["--distribution-dir", "directory", "--dry-run"]), {
     distributionDirectory: "directory",
     dryRun: true,
+    componentsOnly: false,
   });
   assert.deepEqual(parseOnlinePublishArgs(["--dry-run", "--distribution-dir", "directory"]), {
     distributionDirectory: "directory",
     dryRun: true,
+    componentsOnly: false,
   });
+  assert.deepEqual(
+    parseOnlinePublishArgs(["--distribution-dir", "directory", "--components-only"]),
+    {
+      distributionDirectory: "directory",
+      dryRun: false,
+      componentsOnly: true,
+    },
+  );
+  assert.deepEqual(
+    parseOnlinePublishArgs(["--distribution-dir", "directory", "--dry-run", "--components-only"]),
+    {
+      distributionDirectory: "directory",
+      dryRun: true,
+      componentsOnly: true,
+    },
+  );
   for (const args of [
     [],
     ["--distribution-dir", "--dry-run"],
     ["--distribution-dir", "directory", "--bucket", "other"],
     ["--distribution-dir", "directory", "--dry-run", "--dry-run"],
+    ["--distribution-dir", "directory", "--components-only", "--components-only"],
   ])
     assert.throws(() => parseOnlinePublishArgs(args), /Usage/);
 });

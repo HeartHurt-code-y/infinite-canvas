@@ -109,7 +109,6 @@ async function fixture(t, edition = "online", target = "") {
         size: archiveBytes.length,
         sha256: archiveSha256,
         url: runtimeComponentArchiveUrl(definition.id, archiveSha256, {
-          applicationVersion: VERSION,
           platform: COMPONENT_PLATFORM,
         }),
       },
@@ -369,7 +368,6 @@ async function macFixture(t, platform = "darwin-aarch64", explicitTarget = false
   f.catalog.platform = platform;
   for (const component of f.catalog.components)
     component.archive.url = runtimeComponentArchiveUrl(component.id, component.archive.sha256, {
-      applicationVersion: VERSION,
       platform,
     });
   await writeJson(f.catalogPath, f.catalog);

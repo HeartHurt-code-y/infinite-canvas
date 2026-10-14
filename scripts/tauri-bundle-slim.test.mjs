@@ -273,7 +273,6 @@ async function poseUpdateFixture(t, { catalogPinned = true } = {}) {
         size: 100,
         sha256,
         url: runtimeComponentArchiveUrl(definition.id, sha256, {
-          applicationVersion: "0.2.1",
           platform: "windows-x86_64",
         }),
       },

@@ -75,7 +75,7 @@ export function assertOnlineObjectKey(key) {
     const componentPrefix = `${TOS_UPDATES_PREFIX}/components/${platform}/`;
     if (
       key.startsWith(componentPrefix) &&
-      new RegExp(`^${VERSION}/(?:${COMPONENT_IDS})-[a-f0-9]{64}\\.zip$`).test(
+      new RegExp(`^(?:${COMPONENT_IDS})-[a-f0-9]{64}\\.zip$`).test(
         key.slice(componentPrefix.length),
       )
     )

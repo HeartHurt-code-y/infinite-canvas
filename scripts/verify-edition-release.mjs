@@ -227,7 +227,6 @@ export function assertEditionCatalog(catalog, applicationVersion, platform = COM
         component.archive.size <= 8 * 1024 ** 3 &&
         component.archive.url ===
           runtimeComponentArchiveUrl(component.id, component.archive.sha256, {
-            applicationVersion,
             platform,
           }),
       `Component archive does not use its trusted content-addressed URL: ${component.id}`,

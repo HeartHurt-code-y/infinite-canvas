@@ -265,9 +265,10 @@ fn archive_url(catalog: &ComponentCatalog, component: &CatalogComponent) -> Resu
     )
     .map_err(|error| error.to_string())?;
     let url = Url::parse(&component.archive.url).map_err(|_| "组件下载地址无效")?;
+    // 组件包按内容哈希寻址（不含应用版本段），同一份内容跨版本复用同一对象。
     let expected_path = format!(
-        "/infinite-canvas/updates/components/{}/{}/{}-{}.zip",
-        catalog.platform, catalog.application_version, component.id, component.archive.sha256
+        "/infinite-canvas/updates/components/{}/{}-{}.zip",
+        catalog.platform, component.id, component.archive.sha256
     );
     if url.scheme() != "https"
         || url.host_str() != trusted.host_str()
@@ -1499,6 +1500,58 @@ fn publish_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture_catalog(archive_url: &str) -> (ComponentCatalog, CatalogComponent) {
+        let sha256 = "a".repeat(64);
+        let catalog: ComponentCatalog = serde_json::from_value(serde_json::json!({
+            "schemaVersion": 1,
+            "applicationVersion": "0.2.4",
+            "platform": "windows-x86_64",
+            "components": [{
+                "id": "ffmpeg",
+                "title": "FFmpeg",
+                "description": "媒体处理引擎",
+                "version": "9.0.1",
+                "manifestPath": "manifest.json",
+                "manifestSha256": sha256,
+                "bundlePath": "ffmpeg",
+                "dependencies": [],
+                "archive": {
+                    "format": "zip",
+                    "url": archive_url,
+                    "size": 1,
+                    "sha256": sha256,
+                },
+                "files": [{"path": "manifest.json", "size": 1, "sha256": sha256}],
+            }],
+            "features": [],
+        }))
+        .unwrap();
+        let component = catalog.components[0].clone();
+        (catalog, component)
+    }
+    #[test]
+    fn archive_url_only_accepts_content_addressed_paths_on_the_trusted_host() {
+        let sha = "a".repeat(64);
+        let trusted = "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates";
+        let (catalog, component) = fixture_catalog(&format!(
+            "{trusted}/components/windows-x86_64/ffmpeg-{sha}.zip"
+        ));
+        let accepted = archive_url(&catalog, &component).unwrap();
+        assert_eq!(
+            accepted.path(),
+            format!("/infinite-canvas/updates/components/windows-x86_64/ffmpeg-{sha}.zip")
+        );
+        // 旧版带应用版本段的 URL 与外域 URL 一律拒绝。
+        let (catalog, component) = fixture_catalog(&format!(
+            "{trusted}/components/windows-x86_64/0.2.4/ffmpeg-{sha}.zip"
+        ));
+        assert!(archive_url(&catalog, &component)
+            .is_err_and(|error| error.contains("可信更新源")));
+        let (catalog, component) = fixture_catalog(&format!(
+            "https://evil.example.com/infinite-canvas/updates/components/windows-x86_64/ffmpeg-{sha}.zip"
+        ));
+        assert!(archive_url(&catalog, &component).is_err());
+    }
     #[test]
     fn component_platform_maps_only_supported_architectures() {
         assert_eq!(

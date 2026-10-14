@@ -251,14 +251,13 @@ export async function prepareOnlinePublication({
           path.join(root, ".cache/runtime-components/packages", `${archive.sha256}.zip`) &&
         archive.url ===
           runtimeComponentArchiveUrl(archive.id, archive.sha256, {
-            applicationVersion: version,
             platform,
           }),
       "Component upload is outside the trusted catalog/cache contract",
     );
     ids.add(archive.id);
     const objectKey = tosUpdatesObjectKey(
-      `components/${platform}/${version}/${archive.id}-${archive.sha256}.zip`,
+      `components/${platform}/${archive.id}-${archive.sha256}.zip`,
     );
     objects.push({ ...archive, objectKey, contentType: "application/zip" });
   }
@@ -413,6 +412,7 @@ export async function publishOnlineEdition({
   transportFactory = defaultTransportFactory,
   verifyRelease = verifyEditionRelease,
   dryRun = false,
+  componentsOnly = false,
   onProgress = () => {},
 }) {
   const plan = await prepareOnlinePublication({
@@ -421,6 +421,16 @@ export async function publishOnlineEdition({
     platform,
     verifyRelease,
   });
+  // --components-only 只预热组件包对象（不读频道、不动 latest.json）：
+  // 组件升级后可先行上传，正式发布时同内容对象直接 HEAD 命中复用。
+  const componentPrefix = tosUpdatesObjectKey(`components/${platform}/`);
+  const objects = componentsOnly
+    ? plan.objects.filter((entry) => entry.objectKey.startsWith(componentPrefix))
+    : plan.objects;
+  requireValue(
+    !componentsOnly || objects.length > 0,
+    "No component objects matched the requested platform",
+  );
   const report = {
     schemaVersion: 1,
     edition: plan.edition,
@@ -429,7 +439,7 @@ export async function publishOnlineEdition({
     channel: plan.channel,
     catalogSha256: plan.catalogSha256,
     dryRun,
-    objects: plan.objects.map(({ objectKey, url, size, sha256 }) => ({
+    objects: objects.map(({ objectKey, url, size, sha256 }) => ({
       objectKey,
       url,
       size,
@@ -442,10 +452,31 @@ export async function publishOnlineEdition({
       sha256: plan.feed.sha256,
     },
   };
-  if (dryRun) return { ...report, published: false, localReleaseVerified: true };
+  if (dryRun)
+    return {
+      ...report,
+      published: false,
+      ...(componentsOnly ? { componentsOnly: true } : {}),
+      localReleaseVerified: true,
+    };
   const transport = await transportFactory({ root: plan.root, platform: plan.platform });
   for (const method of ["readObject", "headObject", "putObject", "verifyPublicObject"])
     requireValue(typeof transport?.[method] === "function", `Online transport lacks ${method}`);
+  if (componentsOnly) {
+    const outcomes = [];
+    for (const entry of objects) {
+      await assertLocalObject(entry, plan.root);
+      outcomes.push(await publishImmutable(transport, entry, onProgress));
+    }
+    return {
+      ...report,
+      published: false,
+      componentsOnly: true,
+      uploadedObjectCount: outcomes.filter((value) => value === "uploaded").length,
+      reusedObjectCount: outcomes.filter((value) => value === "reused").length,
+      publicObjectsVerified: true,
+    };
+  }
   const previous = await transport.readObject({
     objectKey: plan.feed.objectKey,
     maxBytes: JSON_BUDGET,
@@ -460,7 +491,7 @@ export async function publishOnlineEdition({
     );
   }
   const outcomes = [];
-  for (const entry of plan.objects) {
+  for (const entry of objects) {
     await assertLocalObject(entry, plan.root);
     outcomes.push(await publishImmutable(transport, entry, onProgress));
   }
@@ -597,16 +628,18 @@ export async function publishOnlineEdition({
 export function parseOnlinePublishArgs(args) {
   const distributionAt = args.indexOf("--distribution-dir");
   const dryRun = args.includes("--dry-run");
+  const componentsOnly = args.includes("--components-only");
   requireValue(
     distributionAt >= 0 &&
       args[distributionAt + 1] &&
       !args[distributionAt + 1].startsWith("--") &&
-      args.length === (dryRun ? 3 : 2) &&
+      args.length === 2 + (dryRun ? 1 : 0) + (componentsOnly ? 1 : 0) &&
       args.filter((argument) => argument === "--distribution-dir").length === 1 &&
-      args.filter((argument) => argument === "--dry-run").length <= 1,
-    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run]",
+      args.filter((argument) => argument === "--dry-run").length <= 1 &&
+      args.filter((argument) => argument === "--components-only").length <= 1,
+    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run] [--components-only]",
   );
-  return { distributionDirectory: args[distributionAt + 1], dryRun };
+  return { distributionDirectory: args[distributionAt + 1], dryRun, componentsOnly };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
