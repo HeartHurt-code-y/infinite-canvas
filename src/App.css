@@ -4695,6 +4695,20 @@ svg[data-spin="true"] {
   border-radius: var(--radius-control);
 }
 
+/*
+ * 收起的 <details> 必须真正藏起内容。
+ *
+ * 为什么：折叠隐藏由浏览器 UA 样式完成，但 model-slot / model-grid 等
+ * 子元素自带 display: grid，在新版 Chromium 的 details 实现下会击穿折叠
+ * ——「模型配置」收起时表单照常渲染、顶占布局，卡片尾部又被页脚的
+ * 「还差 N 项必填内容」提示盖住，用户点到的控件其实埋在提示条底下，
+ * 表现为「生成方式/供应商/模型点不动，要点好几次才切过去」。
+ * 显式在收起时藏起 summary 以外的全部子元素，让折叠不再依赖 UA 默认。
+ */
+.canvas-knowledge-workflow__models:not([open]) > *:not(summary) {
+  display: none;
+}
+
 .canvas-knowledge-workflow__models > summary {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { node } from "../../test/videoWorkflowFixtures";
+import { selectCanvasOption } from "../../test/canvasSelectInteraction";
 import { mediaClient } from "../../lib/backend";
 import * as backend from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
@@ -150,9 +151,7 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    fireEvent.change(screen.getByRole("combobox", { name: "AI 品牌摄影风格" }), {
-      target: { value: "retro" },
-    });
+    selectCanvasOption("AI 品牌摄影风格", "复古时装");
     expect(change.mock.calls[0]?.[0].brandCreative).toEqual({
       style: "retro",
       brief: "自然肤质",
@@ -180,9 +179,7 @@ describe("ProductSceneWorkflowSections", () => {
       );
     }
     render(<Harness />);
-    fireEvent.change(screen.getByRole("combobox", { name: "AI 品牌摄影风格" }), {
-      target: { value: "retro" },
-    });
+    selectCanvasOption("AI 品牌摄影风格", "复古时装");
     expect(latest.brandCreative?.style).toBe("retro");
     fireEvent.click(screen.getByRole("radio", { name: /AI 多机位/ }));
     expect(latest.generationMode).toBe("reference");
@@ -233,9 +230,7 @@ describe("ProductSceneWorkflowSections", () => {
       sourcePath: "C:/photo/wearing.jpg",
       preservePhoto: true,
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "佩戴原片 照片用途" }), {
-      target: { value: "wearing" },
-    });
+    selectCanvasOption("佩戴原片 照片用途", "真实佩戴");
     expect(latest.views[0]).toMatchObject({
       photoRole: "wearing",
       preparedPath: "C:/prepared/wearing.png",
@@ -349,9 +344,7 @@ describe("ProductSceneWorkflowSections", () => {
     fireEvent.change(screen.getByRole("spinbutton", { name: "机身原图 保护宽度百分比" }), {
       target: { value: "80" },
     });
-    fireEvent.change(screen.getByRole("combobox", { name: "机身原图 原片用途" }), {
-      target: { value: "wearing" },
-    });
+    selectCanvasOption("机身原图 原片用途", "真实佩戴 · 同时保留手腕与遮挡");
     fireEvent.click(screen.getByRole("button", { name: "应用保护范围" }));
     expect(change).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -449,15 +442,10 @@ describe("ProductSceneWorkflowSections", () => {
     expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "查看第 1 张实拍母版对照" })).toBeEnabled();
     for (const { label } of JEWELRY_REVIEW_CHECKS.slice(0, 5)) {
-      fireEvent.change(screen.getByRole("combobox", { name: `第 1 张 ${label}` }), {
-        target: { value: "pass" },
-      });
+      selectCanvasOption(`第 1 张 ${label}`, "人工核对通过");
     }
     expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
-    fireEvent.change(
-      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[5].label}` }),
-      { target: { value: "pass" } },
-    );
+    selectCanvasOption(`第 1 张 ${JEWELRY_REVIEW_CHECKS[5].label}`, "人工核对通过");
     fireEvent.change(screen.getByRole("textbox", { name: "第 1 张珠宝复核备注" }), {
       target: { value: "对照实物-01，天然棉絮一致" },
     });
@@ -529,10 +517,7 @@ describe("ProductSceneWorkflowSections", () => {
     );
     expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
     expect(screen.getByRole("textbox", { name: "第 1 张珠宝复核备注" })).toHaveValue("");
-    fireEvent.change(
-      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}` }),
-      { target: { value: "pass" } },
-    );
+    selectCanvasOption(`第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}`, "人工核对通过");
     expect(change.mock.calls[0]![0].productScene!.rows[0]!.jewelryReview).toMatchObject({
       outputPath: "C:/out/replaced.png",
       checks: { connections: "pass", shape: "uncertain" },
@@ -618,10 +603,7 @@ describe("ProductSceneWorkflowSections", () => {
         onContinue={vi.fn()}
       />,
     );
-    fireEvent.change(
-      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}` }),
-      { target: { value: "fail" } },
-    );
+    selectCanvasOption(`第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}`, "不通过");
     const updated = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
     expect(updated.phase).toBe("done");
     expect(updated.productScene!.rows[0]!.status).toBe("accepted");
@@ -883,9 +865,7 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    fireEvent.change(screen.getByRole("combobox", { name: "机身原图 原图角度" }), {
-      target: { value: "eye" },
-    });
+    selectCanvasOption("机身原图 原图角度", "平视");
     expect(change).toHaveBeenCalledWith(
       expect.objectContaining({
         views: [expect.objectContaining({ angle: "eye", approved: false })],
@@ -1371,7 +1351,13 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    expect(screen.getByRole("option", { name: "真实佩戴" })).toBeInTheDocument();
+    // CanvasSelect 的选项在菜单打开时才存在：展开后断言品牌摄影模式提供「真实佩戴」。
+    fireEvent.click(screen.getByRole("combobox", { name: "机身原图 照片用途" }));
+    expect(
+      within(screen.getByRole("listbox", { name: "机身原图 照片用途" })).getByRole("option", {
+        name: "真实佩戴",
+      }),
+    ).toBeInTheDocument();
     unmount();
 
     // 保真合成的母版是抠图后的商品本体：给不了真人佩戴照，就连选项都不该出现。
@@ -1387,7 +1373,12 @@ describe("ProductSceneWorkflowSections", () => {
         onBusyChange={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("option", { name: "真实佩戴" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("combobox", { name: "机身原图 照片用途" }));
+    expect(
+      within(screen.getByRole("listbox", { name: "机身原图 照片用途" })).queryByRole("option", {
+        name: "真实佩戴",
+      }),
+    ).not.toBeInTheDocument();
     expect(
       screen.getByRole("combobox", { name: "机身原图 照片用途" }).closest("label")!,
     ).toHaveTextContent("原图保真合成只合成商品本体");

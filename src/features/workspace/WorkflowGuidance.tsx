@@ -107,6 +107,30 @@ export function WorkflowGuide({ kind }: { readonly kind: WorkflowGuideKind }) {
               先查看执行计划，再确认执行。模型调用可能产生费用，数量和返工会增加调用次数；修改输入后应重新查看计划。
             </p>
           </div>
+          {guide.demo ? (
+            <div>
+              <strong>照着填一遍（逐个参数的实操演示）</strong>
+              <p>从上到下就是界面的字段顺序：填什么、界面和成图会因此发生什么。</p>
+              <table className="workflow-guide__demo">
+                <thead>
+                  <tr>
+                    <th scope="col">参数</th>
+                    <th scope="col">这样填</th>
+                    <th scope="col">效果</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {guide.demo.map((row) => (
+                    <tr key={row.field}>
+                      <th scope="row">{row.field}</th>
+                      <td>{row.fill}</td>
+                      <td>{row.effect}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </div>
       </details>
     </section>

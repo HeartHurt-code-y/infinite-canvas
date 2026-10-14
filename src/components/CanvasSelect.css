@@ -1,0 +1,95 @@
+/* 画布节点内的下拉选择（CanvasSelect）：按钮触发 + portal 菜单。
+   样式对齐工作流卡片既有控件：paper-2 底、rule-2 描边、control 圆角。 */
+
+.canvas-select {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3xs);
+  padding-inline: var(--space-2xs);
+  color: var(--color-ink);
+  text-align: left;
+  background: var(--color-paper-2);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.canvas-select:hover:not(:disabled) {
+  border-color: var(--color-image-strong);
+}
+
+.canvas-select:focus-visible {
+  border-color: var(--color-accent);
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
+}
+
+.canvas-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.canvas-select__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 菜单挂在 document.body 上（与 PromptFloatingMenu 同一套定位思路）：
+   跟随触发按钮、空间不足翻到上方、随画布缩放与卡片滚动重新对位。 */
+.canvas-select__menu {
+  position: fixed;
+  /* 与提示词消歧浮层同一档：必须盖过 React Flow 节点与卡片工具条。 */
+  z-index: calc(var(--z-modal) + 20);
+  overflow-y: auto;
+  padding: var(--space-3xs);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-raised);
+  overscroll-behavior: contain;
+}
+
+.canvas-select__option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3xs);
+  min-height: 2rem;
+  padding: var(--space-3xs) var(--space-2xs);
+  color: var(--color-ink);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.canvas-select__option.is-active {
+  background: var(--color-paper-2);
+}
+
+.canvas-select__option.is-selected {
+  color: var(--color-accent);
+  font-weight: 700;
+}
+
+.canvas-select__option:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+.canvas-select__option-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.canvas-select__empty {
+  padding: var(--space-2xs);
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+}

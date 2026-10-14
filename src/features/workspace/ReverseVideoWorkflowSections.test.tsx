@@ -304,7 +304,8 @@ describe("reverse-video workflow node", () => {
     expect(screen.getByText("短视频反推工作流")).toBeInTheDocument();
     expect(screen.queryByLabelText("图片生成模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("视觉反推与审核模型")).toHaveValue("project-text");
+    // CanvasSelect 以按钮文案显示当前模型（原生 select 时代是 toHaveValue）。
+    expect(screen.getByLabelText("视觉反推与审核模型")).toHaveTextContent("项目文本模型");
     expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
     expect(props.onExecute).toHaveBeenCalledWith(props.node.key);

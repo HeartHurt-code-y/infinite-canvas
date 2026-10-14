@@ -5,6 +5,7 @@ import { node, catalog } from "../../test/videoWorkflowFixtures";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import { WorkflowSessionsProvider } from "./useWorkflowSessions";
 import { createWorkflowSessionsStub } from "../../test/workflowSessionsStub";
+import { selectCanvasOption } from "../../test/canvasSelectInteraction";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
 import {
   comicDramaDeliveryMarkdown,
@@ -110,10 +111,8 @@ describe("comic drama node", () => {
       );
     }
     render(<Harness />);
-    fireEvent.change(screen.getByLabelText("漫剧语音供应商"), {
-      target: { value: "project-provider" },
-    });
-    expect(screen.getByLabelText("漫剧语音模型")).toHaveValue("project-speech");
+    selectCanvasOption("漫剧语音供应商", "项目供应商");
+    expect(screen.getByLabelText("漫剧语音模型")).toHaveTextContent("豆包语音");
     fireEvent.change(screen.getByLabelText("父亲控制台音色 ID"), {
       target: { value: "console-voice-father" },
     });

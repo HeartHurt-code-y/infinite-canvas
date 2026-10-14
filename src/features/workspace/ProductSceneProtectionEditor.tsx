@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { toMediaSrc } from "../../lib/backend";
 import type { ProductSceneView } from "./productSceneWorkflowModel";
 import { WorkflowFieldHelp } from "./WorkflowGuidance";
@@ -158,16 +159,17 @@ export function ProductSceneProtectionEditor({
         </label>
         <label>
           原片用途
-          <select
-            aria-label={`${view.label} 原片用途`}
+          <CanvasSelect
+            ariaLabel={`${view.label} 原片用途`}
             value={draft.use}
-            onChange={(event) =>
-              setDraft((current) => ({ ...current, use: event.target.value as Protection["use"] }))
+            options={[
+              { value: "product", label: "商品摆拍 · 保留阴影与透射背景" },
+              { value: "wearing", label: "真实佩戴 · 同时保留手腕与遮挡" },
+            ]}
+            onChange={(use) =>
+              setDraft((current) => ({ ...current, use: use as Protection["use"] }))
             }
-          >
-            <option value="product">商品摆拍 · 保留阴影与透射背景</option>
-            <option value="wearing">真实佩戴 · 同时保留手腕与遮挡</option>
-          </select>
+          />
           <WorkflowFieldHelp>
             商品放在台面等环境中选「商品摆拍」；已经戴在人身上选「真实佩戴」，同时保留手腕与遮挡。按原片实际内容选择，再应用保护范围并重新确认原图。
           </WorkflowFieldHelp>

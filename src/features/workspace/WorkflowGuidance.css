@@ -110,3 +110,37 @@ label.product-scene__approval > .workflow-field-help {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* 「照着填一遍」实操演示表：参数 → 填什么 → 效果。窄卡允许横向滚动，
+   不挤压工作流卡片本身的栅格。 */
+.workflow-guide__demo {
+  display: block;
+  width: 100%;
+  margin: var(--space-3xs) 0 0;
+  overflow-x: auto;
+  border-collapse: collapse;
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+}
+
+.workflow-guide__demo th,
+.workflow-guide__demo td {
+  padding: var(--space-3xs) var(--space-2xs);
+  border-top: var(--rule-thin) solid var(--color-rule-2);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.workflow-guide__demo thead th {
+  color: var(--color-ink-2);
+  background: var(--color-paper-2);
+  border-top: 0;
+}
+
+.workflow-guide__demo tbody th {
+  white-space: nowrap;
+  font-weight: 700;
+}

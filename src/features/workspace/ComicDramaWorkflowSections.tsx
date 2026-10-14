@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -237,15 +238,16 @@ export function ComicDramaConfiguration({
         <div className="canvas-comic-drama-workflow__format">
           <label>
             画幅
-            <select
-              aria-label="漫剧画幅"
+            <CanvasSelect
+              ariaLabel="漫剧画幅"
               value={options.aspectRatio}
-              onChange={(event) => onChange({ ...options, aspectRatio: event.target.value })}
-            >
-              <option value="9:16">竖屏 9:16</option>
-              <option value="16:9">横屏 16:9</option>
-              <option value="1:1">方形 1:1</option>
-            </select>
+              options={[
+                { value: "9:16", label: "竖屏 9:16" },
+                { value: "16:9", label: "横屏 16:9" },
+                { value: "1:1", label: "方形 1:1" },
+              ]}
+              onChange={(aspectRatio) => onChange({ ...options, aspectRatio })}
+            />
             <WorkflowFieldHelp>
               按发布位置选择：手机短视频用竖屏 9:16，横向播放用 16:9，方形展示用
               1:1。默认竖屏；选定后按这一画幅规划镜头。
@@ -253,16 +255,17 @@ export function ComicDramaConfiguration({
           </label>
           <label>
             交付方式
-            <select
-              aria-label="漫剧交付方式"
+            <CanvasSelect
+              ariaLabel="漫剧交付方式"
               value={options.deliverable}
-              onChange={(event) =>
-                onChange({ ...options, deliverable: event.target.value as "video" | "documents" })
+              options={[
+                { value: "video", label: "制作完整成片" },
+                { value: "documents", label: "仅制作分集文档" },
+              ]}
+              onChange={(deliverable) =>
+                onChange({ ...options, deliverable: deliverable as "video" | "documents" })
               }
-            >
-              <option value="video">制作完整成片</option>
-              <option value="documents">仅制作分集文档</option>
-            </select>
+            />
             <WorkflowFieldHelp>
               想继续制作画面、配音与成片，选「制作完整成片」并配置所需模型和音色。只需剧本、分镜等制作资料，选「仅制作分集文档」。
             </WorkflowFieldHelp>
@@ -294,11 +297,25 @@ export function ComicDramaConfiguration({
               <span>
                 <RequiredMark>项目语音供应商</RequiredMark>
               </span>
-              <select
-                aria-label="漫剧语音供应商"
+              <CanvasSelect
+                ariaLabel="漫剧语音供应商"
                 value={options.speech?.model.providerId ?? ""}
-                onChange={(event) => {
-                  const providerId = event.target.value;
+                options={[
+                  { value: "", label: "请选择项目供应商" },
+                  ...(options.speech?.model.providerId && !selectedProvider
+                    ? [
+                        {
+                          value: options.speech.model.providerId,
+                          label: `${options.speech.model.providerId}（不可用）`,
+                        },
+                      ]
+                    : []),
+                  ...speechProviders.map((entry) => ({
+                    value: entry.provider.id,
+                    label: entry.provider.displayName,
+                  })),
+                ]}
+                onChange={(providerId) => {
                   const modelDefinitionId =
                     speechProviders.find((entry) => entry.provider.id === providerId)?.models[0]
                       ?.definitionId ?? "";
@@ -307,19 +324,7 @@ export function ComicDramaConfiguration({
                     speech: { model: { providerId, modelDefinitionId }, voiceBindings: {} },
                   });
                 }}
-              >
-                <option value="">请选择项目供应商</option>
-                {options.speech?.model.providerId && !selectedProvider ? (
-                  <option value={options.speech.model.providerId}>
-                    {options.speech.model.providerId}（不可用）
-                  </option>
-                ) : null}
-                {speechProviders.map((entry) => (
-                  <option key={entry.provider.id} value={entry.provider.id}>
-                    {entry.provider.displayName}
-                  </option>
-                ))}
-              </select>
+              />
               <WorkflowFieldHelp>
                 选择已在项目中启用语音合成能力的供应商。列表为空时，先在供应商设置中绑定语音模型；切换供应商后需要重新填写角色音色。
               </WorkflowFieldHelp>
@@ -328,34 +333,37 @@ export function ComicDramaConfiguration({
               <span>
                 <RequiredMark>语音合成模型</RequiredMark>
               </span>
-              <select
-                aria-label="漫剧语音模型"
+              <CanvasSelect
+                ariaLabel="漫剧语音模型"
                 value={options.speech?.model.modelDefinitionId ?? ""}
-                onChange={(event) =>
+                options={[
+                  { value: "", label: "请选择模型" },
+                  ...(options.speech?.model.modelDefinitionId && !selectedModel
+                    ? [
+                        {
+                          value: options.speech.model.modelDefinitionId,
+                          label: `${options.speech.model.modelDefinitionId}（不可用）`,
+                        },
+                      ]
+                    : []),
+                  ...(selectedProvider?.models ?? []).map((model) => ({
+                    value: model.definitionId,
+                    label: model.displayName,
+                  })),
+                ]}
+                onChange={(modelDefinitionId) =>
                   onChange({
                     ...options,
                     speech: {
                       model: {
                         providerId: options.speech?.model.providerId ?? "",
-                        modelDefinitionId: event.target.value,
+                        modelDefinitionId,
                       },
                       voiceBindings: {},
                     },
                   })
                 }
-              >
-                <option value="">请选择模型</option>
-                {options.speech?.model.modelDefinitionId && !selectedModel ? (
-                  <option value={options.speech.model.modelDefinitionId}>
-                    {options.speech.model.modelDefinitionId}（不可用）
-                  </option>
-                ) : null}
-                {selectedProvider?.models.map((model) => (
-                  <option key={model.definitionId} value={model.definitionId}>
-                    {model.displayName}
-                  </option>
-                ))}
-              </select>
+              />
               <WorkflowFieldHelp>
                 用这个模型逐句生成角色配音。选择当前账号可使用、支持所需语言与音色的模型；切换模型后音色绑定会清空，需要重新核对。
               </WorkflowFieldHelp>

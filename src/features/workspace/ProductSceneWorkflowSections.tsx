@@ -2,6 +2,7 @@ import { WorkflowFieldHelp } from "./WorkflowGuidance";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
 import {
   backendErrorMessage,
@@ -143,24 +144,25 @@ function ProductSceneJewelryReviewDetails({
       {JEWELRY_REVIEW_CHECKS.map(({ key, label }) => (
         <label key={key}>
           {label}
-          <select
-            aria-label={`第 ${row.index} 张 ${label}`}
-            value={review.checks[key]}
+          <CanvasSelect
+            ariaLabel={`第 ${row.index} 张 ${label}`}
             disabled={disabled}
-            onChange={(event) =>
+            value={review.checks[key]}
+            options={[
+              { value: "uncertain", label: "待核对 / 无法确定" },
+              { value: "pass", label: "人工核对通过" },
+              { value: "fail", label: "不通过" },
+            ]}
+            onChange={(next) =>
               onChange({
                 ...review,
                 checks: {
                   ...review.checks,
-                  [key]: event.target.value as "pass" | "fail" | "uncertain",
+                  [key]: next as "pass" | "fail" | "uncertain",
                 },
               })
             }
-          >
-            <option value="uncertain">待核对 / 无法确定</option>
-            <option value="pass">人工核对通过</option>
-            <option value="fail">不通过</option>
-          </select>
+          />
           <WorkflowFieldHelp>
             对照本张实拍母版逐项核对；能确认一致选“通过”，有差异选“不通过”，看不清先保留“待核对”。
           </WorkflowFieldHelp>
@@ -589,12 +591,18 @@ export function ProductSceneConfiguration({
       </p>
       <label>
         AI 品牌摄影风格
-        <select
-          aria-label="AI 品牌摄影风格"
+        <CanvasSelect
+          ariaLabel="AI 品牌摄影风格"
           value={options.brandCreative?.style ?? ""}
-          onChange={(event) => {
+          options={[
+            { value: "", label: "沿用现有产品场景" },
+            ...PRODUCT_SCENE_BRAND_STYLES.map((style) => ({
+              value: style.id,
+              label: style.label,
+            })),
+          ]}
+          onChange={(style) => {
             const next = { ...options };
-            const style = event.target.value;
             if (!style) delete next.brandCreative;
             else
               next.brandCreative = {
@@ -604,14 +612,7 @@ export function ProductSceneConfiguration({
               };
             onChange(next);
           }}
-        >
-          <option value="">沿用现有产品场景</option>
-          {PRODUCT_SCENE_BRAND_STYLES.map((style) => (
-            <option key={style.id} value={style.id}>
-              {style.label}
-            </option>
-          ))}
-        </select>
+        />
         <WorkflowFieldHelp>
           沿用现有产品场景适合普通展示；冷白杂志偏清冷与留白，复古时装偏织物层次，暖白意境偏柔光。先选一种，再在品牌画面要求里补充细节。
         </WorkflowFieldHelp>
@@ -813,30 +814,28 @@ export function ProductSceneConfiguration({
             {generationMode !== "protected" ? (
               <label>
                 {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
-                <select
-                  aria-label={`${view.label} 原图角度`}
+                <CanvasSelect
+                  ariaLabel={`${view.label} 原图角度`}
                   value={view.angle}
-                  onChange={(event) =>
+                  options={Object.entries(ANGLES).map(([optionValue, label]) => ({
+                    value: optionValue,
+                    label,
+                  }))}
+                  onChange={(angle) =>
                     onChange({
                       ...options,
                       views: options.views.map((item) =>
                         item.id === view.id
                           ? {
                               ...item,
-                              angle: event.target.value as typeof view.angle,
+                              angle: angle as typeof view.angle,
                               approved: false,
                             }
                           : item,
                       ),
                     })
                   }
-                >
-                  {Object.entries(ANGLES).map(([value, label]) => (
-                    <option key={value} value={value}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
+                />
                 <WorkflowFieldHelp>
                   {generationMode === "reference"
                     ? "按这张原图实际拍摄方向选择，用于描述参考；新图的目标机位由计划安排。俯视是从上向下拍，平视是与商品同高。"
@@ -847,15 +846,21 @@ export function ProductSceneConfiguration({
             {generationMode === "protected" || options.brandCreative ? (
               <label>
                 照片用途
-                <select
-                  aria-label={`${view.label} 照片用途`}
+                <CanvasSelect
+                  ariaLabel={`${view.label} 照片用途`}
                   value={
                     /* 保真合成没有「真实佩戴」这一项：历史标注回显成「未标注」，
-                       不让 select 的 value 与选项列表脱节。 */
+                       不让下拉的 value 与选项列表脱节。 */
                     !preserveReference && view.photoRole === "wearing" ? "" : (view.photoRole ?? "")
                   }
-                  onChange={(event) => {
-                    const photoRole = event.target.value;
+                  options={[
+                    { value: "", label: "未标注 · 方案暂定分配" },
+                    { value: "full", label: "商品全貌" },
+                    { value: "detail", label: "局部细节" },
+                    // 保真合成只能贴抠图后的商品本体：给不了真人佩戴照，就别给这个选项。
+                    ...(!preserveReference ? [] : [{ value: "wearing", label: "真实佩戴" }]),
+                  ]}
+                  onChange={(photoRole) => {
                     onChange({
                       ...options,
                       views: options.views.map((item) => {
@@ -872,13 +877,7 @@ export function ProductSceneConfiguration({
                       }),
                     });
                   }}
-                >
-                  <option value="">未标注 · 方案暂定分配</option>
-                  <option value="full">商品全貌</option>
-                  <option value="detail">局部细节</option>
-                  {/* 保真合成只能贴抠图后的商品本体：给不了真人佩戴照，就别给这个选项。 */}
-                  {!preserveReference ? null : <option value="wearing">真实佩戴</option>}
-                </select>
+                />
                 {preserveReference ? null : (
                   <small>
                     原图保真合成只合成商品本体。「真实佩戴」请改用「AI 多机位」或「珠宝原片保护」。
@@ -1022,21 +1021,22 @@ export function ProductSceneConfiguration({
         {productSceneSceneBiasApplies(options) ? (
           <label>
             场景倾向
-            <select
-              aria-label="场景倾向"
+            <CanvasSelect
+              ariaLabel="场景倾向"
               value={options.sceneBias}
-              onChange={(event) =>
+              options={[
+                { value: "mixed", label: "均衡混合" },
+                { value: "geek", label: "桌面极客" },
+                { value: "office", label: "企业办公" },
+                { value: "unboxing", label: "开箱摆放" },
+              ]}
+              onChange={(sceneBias) =>
                 onChange({
                   ...options,
-                  sceneBias: event.target.value as ProductSceneWorkflowOptions["sceneBias"],
+                  sceneBias: sceneBias as ProductSceneWorkflowOptions["sceneBias"],
                 })
               }
-            >
-              <option value="mixed">均衡混合</option>
-              <option value="geek">桌面极客</option>
-              <option value="office">企业办公</option>
-              <option value="unboxing">开箱摆放</option>
-            </select>
+            />
             <small>
               {productSceneCameraRotates(options)
                 ? "只决定整幅画面的环境类型；拍摄机位由制作计划自动轮换，不在这里设置。"
@@ -1049,20 +1049,21 @@ export function ProductSceneConfiguration({
         ) : null}
         <label>
           图片比例
-          <select
-            aria-label="产品场景图片比例"
+          <CanvasSelect
+            ariaLabel="产品场景图片比例"
             value={options.aspectRatio}
-            onChange={(event) =>
+            options={[
+              { value: "1:1", label: "1:1 · 2048 × 2048" },
+              { value: "3:4", label: "3:4 · 1536 × 2048" },
+              { value: "9:16", label: "9:16 · 1152 × 2048" },
+            ]}
+            onChange={(aspectRatio) =>
               onChange({
                 ...options,
-                aspectRatio: event.target.value as ProductSceneWorkflowOptions["aspectRatio"],
+                aspectRatio: aspectRatio as ProductSceneWorkflowOptions["aspectRatio"],
               })
             }
-          >
-            <option value="1:1">1:1 · 2048 × 2048</option>
-            <option value="3:4">3:4 · 1536 × 2048</option>
-            <option value="9:16">9:16 · 1152 × 2048</option>
-          </select>
+          />
           <WorkflowFieldHelp>
             方形 1:1 适合方图位置，3:4 适合竖版图文，9:16
             适合全屏竖图；按最终展示位置选择，尺寸见选项。
@@ -1641,21 +1642,22 @@ export function ProductSceneDeliverables({
       ) : null}
       <label>
         筛选图片
-        <select
-          aria-label="筛选产品场景图"
+        <CanvasSelect
+          ariaLabel="筛选产品场景图"
           value={filter}
-          onChange={(event) => {
-            setFilter(event.target.value as typeof filter);
+          options={[
+            { value: "all", label: "全部计划" },
+            { value: "needs_review", label: "待审核" },
+            { value: "accepted", label: "已选用" },
+            { value: "rejected", label: "已拒绝" },
+            { value: "error", label: "失败" },
+          ]}
+          onChange={(nextFilter) => {
+            setFilter(nextFilter as typeof filter);
             setPage(0);
             setSelectedIds([]);
           }}
-        >
-          <option value="all">全部计划</option>
-          <option value="needs_review">待审核</option>
-          <option value="accepted">已选用</option>
-          <option value="rejected">已拒绝</option>
-          <option value="error">失败</option>
-        </select>
+        />
         <WorkflowFieldHelp>
           按审核状态缩小当前列表；待审核用于挑选成图，失败用于找到需要处理的任务，切换筛选不会重新生成。
         </WorkflowFieldHelp>

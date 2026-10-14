@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { workflowStatusMessage } from "../../lib/workflowErrors";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
@@ -190,61 +191,55 @@ function ModelSlot({
   const models = selectedProvider?.models ?? [];
   const selectedModel = models.find((model) => model.definitionId === selection.modelDefinitionId);
 
+  const providerOptions = [
+    ...(!selection.providerId ? [{ value: "", label: "请选择供应商" }] : []),
+    ...(selection.providerId && !selectedProvider
+      ? [{ value: selection.providerId, label: `${selection.providerId}（不可用）` }]
+      : []),
+    ...providers.map((entry) => ({ value: entry.provider.id, label: entry.provider.displayName })),
+  ];
+  const modelOptions = [
+    ...(!selection.modelDefinitionId
+      ? [{ value: "", label: models.length ? "请选择模型" : "没有可用模型" }]
+      : []),
+    ...(selection.modelDefinitionId && !selectedModel
+      ? [{ value: selection.modelDefinitionId, label: `${selection.modelDefinitionId}（不可用）` }]
+      : []),
+    ...models.map((model) => ({ value: model.definitionId, label: model.displayName })),
+  ];
+
   return (
     <fieldset className="canvas-knowledge-workflow__model-slot">
       <legend>{required ? <RequiredMark>{label}</RequiredMark> : label}</legend>
       <label>
         <span>项目供应商</span>
-        <select
-          aria-label={`${label}供应商`}
-          aria-required={required}
+        <CanvasSelect
+          ariaLabel={`${label}供应商`}
+          required={required}
           disabled={disabled}
           value={selection.providerId}
-          onChange={(event) => {
-            const providerId = event.target.value;
+          options={providerOptions}
+          onChange={(providerId) => {
             const modelDefinitionId =
               providers.find((entry) => entry.provider.id === providerId)?.models[0]
                 ?.definitionId ?? "";
             onChange({ providerId, modelDefinitionId });
           }}
-        >
-          {!selection.providerId ? <option value="">请选择供应商</option> : null}
-          {selection.providerId && !selectedProvider ? (
-            <option value={selection.providerId}>{selection.providerId}（不可用）</option>
-          ) : null}
-          {providers.map((entry) => (
-            <option key={entry.provider.id} value={entry.provider.id}>
-              {entry.provider.displayName}
-            </option>
-          ))}
-        </select>
+        />
         <WorkflowFieldHelp>
           选择已配置连接的模型服务。列表为空时，先打开顶部「全局设置」，添加并启用供应商连接，再拉取和绑定模型。
         </WorkflowFieldHelp>
       </label>
       <label>
         <span>模型</span>
-        <select
-          aria-label={`${label}模型`}
-          aria-required={required}
+        <CanvasSelect
+          ariaLabel={`${label}模型`}
+          required={required}
           disabled={disabled}
           value={selection.modelDefinitionId}
-          onChange={(event) => onChange({ ...selection, modelDefinitionId: event.target.value })}
-        >
-          {!selection.modelDefinitionId ? (
-            <option value="">{models.length ? "请选择模型" : "没有可用模型"}</option>
-          ) : null}
-          {selection.modelDefinitionId && !selectedModel ? (
-            <option value={selection.modelDefinitionId}>
-              {selection.modelDefinitionId}（不可用）
-            </option>
-          ) : null}
-          {models.map((model) => (
-            <option key={model.definitionId} value={model.definitionId}>
-              {model.displayName}
-            </option>
-          ))}
-        </select>
+          options={modelOptions}
+          onChange={(modelDefinitionId) => onChange({ ...selection, modelDefinitionId })}
+        />
         <WorkflowFieldHelp>{help}</WorkflowFieldHelp>
       </label>
     </fieldset>

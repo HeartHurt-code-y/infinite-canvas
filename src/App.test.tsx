@@ -165,9 +165,15 @@ describe("App workspace", () => {
     const workflowNode = document.querySelector<HTMLElement>(".canvas-knowledge-workflow");
     expect(workflowNode).not.toBeNull();
     fireEvent.click(within(workflowNode!).getByText("模型配置"));
-    expect(within(workflowNode!).getByLabelText("策划与审核供应商")).toHaveValue("moyu-production");
-    expect(within(workflowNode!).getByLabelText("图片生成供应商")).toHaveValue("moyu-production");
-    expect(within(workflowNode!).getByLabelText("视频生成供应商")).toHaveValue("moyu-production");
+    expect(within(workflowNode!).getByLabelText("策划与审核供应商")).toHaveTextContent(
+      "Moyu · 生产环境",
+    );
+    expect(within(workflowNode!).getByLabelText("图片生成供应商")).toHaveTextContent(
+      "Moyu · 生产环境",
+    );
+    expect(within(workflowNode!).getByLabelText("视频生成供应商")).toHaveTextContent(
+      "Moyu · 生产环境",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
     await waitFor(() => {
@@ -239,7 +245,7 @@ describe("App workspace", () => {
       "false",
     );
     fireEvent.click(screen.getByText("模型配置"));
-    expect(screen.getByLabelText("策划与审核供应商")).toHaveValue("moyu-production");
+    expect(screen.getByLabelText("策划与审核供应商")).toHaveTextContent("Moyu · 生产环境");
     expect(screen.queryByLabelText("图片生成供应商")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成供应商")).not.toBeInTheDocument();
   });

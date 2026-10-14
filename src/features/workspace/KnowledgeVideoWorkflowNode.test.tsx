@@ -606,11 +606,16 @@ describe("KnowledgeVideoWorkflowNode", () => {
 
     fireEvent.click(screen.getByText("模型配置"));
     expect(document.querySelectorAll(".canvas-knowledge-workflow__model-slot")).toHaveLength(3);
-    expect(screen.getByRole("combobox", { name: "策划与审核供应商" })).toHaveValue(
-      "project-provider",
+    // CanvasSelect 的可访问名不变，值显示为按钮文案（原生 select 时代是 toHaveValue）。
+    expect(screen.getByRole("combobox", { name: "策划与审核供应商" })).toHaveTextContent(
+      "项目供应商",
     );
-    expect(screen.getByRole("combobox", { name: "图片生成模型" })).toHaveValue("project-image");
-    expect(screen.getByRole("combobox", { name: "视频生成模型" })).toHaveValue("project-video");
+    expect(screen.getByRole("combobox", { name: "图片生成模型" })).toHaveTextContent(
+      "项目图片模型",
+    );
+    expect(screen.getByRole("combobox", { name: "视频生成模型" })).toHaveTextContent(
+      "项目视频模型",
+    );
     expect(screen.queryByRole("option", { name: "仅图片编辑模型" })).not.toBeInTheDocument();
     expect(screen.getByText("这里仅显示当前项目中已启用的供应商和模型。")).toBeInTheDocument();
   });

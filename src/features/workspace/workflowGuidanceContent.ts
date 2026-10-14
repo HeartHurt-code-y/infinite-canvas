@@ -3,11 +3,23 @@ import type { WorkflowKind } from "./workflowKinds";
 /** 新手指南按工作流类型取内容；类型清单与 workflowKinds 注册表同源。 */
 export type WorkflowGuideKind = WorkflowKind;
 
+/** 「照着填一遍」实操演示的一行：这个参数填什么、界面与成图会因此发生什么。 */
+export interface WorkflowGuideDemoRow {
+  readonly field: string;
+  readonly fill: string;
+  readonly effect: string;
+}
+
 export interface WorkflowGuideContent {
   readonly purpose: string;
   readonly prepare: string;
   readonly steps: readonly string[];
   readonly example: string;
+  /**
+   * 完整的填参演示：按界面从上到下的顺序，逐字段给出「填什么 → 有什么效果」。
+   * 参数多的工作流才需要；缺省时指南只显示单段示例。
+   */
+  readonly demo?: readonly WorkflowGuideDemoRow[];
 }
 
 /** 新手说明只解释操作，不改写输入、默认参数或工作流的审批与计费边界。 */
@@ -119,6 +131,63 @@ export const WORKFLOW_GUIDES: Record<WorkflowGuideKind, WorkflowGuideContent> = 
     ],
     example:
       "产品名称：便携咖啡杯。先试做 3 张，选择 3:4 竖版，以通勤桌面为场景；保留真实杯身、杯盖和 Logo，逐张核对后再增加数量。",
+    demo: [
+      {
+        field: "生成方式",
+        fill: "珠宝原片保护",
+        effect:
+          "以实拍原图为母版做外围场景，不改变商品角度和佩戴关系。想尝试全新构图选「AI 多机位」；只有白底图想换背景选「原图保真合成」。",
+      },
+      {
+        field: "产品名称",
+        fill: "珍珠手串 A01（换成自己的款名）",
+        effect: "导出清单用它区分商品；不要保留界面里的示例名。",
+      },
+      {
+        field: "添加完整原片",
+        fill: "点按钮选 1–5 张实拍图",
+        effect:
+          "每张原图做一张母版，实拍范围和背景按原样保留。先放大核对母版再确认；确认后才会进入生成。",
+      },
+      {
+        field: "照片用途（每张原图）",
+        fill: "全貌 / 细节 / 真实佩戴",
+        effect:
+          "告诉计划这张母版负责什么：全貌看完整结构，细节看纹理，佩戴看上身关系。用途错配会直接写进成图。",
+      },
+      {
+        field: "商品 SKU",
+        fill: "BRACELET-A01",
+        effect: "库存或店铺的款式编号；同一款的多张原图共用一个 SKU。",
+      },
+      {
+        field: "单件实物编号",
+        fill: "天然纹理 #7",
+        effect: "同 SKU 有多件实物时必须分开编号；天然纹理、精琢或包浆不共用，防止成图张冠李戴。",
+      },
+      {
+        field: "总计划张数",
+        fill: "先填 3–5",
+        effect:
+          "第一次试做别贪多：逐张确认方向对了再规划更多。费用按生成张数计，修改输入后需重新查看计划。",
+      },
+      {
+        field: "同时生成张数上限",
+        fill: "保留 10",
+        effect: "同一时间最多提交几张。供应商额度小就调低；它不改变总计划张数。",
+      },
+      {
+        field: "图片比例",
+        fill: "3:4 · 1536 × 2048",
+        effect: "按最终展示位置选：详情页竖图 3:4，方图位 1:1，全屏竖图 9:16。",
+      },
+      {
+        field: "查看执行计划",
+        fill: "核对后点确认",
+        effect:
+          "计划列出每张用什么原图配什么场景；确认之前不会提交任何付费任务，确认后才分批制作。",
+      },
+    ],
   },
   reverseVideo: {
     purpose: "分析已有短视频的画面与动作结构，交付反推提示词、三条二创路线和可复用案例。",
