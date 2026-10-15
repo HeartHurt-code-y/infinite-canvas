@@ -14,7 +14,9 @@ export interface AgentTool {
   readonly title: string;
   readonly description: string;
   readonly inputSchema: Record<string, unknown>;
-  readonly effect: "read" | "write" | "render" | "generate";
+  readonly effect: "read" | "write" | "render" | "generate" | "download";
+  /** 计划确认页的费用提示；缺省按 effect 给默认文案（generate/render/download）。 */
+  readonly effectHint?: string;
   validate(args: unknown): void;
   execute(args: unknown, context: AgentToolContext): Promise<unknown>;
 }

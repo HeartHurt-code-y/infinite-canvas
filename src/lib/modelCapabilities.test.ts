@@ -10,8 +10,25 @@ import {
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
   modelSupportsBatchCount,
+  parameterValueIssue,
+  type ModelParameterCapability,
 } from "./modelCapabilities";
 import { isSeedanceDraftModel, supportsSeedanceDraft } from "./seedanceDraft";
+
+const capability = (patch: Partial<ModelParameterCapability>): ModelParameterCapability => ({
+  key: "ratio",
+  label: "画幅",
+  type: "string",
+  defaultValue: "16:9",
+  options: [
+    { value: "16:9", label: "16:9" },
+    { value: "9:16", label: "9:16" },
+  ],
+  optional: false,
+  requiresNoMedia: false,
+  order: 0,
+  ...patch,
+});
 
 describe("model capabilities", () => {
   it.each(["PixVerse-V6", "PixVerse-C1"])(
@@ -1052,5 +1069,45 @@ describe("model capabilities", () => {
     // 非 Gemini 图片模型不被误判。
     expect(isGeminiImageModel("gemini-2.5-flash")).toBe(false);
     expect(isGeminiImageModel("gpt-image-2")).toBe(false);
+  });
+});
+
+describe("parameterValueIssue", () => {
+  it("枚举参数只接受声明过的取值，报错列出全部可选项", () => {
+    const ratio = capability({});
+    expect(parameterValueIssue(ratio, "9:16")).toBeNull();
+    expect(parameterValueIssue(ratio, "21:9")).toBe("可选值：16:9（16:9）、9:16（9:16）。");
+  });
+
+  it("布尔参数只接受 true/false", () => {
+    const audio = capability({ key: "audio", type: "boolean", defaultValue: false, options: [] });
+    expect(parameterValueIssue(audio, true)).toBeNull();
+    expect(parameterValueIssue(audio, "true")).toBe("需要 true 或 false。");
+  });
+
+  it("数值参数校验整数与小数边界", () => {
+    const duration = capability({
+      key: "duration",
+      type: "integer",
+      defaultValue: 5,
+      options: [],
+      minimum: 3,
+      maximum: 10,
+    });
+    expect(parameterValueIssue(duration, 5)).toBeNull();
+    expect(parameterValueIssue(duration, 5.5)).toBe("需要整数。");
+    expect(parameterValueIssue(duration, 2)).toBe("不能小于 3。");
+    expect(parameterValueIssue(duration, 11)).toBe("不能大于 10。");
+    expect(parameterValueIssue(duration, "5")).toBe("需要整数。");
+    const seed = capability({ key: "seed", type: "number", defaultValue: 0, options: [] });
+    expect(parameterValueIssue(seed, 1.5)).toBeNull();
+    expect(parameterValueIssue(seed, Number.NaN)).toBe("需要数字。");
+  });
+
+  it("自由文本参数要求非空字符串", () => {
+    const template = capability({ key: "template_id", type: "string", options: [] });
+    expect(parameterValueIssue(template, "fx-01")).toBeNull();
+    expect(parameterValueIssue(template, "  ")).toBe("需要非空文本。");
+    expect(parameterValueIssue(template, 7)).toBe("需要非空文本。");
   });
 });

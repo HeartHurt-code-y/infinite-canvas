@@ -1192,6 +1192,30 @@ export function resolvedParameterValue(
   return isParameterValue(value) ? value : capability.defaultValue;
 }
 
+/** 程序化写入（智能体计划等）提交前的取值校验；返回给人话问题，null 表示可用。 */
+export function parameterValueIssue(
+  capability: ModelParameterCapability,
+  value: ModelParameterValue,
+): string | null {
+  if (capability.type === "boolean")
+    return typeof value === "boolean" ? null : "需要 true 或 false。";
+  if (capability.options.length > 0) {
+    return capability.options.some((option) => option.value === value)
+      ? null
+      : `可选值：${capability.options.map((option) => `${option.value}（${option.label}）`).join("、")}。`;
+  }
+  if (capability.type === "string")
+    return typeof value === "string" && value.trim().length > 0 ? null : "需要非空文本。";
+  if (typeof value !== "number" || !Number.isFinite(value))
+    return capability.type === "integer" ? "需要整数。" : "需要数字。";
+  if (capability.type === "integer" && !Number.isInteger(value)) return "需要整数。";
+  if (capability.minimum != null && value < capability.minimum)
+    return `不能小于 ${capability.minimum}。`;
+  if (capability.maximum != null && value > capability.maximum)
+    return `不能大于 ${capability.maximum}。`;
+  return null;
+}
+
 export function generationParameters(
   capabilities: readonly ModelParameterCapability[],
   values: Readonly<Record<string, ModelParameterValue>>,

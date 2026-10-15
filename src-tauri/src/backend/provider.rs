@@ -117,6 +117,9 @@ pub struct ProviderRuntime {
     lifecycle: GenerationTaskLifecycle,
     credentials: CredentialStore,
     client: reqwest::Client,
+    /// 流式文本调用专用客户端：不带总时限，存活性由首字节与块间空闲两个看门狗
+    /// 守护（见 `ProviderRuntime::new`）。
+    stream_client: reqwest::Client,
     /// 进程内记忆：上游以 4xx 明确点名「不认识这个字段」的请求字段，按
     /// 「模型定义 + 操作」分桶。命中后请求体不再携带该字段，避免同一模型每次生成都
     /// 先用一个注定失败的请求试一次。
@@ -410,6 +413,11 @@ const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 /// `finish_reason`）已经发完后仍不关闭连接、也不再推 `[DONE]` / usage，这时
 /// 已组装出可交付结果就回收，而不是把整轮生成判失败。
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// 非流式文本调用的总时限（响应头 + 完整响应体）。非流式响应没有块间空闲可观测，
+/// 只能用总时限兜底「收了响应头却迟迟不给正文」的网关；但不支持流式的网关要等
+/// 上游全部生成完才回传，长文本生成合法地超过 5 分钟，因此比 JSON 接口的
+/// 客户端默认值（300 秒）宽松。流式调用不走这条时限，见 `stream_client`。
+const NON_STREAM_TEXT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 /// 单个 SSE 帧的缓冲上限。一帧承载一条增量，正常远小于此值；超过它说明上游没有
 /// 按 SSE 分帧回传，继续缓存没有意义。
 const SSE_FRAME_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
@@ -1270,11 +1278,21 @@ impl ProviderRuntime {
             .timeout(std::time::Duration::from_secs(300))
             .user_agent("InfiniteCanvas/0.1")
             .build()?;
+        // 流式响应不能套总时限：reqwest 的 `.timeout()` 覆盖「发请求到响应体读完」
+        // 全程，健康的生成（长上下文规划、长正文输出）合法地超过任何固定上限，会被
+        // 硬杀成 `Decode(Body(TimedOut))`。流式的存活性由调用方的两个看门狗守护：
+        // FIRST_BYTE_TIMEOUT 限响应头，STREAM_IDLE_TIMEOUT 限块间空闲，正常增量
+        // 之间不该有秒级以上的间隙，不需要总时限兜底。
+        let stream_client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .user_agent("InfiniteCanvas/0.1")
+            .build()?;
         Ok(Self {
             storage,
             lifecycle,
             credentials,
             client,
+            stream_client,
             rejected_request_fields: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -2313,11 +2331,20 @@ impl ProviderRuntime {
         )?;
 
         let sanitized_url = sanitize_url(url);
-        let mut request = self
-            .client
+        // 流式必须走无总时限的 stream_client；非流式看不到块间粒度，用显式总时限
+        // 兜底挂死的网关。
+        let client = if call.dialect.is_some() {
+            &self.stream_client
+        } else {
+            &self.client
+        };
+        let mut request = client
             .post(url.clone())
             .bearer_auth(&context.api_key)
             .json(body);
+        if call.dialect.is_none() {
+            request = request.timeout(NON_STREAM_TEXT_TIMEOUT);
+        }
         for (name, value) in extra_headers {
             request = request.header(*name, *value);
         }
@@ -9101,10 +9128,12 @@ mod tests {
                 captured[0].1["metadata"],
                 json!({ "content": [{ "type": "draft_task", "draft_task": { "id": "cgt-draft-source" } }] })
             );
+            // hyper 1.x 按原始大小写回传请求头名（Authorization），断言统一转小写。
             assert!(
                 captured[0]
                     .0
-                    .contains("authorization: Bearer sk-frozen-test")
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer sk-frozen-test")
             );
         }
     }
@@ -12271,5 +12300,157 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["upload", "upload", "submit"]
         );
+    }
+
+    /// 流式文本调用的 mock 网关：立刻回响应头，再按 400ms 间隔滴流 SSE 帧，发完
+    /// 关闭连接。健康的流本来就可以比任何固定总时限长，因此帧间隔故意拉大。
+    fn streaming_text_mock_runtime() -> (
+        tempfile::TempDir,
+        ProviderRuntime,
+        TaskExecutionRecord,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let frames: Vec<String> = vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"# 分镜\"},\"finish_reason\":null}]}\n\n"
+                .to_string(),
+            "data: {\"choices\":[{\"delta\":{\"content\":\"第一幕\"},\"finish_reason\":null}]}\n\n"
+                .to_string(),
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n".to_string(),
+            "data: [DONE]\n\n".to_string(),
+        ];
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock streaming provider");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "mock server saw no request");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            let mut bytes = Vec::new();
+            loop {
+                let read = stream.read(&mut buffer).unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&buffer[..read]);
+                if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let mut frames = frames.into_iter();
+            let Some(first) = frames.next() else {
+                return;
+            };
+            let mut head =
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+                    .to_vec();
+            head.extend_from_slice(first.as_bytes());
+            stream.write_all(&head).unwrap();
+            stream.flush().unwrap();
+            for frame in frames {
+                std::thread::sleep(Duration::from_millis(400));
+                stream.write_all(frame.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let directory = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("backend.sqlite")).unwrap());
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "streaming-text-mock".into(),
+                display_name: "Streaming text mock".into(),
+                adapter_id: MOYU_ADAPTER_ID.into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .unwrap();
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-frozen-test")
+            .unwrap();
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        lifecycle
+            .create(NewTask {
+                id: "streaming-text-mock-task",
+                canvas_id: "canvas-1",
+                source_node_id: "text-1",
+                operation: GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "text-mock-model",
+                remote_model_id: None,
+                logical_request: &json!({}),
+            })
+            .unwrap();
+        for fact in [
+            GenerationLifecycleFact::BeginResolution {
+                attempt_id: "resolve-1".into(),
+            },
+            GenerationLifecycleFact::ResolutionSucceeded {
+                attempt_id: "resolve-1".into(),
+                resolved_request: json!({}),
+            },
+            GenerationLifecycleFact::BeginSubmission {
+                attempt_id: "submit-1".into(),
+                backoff_ms: None,
+            },
+        ] {
+            lifecycle.commit("streaming-text-mock-task", fact).unwrap();
+        }
+        let task = storage
+            .get_task_execution("streaming-text-mock-task")
+            .unwrap();
+        let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
+        (directory, runtime, task, server)
+    }
+
+    #[tokio::test]
+    async fn streaming_text_call_survives_past_the_bounded_client_total_timeout() {
+        let (directory, mut runtime, task, server) = streaming_text_mock_runtime();
+        // 把有界客户端的总时限压到 700ms，而 mock 网关的滴流全程约 1.3s：流式分支
+        // 一旦回归成共用 client，请求会在 700ms 被硬杀成 Decode(Body(TimedOut))
+        //（线上「error decoding response body / operation timed out」故障的原样）。
+        runtime.client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(700))
+            .build()
+            .unwrap();
+        let body = json!({ "model": "text-mock-model", "stream": true, "messages": [] });
+        let started = std::time::Instant::now();
+        let (response, payload) = runtime
+            .captured_text_json(
+                &task,
+                "submit-1",
+                "/chat/completions",
+                &[],
+                &body,
+                &body,
+                &[],
+                Some(TextModelStream::OpenAiChat),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("healthy slow stream must not hit any total timeout");
+        assert_eq!(response.status, 200);
+        assert_eq!(payload["choices"][0]["message"]["content"], "# 分镜第一幕");
+        assert!(started.elapsed() >= std::time::Duration::from_millis(1000));
+        server.join().expect("mock server thread");
+        drop(directory);
     }
 }

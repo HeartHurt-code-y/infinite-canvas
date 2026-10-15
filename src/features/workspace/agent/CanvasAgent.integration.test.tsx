@@ -53,6 +53,9 @@ const callbacks = new Map<number, (payload: unknown) => unknown>();
 let callbackId = 0;
 let plannedScene = createWhiteModelStudioDraft().plan;
 let replyOverride: { message: string; actions: readonly AgentAction[] } | null = null;
+/** 只读计划执行后控制器会再问一轮；置位后第二次询问返回空动作，避免空转。 */
+let replyOnceThenEmpty = false;
+let runPromptCalls = 0;
 let generationTasks: readonly GenerationTaskSummary[] = [];
 const submittedTaskId = "agent-generation-submitted-task";
 const job: BlenderRenderJob = {
@@ -142,31 +145,37 @@ function invoke(command: string, args?: Record<string, unknown>): Promise<unknow
     case "count_assets_by_kind":
       return Promise.resolve({ image: 0, video: 0, audio: 0 });
     case "run_prompt_node": {
-      const reply = JSON.stringify(
-        replyOverride ?? {
-          message: "先创建视频节点，再设置并渲染人物走动白模。",
-          actions: [
-            {
-              id: "video",
-              tool: "canvas.create_node",
-              args: { kind: "video", text: "人物在画面中从左走到右" },
-              dependsOn: [],
-            },
-            {
-              id: "scene",
-              tool: "blender.set_scene",
-              args: { nodeKey: "$video", scene: plannedScene },
-              dependsOn: ["video"],
-            },
-            {
-              id: "render",
-              tool: "blender.render",
-              args: { nodeKey: "$video" },
-              dependsOn: ["scene"],
-            },
-          ],
-        },
-      );
+      const followUp = replyOnceThenEmpty && runPromptCalls >= 1;
+      const planned = followUp
+        ? {
+            message: "最近的生成任务仍在进行中，暂无后续步骤。",
+            actions: [] as readonly AgentAction[],
+          }
+        : (replyOverride ?? {
+            message: "先创建视频节点，再设置并渲染人物走动白模。",
+            actions: [
+              {
+                id: "video",
+                tool: "canvas.create_node",
+                args: { kind: "video", text: "人物在画面中从左走到右" },
+                dependsOn: [],
+              },
+              {
+                id: "scene",
+                tool: "blender.set_scene",
+                args: { nodeKey: "$video", scene: plannedScene },
+                dependsOn: ["video"],
+              },
+              {
+                id: "render",
+                tool: "blender.render",
+                args: { nodeKey: "$video" },
+                dependsOn: ["scene"],
+              },
+            ] as readonly AgentAction[],
+          });
+      const reply = JSON.stringify(planned);
+      runPromptCalls += 1;
       return Promise.resolve({ optimizedPrompt: reply, rawModelOutput: reply });
     }
     case "start_blender_render":
@@ -200,6 +209,8 @@ beforeEach(() => {
   callbackId = 0;
   plannedScene = createWhiteModelStudioDraft().plan;
   replyOverride = null;
+  replyOnceThenEmpty = false;
+  runPromptCalls = 0;
   generationTasks = [];
   invokeMock.mockReset();
   invokeMock.mockImplementation(invoke);
@@ -581,5 +592,125 @@ describe("CanvasAgent workspace integration", () => {
       });
       expect(query.statuses).toEqual(expect.arrayContaining(["unknown", "interrupted"]));
     }
+  });
+
+  it("approves one cleanup plan covering count, connect, disconnect and delete", async () => {
+    replyOverride = {
+      message: "建立连线再断开，设置生成数量并清理提示词节点。",
+      actions: [
+        {
+          id: "prompt",
+          tool: "canvas.create_node",
+          args: { kind: "prompt", text: "上游参考文字" },
+          dependsOn: [],
+        },
+        {
+          id: "video",
+          tool: "canvas.create_node",
+          args: { kind: "video", text: "保留的视频节点" },
+          dependsOn: [],
+        },
+        {
+          id: "count",
+          tool: "canvas.set_generation_count",
+          args: { nodeKey: "$video", count: 2 },
+          dependsOn: ["video"],
+        },
+        {
+          id: "connect",
+          tool: "canvas.connect",
+          args: { fromKey: "$prompt", toKey: "$video" },
+          dependsOn: ["prompt", "count"],
+        },
+        {
+          id: "disconnect",
+          tool: "canvas.disconnect",
+          args: { fromKey: "$prompt", toKey: "$video" },
+          dependsOn: ["connect"],
+        },
+        {
+          id: "delete",
+          tool: "canvas.delete_node",
+          args: { nodeKey: "$prompt" },
+          dependsOn: ["disconnect"],
+        },
+      ],
+    };
+    render(<App />);
+    const panel = await openPanel();
+    const approve = await propose(panel, "连线后又不需要了，清理掉提示词节点");
+    expect(latestDocument().genNodes).toHaveLength(0);
+    fireEvent.click(approve);
+    await waitFor(() => {
+      expect(within(panel).queryByRole("alert")?.textContent ?? "no error").toBe("no error");
+      expect((latestDocument().agent as AgentState).status).toBe("idle");
+    });
+    const saved = latestDocument();
+    expect(saved.genNodes).toHaveLength(1);
+    const kept = saved.genNodes[0]!;
+    expect(kept.kind).toBe("video");
+    expect(kept.kind !== "prompt" && kept.config.generationCount).toBe(2);
+    expect(saved.assetEdges).toHaveLength(0);
+    // 断开上游后清除自动导入的文字：视频节点自己的创作文字被连线导入并随断连清空。
+    expect(saved.promptContents[kept.key]?.items ?? []).toEqual([]);
+    expect(
+      (saved.agent as AgentState).messages.some(
+        (message) =>
+          message.role === "tool" &&
+          message.content.includes("删除画布节点") &&
+          message.content.includes('"removedEdges":0'),
+      ),
+    ).toBe(true);
+  });
+
+  it("answers generation progress from a read-only history query without approval", async () => {
+    generationTasks = [
+      {
+        id: "task-live",
+        canvasId: "canvas-any",
+        sourceNodeId: "video-node",
+        operation: "video_generation",
+        status: "running",
+        queryHealth: "healthy",
+        providerConnectionId: provider.id,
+        providerDisplayNameSnapshot: provider.displayName,
+        modelDefinitionId: videoModelId,
+        remoteModelIdSnapshot: null,
+        remoteTaskId: null,
+        progress: 55,
+        tokens: null,
+        createdAt: 1,
+        updatedAt: 2,
+        completedAt: null,
+      },
+    ];
+    replyOverride = {
+      message: "查询最近的生成任务。",
+      actions: [{ id: "check", tool: "generation.history", args: { limit: 5 }, dependsOn: [] }],
+    };
+    replyOnceThenEmpty = true;
+    render(<App />);
+    const panel = await openPanel();
+    fireEvent.change(within(panel).getByRole("textbox", { name: "给创作助手的消息" }), {
+      target: { value: "看看生成任务进展" },
+    });
+    fireEvent.click(within(panel).getByRole("button", { name: "发送" }));
+    await within(panel).findByText("查询生成任务");
+    await waitFor(() => expect((latestDocument().agent as AgentState).status).toBe("idle"));
+    expect(within(panel).queryByRole("button", { name: "确认并执行" })).not.toBeInTheDocument();
+    expect(within(panel).getByText(/"statusText":"生成中"/)).toBeInTheDocument();
+    expect(latestDocument().genNodes).toHaveLength(0);
+    const queries = invokeMock.mock.calls.filter(
+      ([command]) => command === "list_generation_tasks",
+    );
+    expect(queries.length).toBeGreaterThan(0);
+    const query = queries.at(-1)![1]!["query"] as {
+      canvasId: string;
+      sourceNodeId: string | null;
+      limit: number;
+    };
+    expect(query.limit).toBe(5);
+    expect(query.sourceNodeId).toBeNull();
+    expect(typeof query.canvasId).toBe("string");
   });
 });

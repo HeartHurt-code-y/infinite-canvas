@@ -262,7 +262,7 @@ export class CanvasAgentController {
         context: host.context(),
         conversation: this.state.messages,
         instructions:
-          "只使用注册工具。新节点在后续步骤用 $步骤id 引用，必须声明 dependsOn。白模先创建视频节点，再 set_scene，render 会导出并放回画布。所有写入都需要批准，请返回完整可审阅计划；不要声称计划已执行。已有信息优先读取。只能从实际工具结果判断成功。",
+          "只使用注册工具。新节点在后续步骤用 $步骤id 引用，必须声明 dependsOn。白模先创建视频节点，再 set_scene，render 会导出并放回画布。剧本与分镜先在回复里写好整篇文档，再用 canvas.set_document 写入；抽帧与合成节点要先连线好输入再运行。所有写入都需要批准，请返回完整可审阅计划；不要声称计划已执行。已有信息优先读取。只能从实际工具结果判断成功。",
       });
       let raw: string;
       try {

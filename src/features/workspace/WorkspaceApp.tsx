@@ -8,9 +8,12 @@ import {
 import { CanvasAgentController } from "./agent/canvasAgentController";
 import { createAgentCanvasTools } from "./agent/agentCanvasTools";
 import { createAgentBlenderTools, previewAgentBlenderScenes } from "./agent/agentBlenderTools";
+import { createAgentVideoDownloadTools } from "./agent/agentVideoDownloadTools";
+import { createAgentWorkflowNodeTools } from "./agent/agentWorkflowNodeTools";
 import {
   agentCanvasContext,
   agentCanvasSignature,
+  agentGenNodeParameterCapabilities,
   agentPlanReview,
 } from "./agent/agentCanvasContext";
 import type { AgentToolContext } from "./agent/agentTypes";
@@ -121,7 +124,11 @@ import {
   isDeletableCloudAssetGroupId,
   resolveActiveAssetLibraryProvider,
 } from "../../lib/assetLibrarySupport";
-import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
+import {
+  generationParameters,
+  modelParameterCapabilities,
+  parameterValueIssue,
+} from "../../lib/modelCapabilities";
 import { perTaskVideoUrlConnection, perTaskVideoUrlIssue } from "../../lib/perTaskVideo";
 import type {
   PromptContentConnection,
@@ -11942,6 +11949,29 @@ export function WorkspaceApp({
       context,
       createNode: (kind, text) => {
         const center = viewportCenterBoardCoordinates();
+        if (kind === "screenplay" || kind === "storyboard") {
+          const node =
+            kind === "screenplay"
+              ? createScreenplayNode(center.x, center.y)
+              : createStoryboardNode(center.x, center.y);
+          addNode(kind, node, { select: true });
+          if (text)
+            patchNode(kind, node.key, (item) => ({
+              ...item,
+              config: { ...item.config, currentDocument: text },
+            }));
+          return node.key;
+        }
+        if (kind === "video_composer") {
+          const node = createVideoComposerNode(center.x, center.y);
+          addNode("videoComposer", node, { select: true });
+          return node.key;
+        }
+        if (kind === "frame_extractor") {
+          const node = createFrameExtractorNode(center.x, center.y);
+          addNode("frameExtractor", node, { select: true });
+          return node.key;
+        }
         const node = createGenNode(kind, center.x, center.y);
         addNode("gen", node, { select: true });
         setPrompt(node.key, text);
@@ -11987,10 +12017,77 @@ export function WorkspaceApp({
             parameterValues: {},
           });
       },
+      setParameters: (nodeKey, values) => {
+        const node = requireNode(nodeKey);
+        if (node.kind === "prompt")
+          throw new Error("提示词节点没有模型参数；创作文字请用 canvas.set_prompt 写入。");
+        const resolved = agentGenNodeParameterCapabilities(
+          snapshotV2({}),
+          providerCatalog,
+          nodeKey,
+          canvasInputsFor(nodeKey).media.length > 0,
+        );
+        if (!resolved)
+          throw new Error("节点尚未选择可用模型；请先用 canvas.set_model 选择模型，再设置参数。");
+        const byKey = new Map(resolved.capabilities.map((item) => [item.key, item]));
+        const next = { ...node.config.parameterValues };
+        for (const [parameterKey, value] of Object.entries(values)) {
+          const capability = byKey.get(parameterKey);
+          if (!capability)
+            throw new Error(
+              resolved.capabilities.length
+                ? `当前模型不支持参数「${parameterKey}」；可用参数：${resolved.capabilities
+                    .map((item) => `${item.key}（${item.label}）`)
+                    .join("、")}。`
+                : `当前模型没有任何可设置参数。`,
+            );
+          const issue = parameterValueIssue(capability, value);
+          if (issue)
+            throw new Error(`参数「${parameterKey}」（${capability.label}）取值无效：${issue}`);
+          next[parameterKey] = value;
+        }
+        if (node.kind === "video")
+          updateVideoNodeConfig(nodeKey, { ...node.config, parameterValues: next });
+        else updateImageNodeConfig(nodeKey, { ...node.config, parameterValues: next });
+      },
       connect: (fromKey, toKey) => {
         const result = connectCanvasStateNodes(fromKey, toKey);
         if (result.status === "rejected") throw new Error(`连线失败：${result.reason}`);
         reconcilePrompts();
+      },
+      disconnect: (fromKey, toKey) => {
+        const edge = snapshotV2({}).assetEdges.find(
+          (item) => item.fromKey === fromKey && item.toKey === toKey,
+        );
+        if (!edge) throw new Error("这两个节点之间没有连线，请重新读取画布。");
+        if (disconnectCanvasEdge(edge.id) === "missing")
+          throw new Error("连线刚刚被移除，请重新读取画布。");
+        reconcilePrompts();
+      },
+      removeNode: (nodeKey) => {
+        const document = snapshotV2({});
+        const nodes = canvasNodesByKeyFromDocument(document);
+        if (
+          !(Object.keys(nodes) as (keyof typeof nodes)[]).some((type) => nodes[type].has(nodeKey))
+        )
+          throw new Error("要删除的节点已不存在，请重新读取画布。");
+        const removedEdges = document.assetEdges.filter(
+          (edge) => edge.fromKey === nodeKey || edge.toKey === nodeKey,
+        ).length;
+        if (!removeCanvasNode(nodeKey)) throw new Error("要删除的节点已不存在，请重新读取画布。");
+        reconcilePrompts();
+        return { removedEdges };
+      },
+      setGenerationCount: (nodeKey, count) => {
+        const node = requireNode(nodeKey);
+        if (node.kind === "prompt") throw new Error("提示词节点没有生成数量。");
+        if (node.kind === "video")
+          updateVideoNodeConfig(nodeKey, { ...node.config, generationCount: count });
+        else updateImageNodeConfig(nodeKey, { ...node.config, generationCount: count });
+      },
+      history: async (nodeKey, limit) => {
+        const page = await generationClient.list({ canvasId, sourceNodeId: nodeKey, limit });
+        return page.items;
       },
       move: (nodeKey, x, y) => {
         const nodes = canvasNodesByKeyFromDocument(snapshotV2({}));
@@ -12175,8 +12272,198 @@ export function WorkspaceApp({
         setWhiteModelStudioNodeKey(nodeKey);
       },
     });
+    const downloadTools = createAgentVideoDownloadTools({
+      client: videoDownloaderClient,
+      engineStatus: async () => {
+        if (!isDesktopRuntime())
+          throw new Error("请在桌面应用中使用视频下载；浏览器预览不连接下载引擎。");
+        const status = await videoDownloaderClient.getEngine();
+        return {
+          state: status.state,
+          cookiesInstalled: status.cookiesInstalled,
+          bilibiliLoggedIn: status.bilibiliLoggedIn,
+          cookieBrowser: status.cookieBrowser ?? null,
+        };
+      },
+      attachDownload: async (job: VideoDownloadJobRecord, connectToNodeKey: string | null) => {
+        const anchor = connectToNodeKey ? requireNode(connectToNodeKey) : null;
+        const center = anchor ? null : viewportCenterBoardCoordinates();
+        const result = canvasAgent.mutate(() => {
+          const key = outputNodeKey();
+          const name = job.fileName ?? fileNameFromPath(job.finalPath ?? "");
+          addOutput({
+            key,
+            resultKey: null,
+            sourceNodeId: `agent-download-${job.jobId}`,
+            taskId: `agent-download:${job.jobId}`,
+            mediaType: "video",
+            origin: "download",
+            finalPath: job.finalPath,
+            previewSrc: null,
+            name,
+            ...(anchor ? { x: anchor.x - 360, y: anchor.y } : { x: center!.x, y: center!.y }),
+          });
+          let connected = false;
+          let connectionNote: string | null = null;
+          if (anchor) {
+            const connection = connectCanvasStateNodes(key, anchor.key);
+            if (connection.status === "rejected") connectionNote = connection.reason;
+            else connected = true;
+          }
+          return { outputNodeKey: key, connected, connectionNote };
+        });
+        await canvasPersistence.flush();
+        return result;
+      },
+      probeVideo: async (path) => {
+        try {
+          const probe = await videoPreparationClient.probe({
+            kind: "local_file",
+            path,
+            mediaType: "video",
+          });
+          return {
+            durationSeconds: probe.durationSeconds,
+            width: probe.width,
+            height: probe.height,
+          };
+        } catch {
+          // 元数据探测失败不影响下载成果；模型按无时长信息继续。
+          return { durationSeconds: null, width: null, height: null };
+        }
+      },
+    });
+    const workflowTools = createAgentWorkflowNodeTools({
+      setDocument: (nodeKey, markdown) => {
+        const document = snapshotV2({});
+        const isScreenplay = (document.screenplayNodes ?? []).some((item) => item.key === nodeKey);
+        const isStoryboard = (document.storyboardNodes ?? []).some((item) => item.key === nodeKey);
+        if (!isScreenplay && !isStoryboard)
+          throw new Error("只有剧本或分镜节点有文档；请重新读取画布确认节点身份。");
+        patchNode(isScreenplay ? "screenplay" : "storyboard", nodeKey, (item) => ({
+          ...item,
+          config: { ...item.config, currentDocument: markdown },
+        }));
+      },
+      setExtractorTimestamps: (nodeKey, timestamps) => {
+        const node = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
+        if (!node) throw new Error("抽帧节点已不存在，请重新读取画布。");
+        updateFrameExtractorConfig(nodeKey, { ...node.config, timestamps: [...timestamps] });
+      },
+      extractionSource: (nodeKey) => {
+        if (!isDesktopRuntime())
+          throw new Error("请在桌面应用中使用视频抽帧；浏览器预览不连接 FFmpeg 引擎。");
+        const node = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
+        if (!node) throw new Error("抽帧节点已不存在，请重新读取画布。");
+        if (node.config.checkpoint)
+          throw new Error("这个抽帧节点还有未完成的批次，请先在节点上完成或取消后重试。");
+        const video = canvasInputsFor(nodeKey).media.find(
+          (item) => item.kind === "video" && item.finalPath,
+        );
+        const videoPath = video?.finalPath ?? (node.config.videoPath.trim() || null);
+        if (!videoPath)
+          throw new Error(
+            "没有可抽帧的视频：请先用 canvas.connect 把视频素材或视频产物连到抽帧节点。",
+          );
+        if (!node.config.timestamps.length)
+          throw new Error("抽帧节点还没有配置秒数；请在 timestamps 参数里提供。");
+        return { videoPath, timestamps: node.config.timestamps };
+      },
+      attachFrames: async (job, nodeKey) => {
+        const startNode = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
+        if (!startNode) throw new Error("抽帧节点已不存在，帧图片无法落卡；请重新读取画布。");
+        const outputNodeKeys = canvasAgent.mutate(() => {
+          const keys: string[] = [];
+          for (const frame of job.frames) {
+            const exists = snapshotV2({}).outputNodes?.some(
+              (output) =>
+                output.origin === "frame_extract" &&
+                output.sourceNodeId === nodeKey &&
+                output.finalPath === frame.path,
+            );
+            if (exists) continue;
+            const key = outputNodeKey();
+            addOutput((current, nodesById) => ({
+              key,
+              resultKey: null,
+              sourceNodeId: nodeKey,
+              taskId: `agent-extract:${job.jobId}`,
+              mediaType: "image",
+              origin: "frame_extract",
+              finalPath: frame.path,
+              previewSrc: null,
+              name: fileNameFromPath(frame.path),
+              ...nextFrameExtractorOutputSlot(
+                currentOutputSource(nodesById, "frameExtractor", startNode),
+                current,
+                outputPlacementOptionsFor(nodesById, startNode.key),
+              ),
+            }));
+            keys.push(key);
+          }
+          return keys;
+        });
+        await canvasPersistence.flush();
+        return { outputNodeKeys };
+      },
+      compositionInputs: (nodeKey) => {
+        if (!isDesktopRuntime())
+          throw new Error("请在桌面应用中使用视频合成；浏览器预览不连接 FFmpeg 引擎。");
+        const node = canvasNodesNow("videoComposer").find((item) => item.key === nodeKey);
+        if (!node) throw new Error("合成节点已不存在，请重新读取画布。");
+        const inputs = composerInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
+        if (inputs.length < 2)
+          throw new Error(
+            "至少连接 2 段视频后才能合成；请先用 canvas.connect 连接视频素材或视频产物。",
+          );
+        if (inputs.some((input) => input.ffmpegSource == null))
+          throw new Error(
+            "部分上游视频还没有可交给合成引擎的本地文件；请等生成或下载完成并保存后再合成。",
+          );
+        return {
+          inputs: inputs.flatMap((input) =>
+            input.ffmpegSource == null
+              ? []
+              : [{ key: input.key, name: input.name, source: input.ffmpegSource }],
+          ),
+          outputName: node.config.outputName,
+        };
+      },
+      attachComposition: async (job, nodeKey) => {
+        const node = canvasNodesNow("videoComposer").find((item) => item.key === nodeKey);
+        if (!node) return { outputNodeKey: null };
+        const createdKey = canvasAgent.mutate(() => {
+          const key = outputNodeKey();
+          const taskId = `agent-composition:${job.jobId}`;
+          const aspectRatio =
+            job.width != null && job.height != null && job.height > 0
+              ? job.width / job.height
+              : 16 / 9;
+          addOutput((current, nodesById) => ({
+            key,
+            resultKey: `${taskId}#0`,
+            sourceNodeId: nodeKey,
+            taskId,
+            mediaType: "video",
+            origin: "composition",
+            finalPath: job.finalPath,
+            previewSrc: toMediaSrc(job.finalPath ?? ""),
+            name: job.fileName ?? fileNameFromPath(job.finalPath ?? ""),
+            aspectRatio,
+            ...nextVideoComposerOutputSlot(
+              currentOutputSource(nodesById, "videoComposer", node),
+              current,
+              outputPlacementOptionsFor(nodesById, node.key),
+            ),
+          }));
+          return key;
+        });
+        await canvasPersistence.flush();
+        return { outputNodeKey: createdKey };
+      },
+    });
     canvasAgent.configure({
-      tools: [...canvasTools, ...blenderTools],
+      tools: [...canvasTools, ...blenderTools, ...downloadTools, ...workflowTools],
       context,
       review: (actions) =>
         agentPlanReview(readDocument(), providerCatalog, nodeModelSelections, actions),

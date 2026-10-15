@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { NodeModelSelection } from "../workspaceModel";
-import type { AgentAction, AgentToolContext } from "./agentTypes";
+import type { AgentAction, AgentTool, AgentToolContext } from "./agentTypes";
 import { CanvasAgentController, type CanvasAgentHost } from "./canvasAgentController";
 
 const model: NodeModelSelection = { providerId: "provider", modelDefinitionId: "text-model" };
@@ -233,6 +233,48 @@ describe("画布智能体执行边界", () => {
         .getState()
         .messages.some((item) => item.content.startsWith("本轮未全部完成：")),
     ).toBe(true);
+  });
+
+  it("download 效果需要批准，且同一计划允许多个下载步骤", async () => {
+    const view = harness();
+    const runs = vi.fn(() => Promise.resolve({ downloaded: true }));
+    (view.host.tools as AgentTool[]).push({
+      name: "video_download.start",
+      title: "下载链接视频",
+      description: "从链接下载视频",
+      effect: "download",
+      inputSchema: { type: "object" },
+      validate() {},
+      execute: runs,
+    });
+    view.ask.mockResolvedValue(
+      reply([
+        {
+          id: "dl-1",
+          tool: "video_download.start",
+          args: { url: "https://a.example/x" },
+          dependsOn: [],
+        },
+        {
+          id: "dl-2",
+          tool: "video_download.start",
+          args: { url: "https://b.example/y" },
+          dependsOn: [],
+        },
+      ]),
+    );
+    await view.controller.send("下载两个视频");
+
+    expect(view.controller.getState().pending?.actions).toHaveLength(2);
+    expect(runs).not.toHaveBeenCalled();
+    await view.controller.approve();
+
+    expect(runs).toHaveBeenCalledTimes(2);
+    expect(view.controller.getState()).toMatchObject({
+      status: "idle",
+      pending: null,
+      error: null,
+    });
   });
 
   it("首次存档失败不会调用模型", async () => {

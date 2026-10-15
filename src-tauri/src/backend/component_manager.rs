@@ -1545,8 +1545,7 @@ mod tests {
         let (catalog, component) = fixture_catalog(&format!(
             "{trusted}/components/windows-x86_64/0.2.4/ffmpeg-{sha}.zip"
         ));
-        assert!(archive_url(&catalog, &component)
-            .is_err_and(|error| error.contains("可信更新源")));
+        assert!(archive_url(&catalog, &component).is_err_and(|error| error.contains("可信更新源")));
         let (catalog, component) = fixture_catalog(&format!(
             "https://evil.example.com/infinite-canvas/updates/components/windows-x86_64/ffmpeg-{sha}.zip"
         ));

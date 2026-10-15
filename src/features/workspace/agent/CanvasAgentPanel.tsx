@@ -22,6 +22,7 @@ const EXAMPLES = [
   "让人物先蹲下，再起身挥右手，把抬手动作放慢一些。",
   "帮我在画布上添加图片生成节点，并写好一段极简客厅的提示词。",
   "查看当前画布，告诉我接下来可以怎样继续制作。",
+  "看看最近的生成任务进展如何。",
 ];
 
 const PARAMETER_LABELS: Readonly<Record<string, string>> = {
@@ -47,6 +48,10 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   fps: "每秒帧数",
   x: "横向位置",
   y: "纵向位置",
+  url: "视频链接",
+  count: "生成数量",
+  limit: "查询条数",
+  timestamps: "抽帧时刻（秒）",
 };
 
 const VALUE_LABELS: Readonly<Record<string, string>> = {
@@ -227,12 +232,18 @@ function PlanReview({
               {summary.map((line, lineIndex) => (
                 <p key={lineIndex}>{line}</p>
               ))}
-              {tool?.effect === "generate" ? (
-                <p className="canvas-agent__hint">调用生成模型，可能产生费用。</p>
-              ) : null}
-              {tool?.effect === "render" ? (
-                <p className="canvas-agent__hint">使用本机 Blender 渲染。</p>
-              ) : null}
+              {(() => {
+                const effectHint =
+                  tool?.effectHint ??
+                  (tool?.effect === "generate"
+                    ? "调用生成模型，可能产生费用。"
+                    : tool?.effect === "render"
+                      ? "使用本机 Blender 渲染。"
+                      : tool?.effect === "download"
+                        ? "从链接下载视频到本机与画布，不调用生成模型。"
+                        : null);
+                return effectHint ? <p className="canvas-agent__hint">{effectHint}</p> : null;
+              })()}
               {dependencySteps.length > 0 ? (
                 <p className="canvas-agent__hint">
                   在第 {dependencySteps.join("、")} 步完成后执行。
