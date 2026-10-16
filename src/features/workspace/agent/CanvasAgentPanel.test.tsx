@@ -76,10 +76,12 @@ const tool: AgentTool = {
 
 function harness(patch: Partial<AgentState> = {}) {
   let state: AgentState = {
-    version: 1,
+    version: 2,
     expanded: true,
     model: { providerId: "enabled-provider", modelDefinitionId: "text-model" },
     messages: [],
+    sessions: [],
+    activeSessionId: null,
     pending: null,
     status: "idle",
     progress: "",
@@ -103,6 +105,9 @@ function harness(patch: Partial<AgentState> = {}) {
     getScenePreviews: vi.fn((): ReadonlyMap<string, WhiteModelScenePlan> => new Map()),
     setExpanded: vi.fn((expanded: boolean) => update({ expanded })),
     setModel: vi.fn(),
+    newChat: vi.fn(),
+    openSession: vi.fn(),
+    deleteSession: vi.fn(),
     send: vi.fn(() => Promise.resolve()),
     approve: vi.fn(() => Promise.resolve()),
     reject: vi.fn(() => update({ pending: null })),
@@ -192,12 +197,42 @@ describe("CanvasAgentPanel", () => {
     expect(screen.getByRole("status")).toHaveTextContent("正在渲染白模");
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "接下来生成图片" } });
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新聊天" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "停止后续操作" }));
     expect(methods.stop).toHaveBeenCalledTimes(1);
     act(() => update({ status: "idle", progress: "" }));
     rerender(<CanvasAgentPanel controller={controller} catalog={catalog} disabled />);
     expect(screen.getByRole("textbox")).toBeDisabled();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "新聊天" })).toBeDisabled();
+  });
+
+  it("starts a new chat from the header and lists archived chats to reopen or delete", () => {
+    const { controller, methods } = harness({
+      messages: [{ id: "m1", role: "user", content: "在吗" }],
+      sessions: [
+        { id: "s-1", title: "白模第一版", messages: [] },
+        { id: "s-2", title: "客厅效果图", messages: [] },
+      ],
+    });
+    render(<CanvasAgentPanel controller={controller} catalog={catalog} />);
+    expect(screen.getByText("在吗")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "新聊天" }));
+    expect(methods.newChat).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByText("历史聊天"));
+    fireEvent.click(screen.getByRole("button", { name: "白模第一版" }));
+    expect(methods.openSession).toHaveBeenCalledExactlyOnceWith("s-1");
+    fireEvent.click(screen.getByRole("button", { name: "删除历史聊天：客厅效果图" }));
+    expect(methods.deleteSession).toHaveBeenCalledExactlyOnceWith("s-2");
+    expect(methods.send).not.toHaveBeenCalled();
+  });
+
+  it("hides the history list when no chat has been archived", () => {
+    const { controller } = harness();
+    render(<CanvasAgentPanel controller={controller} catalog={catalog} />);
+    expect(screen.queryByText("历史聊天")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "新聊天" })).toBeEnabled();
   });
 
   it("previews a locally derived scene without adding scene data to the planned tool arguments", () => {

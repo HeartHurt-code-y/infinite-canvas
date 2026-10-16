@@ -1065,6 +1065,26 @@ export function outputNodeDimensions(node: OutputNodeData): CanvasNodeDimensions
     : fitMediaNodeDimensions(node.aspectRatio);
 }
 
+/**
+ * 画布节点 key 的统一识别模式，与下方 *NodeKey 工厂同源维护：`前缀-8位base36`
+ * （Math.random 的进制串可能丢前导零，实际 1–8 位）。前缀表必须覆盖全部节点 key
+ * 工厂，新增节点类型时同步扩这里；创作助手消息里的节点代号识别也依赖它。
+ * 两侧 lookaround 把匹配钉在完整 token 上，避免命中 `xgen-abc123`、
+ * `gen-abc123def9`（超长）或 `frame-extractor-config` 这类带连字符的词。
+ */
+const CANVAS_NODE_KEY_SOURCE =
+  "(?<![a-z0-9-])(?:asset|gen|output|composer|downloader|frame-extractor|screenplay|storyboard|viral-remix|knowledge-video)-[a-z0-9]{1,8}(?![a-z0-9-])";
+
+/** 全局模式：给 matchAll / 分词用（matchAll 会克隆正则，共享实例无 lastIndex 污染）。 */
+export const CANVAS_NODE_KEY_PATTERN = new RegExp(CANVAS_NODE_KEY_SOURCE, "g");
+
+const CANVAS_NODE_KEY_EXACT_PATTERN = new RegExp(`^${CANVAS_NODE_KEY_SOURCE}$`);
+
+/** 整段字符串是否恰好是一个节点 key 形状（行内代码精确匹配用）。 */
+export function isCanvasNodeKeyShape(value: string): boolean {
+  return CANVAS_NODE_KEY_EXACT_PATTERN.test(value);
+}
+
 export function assetNodeKey(): string {
   return `asset-${Math.random().toString(36).slice(2, 10)}`;
 }

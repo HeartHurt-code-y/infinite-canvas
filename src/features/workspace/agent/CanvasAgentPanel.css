@@ -124,6 +124,76 @@
   font-size: var(--text-xs);
 }
 
+.canvas-agent__header > div {
+  min-width: 0;
+}
+
+.canvas-agent__new-chat {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+}
+
+.canvas-agent__history {
+  flex: 0 0 auto;
+  border-bottom: var(--rule-thin) solid var(--color-rule-faint);
+}
+
+.canvas-agent__history summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  user-select: none;
+}
+
+.canvas-agent__history summary:hover {
+  color: var(--color-text-2);
+}
+
+.canvas-agent__history-count {
+  min-width: var(--space-lg);
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-round);
+  background: var(--color-surface-3);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-agent__history-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  max-height: 12rem;
+  margin: 0;
+  padding: 0 var(--space-md) var(--space-sm);
+  list-style: none;
+  overflow-y: auto;
+}
+
+.canvas-agent__history-list li {
+  display: flex;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+
+.canvas-agent__history-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  overflow: hidden;
+  text-align: start;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-agent__history-delete {
+  flex: 0 0 auto;
+  color: var(--color-text-3);
+}
+
 .canvas-agent__model {
   display: flex;
   flex: 0 0 auto;
@@ -238,6 +308,39 @@
 }
 .canvas-agent .markdown-view img {
   max-width: 100%;
+}
+
+/* 节点代号芯片：替代客户读不懂的 `gen-xxxxxxxx`。它是消息文本里的内联控件，
+ * 必须压过 .canvas-agent button 的整行按钮基础样式（min-height/padding），
+ * 回到紧凑的行内药丸形态；名称过长时省略号截断，完整信息放 title。 */
+.canvas-agent .canvas-node-chip {
+  display: inline-block;
+  max-width: 100%;
+  min-height: 0;
+  padding: 0 var(--space-2xs);
+  overflow: hidden;
+  background: var(--color-surface-3);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-round);
+  color: var(--color-text);
+  font: inherit;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  text-transform: none;
+  vertical-align: baseline;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.canvas-agent .canvas-node-chip:hover {
+  border-color: var(--color-rule-strong);
+  background: var(--color-surface-2);
+}
+
+/* 代号在但节点已不在（被删除、无画布上下文）时退回纯代号：保持行内代码观感，
+ * 明确示意它不再是可跳转的控件。 */
+.canvas-agent .canvas-node-chip-missing {
+  color: var(--color-text-3);
 }
 
 .canvas-agent__plan {

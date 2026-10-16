@@ -147,6 +147,21 @@ describe("画布智能体执行边界", () => {
     expect(view.controller.getState().error).toBeNull();
   });
 
+  it("模型省略 actions 键时按纯文字答复收尾，不消耗修正轮", async () => {
+    const view = harness();
+    view.ask.mockResolvedValue(
+      JSON.stringify({ message: "下载引擎已就绪，本轮无需执行步骤。" }),
+    );
+    await view.controller.send("查询下载引擎");
+
+    expect(view.ask).toHaveBeenCalledTimes(1);
+    expect(view.controller.getState()).toMatchObject({ status: "idle", pending: null, error: null });
+    expect(view.controller.getState().messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "下载引擎已就绪，本轮无需执行步骤。",
+    });
+  });
+
   it("写入必须先批准，批准按钮并发点击和完成后再点都不会重复执行", async () => {
     const view = harness();
     await view.controller.send("请创建小人白模");
@@ -320,5 +335,190 @@ describe("画布智能体执行边界", () => {
     expect(view.ask).not.toHaveBeenCalled();
     expect(view.execute).not.toHaveBeenCalled();
     expect(view.save).not.toHaveBeenCalled();
+  });
+});
+
+describe("画布智能体新聊天与历史会话", () => {
+  it("新聊天把当前对话归档并回到空聊天", async () => {
+    const view = harness();
+    await view.controller.send("创建小人白模");
+    view.save.mockClear();
+    view.controller.newChat();
+
+    const state = view.controller.getState();
+    expect(state.messages).toEqual([]);
+    expect(state.activeSessionId).toBeNull();
+    expect(state.pending).toBeNull();
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0]).toMatchObject({ title: "创建小人白模" });
+    expect(state.sessions[0]?.messages.some((item) => item.content === "创建小人白模")).toBe(true);
+    expect(view.save).toHaveBeenCalled();
+  });
+
+  it("空聊天点新聊天不产生归档", () => {
+    const view = harness();
+    view.controller.newChat();
+
+    expect(view.controller.getState().sessions).toEqual([]);
+  });
+
+  it("从历史打开会话会把当前聊天交换归档并沿用原会话 id", async () => {
+    const view = harness();
+    await view.controller.send("第一个需求");
+    view.controller.newChat();
+    const first = view.controller.getState().sessions[0]!;
+    await view.controller.send("第二个需求");
+    view.controller.openSession(first.id);
+
+    let state = view.controller.getState();
+    expect(state.activeSessionId).toBe(first.id);
+    expect(state.messages.some((item) => item.content === "第一个需求")).toBe(true);
+    expect(state.sessions).toHaveLength(1);
+    expect(state.sessions[0]?.title).toBe("第二个需求");
+
+    view.controller.newChat();
+    state = view.controller.getState();
+    expect(state.sessions[0]).toMatchObject({ id: first.id, title: "第一个需求" });
+  });
+
+  it("删除历史会话只移除被选中的那一条", async () => {
+    const view = harness();
+    await view.controller.send("第一个需求");
+    view.controller.newChat();
+    await view.controller.send("第二个需求");
+    view.controller.newChat();
+
+    const sessions = view.controller.getState().sessions;
+    expect(sessions.map((session) => session.title)).toEqual(["第二个需求", "第一个需求"]);
+    view.controller.deleteSession(sessions[1]!.id);
+    expect(view.controller.getState().sessions.map((session) => session.title)).toEqual([
+      "第二个需求",
+    ]);
+  });
+
+  it("忙碌时新聊天、切换与删除一律不生效", async () => {
+    const view = harness();
+    const gate = deferred<string>();
+    view.ask.mockReturnValueOnce(gate.promise);
+    const running = view.controller.send("制作白模");
+    await vi.waitFor(() => expect(view.ask).toHaveBeenCalledTimes(1));
+    view.controller.newChat();
+    view.controller.openSession("missing");
+    view.controller.deleteSession("missing");
+    gate.resolve(reply([]));
+    await running;
+
+    const state = view.controller.getState();
+    expect(state.messages.some((item) => item.role === "user")).toBe(true);
+    expect(state.sessions).toEqual([]);
+  });
+
+  it("归档超过上限时丢弃最旧的会话", async () => {
+    const view = harness();
+    for (let index = 0; index < 21; index++) {
+      await view.controller.send(`第 ${index} 个需求`);
+      view.controller.newChat();
+    }
+
+    const sessions = view.controller.getState().sessions;
+    expect(sessions).toHaveLength(20);
+    expect(sessions[0]?.title).toBe("第 20 个需求");
+    expect(sessions.at(-1)?.title).toBe("第 1 个需求");
+  });
+
+  it("v2 存档连同历史会话一起恢复，v1 存档迁移为无历史", () => {
+    const view = harness();
+    const saved = {
+      ...view.controller.getState(),
+      expanded: true,
+      model,
+      messages: [{ id: "m1", role: "user" as const, content: "恢复我" }],
+      sessions: [
+        { id: "s1", title: "旧聊天", messages: [{ id: "m0", role: "user" as const, content: "旧消息" }] },
+      ],
+      activeSessionId: "s1",
+    };
+    const restarted = new CanvasAgentController();
+    restarted.configure(view.host);
+    restarted.restore(structuredClone(saved));
+    expect(restarted.getState()).toMatchObject({
+      version: 2,
+      activeSessionId: "s1",
+      messages: [{ id: "m1" }],
+      sessions: [{ id: "s1", title: "旧聊天" }],
+      status: "idle",
+    });
+
+    const legacy = new CanvasAgentController();
+    legacy.configure(view.host);
+    legacy.restore({ version: 1, expanded: false, model, messages: [], status: "idle" });
+    expect(legacy.getState()).toMatchObject({
+      version: 2,
+      sessions: [],
+      activeSessionId: null,
+      status: "idle",
+    });
+  });
+});
+
+describe("画布智能体计划解析兜底", () => {
+  const writePlan = reply([createAction()]);
+
+  it("JSON 前后的说明正文不再使计划失败，也不消耗修正轮", async () => {
+    const view = harness();
+    view.ask.mockResolvedValueOnce(
+      `好的，超过 30 秒有两条轨道建议分开管理：\n${writePlan}\n以上计划请确认。`,
+    );
+    await view.controller.send("请创建白模");
+
+    expect(view.ask).toHaveBeenCalledTimes(1);
+    expect(view.controller.getState().pending?.actions).toEqual([createAction()]);
+    expect(view.controller.getState()).toMatchObject({ status: "idle", error: null });
+    expect(
+      view.controller.getState().messages.some((item) => item.content.startsWith("计划未执行")),
+    ).toBe(false);
+  });
+
+  it("思考块与代码围栏混合包裹时，取末尾的计划对象而不是思考草稿", async () => {
+    const view = harness();
+    view.ask.mockResolvedValueOnce(
+      `[think]草稿：${reply([])}[/think]\n好的：\n\`\`\`json\n${writePlan}\n\`\`\`\n请确认。`,
+    );
+    await view.controller.send("请创建白模");
+
+    expect(view.ask).toHaveBeenCalledTimes(1);
+    expect(view.controller.getState().pending?.actions).toEqual([createAction()]);
+    expect(view.controller.getState()).toMatchObject({ status: "idle", error: null });
+  });
+
+  it("整段正文没有 JSON 时进入修正轮，并把输出协议回传给模型", async () => {
+    const view = harness();
+    view.ask
+      .mockResolvedValueOnce("超过 30 秒有两条轨道，建议您分开管理。")
+      .mockResolvedValueOnce(writePlan);
+    await view.controller.send("请创建白模");
+
+    expect(view.ask).toHaveBeenCalledTimes(2);
+    expect(view.controller.getState().pending?.actions).toEqual([createAction()]);
+    expect(view.controller.getState()).toMatchObject({ status: "idle", error: null });
+    expect(
+      view.controller
+        .getState()
+        .messages.some(
+          (item) => item.role === "tool" && item.content.includes("不是有效的 JSON 计划"),
+        ),
+    ).toBe(true);
+    expect(view.ask.mock.calls[1]?.[1]).toContain("只返回一个 JSON 对象");
+  });
+
+  it("连续两轮都无法解析时停机并给出可读原因", async () => {
+    const view = harness();
+    view.ask.mockResolvedValue("超过 30 秒有两条轨道，建议您分开管理。");
+    await view.controller.send("请创建白模");
+
+    expect(view.ask).toHaveBeenCalledTimes(2);
+    expect(view.controller.getState().pending).toBeNull();
+    expect(view.controller.getState().error).toContain("连续两次");
+    expect(view.controller.getState().error).toContain("不是有效的 JSON 计划");
   });
 });

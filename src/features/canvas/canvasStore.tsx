@@ -1,4 +1,11 @@
-import { createContext, createElement, useContext, useState, type ReactNode } from "react";
+import {
+  createContext,
+  createElement,
+  useContext,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { createStore, type StoreApi } from "zustand/vanilla";
@@ -351,7 +358,7 @@ export interface CanvasStoreState {
 type CanvasHistoryState = Pick<CanvasStoreState, "nodesById" | "assetEdges">;
 
 /** 画布 store：主状态外挂 zundo temporal 历史 store。 */
-interface CanvasStore extends StoreApi<CanvasStoreState> {
+export interface CanvasStore extends StoreApi<CanvasStoreState> {
   readonly temporal: StoreApi<TemporalState<CanvasHistoryState>>;
 }
 
@@ -1856,6 +1863,44 @@ export function useCanvasNodeEntry(key: string): CanvasNodeEntry | undefined {
   const canvas = useContext(CanvasStoreContext);
   if (canvas == null) throw new Error("useCanvasNodeEntry must be used within CanvasStoreProvider");
   return useStore(canvas.store, (state) => state.nodesById[key]);
+}
+
+const subscribeNothing = () => () => {};
+const snapshotUndefined = () => undefined;
+const snapshotNull = () => null;
+
+/**
+ * 可空的单节点订阅：语义与 useCanvasNodeEntry 一致，但宿主渲染在无画布上下文的
+ * 环境（单测、独立预览）时不抛错、不订阅，返回 undefined。创作助手消息里的
+ * 节点代号芯片按此粒度解析自身标签，未命中节点的代号降级为纯文本。
+ */
+export function useOptionalCanvasNodeEntry(key: string): CanvasNodeEntry | undefined {
+  const canvas = useContext(CanvasStoreContext);
+  return useSyncExternalStore(
+    canvas ? canvas.subscribe : subscribeNothing,
+    canvas ? () => canvas.store.getState().nodesById[key] : snapshotUndefined,
+    snapshotUndefined,
+  );
+}
+
+/**
+ * 可空的成员规模订阅：返回当前画布节点总数（无上下文时 null）。总数只在
+ * 节点增删时变化，内容补丁与拖拽不触发，适合作为「节点集合已变化、需要
+ * 重新识别文本中的节点代号」的低频信号。
+ */
+export function useOptionalCanvasNodeMembership(): number | null {
+  const canvas = useContext(CanvasStoreContext);
+  return useSyncExternalStore(
+    canvas ? canvas.subscribe : subscribeNothing,
+    canvas ? () => Object.keys(canvas.store.getState().nodesById).length : snapshotNull,
+    snapshotNull,
+  );
+}
+
+/** 可空的 store 句柄读取（不订阅）：事件期判断某个 key 是否为当前画布节点时用。 */
+export function useOptionalCanvasStore(): CanvasStore | null {
+  const canvas = useContext(CanvasStoreContext);
+  return canvas?.store ?? null;
 }
 
 /**

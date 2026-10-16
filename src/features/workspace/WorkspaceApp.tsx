@@ -2502,6 +2502,28 @@ export function WorkspaceApp({
     },
     [zoom],
   );
+  /**
+   * 创作助手消息里节点代号芯片的定位：与点击节点同一套选中语义（清空框选与
+   * 边选），再把视口动画居中到节点几何中心。节点已删除时静默不动——渲染层已把
+   * 失效代号降级为纯文本，这里只兜住渲染与点击之间被删除的竞态。
+   */
+  const focusCanvasNodeKey = useCallback(
+    (key: string) => {
+      const entry = canvasStore.getState().nodesById[key];
+      if (entry == null) return;
+      setMarqueeNodeKeys(new Set());
+      selectNode(key);
+      selectEdge(null);
+      // React Flow 上的实时坐标优先（拖拽中、悬停展开的卡片），store 兜底。
+      const flowNode = flowInstanceRef.current?.getNode(key);
+      const width = flowNode?.measured?.width ?? entry.data.measured?.width ?? 0;
+      const height = flowNode?.measured?.height ?? entry.data.measured?.height ?? 0;
+      const x = flowNode?.position.x ?? entry.data.x;
+      const y = flowNode?.position.y ?? entry.data.y;
+      centerView(x + width / 2, y + height / 2);
+    },
+    [canvasStore, centerView, selectEdge, selectNode],
+  );
   const sessions = useWorkflowSessions({
     canvasId,
     active,
@@ -12526,6 +12548,7 @@ export function WorkspaceApp({
             controller={canvasAgent}
             catalog={providerCatalog}
             disabled={!canvasHydrated}
+            onFocusNodeKey={focusCanvasNodeKey}
           />
         </Suspense>
         {!canvasHydrated ? (

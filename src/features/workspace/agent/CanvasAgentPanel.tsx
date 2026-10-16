@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Icon } from "../../../components/Icon";
 import { ImeTextarea } from "../../../components/ImeTextField";
-import { MarkdownView } from "../../../components/MarkdownView";
 import type { ProviderCatalogEntry } from "../../../lib/backend";
 import { whiteModelPlanIssue, type WhiteModelScenePlan } from "../../../lib/whiteModelScene";
 import { WhiteModelViewport } from "../WhiteModelViewport";
 import { PlaybackClock, usePlaybackClock } from "../whiteModelPlayback";
+import { AgentMessageView, AgentNodeKeyText } from "./AgentMessageView";
 import type { AgentAction, AgentPlan, AgentTool } from "./agentTypes";
 import type { CanvasAgentController } from "./canvasAgentController";
 import "../WhiteModelStudioDialog.css";
@@ -15,6 +15,8 @@ interface CanvasAgentPanelProps {
   readonly controller: CanvasAgentController;
   readonly catalog: readonly ProviderCatalogEntry[];
   readonly disabled?: boolean;
+  /** 消息里节点代号芯片的定位回调；缺省时芯片只展示不可跳转。 */
+  readonly onFocusNodeKey?: (nodeKey: string) => void;
 }
 
 const EXAMPLES = [
@@ -188,6 +190,7 @@ function PlanReview({
   catalog,
   previews,
   disabled,
+  onFocusNodeKey,
   onApprove,
   onReject,
 }: {
@@ -196,6 +199,7 @@ function PlanReview({
   readonly catalog: readonly ProviderCatalogEntry[];
   readonly previews: ReadonlyMap<string, WhiteModelScenePlan>;
   readonly disabled: boolean;
+  readonly onFocusNodeKey?: ((nodeKey: string) => void) | undefined;
   readonly onApprove: () => void;
   readonly onReject: () => void;
 }) {
@@ -206,12 +210,14 @@ function PlanReview({
         <strong>请确认制作计划</strong>
         <span>{plan.actions.length} 步</span>
       </div>
-      {plan.message ? <MarkdownView content={plan.message} /> : null}
+      {plan.message ? <AgentMessageView content={plan.message} onFocusNodeKey={onFocusNodeKey} /> : null}
       {plan.review?.length ? (
         <details className="canvas-agent__details" open>
           <summary>本次制作内容</summary>
           {plan.review.map((line, index) => (
-            <p key={index}>{line}</p>
+            <p key={index}>
+              <AgentNodeKeyText text={line} onFocusNodeKey={onFocusNodeKey} />
+            </p>
           ))}
         </details>
       ) : null}
@@ -230,7 +236,9 @@ function PlanReview({
                 <strong>{tool?.title ?? "创作操作"}</strong>
               </div>
               {summary.map((line, lineIndex) => (
-                <p key={lineIndex}>{line}</p>
+                <p key={lineIndex}>
+                  <AgentNodeKeyText text={line} onFocusNodeKey={onFocusNodeKey} />
+                </p>
               ))}
               {(() => {
                 const effectHint =
@@ -279,7 +287,12 @@ function PlanReview({
   );
 }
 
-export function CanvasAgentPanel({ controller, catalog, disabled = false }: CanvasAgentPanelProps) {
+export function CanvasAgentPanel({
+  controller,
+  catalog,
+  disabled = false,
+  onFocusNodeKey,
+}: CanvasAgentPanelProps) {
   const subscribe = useCallback(
     (listener: () => void) => controller.subscribe(listener),
     [controller],
@@ -373,6 +386,19 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
               <strong>创作助手</strong>
               <p>描述想法，一起完成画布创作</p>
             </div>
+            <button
+              type="button"
+              className="canvas-agent__new-chat"
+              disabled={disabled || busy}
+              title="开始新聊天；当前对话会存入历史聊天"
+              onClick={() => {
+                controller.newChat();
+                inputRef.current?.focus();
+              }}
+            >
+              <Icon name="plus" size="sm" />
+              新聊天
+            </button>
           </header>
           <div className="canvas-agent__model">
             <label htmlFor="canvas-agent-model">对话模型</label>
@@ -396,6 +422,42 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
               ))}
             </select>
           </div>
+          {state.sessions.length > 0 ? (
+            <details className="canvas-agent__history">
+              <summary>
+                <Icon name="stack-simple" size="sm" />
+                历史聊天
+                <span className="canvas-agent__history-count">{state.sessions.length}</span>
+              </summary>
+              <ul className="canvas-agent__history-list">
+                {state.sessions.map((session) => (
+                  <li key={session.id}>
+                    <button
+                      type="button"
+                      className="canvas-agent__history-open"
+                      disabled={disabled || busy}
+                      title={session.title}
+                      onClick={() => {
+                        controller.openSession(session.id);
+                        inputRef.current?.focus();
+                      }}
+                    >
+                      {session.title}
+                    </button>
+                    <button
+                      type="button"
+                      className="canvas-agent__history-delete"
+                      aria-label={`删除历史聊天：${session.title}`}
+                      disabled={disabled || busy}
+                      onClick={() => controller.deleteSession(session.id)}
+                    >
+                      <Icon name="trash-simple" size="sm" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
           <div
             className="canvas-agent__transcript"
             ref={transcriptRef}
@@ -448,9 +510,11 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
                       <p>{message.content}</p>
                     </details>
                   ) : message.role === "assistant" ? (
-                    <MarkdownView content={message.content} />
+                    <AgentMessageView content={message.content} onFocusNodeKey={onFocusNodeKey} />
                   ) : (
-                    <p>{message.content}</p>
+                    <p>
+                      <AgentNodeKeyText text={message.content} onFocusNodeKey={onFocusNodeKey} />
+                    </p>
                   )}
                 </article>
               ))}
@@ -463,6 +527,7 @@ export function CanvasAgentPanel({ controller, catalog, disabled = false }: Canv
                 catalog={catalog}
                 previews={controller.getScenePreviews(state.pending.actions)}
                 disabled={disabled || busy}
+                onFocusNodeKey={onFocusNodeKey}
                 onApprove={() => {
                   followMessages.current = true;
                   void run(() => controller.approve());

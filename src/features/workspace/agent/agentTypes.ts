@@ -42,11 +42,23 @@ export interface AgentPlan {
   readonly review?: readonly string[];
 }
 
+/** 归档的历史聊天；标题取自首条用户消息，随画布文档持久化。 */
+export interface AgentChatSession {
+  readonly id: string;
+  readonly title: string;
+  readonly messages: readonly AgentMessage[];
+}
+
 export interface AgentState {
-  readonly version: 1;
+  readonly version: 2;
   readonly expanded: boolean;
   readonly model: NodeModelSelection | null;
+  /** 当前聊天；历史聊天存放在 sessions 中。 */
   readonly messages: readonly AgentMessage[];
+  /** 归档聊天，最新在前。 */
+  readonly sessions: readonly AgentChatSession[];
+  /** 当前聊天来自的历史会话 id；新开的聊天为 null。 */
+  readonly activeSessionId: string | null;
   readonly pending: AgentPlan | null;
   readonly status: "idle" | "thinking" | "executing";
   readonly progress: string;

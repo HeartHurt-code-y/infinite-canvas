@@ -6,6 +6,7 @@ import type { NodeModelSelection } from "../workspaceModel";
 import type { WhiteModelScenePlan } from "../../../lib/whiteModelScene";
 import type {
   AgentAction,
+  AgentChatSession,
   AgentMessage,
   AgentState,
   AgentTool,
@@ -22,13 +23,105 @@ const actionSchema = v.strictObject({
 });
 const replySchema = v.strictObject({
   message: v.pipe(v.string(), v.maxLength(30_000)),
-  actions: v.pipe(v.array(actionSchema), v.maxLength(16)),
+  // 缺失 actions 与「本轮无操作、只作答」同义（与 args/dependsOn 同一套归一化约定），
+  // 模型在纯文字答复时常省略该键，按空计划收尾即可，不为机械缺省烧修正轮。
+  actions: v.nullish(v.pipe(v.array(actionSchema), v.maxLength(16)), () => []),
 });
 const messageSchema = v.strictObject({
   id: v.string(),
   role: v.picklist(["user", "assistant", "tool"]),
   content: v.string(),
 });
+const sessionSchema = v.strictObject({
+  id: v.string(),
+  title: v.pipe(v.string(), v.maxLength(200)),
+  messages: v.array(messageSchema),
+});
+
+/** 归档聊天数量上限：聊天内容随画布文档持久化，无界增长会拖慢每次保存。 */
+const MAX_SESSIONS = 20;
+const TITLE_MAX_CHARS = 24;
+
+/** 归档标题取首条用户消息，压成单行并截断；空对话兜底为「新聊天」。 */
+const chatTitle = (messages: readonly AgentMessage[]) => {
+  const first = messages.find((message) => message.role === "user");
+  const condensed = (first?.content ?? "").replace(/\s+/g, " ").trim();
+  if (!condensed) return "新聊天";
+  return condensed.length > TITLE_MAX_CHARS ? `${condensed.slice(0, TITLE_MAX_CHARS)}…` : condensed;
+};
+
+/**
+ * 模型偶发无视输出协议，在 JSON 计划前后附加说明正文、代码围栏或思考内容，
+ * 整段 JSON.parse 会失败。逐个 `{` 候选扫描最外层平衡对象（引号与转义不参与配对），
+ * 优先取末尾形如计划回复（message 字符串 + actions 数组）的对象，避免误取思考草稿；
+ * 全部失败时返回 null，由调用方沿用原始解析错误进入修正轮。
+ */
+const salvagePlanObject = (text: string): unknown => {
+  const candidates: string[] = [];
+  for (
+    let start = text.indexOf("{");
+    start >= 0 && candidates.length < 200;
+    start = text.indexOf("{", start + 1)
+  ) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < text.length; index++) {
+      const char = text.charAt(index);
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === "\\") escaped = true;
+        else if (char === '"') inString = false;
+      } else if (char === '"') inString = true;
+      else if (char === "{") depth++;
+      else if (char === "}") {
+        depth--;
+        if (depth === 0) {
+          candidates.push(text.slice(start, index + 1));
+          break;
+        }
+      }
+    }
+  }
+  let fallback: { text: string; value: object } | null = null;
+  for (let index = candidates.length - 1; index >= 0; index--) {
+    const candidate = candidates[index];
+    if (!candidate) continue;
+    let value: unknown;
+    try {
+      value = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    if (typeof record["message"] === "string" && Array.isArray(record["actions"])) return value;
+    if (!fallback || candidate.length > fallback.text.length)
+      fallback = { text: candidate, value };
+  }
+  return fallback?.value ?? null;
+};
+
+/** 计划回复解析：先按整段（剥外层围栏）解析，失败时回退提取正文中的平衡 JSON 对象。 */
+const extractPlanReply = (raw: string): unknown => {
+  const text = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "");
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const salvaged = salvagePlanObject(text);
+    if (salvaged === null) throw error;
+    return salvaged;
+  }
+};
+
+/** 修正轮的失败摘要：JSON 语法错误翻译成人话，其余沿用 valibot 全量 issue。 */
+const planRejectSummary = (error: unknown) =>
+  error instanceof SyntaxError
+    ? "这轮回复不是有效的 JSON 计划，可能混入了说明正文、代码围栏或思考内容"
+    : `结构校验失败：${formatValibotIssues(error)}`;
 
 export interface CanvasAgentHost {
   tools: readonly AgentTool[];
@@ -43,10 +136,12 @@ export interface CanvasAgentHost {
 }
 
 const initialState = (): AgentState => ({
-  version: 1,
+  version: 2,
   expanded: false,
   model: null,
   messages: [],
+  sessions: [],
+  activeSessionId: null,
   pending: null,
   status: "idle",
   progress: "",
@@ -107,25 +202,91 @@ export class CanvasAgentController {
     this.update({ model, pending: null });
     this.saveUI();
   };
+  /** 把当前聊天归档到历史最前（沿用原会话 id），超过上限时丢弃最旧的归档。 */
+  private archivedActive(): readonly AgentChatSession[] {
+    const { messages, sessions, activeSessionId } = this.state;
+    if (!messages.length) return sessions;
+    const archived: AgentChatSession = {
+      id: activeSessionId ?? crypto.randomUUID(),
+      title: chatTitle(messages),
+      messages,
+    };
+    return [
+      archived,
+      ...sessions.filter((session) => session.id !== archived.id),
+    ].slice(0, MAX_SESSIONS);
+  }
+  private leaveChat(excludeSessionId?: string) {
+    return {
+      sessions: this.archivedActive().filter((session) => session.id !== excludeSessionId),
+      messages: [] as readonly AgentMessage[],
+      activeSessionId: null as string | null,
+      pending: null,
+      error: null,
+      progress: "",
+    };
+  }
+  newChat = () => {
+    if (this.state.status !== "idle") return;
+    this.update(this.leaveChat());
+    this.saveUI();
+  };
+  openSession = (id: string) => {
+    if (this.state.status !== "idle") return;
+    const session = this.state.sessions.find((item) => item.id === id);
+    if (!session) return;
+    this.update({ ...this.leaveChat(id), messages: session.messages, activeSessionId: id });
+    this.saveUI();
+  };
+  deleteSession = (id: string) => {
+    if (this.state.status !== "idle") return;
+    this.update({ sessions: this.state.sessions.filter((session) => session.id !== id) });
+    this.saveUI();
+  };
   restore(raw: unknown) {
     if (!raw || typeof raw !== "object") return;
-    const schema = v.object({
+    const modelSchema = v.nullable(
+      v.object({ providerId: v.string(), modelDefinitionId: v.string() }),
+    );
+    // v1 只保存当前聊天；v2 起归档聊天随画布文档保存，旧档迁移为无历史。
+    const v1Schema = v.object({
       version: v.literal(1),
       expanded: v.boolean(),
-      model: v.nullable(v.object({ providerId: v.string(), modelDefinitionId: v.string() })),
+      model: modelSchema,
       messages: v.array(messageSchema),
       status: v.string(),
     });
-    const parsed = v.safeParse(schema, raw);
-    if (!parsed.success) throw new Error("创作助手对话存档损坏，请保留存档后重试。");
-    const data = parsed.output;
-    this.state = {
-      ...initialState(),
-      expanded: data.expanded,
-      model: data.model,
-      messages: data.messages,
+    const v2Schema = v.object({
+      version: v.literal(2),
+      expanded: v.boolean(),
+      model: modelSchema,
+      messages: v.array(messageSchema),
+      sessions: v.array(sessionSchema),
+      activeSessionId: v.nullable(v.string()),
+      status: v.string(),
+    });
+    let restored: {
+      expanded: boolean;
+      model: NodeModelSelection | null;
+      messages: readonly AgentMessage[];
+      sessions: readonly AgentChatSession[];
+      activeSessionId: string | null;
+      status: string;
     };
-    if (data.status !== "idle" || ("pending" in raw && raw.pending)) {
+    if ((raw as { version?: unknown }).version === 1) {
+      const parsed = v.safeParse(v1Schema, raw);
+      if (!parsed.success) throw new Error("创作助手对话存档损坏，请保留存档后重试。");
+      const { expanded, model, messages, status } = parsed.output;
+      restored = { expanded, model, messages, sessions: [], activeSessionId: null, status };
+    } else {
+      const parsed = v.safeParse(v2Schema, raw);
+      if (!parsed.success) throw new Error("创作助手对话存档损坏，请保留存档后重试。");
+      restored = parsed.output;
+    }
+    // status 只用于识别中断；运行状态本身不随存档恢复。
+    const { status, ...ui } = restored;
+    this.state = { ...initialState(), ...ui };
+    if (status !== "idle" || ("pending" in raw && raw.pending)) {
       this.append(
         "assistant",
         "上次制作已中断，旧计划的确认已失效。已保存的节点和白模渲染任务仍保留；请说明要继续的内容，我会读取当前状态重新规划。",
@@ -262,7 +423,7 @@ export class CanvasAgentController {
         context: host.context(),
         conversation: this.state.messages,
         instructions:
-          "只使用注册工具。新节点在后续步骤用 $步骤id 引用，必须声明 dependsOn。白模先创建视频节点，再 set_scene，render 会导出并放回画布。剧本与分镜先在回复里写好整篇文档，再用 canvas.set_document 写入；抽帧与合成节点要先连线好输入再运行。所有写入都需要批准，请返回完整可审阅计划；不要声称计划已执行。已有信息优先读取。只能从实际工具结果判断成功。",
+          "每轮只输出一个 JSON 对象（含 message 与 actions 字段），不使用代码围栏或附加正文。只使用注册工具。新节点在后续步骤用 $步骤id 引用，必须声明 dependsOn。白模先创建视频节点，再 set_scene，render 会导出并放回画布。剧本与分镜先在回复里写好整篇文档，再用 canvas.set_document 写入；抽帧与合成节点要先连线好输入再运行。所有写入都需要批准，请返回完整可审阅计划；不要声称计划已执行。已有信息优先读取。只能从实际工具结果判断成功。",
       });
       let raw: string;
       try {
@@ -274,24 +435,19 @@ export class CanvasAgentController {
       this.assertCurrent();
       let reply: v.InferOutput<typeof replySchema>;
       try {
-        reply = v.parse(
-          replySchema,
-          JSON.parse(
-            raw
-              .trim()
-              .replace(/^```(?:json)?\s*/i, "")
-              .replace(/\s*```$/, ""),
-          ),
-        );
+        reply = v.parse(replySchema, extractPlanReply(raw));
         reply = { ...reply, actions: this.validate(reply.actions) };
       } catch (error) {
-        const summary = formatValibotIssues(error);
+        const summary = planRejectSummary(error);
         if (round >= 1)
           throw new Error(
             `助手连续两次返回的计划都无法通过结构校验：${summary}。请换个说法重试，或先在画布上手动完成这一步。`,
             { cause: error },
           );
-        this.append("tool", `计划未执行，结构校验失败：${summary}。请根据已注册工具修正。`);
+        this.append(
+          "tool",
+          `计划未执行：${summary}。请根据已注册工具修正，只返回一个 JSON 对象（含 message 与 actions 字段），不要附加正文或代码围栏。`,
+        );
         continue;
       }
       this.append("assistant", reply.message);
