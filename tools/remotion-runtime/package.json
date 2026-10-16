@@ -5,7 +5,7 @@
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {
-    "test": "node --test plan.test.mjs resolve-douyin.test.mjs resolve-rednote.test.mjs"
+    "test": "node --test plan.test.mjs capture-login.test.mjs resolve-douyin.test.mjs resolve-rednote.test.mjs"
   },
   "dependencies": {
     "@remotion/renderer": "4.0.425",

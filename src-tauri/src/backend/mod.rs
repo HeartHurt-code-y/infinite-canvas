@@ -4,6 +4,7 @@ pub mod asset_library;
 pub mod blender;
 pub mod brand_design;
 pub mod brand_models;
+mod browser_login;
 mod browser_media;
 pub mod commands;
 pub mod commerce_sources;

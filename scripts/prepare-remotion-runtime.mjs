@@ -94,6 +94,7 @@ const fileNames = [
   "Composition.tsx",
   "index.tsx",
   "render.mjs",
+  "capture-login.mjs",
   "resolve-douyin.mjs",
   "resolve-rednote.mjs",
 ];
@@ -121,6 +122,7 @@ const readyPaths = [
   nodeName,
   "render.mjs",
   "plan.mjs",
+  "capture-login.mjs",
   "resolve-douyin.mjs",
   "resolve-rednote.mjs",
   "Composition.tsx",
@@ -244,6 +246,7 @@ for (const name of [
   "plan.mjs",
   "Composition.tsx",
   "render.mjs",
+  "capture-login.mjs",
   "resolve-douyin.mjs",
   "resolve-rednote.mjs",
 ])

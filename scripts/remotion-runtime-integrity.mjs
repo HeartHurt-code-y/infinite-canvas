@@ -21,6 +21,7 @@ export function remotionCriticalPaths(nodeName, browserExecutable) {
     browserExecutable,
     "render.mjs",
     "plan.mjs",
+    "capture-login.mjs",
     "resolve-douyin.mjs",
     "resolve-rednote.mjs",
     "bundle/index.html",
@@ -42,6 +43,7 @@ export async function remotionCachedSourcesMatch(root, source) {
       "plan.mjs",
       "Composition.tsx",
       "render.mjs",
+      "capture-login.mjs",
       "resolve-douyin.mjs",
       "resolve-rednote.mjs",
     ]) {

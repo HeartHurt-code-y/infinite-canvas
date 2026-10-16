@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 use regex::Regex;
 
+use super::browser_login::{self, LoginSite, login_prompt_text};
 use super::browser_media::{self, SiteResolver};
 use super::composer::VideoCompositionService;
 use super::error::{BackendError, BackendResult};
@@ -256,6 +257,8 @@ struct Inner {
     cookie_browser: std::sync::Mutex<Option<VideoCookieBrowser>>,
     /// 串行化引擎安装/更新，避免并发重复下载二进制。
     engine_lock: AsyncMutex<()>,
+    /// 可见登录浏览器同一时间只弹一个：多个任务串行等待捕获完成。
+    login_capture_lock: AsyncMutex<()>,
     site_resolver_slots: Semaphore,
     downloads_dir: PathBuf,
     engine_dir: PathBuf,
@@ -299,6 +302,7 @@ impl VideoDownloadService {
                 engine: std::sync::Mutex::new(EngineRuntime::default()),
                 cookie_browser: std::sync::Mutex::new(cookie_browser),
                 engine_lock: AsyncMutex::new(()),
+                login_capture_lock: AsyncMutex::new(()),
                 site_resolver_slots: Semaphore::new(2),
                 downloads_dir,
                 engine_dir,
@@ -747,6 +751,45 @@ impl VideoDownloadService {
     }
 
     async fn run_download(&self, job_id: String, url: String, cookie_source: VideoCookieSource) {
+        // 之前登录捕获得到的站点会话直接复用：Auto/无凭据时不再从头撞风控。
+        let mut cookie_source = if matches!(
+            cookie_source,
+            VideoCookieSource::None | VideoCookieSource::Auto
+        ) {
+            self.site_session_source(&url).unwrap_or(cookie_source)
+        } else {
+            cookie_source
+        };
+        // 登录捕获每份任务至多一次：重试仍失败时给出手动导入指引而非再弹窗。
+        let mut login_used = false;
+        loop {
+            let mut login_captured = None;
+            self.run_download_pipeline(
+                job_id.clone(),
+                url.clone(),
+                cookie_source.clone(),
+                login_used,
+                &mut login_captured,
+            )
+            .await;
+            match login_captured.filter(|_| !login_used) {
+                Some(path) => {
+                    cookie_source = VideoCookieSource::ManualFile(path);
+                    login_used = true;
+                }
+                None => return,
+            }
+        }
+    }
+
+    async fn run_download_pipeline(
+        &self,
+        job_id: String,
+        url: String,
+        cookie_source: VideoCookieSource,
+        login_used: bool,
+        login_captured: &mut Option<PathBuf>,
+    ) {
         // 1. 确保引擎就绪（缺失时自动下载锁定版本）。
         let binary = match self.ensure_engine().await {
             Ok(binary) => binary,
@@ -920,6 +963,26 @@ impl VideoDownloadService {
                         Ok(Some(selection)) => (selection.source, selection.private_cookie),
                         Ok(None) => return,
                         Err(message) => {
+                            if self.is_cancelled(&job_id) {
+                                return;
+                            }
+                            // 预检全失败的常见原因是站点风控；先尝试弹窗登录再定去留。
+                            let capture_hint = self
+                                .try_login_capture(
+                                    &job_id,
+                                    &url,
+                                    &message,
+                                    login_used,
+                                    login_captured,
+                                )
+                                .await;
+                            if login_captured.is_some() {
+                                return;
+                            }
+                            let message = match capture_hint {
+                                Some(hint) => format!("{message}\n{hint}"),
+                                None => message,
+                            };
                             if !self.is_cancelled(&job_id) {
                                 self.fail_job(&job_id, message);
                             }
@@ -1455,18 +1518,40 @@ impl VideoDownloadService {
                     if can_retry {
                         continue;
                     }
-                    self.fail_job(
-                        &job_id,
-                        original_fallback_failure(
-                            original_fallback,
-                            failure_message(
-                                &stderr_tail,
-                                &status.to_string(),
-                                &url,
-                                active_cookie_source,
-                            ),
+                    let mut message = original_fallback_failure(
+                        original_fallback,
+                        failure_message(
+                            &stderr_tail,
+                            &status.to_string(),
+                            &url,
+                            active_cookie_source,
                         ),
                     );
+                    if !self.is_cancelled(&job_id) {
+                        // 最后一个候选仍失败：符合登录/验证签名时弹浏览器捕获会话，
+                        // 由外层用新会话整链重试一次。
+                        let diagnostics: String =
+                            stderr_tail.iter().fold(String::new(), |mut acc, line| {
+                                acc.push_str(line);
+                                acc
+                            });
+                        if let Some(hint) = self
+                            .try_login_capture(
+                                &job_id,
+                                &url,
+                                &diagnostics,
+                                login_used,
+                                login_captured,
+                            )
+                            .await
+                        {
+                            message.push('\n');
+                            message.push_str(&hint);
+                        } else if login_captured.is_some() {
+                            return;
+                        }
+                    }
+                    self.fail_job(&job_id, message);
                 }
                 Err(error) => {
                     if can_retry {
@@ -1482,6 +1567,74 @@ impl VideoDownloadService {
                 }
             }
             return;
+        }
+    }
+
+    fn site_session_path(&self, site: LoginSite) -> PathBuf {
+        self.inner.engine_dir.join(site.session_file_name())
+    }
+
+    /// 已捕获的站点登录会话（如存在）作为手动 Cookies 文件复用。
+    fn site_session_source(&self, url: &str) -> Option<VideoCookieSource> {
+        let path = self.site_session_path(LoginSite::for_url(url)?);
+        path.is_file()
+            .then_some(VideoCookieSource::ManualFile(path))
+    }
+
+    /// 失败疑似登录/站点验证墙时，弹可见浏览器让用户登录并自动收集 Cookies。
+    /// - `Some(提示)`：不适配或捕获失败，提示应追加进失败文案；
+    /// - `None` 且 `login_captured` 被置位：会话文件已写好，外层应重试；
+    /// - `None` 且未置位：与登录无关，按原样失败。
+    async fn try_login_capture(
+        &self,
+        job_id: &str,
+        url: &str,
+        diagnostics: &str,
+        login_used: bool,
+        login_captured: &mut Option<PathBuf>,
+    ) -> Option<String> {
+        let Some(site) = browser_login::login_capture_required(url, diagnostics) else {
+            return None;
+        };
+        if login_used {
+            return Some(
+                "已尝试过自动登录，站点仍然拦截。请从浏览器导出 cookies.txt 手动导入后重试。"
+                    .into(),
+            );
+        }
+        let Some(renderer) = self.inner.browser_runtime.as_ref() else {
+            // 浏览器组件未就绪：保持原有失败文案，不打扰用户。
+            return None;
+        };
+        let _guard = self.inner.login_capture_lock.lock().await;
+        if self.is_cancelled(job_id) {
+            return None;
+        }
+        self.update_record(job_id, |record| {
+            record.progress = None;
+            record.probe_status = Some(login_prompt_text(site));
+        });
+        let cancelled = self.cancel_flag(job_id);
+        match browser_login::capture(renderer, site, url, &cancelled).await {
+            Ok(session_text) => {
+                let path = self.site_session_path(site);
+                match super::credentials::write_private_file(&path, &session_text) {
+                    Ok(()) => {
+                        self.update_record(job_id, |record| {
+                            record.probe_status =
+                                Some("已获取站点登录 Cookies，正在用新会话重试下载".into());
+                        });
+                        *login_captured = Some(path);
+                        None
+                    }
+                    Err(error) => Some(format!("登录 Cookies 保存失败：{error}。")),
+                }
+            }
+            Err("cancelled") => None,
+            Err(detail) => Some(format!(
+                "自动登录未完成：{}可稍后重试下载，或从浏览器导出 cookies.txt 手动导入。",
+                login_capture_failure_reason(detail)
+            )),
         }
     }
 
@@ -2458,6 +2611,30 @@ fn resolve_final_path(
     None
 }
 
+/// 登录捕获的稳定错误串 → 用户可读的原因；未识别的串按内部异常兜底，
+/// 不把英文内部代号直接亮给用户。
+fn login_capture_failure_reason(detail: &str) -> String {
+    match detail {
+        "login capture browser unavailable" => {
+            "没有找到可用的浏览器，自动登录需要 Edge、Chrome、Brave 或 Chromium。".into()
+        }
+        "login capture login timeout" => {
+            "等待约 5 分钟仍未检测到站点 Cookie；若窗口里已完成登录但下载仍失败，可再重试一次。"
+                .into()
+        }
+        "login capture browser closed early" => "浏览器窗口在拿到站点 Cookie 前被关闭。".into(),
+        "login capture timed out" => "登录窗口长时间未退出，已强制结束。".into(),
+        "login capture returned no site cookies" => "未收集到该站点的 Cookie。".into(),
+        "login capture script unavailable" | "login capture runtime unavailable" => {
+            "登录组件未就绪。".into()
+        }
+        "login capture script error" => "登录窗口脚本运行出错。".into(),
+        "login capture input rejected" => "登录请求参数未通过脚本校验。".into(),
+        "login capture process failed" => "登录窗口进程异常退出。".into(),
+        _ => "登录流程内部异常。".into(),
+    }
+}
+
 fn original_fallback_failure(is_original_fallback: bool, detail: String) -> String {
     if is_original_fallback {
         format!("站点视频流候选均未通过下载验收；原站链接重试也失败。\n{detail}")
@@ -2486,6 +2663,12 @@ fn extract_merger_path(line: &str) -> Option<String> {
     (!path.is_empty()).then(|| path.to_string())
 }
 
+/// `--batch-file -` 每次从 stdin 读链接都会打印这行提示，成败都会出现；
+/// 展示给用户会被误解成要求按 Ctrl+Z，属于引擎噪音而非失败原因。
+fn is_engine_stdin_banner(line: &str) -> bool {
+    line.starts_with("Reading URLs from STDIN")
+}
+
 /// 组装失败信息：优先保留 yt-dlp 的真实错误。抖音详情接口返回空数据时，
 /// yt-dlp 会统一提示 Fresh cookies；有效 Cookies 也可能触发，不能据此判定过期。
 fn failure_message(
@@ -2498,7 +2681,10 @@ fn failure_message(
         .iter()
         .map(String::as_str)
         .filter(|line| {
-            !line.starts_with("[download]") && !line.is_empty() && !line.starts_with("[Merger]")
+            !line.starts_with("[download]")
+                && !line.is_empty()
+                && !line.starts_with("[Merger]")
+                && !is_engine_stdin_banner(line)
         })
         .collect();
     let mut message = if relevant.is_empty() {
@@ -2909,6 +3095,7 @@ mod tests {
     #[test]
     fn douyin_empty_detail_does_not_assert_cookies_are_expired() {
         let tail = VecDeque::from([
+            "Reading URLs from STDIN - EOF (Ctrl+Z) to end:".to_string(),
             "WARNING: [Douyin] Failed to parse JSON: Expecting value in ''".to_string(),
             "ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed".to_string(),
         ]);
@@ -2921,6 +3108,8 @@ mod tests {
         assert!(message.contains("有效 Cookies 也可能"));
         assert!(message.contains("提取器限制"));
         assert!(!message.contains("请导入浏览器导出的 cookies.txt"));
+        // stdin 提示横幅是每次读取链接的固定输出，不能进入用户失败文案。
+        assert!(!message.contains("Reading URLs from STDIN"));
 
         let auto_message = auto_failure_message(
             "https://v.douyin.com/example/",
