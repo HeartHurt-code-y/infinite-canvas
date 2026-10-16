@@ -1965,6 +1965,7 @@ impl ProviderRuntime {
         let context = self.resolve_frozen(task)?;
         let path = format!("/v1/videos/{remote_task_id}/content");
         let url = endpoint(&context.base_url, &path)?;
+        let sanitized_url = sanitize_url(&url);
         let call_id = Uuid::new_v4().to_string();
         self.lifecycle.commit(
             &task.id,
@@ -2034,6 +2035,17 @@ impl ProviderRuntime {
             ));
         }
         let bytes = response.bytes().await?.to_vec();
+        if looks_like_html_document(&bytes) {
+            return Err(html_document_rejection(
+                status,
+                &sanitized_url,
+                &content_type_header(&headers),
+                &bytes,
+                format!(
+                    "视频内容接口返回的是网页而不是视频文件（HTTP {status}）。该网关可能不支持内容接口：请核对供应商连接的 API 地址后重试。"
+                ),
+            ));
+        }
         info!(
             "[provider] 收到视频 content 直连响应: taskId={}, callId={}, HTTP {status}, 字节 {}",
             task.id,
@@ -2133,6 +2145,20 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             response.body.len()
         );
+        if (200..300).contains(&response.status)
+            && looks_like_html_document(response.body.as_bytes())
+        {
+            return Err(html_document_rejection(
+                response.status,
+                &sanitized_url,
+                &content_type_header(&response.headers),
+                response.body.as_bytes(),
+                format!(
+                    "供应商返回了网页而不是接口数据（HTTP {}）。通常是 API 地址没有指向接口（一般应以 /v1 结尾），或该网关不支持此接口：请在供应商设置里核对 API 地址。",
+                    response.status
+                ),
+            ));
+        }
         Ok(response)
     }
 
@@ -2913,6 +2939,17 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             body.len()
         );
+        if (200..300).contains(&status) && looks_like_html_document(body.as_bytes()) {
+            return Err(html_document_rejection(
+                status,
+                &sanitized_url,
+                &content_type_header(&headers),
+                body.as_bytes(),
+                format!(
+                    "供应商返回了网页而不是接口数据（HTTP {status}）。通常是 API 地址没有指向接口（一般应以 /v1 结尾），或该网关不支持此接口：请在供应商设置里核对 API 地址。"
+                ),
+            ));
+        }
         Ok(RawProviderResponse {
             status,
             headers,
@@ -6196,6 +6233,70 @@ pub(crate) fn truncate_connectivity_detail(value: &str) -> String {
     format!("{truncated}…")
 }
 
+/// 识别「网页兜底响应」：状态码 2xx 但响应体其实是 HTML 文档。
+///
+/// new-api 系网关对路由表之外的路径不回 404，而是 301 跳到自家官网，再由 SPA
+/// 前端路由兜底以 HTTP 200 返回首页 HTML（魔芋网关实测：`www.moyu.info` 的
+/// 未知路径 301 到 `www.moyu.cn`，任意未知路径都以 200 + 首页 HTML 接住）。
+/// 凭据、直链或 API 地址一旦指错，收到的就是这种「成功状态码 + 网页」的响应，
+/// 只能靠响应体识别。判定刻意保守：只认 BOM/空白之后紧跟 `<!doctype html` 或
+/// `<html` 的文档开头；JSON（以 `{`/`[`/`"` 开头）、SSE（`data:`/`event:`）与
+/// 媒体字节永远不命中。
+pub(crate) fn looks_like_html_document(body: &[u8]) -> bool {
+    let body = body
+        .strip_prefix([0xEF, 0xBB, 0xBF].as_slice())
+        .unwrap_or(body);
+    let start = body
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(body.len());
+    let body = &body[start..];
+    starts_with_ignore_case(body, b"<!doctype html") || starts_with_ignore_case(body, b"<html")
+}
+
+fn starts_with_ignore_case(haystack: &[u8], prefix: &[u8]) -> bool {
+    haystack.len() >= prefix.len()
+        && haystack[..prefix.len()]
+            .iter()
+            .zip(prefix.iter())
+            .all(|(byte, expected)| byte.eq_ignore_ascii_case(expected))
+}
+
+/// 网页兜底响应的统一协议错误：给用户指路的文案放在摘要里，HTML 前缀只进
+/// 「展开完整报错」的载荷，不整页印给用户。
+pub(crate) fn html_document_rejection(
+    status: u16,
+    url: &str,
+    content_type: &str,
+    body: &[u8],
+    message: String,
+) -> BackendError {
+    let prefix = String::from_utf8_lossy(&body[..body.len().min(512)]).into_owned();
+    BackendError::protocol(
+        message,
+        json!({
+            "httpStatus": status,
+            "url": redact_url_string(url),
+            "contentType": content_type,
+            "rawResponsePrefix": prefix,
+            "rawResponseBytes": body.len(),
+        }),
+    )
+}
+
+/// 从 `response_headers` 归一后的头里取 content-type（多值时取第一个）。
+fn content_type_header(headers: &Value) -> String {
+    match headers.get("content-type") {
+        Some(Value::String(value)) => value.clone(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .find_map(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 /// 把底层错误映射为机器可读的连通性失败类别，供前端生成本地化提示。
 fn connectivity_error_reason(error: &BackendError) -> &'static str {
     match error {
@@ -8819,6 +8920,88 @@ mod tests {
             .unwrap();
         let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
         (directory, runtime, task, server)
+    }
+
+    #[test]
+    fn html_document_detection_only_matches_document_openings() {
+        assert!(looks_like_html_document(
+            b"<!doctype html><html lang=\"zh\"><title>moyu</title></html>"
+        ));
+        assert!(looks_like_html_document(
+            b" \r\n\t<html><body>fallback</body></html>"
+        ));
+        assert!(looks_like_html_document(
+            b"<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\">"
+        ));
+        let mut bom_html = vec![0xEF, 0xBB, 0xBF];
+        bom_html.extend_from_slice(b"<html></html>");
+        assert!(looks_like_html_document(&bom_html));
+        // 正常响应体永不误报：JSON、内容恰似 HTML 的 JSON 字符串、SSE、媒体字节、空白。
+        assert!(!looks_like_html_document(b"{\"success\":true,\"data\":{}}"));
+        assert!(!looks_like_html_document(
+            b"\"<html> only json string content\""
+        ));
+        assert!(!looks_like_html_document(
+            b"data: {\"delta\":\"<html\"}\n\n"
+        ));
+        assert!(!looks_like_html_document(b"\x00\x00\x00\x18ftypmp42"));
+        assert!(!looks_like_html_document(b"\x89PNG\r\n\x1a\n"));
+        assert!(!looks_like_html_document(b"   "));
+        assert!(!looks_like_html_document(b""));
+    }
+
+    #[tokio::test]
+    async fn raw_json_request_rejects_an_html_fallback_page() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0; 4096];
+            let _ = stream.read(&mut buffer);
+            let body = "<!doctype html><html lang=\"zh\"><title>魔芋AI大模型网关</title></html>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let directory = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("backend.sqlite")).unwrap());
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
+        let context = ResolvedProviderContext {
+            provider_connection_id: "html-fallback-mock".into(),
+            adapter_id: MOYU_ADAPTER_ID.into(),
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key_ref: "html-fallback-key".into(),
+            api_key: "sk-test".into(),
+        };
+        let error = runtime
+            .send_raw_json_request(&context, Method::GET, "/video/tasks", &[], None, &[])
+            .await
+            .expect_err("网页兜底响应必须失败");
+        let BackendError::Protocol { message, details } = error else {
+            panic!("应为协议错误");
+        };
+        assert!(message.contains("网页而不是接口数据"), "{message}");
+        assert!(message.contains("核对 API 地址"), "{message}");
+        assert_eq!(details.get("httpStatus"), Some(&json!(200)));
+        assert!(
+            details
+                .get("url")
+                .and_then(Value::as_str)
+                .is_some_and(|url| url.contains(&format!("127.0.0.1:{port}")))
+        );
+        assert!(
+            details
+                .get("rawResponsePrefix")
+                .and_then(Value::as_str)
+                .is_some_and(|prefix| prefix.contains("doctype"))
+        );
     }
 
     #[tokio::test]

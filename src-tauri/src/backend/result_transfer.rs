@@ -141,6 +141,17 @@ async fn download_inner(
             json!({ "url": redact_url_string(url) }),
         ));
     }
+    // 走到这里响应必为 2xx；但网关会把未知路径兜底成自家首页（HTTP 200 + HTML），
+    // 靠状态码拦不住，只能认响应体：文档开头必不是媒体文件。
+    if super::provider::looks_like_html_document(&bytes) {
+        return Err(super::provider::html_document_rejection(
+            200,
+            url,
+            "",
+            &bytes,
+            "生成产物链接返回的是网页而不是媒体文件。链接可能已失效或被网关重定向到了网站首页：请重新查询任务获取新的产物链接。".into(),
+        ));
+    }
     remove_identity(part_path).await?;
     Ok(bytes)
 }
@@ -818,6 +829,39 @@ mod tests {
         assert_eq!(split_ranges(16, 4), vec![(0, 3), (4, 7), (8, 11), (12, 15)]);
         assert_eq!(split_ranges(10, 3), vec![(0, 3), (4, 7), (8, 9)]);
         assert_eq!(split_ranges(1, 4), vec![(0, 0)]);
+    }
+
+    #[tokio::test]
+    async fn result_download_rejects_an_html_fallback_page() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        serve_once(listener, |stream| {
+            let body = "<!doctype html><html lang=\"zh\"><title>魔芋AI大模型网关</title></html>";
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(body.as_bytes()).unwrap();
+        });
+        let dir = tempfile::tempdir().expect("temp");
+        let part = dir.path().join("fallback.download");
+        let error = download_result(
+            test_client(),
+            &format!("http://127.0.0.1:{port}/file.mp4"),
+            &ResultDownloadAuth::default(),
+            &part,
+            test_policy(),
+            |_| {},
+        )
+        .await
+        .expect_err("网页兜底响应必须失败");
+        let BackendError::Protocol { message, details } = error else {
+            panic!("应为协议错误");
+        };
+        assert!(message.contains("网页而不是媒体文件"), "{message}");
+        assert!(message.contains("重新查询任务"), "{message}");
+        assert_eq!(details.get("httpStatus"), Some(&json!(200)));
     }
 
     #[tokio::test]

@@ -809,6 +809,16 @@ impl MediaResolver {
             ));
         }
         let bytes = response.bytes().await?.to_vec();
+        // 2xx 但响应体是网页（网关把失效直链兜底到自家首页）：必不是素材文件。
+        if super::provider::looks_like_html_document(&bytes) {
+            return Err(super::provider::html_document_rejection(
+                status,
+                url,
+                "",
+                &bytes,
+                "引用素材链接返回的是网页而不是素材文件。链接可能已失效：请更换素材链接或重新上传。".into(),
+            ));
+        }
         info!(
             "[resolve] 引用素材下载完成: HTTP {status}, 耗时 {}ms, 下载 {} 字节, url={redacted_url}",
             started_at.elapsed().as_millis(),
