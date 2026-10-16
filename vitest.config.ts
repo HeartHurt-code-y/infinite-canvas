@@ -15,6 +15,7 @@ const jsdomTsTests = [
   "src/lib/promptOrdinalMentions.test.ts",
   "src/lib/appUpdate.test.ts",
   "src/lib/backend.test.ts",
+  "src/lib/externalLinks.test.ts",
   "src/lib/canvasDocumentClient.test.ts",
   "src/lib/videoComposer.test.ts",
   "src/lib/videoFrameSampler.test.ts",

@@ -2,6 +2,7 @@ mod backend;
 
 use backend::commands;
 use tauri::Manager as _;
+use tauri_plugin_opener::OpenerExt as _;
 
 /// Release packaging checks that the slim executable expects exactly the
 /// component manifests listed in the signed resource release.
@@ -107,6 +108,55 @@ fn run_keychain_access_self_test_if_requested() -> bool {
     std::process::exit(if outcome.passed() { 0 } else { 1 });
 }
 
+/// 判定 URL 是否属于应用自身、允许在主 webview 内加载。
+///
+/// http(s) 只放行开发服务器与 Tauri 各协议在本机的回环地址（Windows 生产环境
+/// 应用来源是 `http://tauri.localhost`）；其余一律算站外，交给 `on_navigation`
+/// 改走系统浏览器。host 采用全等匹配，`tauri.localhost.evil.com` 这类前缀
+/// 相似的域名不会误放行。
+fn is_internal_webview_url(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" | "about" | "blob" | "asset" | "assetproxy" | "localbase64" => true,
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some(
+                "localhost" | "127.0.0.1" | "tauri.localhost" | "asset.localhost" | "ipc.localhost"
+            )
+        ),
+        _ => false,
+    }
+}
+
+/// 主窗口必须在 Rust 侧手工创建（tauri.conf.json 不再声明 windows）：`on_navigation`
+/// 只存在于 builder 上，配置自动创建的窗口挂不上。
+///
+/// 这是外链治理的最后一道防线（前两道在前端：main.tsx 的全局点击守卫与
+/// MarkdownView 的链接处理）：任何漏网渠道触发的站外导航都被取消并改用
+/// 系统浏览器打开，保证主窗口永远不会被外部页面原地顶掉——Tauri 窗口没有
+/// 地址栏和返回键，用户一旦被顶掉只能杀进程。
+fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let handle = app.clone();
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+        .title("无限画布")
+        .inner_size(1280.0, 800.0)
+        .min_inner_size(800.0, 600.0)
+        .center()
+        .resizable(true)
+        .devtools(true)
+        .on_navigation(move |url| {
+            if is_internal_webview_url(url) {
+                return true;
+            }
+            tauri_plugin_log::log::info!("[导航] 拦截站外跳转，改用系统浏览器打开: {url}");
+            if let Err(error) = handle.opener().open_url(url.as_str(), None::<&str>) {
+                tauri_plugin_log::log::warn!("[导航] 系统浏览器打开失败: {error}");
+            }
+            false
+        })
+        .build()?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     if run_component_catalog_pins_if_requested() {
@@ -167,6 +217,7 @@ pub fn run() {
         .setup(|app| {
             let setup_clock = std::time::Instant::now();
             tauri_plugin_log::log::info!("[启动] setup 开始（主线程，期间事件循环不泵消息）");
+            create_main_window(app.handle())?;
             let state = backend::BackendState::initialize(app.handle())?;
             tauri_plugin_log::log::info!(
                 "[启动] BackendState::initialize 完成, 耗时 {}ms",
@@ -367,4 +418,57 @@ pub fn run() {
                 tauri_plugin_log::log::info!("[启动] 事件循环就绪，开始泵消息");
             }
         });
+}
+
+#[cfg(test)]
+mod navigation_guard_tests {
+    use super::is_internal_webview_url;
+
+    fn url(text: &str) -> tauri::Url {
+        text.parse().expect("测试 URL 必须可解析")
+    }
+
+    #[test]
+    fn allows_app_shell_and_custom_scheme_origins() {
+        // 生产来源：macOS/Linux 为 tauri://localhost，Windows 为 http(s)://tauri.localhost。
+        assert!(is_internal_webview_url(&url("tauri://localhost/")));
+        assert!(is_internal_webview_url(&url(
+            "https://tauri.localhost/index.html"
+        )));
+        assert!(is_internal_webview_url(&url("about:blank")));
+        assert!(is_internal_webview_url(&url(
+            "blob:https://tauri.localhost/abc"
+        )));
+        assert!(is_internal_webview_url(&url("asset://localhost/img.png")));
+        assert!(is_internal_webview_url(&url(
+            "http://asset.localhost/img.png"
+        )));
+        assert!(is_internal_webview_url(&url("http://ipc.localhost/")));
+        assert!(is_internal_webview_url(&url(
+            "assetproxy://localhost/media/1"
+        )));
+        assert!(is_internal_webview_url(&url("localbase64://localhost/abc")));
+        // 开发服务器。
+        assert!(is_internal_webview_url(&url("http://localhost:1420/")));
+        assert!(is_internal_webview_url(&url(
+            "http://127.0.0.1:1420/node?x=1"
+        )));
+    }
+
+    #[test]
+    fn rejects_external_navigations() {
+        assert!(!is_internal_webview_url(&url(
+            "https://www.douyin.com/video/123"
+        )));
+        assert!(!is_internal_webview_url(&url("http://evil.example.com/")));
+        // host 全等匹配：前缀相似的域名不得借回环地址混进站内。
+        assert!(!is_internal_webview_url(&url("http://localhost.evil.com/")));
+        assert!(!is_internal_webview_url(&url(
+            "https://tauri.localhost.evil.com/"
+        )));
+        assert!(!is_internal_webview_url(&url("mailto:someone@example.com")));
+        assert!(!is_internal_webview_url(&url(
+            "file:///C:/Windows/notepad.exe"
+        )));
+    }
 }

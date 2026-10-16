@@ -10,18 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "无限画布",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 800,
-        "minHeight": 600,
-        "center": true,
-        "resizable": true,
-        "devtools": true
-      }
-    ],
+    "windows": [],
     "withGlobalTauri": true,
     "security": {
       "csp": null,
