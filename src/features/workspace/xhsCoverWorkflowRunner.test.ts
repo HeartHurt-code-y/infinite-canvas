@@ -130,6 +130,7 @@ function setup() {
 describe("single-node portrait cover workflow", () => {
   it("preserves large portrait and product order through planning, image generation and QC", async () => {
     const { runner, request, calls, fake } = setup();
+    vi.mocked(fake.generation.get).mockRejectedValue(new Error("unexpected full-detail polling"));
     const withMaterials = {
       ...request,
       node: {
@@ -148,6 +149,8 @@ describe("single-node portrait cover workflow", () => {
     };
     const checkpoint = await runner.run(withMaterials);
     expect(checkpoint.phase).toBe("done");
+    expect(fake.generation.getProgress).toHaveBeenCalled();
+    expect(fake.generation.get).not.toHaveBeenCalled();
     for (const input of calls()) {
       expect(input.referenceInputs).toEqual(workflowConnectedReferenceFixtures);
       expect(input.multimodalInputs?.slice(0, 2).map((item) => item.localPath)).toEqual([
@@ -367,7 +370,7 @@ describe("single-node portrait cover workflow", () => {
     const result = await runner.run(resume(paused));
     expect(result.phase).toBe("done");
     expect(fake.generation.start).toHaveBeenCalledOnce();
-    expect(fake.generation.get).toHaveBeenCalledWith("image-existing");
+    expect(fake.generation.getProgress).toHaveBeenCalledWith("image-existing");
   });
 
   it("resumes legacy QC after a serde-style key-order round trip without regenerating or renormalizing", async () => {
@@ -407,7 +410,7 @@ describe("single-node portrait cover workflow", () => {
     "keeps %s task identity instead of creating a second charge",
     async (status) => {
       const { fake, runner, request, resume } = setup();
-      vi.mocked(fake.generation.get).mockImplementation(() =>
+      vi.mocked(fake.generation.getProgress).mockImplementation(() =>
         Promise.resolve({
           ...completedTask("image-1"),
           summary: { ...completedTask("image-1").summary, status },
@@ -426,7 +429,7 @@ describe("single-node portrait cover workflow", () => {
     "actually restores a %s local save once on explicit retry, without new image generation",
     async (saveStatus) => {
       const { fake, runner, request, resume, resultRecovery } = setup();
-      vi.mocked(fake.generation.get).mockImplementation(() =>
+      vi.mocked(fake.generation.getProgress).mockImplementation(() =>
         Promise.resolve({
           ...completedTask("image-1"),
           results: completedTask("image-1").results.map((result) => ({
@@ -456,7 +459,7 @@ describe("single-node portrait cover workflow", () => {
       error: "disk still full",
       finalPath: null,
     };
-    vi.mocked(fake.generation.get).mockResolvedValue({
+    vi.mocked(fake.generation.getProgress).mockResolvedValue({
       ...completedTask("image-1"),
       results: [failedResult],
     });
@@ -468,12 +471,12 @@ describe("single-node portrait cover workflow", () => {
     expect(retried.xhsCover?.taskId).toBe("image-1");
     expect(resultRecovery.resume).toHaveBeenCalledOnce();
     expect(fake.generation.start).toHaveBeenCalledOnce();
-    expect(fake.generation.get).toHaveBeenCalledTimes(2);
+    expect(fake.generation.getProgress).toHaveBeenCalledTimes(2);
   });
 
   it("allows a new image task only after the previous task is confirmed failed", async () => {
     const { fake, runner, request, resume } = setup();
-    vi.mocked(fake.generation.get).mockResolvedValueOnce({
+    vi.mocked(fake.generation.getProgress).mockResolvedValueOnce({
       ...completedTask("image-1"),
       summary: { ...completedTask("image-1").summary, status: "failed" },
       results: [],

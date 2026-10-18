@@ -1,4 +1,5 @@
 import { invokeDesktop } from "./ipc";
+import { decodeWorkflowVersionNode, encodeWorkflowVersionNode } from "./workflowVersionStorage";
 import * as v from "valibot";
 import { isDesktopRuntime, type GenerationTaskSummary } from "./backend";
 import { WORKFLOW_KIND_IDS, type WorkflowKind } from "../features/workspace/workflowKinds";
@@ -21,7 +22,8 @@ export interface WorkflowHistoryModelSnapshot {
   readonly modelName: string;
 }
 
-export interface WorkflowHistoryRecord {
+/** List-only metadata; recovery snapshots are fetched through get(). */
+export interface WorkflowHistorySummary {
   readonly id: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
@@ -29,6 +31,11 @@ export interface WorkflowHistoryRecord {
   readonly title: string;
   readonly status: KnowledgeVideoWorkflowPhase;
   readonly progress: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface WorkflowHistoryRecord extends WorkflowHistorySummary {
   readonly message: string;
   readonly error: string | null;
   readonly nodeSnapshot: KnowledgeVideoWorkflowNodeData;
@@ -36,8 +43,6 @@ export interface WorkflowHistoryRecord {
   readonly attemptCount: number;
   /** Save uses the last server revision; a newly created run starts at zero. */
   readonly revision: number;
-  readonly createdAt: number;
-  readonly updatedAt: number;
 }
 
 export interface WorkflowHistoryEvent {
@@ -66,7 +71,7 @@ export interface WorkflowHistoryQuery {
 }
 
 export interface WorkflowHistoryPage {
-  readonly items: readonly WorkflowHistoryRecord[];
+  readonly items: readonly WorkflowHistorySummary[];
   readonly nextCursor: string | null;
 }
 
@@ -93,21 +98,25 @@ const phaseSchema = v.picklist([
   "failed",
   "paused",
 ]);
-const snapshotSchema = v.custom<KnowledgeVideoWorkflowNodeData>((input) => {
-  if (!input || typeof input !== "object") return false;
-  const node = input as Partial<KnowledgeVideoWorkflowNodeData>;
-  return (
-    node.kind === "knowledge_video_workflow" &&
-    typeof node.key === "string" &&
-    typeof node.x === "number" &&
-    typeof node.y === "number" &&
-    !!node.config &&
-    typeof node.config.brief === "string" &&
-    !!node.config.models &&
-    node.config.checkpoint?.version === 1
-  );
-});
-const recordSchema = v.object({
+const snapshotSchema = v.pipe(
+  v.unknown(),
+  v.transform(decodeWorkflowVersionNode),
+  v.custom<KnowledgeVideoWorkflowNodeData>((input) => {
+    if (!input || typeof input !== "object") return false;
+    const node = input as Partial<KnowledgeVideoWorkflowNodeData>;
+    return (
+      node.kind === "knowledge_video_workflow" &&
+      typeof node.key === "string" &&
+      typeof node.x === "number" &&
+      typeof node.y === "number" &&
+      !!node.config &&
+      typeof node.config.brief === "string" &&
+      !!node.config.models &&
+      node.config.checkpoint?.version === 1
+    );
+  }),
+);
+const summarySchema = v.object({
   id: v.string(),
   canvasId: v.string(),
   sourceNodeId: v.string(),
@@ -115,6 +124,11 @@ const recordSchema = v.object({
   title: v.string(),
   status: phaseSchema,
   progress: v.number(),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+});
+const recordSchema = v.object({
+  ...summarySchema.entries,
   message: v.string(),
   error: v.nullable(v.string()),
   nodeSnapshot: snapshotSchema,
@@ -129,8 +143,6 @@ const recordSchema = v.object({
   ),
   attemptCount: v.number(),
   revision: v.number(),
-  createdAt: v.number(),
-  updatedAt: v.number(),
 });
 const eventSchema = v.object({
   id: v.string(),
@@ -158,7 +170,7 @@ export const workflowHistoryClient: WorkflowHistoryClient = {
     if (!isDesktopRuntime()) return Promise.resolve({ items: [], nextCursor: null });
     return desktop(
       "list_workflow_history",
-      v.object({ items: v.array(recordSchema), nextCursor: v.nullable(v.string()) }),
+      v.object({ items: v.array(summarySchema), nextCursor: v.nullable(v.string()) }),
       { query },
     );
   },
@@ -181,7 +193,15 @@ export const workflowHistoryClient: WorkflowHistoryClient = {
     );
   },
   save(command) {
-    return desktop("save_workflow_history", recordSchema, { command });
+    return desktop("save_workflow_history", recordSchema, {
+      command: {
+        ...command,
+        record: {
+          ...command.record,
+          nodeSnapshot: encodeWorkflowVersionNode(command.record.nodeSnapshot),
+        },
+      },
+    });
   },
   recover() {
     if (!isDesktopRuntime()) return Promise.resolve(0);

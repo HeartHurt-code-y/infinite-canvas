@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -20,19 +20,22 @@ use super::{
     },
     types::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
-        GenerationProgressResult, GenerationResultRecord, GenerationTaskDetail,
-        GenerationTaskEvent, GenerationTaskListQuery, GenerationTaskPage, GenerationTaskProgress,
-        GenerationTaskStatus, GenerationTaskSummary, MediaType, ModelDefinition,
-        ProviderCallRecord, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
-        QueryHealth, ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
-        StagingAssetImportTarget, StagingJobRecord, StagingStatus, TextGenerationOutputRecord,
-        TokenUsage, TosStagingConfig, UpsertProviderConnectionCommand,
-        UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
+        GenerationProgressResult, GenerationResultRecord, GenerationTaskCursor,
+        GenerationTaskDetail, GenerationTaskEvent, GenerationTaskListQuery, GenerationTaskPage,
+        GenerationTaskProgress, GenerationTaskStatus, GenerationTaskSummary, MediaType,
+        ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
+        ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
+        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingJobRecord,
+        StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
     },
 };
 
 #[path = "storage/generation_lifecycle.rs"]
 mod generation_lifecycle;
+
+#[path = "storage/history_query.rs"]
+mod history_query;
 
 /// 已完成（`active` / `cleaned`）的产物入库上传参与重启恢复的时间窗口。
 ///
@@ -330,7 +333,13 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 7] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
+    (
+        "provider-fzy-ai",
+        "饭众烟 AI（异步出图）",
+        "https://fzy-ai.pages.dev",
+        "fzy_ai_v1",
+    ),
     (
         "provider-sd20",
         "SD2.0",
@@ -447,6 +456,7 @@ impl Storage {
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
         connection.execute_batch(workflow_history::SCHEMA)?;
+        workflow_history::migrate_summaries(&connection)?;
         connection.execute_batch(reverse_video_cases::SCHEMA)?;
         connection.execute_batch(brand_models::SCHEMA)?;
         connection.execute(
@@ -1576,57 +1586,23 @@ impl Storage {
 
     pub fn list_tasks(&self, query: &GenerationTaskListQuery) -> BackendResult<GenerationTaskPage> {
         validate_history_date_range(query.created_from, query.created_to)?;
-        let connection = self.lock()?;
         let limit = query.limit.clamp(1, 200) as i64;
-        let statuses = query
-            .statuses
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
-        let mut statement = connection.prepare(&format!(
-            "{} ORDER BY created_at DESC, id LIMIT ?7",
-            task_summary_sql(
-                "WHERE (?1 IS NULL OR canvas_id = ?1)
-                AND (?2 IS NULL OR source_node_id = ?2)
-                AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3)))
-                AND (?4 IS NULL OR created_at < ?4)
-                AND (?5 IS NULL OR created_at >= ?5)
-                AND (?6 IS NULL OR created_at <= ?6)
-                AND (?8 IS NULL OR instr(lower(COALESCE(json_extract(logical_request_json, '$.outputName'), '')), lower(?8)) > 0
-                  OR instr(lower(id), lower(?8)) > 0 OR instr(lower(COALESCE(remote_task_id, '')), lower(?8)) > 0
-                  OR EXISTS (SELECT 1 FROM generation_results r WHERE r.task_id = generation_tasks.id AND instr(lower(COALESCE(r.final_path, '')), lower(?8)) > 0)
-                  OR EXISTS (SELECT 1 FROM generation_result_names n WHERE n.task_id = generation_tasks.id AND instr(lower(n.name), lower(?8)) > 0))"
-            )
-        ))?;
+        let sql = history_query::tasks(query, limit + 1)?;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(&sql.sql)?;
         let mut items = statement
-            .query_map(
-                params![
-                    query.canvas_id,
-                    query.source_node_id,
-                    statuses,
-                    query.cursor_created_before,
-                    query.created_from,
-                    query.created_to,
-                    limit + 1,
-                    query
-                        .search
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                ],
-                task_summary_from_row,
-            )?
+            .query_map(params_from_iter(sql.parameters), task_summary_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        let next_cursor_created_before = if items.len() > limit as usize {
+        let next_cursor = if items.len() > limit as usize {
             items.pop();
-            items.last().map(|item| item.created_at)
+            items.last().map(|item| GenerationTaskCursor {
+                created_at: item.created_at,
+                id: item.id.clone(),
+            })
         } else {
             None
         };
-        Ok(GenerationTaskPage {
-            items,
-            next_cursor_created_before,
-        })
+        Ok(GenerationTaskPage { items, next_cursor })
     }
 
     /// Naming metadata is independent of the result lifecycle and its immutable media path.
@@ -2069,6 +2045,7 @@ impl Storage {
     }
 
     /// 按对象键查找本地素材（拉取存储桶素材时按对象键去重）。
+    #[cfg(test)]
     pub fn find_local_asset_job_by_object_key(
         &self,
         object_key: &str,
@@ -2093,6 +2070,7 @@ impl Storage {
 
     /// 整桶同步去重：任何应用创建的暂存任务都拥有该对象键时，不能再把对象
     /// 当成用户自行放入桶的新素材。包括入库中转、生成输入与尚在上传的 TOS-only 任务。
+    #[cfg(test)]
     pub fn has_staging_job_by_object_key(&self, object_key: &str) -> BackendResult<bool> {
         if object_key.trim().is_empty() {
             return Ok(false);
@@ -3096,6 +3074,145 @@ mod tests {
     }
 
     #[test]
+    fn history_pagination_keeps_all_tasks_with_identical_creation_times() {
+        let directory = TempDir::new().unwrap();
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        for id in ["task-c", "task-a", "task-b"] {
+            storage
+                .insert_task(NewTask {
+                    id,
+                    canvas_id: "same-time-canvas",
+                    source_node_id: "same-time-node",
+                    operation: GenerationOperation::TextToImage,
+                    provider: &provider,
+                    api_key_ref: &provider.api_key_ref,
+                    model_definition_id: "gpt-image-2",
+                    remote_model_id: Some("gpt-image-2"),
+                    logical_request: &json!({}),
+                })
+                .unwrap();
+        }
+        storage
+            .lock()
+            .unwrap()
+            .execute("UPDATE generation_tasks SET created_at = 2000", [])
+            .unwrap();
+        let mut query: GenerationTaskListQuery = serde_json::from_value(json!({
+            "canvasId": "same-time-canvas", "limit": 2
+        }))
+        .unwrap();
+        let first = storage.list_tasks(&query).unwrap();
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-a", "task-b"]
+        );
+        query.cursor = first.next_cursor;
+        let second = storage.list_tasks(&query).unwrap();
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["task-c"]
+        );
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn history_composite_cursor_preserves_order_and_filters_at_every_page_size() {
+        let directory = TempDir::new().unwrap();
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        for (id, timestamp, canvas, node, status, name) in [
+            ("task-c", 2000, "canvas", "node", "created", "keep"),
+            ("task-new", 3000, "canvas", "node", "created", "keep"),
+            ("task-old", 1000, "canvas", "node", "created", "keep"),
+            ("task-b", 2000, "canvas", "node", "created", "keep"),
+            ("task-a", 2000, "canvas", "node", "created", "keep"),
+            (
+                "task-b-other-canvas",
+                2000,
+                "other",
+                "node",
+                "created",
+                "keep",
+            ),
+            (
+                "task-b-other-node",
+                2000,
+                "canvas",
+                "other",
+                "created",
+                "keep",
+            ),
+            ("task-b-failed", 2000, "canvas", "node", "failed", "keep"),
+            (
+                "task-b-other-name",
+                2000,
+                "canvas",
+                "node",
+                "created",
+                "omit",
+            ),
+            ("task-too-old", 999, "canvas", "node", "created", "keep"),
+            ("task-too-new", 3001, "canvas", "node", "created", "keep"),
+        ] {
+            storage
+                .insert_task(NewTask {
+                    id,
+                    canvas_id: canvas,
+                    source_node_id: node,
+                    operation: GenerationOperation::TextToImage,
+                    provider: &provider,
+                    api_key_ref: &provider.api_key_ref,
+                    model_definition_id: "gpt-image-2",
+                    remote_model_id: Some("gpt-image-2"),
+                    logical_request: &json!({"outputName": name}),
+                })
+                .unwrap();
+            storage
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE generation_tasks SET created_at = ?1, status = ?2 WHERE id = ?3",
+                    params![timestamp, status, id],
+                )
+                .unwrap();
+        }
+        let expected = ["task-new", "task-a", "task-b", "task-c", "task-old"];
+        for limit in [1, 2, 3, 5, 6] {
+            let mut query: GenerationTaskListQuery = serde_json::from_value(json!({
+                "canvasId": "canvas", "sourceNodeId": "node", "statuses": ["created"],
+                "search": "keep", "createdFrom": 1000, "createdTo": 3000, "limit": limit
+            }))
+            .unwrap();
+            let mut ids = Vec::new();
+            for _ in 0..=expected.len() {
+                let page = storage.list_tasks(&query).unwrap();
+                assert!(page.items.len() <= limit as usize);
+                if let Some(cursor) = page.next_cursor.as_ref() {
+                    let last = page.items.last().unwrap();
+                    assert_eq!(cursor.created_at, last.created_at);
+                    assert_eq!(cursor.id, last.id);
+                }
+                ids.extend(page.items.into_iter().map(|item| item.id));
+                query.cursor = page.next_cursor;
+                if query.cursor.is_none() {
+                    break;
+                }
+            }
+            assert!(query.cursor.is_none(), "pagination did not end: {limit}");
+            assert_eq!(ids, expected, "page size: {limit}");
+        }
+    }
+
+    #[test]
     fn history_date_range_filters_before_pagination_and_validates_bounds() {
         let directory = TempDir::new().unwrap();
         let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
@@ -3139,10 +3256,11 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![3000, 2000]
         );
-        assert_eq!(first.next_cursor_created_before, Some(2000));
+        assert_eq!(first.next_cursor.as_ref().unwrap().created_at, 2000);
+        assert_eq!(first.next_cursor.as_ref().unwrap().id, "history-date-2");
         let second = storage
             .list_tasks(&GenerationTaskListQuery {
-                cursor_created_before: first.next_cursor_created_before,
+                cursor: first.next_cursor,
                 ..query.clone()
             })
             .unwrap();
@@ -3154,7 +3272,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1000]
         );
-        assert_eq!(second.next_cursor_created_before, None);
+        assert!(second.next_cursor.is_none());
         for (from, to) in [(Some(3001), Some(3000)), (Some(-1), None), (None, Some(-1))] {
             assert!(
                 storage
@@ -3267,7 +3385,7 @@ mod tests {
         let mut pagination = query("第");
         let first = storage.list_tasks(&pagination).unwrap();
         assert_eq!(first.items[0].id, "named-task-44");
-        pagination.cursor_created_before = first.next_cursor_created_before;
+        pagination.cursor = first.next_cursor;
         assert_eq!(
             storage.list_tasks(&pagination).unwrap().items[0].id,
             "named-task-43"
@@ -3545,6 +3663,7 @@ mod tests {
                 "SD2.0",
                 "海外平台",
                 "火山引擎",
+                "饭众烟 AI（异步出图）",
                 "魔芋AI",
             ]
         );

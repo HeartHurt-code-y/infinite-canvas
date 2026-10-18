@@ -8,14 +8,16 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use regex::Regex;
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{
-    Storage, checked_sql_integer, json_sql_error, now_ms, task_summary_from_row, task_summary_sql,
-    validate_history_date_range,
+    Storage, checked_sql_integer, history_query, json_sql_error, now_ms, task_summary_from_row,
+    task_summary_sql, validate_history_date_range,
 };
 use crate::backend::{
     error::{BackendError, BackendResult},
@@ -33,6 +35,8 @@ CREATE TABLE IF NOT EXISTS workflow_history (
   revision INTEGER NOT NULL CHECK(revision > 0),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  progress REAL NOT NULL DEFAULT 0,
   record_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_history_updated ON workflow_history(updated_at DESC,id);
@@ -53,7 +57,6 @@ CREATE INDEX IF NOT EXISTS idx_workflow_history_tasks_run ON workflow_history_ta
 "#;
 
 const MAX_UNCOMPRESSED_RECORD_BYTES: usize = 256 * 1024 * 1024;
-const MAX_LIST_PAGE_BYTES: usize = 64 * 1024 * 1024;
 const COMPRESS_RECORD_AFTER_BYTES: usize = 1024 * 1024;
 // A serialized record is always a JSON object, so this prefix cannot collide with old rows.
 const COMPRESSED_RECORD_PREFIX: &str = "workflow-history:gzip:v1:";
@@ -90,6 +93,20 @@ impl WorkflowKind {
             Self::Reelbench => "reelbench",
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowHistorySummary {
+    pub id: String,
+    pub canvas_id: String,
+    pub source_node_id: String,
+    pub workflow_kind: WorkflowKind,
+    pub title: String,
+    pub status: String,
+    pub progress: f64,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,7 +175,7 @@ pub struct WorkflowHistoryDetail {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowHistoryPage {
-    pub items: Vec<WorkflowHistoryRecord>,
+    pub items: Vec<WorkflowHistorySummary>,
     pub next_cursor: Option<String>,
 }
 
@@ -321,6 +338,13 @@ fn decode_record_with_limit(
     stored: &str,
     max_uncompressed_bytes: usize,
 ) -> Result<(WorkflowHistoryRecord, usize), Box<dyn std::error::Error + Send + Sync>> {
+    decode_history_json_with_limit(stored, max_uncompressed_bytes)
+}
+
+fn decode_history_json_with_limit<T: serde::de::DeserializeOwned>(
+    stored: &str,
+    max_uncompressed_bytes: usize,
+) -> Result<(T, usize), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(encoded) = stored.strip_prefix(COMPRESSED_RECORD_PREFIX) {
         if stored.len() > MAX_UNCOMPRESSED_RECORD_BYTES {
             return Err("compressed workflow history record exceeds the storage limit".into());
@@ -342,16 +366,84 @@ fn decode_record_with_limit(
     }
 }
 
-fn read_record_with_size(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<(WorkflowHistoryRecord, usize)> {
-    decode_record_with_limit(&row.get::<_, String>(0)?, MAX_UNCOMPRESSED_RECORD_BYTES).map_err(
-        |error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error),
-    )
+fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowHistoryRecord> {
+    decode_record_with_limit(&row.get::<_, String>(0)?, MAX_UNCOMPRESSED_RECORD_BYTES)
+        .map(|(record, _)| record)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error)
+        })
 }
 
-fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowHistoryRecord> {
-    read_record_with_size(row).map(|(record, _)| record)
+/// Older databases have title/progress only inside record_json. Backfill once,
+/// one row at a time; normal listing never reads or decompresses snapshots.
+pub(super) fn migrate_summaries(connection: &Connection) -> BackendResult<()> {
+    let columns = connection
+        .prepare("PRAGMA table_info(workflow_history)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_title = columns.iter().any(|column| column == "title");
+    let has_progress = columns.iter().any(|column| column == "progress");
+    if has_title && has_progress {
+        return Ok(());
+    }
+
+    let transaction = connection.unchecked_transaction()?;
+    if !has_title {
+        transaction.execute_batch(
+            "ALTER TABLE workflow_history ADD COLUMN title TEXT NOT NULL DEFAULT ''",
+        )?;
+    }
+    if !has_progress {
+        transaction.execute_batch(
+            "ALTER TABLE workflow_history ADD COLUMN progress REAL NOT NULL DEFAULT 0",
+        )?;
+    }
+    {
+        let mut statement = transaction.prepare("SELECT id,record_json FROM workflow_history")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let stored: String = row.get(1)?;
+            // Deserialize only the summary; skip the nested snapshot/model values.
+            let (title, progress) = match decode_history_json_with_limit::<WorkflowHistorySummary>(
+                &stored,
+                MAX_UNCOMPRESSED_RECORD_BYTES,
+            ) {
+                Ok((summary, _)) => (
+                    sanitize_text(&summary.title),
+                    if valid_progress(summary.progress).is_ok() {
+                        summary.progress
+                    } else {
+                        0.0
+                    },
+                ),
+                // A broken legacy snapshot must not make the whole catalog unusable.
+                // Keep its bytes intact so the detail/restore path reports the error.
+                Err(_) => ("工作流历史（恢复快照无法读取）".to_string(), 0.0),
+            };
+            transaction.execute(
+                "UPDATE workflow_history SET title=?2,progress=?3 WHERE id=?1",
+                params![id, title, progress],
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
+fn read_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowHistorySummary> {
+    Ok(WorkflowHistorySummary {
+        id: row.get(0)?,
+        canvas_id: row.get(1)?,
+        source_node_id: row.get(2)?,
+        workflow_kind: serde_json::from_value(Value::String(row.get(3)?))
+            .map_err(json_sql_error)?,
+        title: row.get(4)?,
+        status: row.get(5)?,
+        progress: row.get(6)?,
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
+    })
 }
 
 fn write_event(
@@ -449,7 +541,7 @@ impl Storage {
             .ok_or_else(|| BackendError::Conflict("工作流历史版本超出范围".to_string()))?;
         let revision = checked_sql_integer(record.revision, "revision")?;
         let encoded = encode_record(&record)?;
-        transaction.execute("INSERT INTO workflow_history(id,canvas_id,source_node_id,workflow_kind,status,revision,created_at,updated_at,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET source_node_id=excluded.source_node_id,status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at,record_json=excluded.record_json", params![record.id,record.canvas_id,record.source_node_id,record.workflow_kind.as_str(),record.status,revision,record.created_at,record.updated_at,encoded])?;
+        transaction.execute("INSERT INTO workflow_history(id,canvas_id,source_node_id,workflow_kind,status,revision,created_at,updated_at,record_json,title,progress) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(id) DO UPDATE SET source_node_id=excluded.source_node_id,status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at,record_json=excluded.record_json,title=excluded.title,progress=excluded.progress", params![record.id,record.canvas_id,record.source_node_id,record.workflow_kind.as_str(),record.status,revision,record.created_at,record.updated_at,encoded,record.title,record.progress])?;
         if let Some(event) = command.event {
             write_event(&transaction, &record.id, event, record.updated_at)?;
         }
@@ -476,45 +568,18 @@ impl Storage {
                 Value::Null,
             ));
         }
-        let statuses = query
-            .statuses
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?;
+        let sql = history_query::workflows(&query, limit + 1, offset)?;
         let connection = self.lock()?;
-        let mut statement = connection.prepare(
-            "SELECT record_json FROM workflow_history
-            WHERE (?1 IS NULL OR canvas_id=?1)
-            AND (?2 IS NULL OR source_node_id=?2)
-            AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3)))
-            AND (?4 IS NULL OR created_at >= ?4)
-            AND (?5 IS NULL OR created_at <= ?5)
-            ORDER BY updated_at DESC,id LIMIT ?6 OFFSET ?7",
-        )?;
-        let mut rows = statement.query(params![
-            query.canvas_id,
-            query.source_node_id,
-            statuses,
-            query.created_from,
-            query.created_to,
-            limit + 1,
-            offset
-        ])?;
+        let mut statement = connection.prepare(&sql.sql)?;
+        let mut rows = statement.query(params_from_iter(sql.parameters))?;
         let mut items = Vec::new();
-        let mut decoded_bytes = 0usize;
         let mut has_more = false;
         while let Some(row) = rows.next()? {
             if items.len() == limit as usize {
                 has_more = true;
                 break;
             }
-            let (record, size) = read_record_with_size(row)?;
-            if !items.is_empty() && decoded_bytes.saturating_add(size) > MAX_LIST_PAGE_BYTES {
-                has_more = true;
-                break;
-            }
-            decoded_bytes = decoded_bytes.saturating_add(size);
-            items.push(record);
+            items.push(read_summary(row)?);
         }
         let next_cursor = has_more.then(|| offset.saturating_add(items.len() as i64).to_string());
         Ok(WorkflowHistoryPage { items, next_cursor })
@@ -584,7 +649,7 @@ impl Storage {
             checkpoint.insert("error".to_string(), Value::Null);
             checkpoint.insert("updatedAt".to_string(), json!(record.updated_at));
             sanitize_record(&mut record);
-            transaction.execute("UPDATE workflow_history SET status='paused',revision=?2,updated_at=?3,record_json=?4 WHERE id=?1", params![record.id,checked_sql_integer(record.revision,"revision")?,record.updated_at,encode_record(&record)?])?;
+            transaction.execute("UPDATE workflow_history SET status='paused',revision=?2,updated_at=?3,record_json=?4,title=?5,progress=?6 WHERE id=?1", params![record.id,checked_sql_integer(record.revision,"revision")?,record.updated_at,encode_record(&record)?,record.title,record.progress])?;
             write_event(
                 &transaction,
                 &record.id,
@@ -734,6 +799,235 @@ mod tests {
             }),
             record,
         })
+    }
+
+    #[test]
+    fn incremental_version_fixture_survives_database_sanitization() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("history.sqlite")).unwrap();
+        let mut original = record("incremental-versions", "paused");
+        let history: Value =
+            serde_json::from_str(include_str!("fixtures/workflow-version-v2.json")).unwrap();
+        assert_eq!(history["contents"][1]["kind"], "delta");
+        original.node_snapshot["config"]["versionHistory"] = history;
+        save(&storage, original).unwrap();
+        let restored = storage
+            .get_workflow_history("incremental-versions")
+            .unwrap();
+        let encoded = &restored.record.node_snapshot["config"]["versionHistory"];
+        assert_eq!(encoded["version"], 2);
+        assert!(encoded["contents"][0]["value"].get("apiKey").is_none());
+        assert_eq!(
+            encoded["contents"][1]["patch"]["changes"]["checkpoint"]["changes"]["base64"],
+            "<内联图片数据已排除>"
+        );
+        assert_eq!(
+            encoded["contents"][1]["patch"]["changes"]["checkpoint"]["changes"]["b64_json"],
+            "<内联图片数据已排除>"
+        );
+        println!("WORKFLOW_VERSION_SANITIZED={encoded}");
+    }
+
+    #[test]
+    fn lists_summaries_without_reading_recovery_snapshots() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("history.sqlite")).unwrap();
+        for (id, payload) in [
+            ("broken-json", "invalid recovery snapshot".to_string()),
+            (
+                "broken-gzip",
+                format!("{COMPRESSED_RECORD_PREFIX}invalid-gzip"),
+            ),
+        ] {
+            save(&storage, record(id, "paused")).unwrap();
+            storage
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE workflow_history SET record_json=?1 WHERE id=?2",
+                    params![payload, id],
+                )
+                .unwrap();
+        }
+
+        let page = storage
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .expect("listing must not decode recovery snapshots");
+        assert_eq!(page.items.len(), 2);
+        for item in page.items {
+            assert_eq!(item.title, "知识视频工作流");
+            assert_eq!(item.status, "paused");
+            assert_eq!(item.progress, 35.0);
+            let payload = serde_json::to_value(&item).unwrap();
+            assert!(payload.get("nodeSnapshot").is_none());
+            assert!(payload.get("models").is_none());
+            assert!(payload.get("error").is_none());
+            assert!(storage.get_workflow_history(&item.id).is_err());
+        }
+    }
+
+    #[test]
+    fn migrates_legacy_summaries_once_and_keeps_recovery_bytes_intact() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE workflow_history (
+                id TEXT PRIMARY KEY, canvas_id TEXT NOT NULL, source_node_id TEXT NOT NULL,
+                workflow_kind TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL,
+                created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, record_json TEXT NOT NULL
+            )",
+            )
+            .unwrap();
+        let mut plain = record("legacy-plain", "paused");
+        plain.title = "旧版原始 JSON 历史".into();
+        plain.revision = 4;
+        plain.created_at = 100;
+        plain.updated_at = 200;
+        let mut compressed = plain.clone();
+        compressed.id = "legacy-compressed".into();
+        compressed.title = "旧版压缩历史".into();
+        compressed.progress = 82.5;
+        compressed.node_snapshot["config"]["checkpoint"]["script"] =
+            json!("Full original script. ".repeat(60_000));
+        let compressed_bytes = encode_record(&compressed).unwrap();
+        assert!(compressed_bytes.starts_with(COMPRESSED_RECORD_PREFIX));
+        let mut broken = plain.clone();
+        broken.id = "legacy-broken".into();
+        let originals = [
+            (plain.clone(), serde_json::to_string(&plain).unwrap()),
+            (compressed.clone(), compressed_bytes),
+            (broken, "invalid legacy snapshot".to_string()),
+        ];
+        for (original, stored) in &originals {
+            connection.execute(
+                "INSERT INTO workflow_history(id,canvas_id,source_node_id,workflow_kind,status,revision,created_at,updated_at,record_json)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![original.id,original.canvas_id,original.source_node_id,original.workflow_kind.as_str(),original.status,checked_sql_integer(original.revision, "revision").unwrap(),original.created_at,original.updated_at,stored],
+            ).unwrap();
+        }
+        drop(connection);
+
+        let storage = Storage::open(&path).unwrap();
+        let page = storage
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .unwrap();
+        assert_eq!(page.items.len(), 3);
+        for (original, stored) in &originals {
+            let summary = page
+                .items
+                .iter()
+                .find(|item| item.id == original.id)
+                .unwrap();
+            assert_eq!(summary.canvas_id, original.canvas_id);
+            assert_eq!(summary.source_node_id, original.source_node_id);
+            assert_eq!(summary.status, original.status);
+            assert_eq!(summary.created_at, original.created_at);
+            assert_eq!(summary.updated_at, original.updated_at);
+            let persisted: String = storage
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT record_json FROM workflow_history WHERE id=?1",
+                    params![original.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                &persisted, stored,
+                "migration must not rewrite recovery data"
+            );
+            if original.id == "legacy-broken" {
+                assert_eq!(summary.title, "工作流历史（恢复快照无法读取）");
+                assert!(storage.get_workflow_history(&original.id).is_err());
+            } else {
+                assert_eq!(summary.title, original.title);
+                assert_eq!(summary.progress, original.progress);
+                let detail = storage.get_workflow_history(&original.id).unwrap();
+                assert_eq!(detail.record.node_snapshot, original.node_snapshot);
+                assert_eq!(detail.record.revision, original.revision);
+            }
+        }
+        // After migration a damaged snapshot cannot trigger another backfill on reopen.
+        storage
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_history SET record_json='invalid after migration' WHERE id=?1",
+                params![compressed.id],
+            )
+            .unwrap();
+        drop(storage);
+        let reopened = Storage::open(&path).unwrap();
+        let page = reopened
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .unwrap();
+        let summary = page
+            .items
+            .iter()
+            .find(|item| item.id == compressed.id)
+            .unwrap();
+        assert_eq!(summary.title, compressed.title);
+        assert_eq!(summary.progress, compressed.progress);
+        assert!(reopened.get_workflow_history(&compressed.id).is_err());
+    }
+
+    #[test]
+    fn saves_summary_and_snapshot_atomically_and_recovers_consistent_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("history.sqlite")).unwrap();
+        let original = save(&storage, record("atomic-summary", "planning")).unwrap();
+        let mut updated = original.clone();
+        updated.title = "已更新的历史标题".into();
+        updated.progress = 72.5;
+        updated.source_node_id = "node-2".into();
+        updated.node_snapshot["key"] = json!("node-2");
+        let rejected = storage.save_workflow_history(SaveWorkflowHistoryCommand {
+            record: updated.clone(),
+            event: Some(WorkflowHistoryEvent {
+                id: String::new(),
+                phase: String::new(),
+                progress: updated.progress,
+                message: "Invalid event must roll back both writes".into(),
+                error: None,
+                created_at: 0,
+            }),
+        });
+        assert!(rejected.is_err());
+        let page = storage
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .unwrap();
+        assert_eq!(page.items[0].title, original.title);
+        assert_eq!(page.items[0].progress, original.progress);
+        assert_eq!(page.items[0].source_node_id, original.source_node_id);
+        assert_eq!(
+            storage
+                .get_workflow_history(&original.id)
+                .unwrap()
+                .record
+                .revision,
+            1
+        );
+
+        let saved = save(&storage, updated).unwrap();
+        assert!(save(&storage, original).is_err());
+        assert_eq!(storage.recover_workflow_history().unwrap(), 1);
+        let page = storage
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .unwrap();
+        let summary = &page.items[0];
+        let detail = storage.get_workflow_history(&saved.id).unwrap();
+        assert_eq!(summary.title, saved.title);
+        assert_eq!(summary.source_node_id, saved.source_node_id);
+        assert_eq!(summary.progress, saved.progress);
+        assert_eq!(summary.status, "paused");
+        assert_eq!(summary.created_at, saved.created_at);
+        assert_eq!(summary.updated_at, detail.record.updated_at);
+        assert_eq!(
+            detail.record.node_snapshot["config"]["checkpoint"]["shots"][0]["taskId"],
+            "media-existing"
+        );
     }
 
     #[test]
@@ -908,21 +1202,29 @@ mod tests {
             .list_workflow_history(WorkflowHistoryQuery::default())
             .unwrap();
         assert_eq!(listed.items.len(), 1);
-        assert_eq!(
-            listed.items[0].node_snapshot["config"]["versionHistory"]["versions"]
-                .as_array()
+        assert!(
+            serde_json::to_value(&listed.items[0])
                 .unwrap()
-                .len(),
-            24
+                .get("nodeSnapshot")
+                .is_none()
         );
         drop(listed);
         let mut second = saved.clone();
         second.id = "large-product-scene-2".into();
         second.revision = 0;
         save(&storage, second).unwrap();
-        let first_page = storage
+        let all = storage
             .list_workflow_history(WorkflowHistoryQuery {
                 limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(all.items.len(), 2);
+        assert!(all.next_cursor.is_none());
+        assert!(serde_json::to_vec(&all).unwrap().len() < 2048);
+        let first_page = storage
+            .list_workflow_history(WorkflowHistoryQuery {
+                limit: Some(1),
                 ..Default::default()
             })
             .unwrap();
@@ -931,7 +1233,7 @@ mod tests {
         let second_page = storage
             .list_workflow_history(WorkflowHistoryQuery {
                 cursor: first_page.next_cursor.clone(),
-                limit: Some(10),
+                limit: Some(1),
                 ..Default::default()
             })
             .unwrap();

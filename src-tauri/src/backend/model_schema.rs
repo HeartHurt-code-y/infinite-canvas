@@ -5,7 +5,7 @@ use super::{
     gateway_profile::GatewayProfile,
     provider_adapter::{
         ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH, BAILIAN_VIDEO_PATH,
-        DASHSCOPE_VIDEO_ENVELOPE, GRSAI_ADAPTER_ID,
+        DASHSCOPE_VIDEO_ENVELOPE, FZY_ADAPTER_ID, GRSAI_ADAPTER_ID,
     },
     types::GenerationOperation,
 };
@@ -55,6 +55,8 @@ pub enum RequestDialect {
     /// 轮询 `GET /v1/api/result?id={task_id}`；同名模型在聚合网关上走
     /// `/v1/images/generations`，契约必须按连接方言区分。
     Grsai,
+    /// 饭众烟异步出图：图片契约由连接决定，不按型号名推断同步或异步。
+    FzyAi,
 }
 
 impl RequestDialect {
@@ -68,6 +70,8 @@ impl RequestDialect {
             Self::AliyunBailian
         } else if adapter_id == GRSAI_ADAPTER_ID {
             Self::Grsai
+        } else if adapter_id == FZY_ADAPTER_ID {
+            Self::FzyAi
         } else {
             Self::OpenAiCompatible
         }
@@ -174,7 +178,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
         RequestDialect::AliyunBailian => false,
         // Grsai 只承载 gpt-image 系图片契约；图片家族改写在 `apply_image_dialect`
         // 已提前返回，视频契约在这里保持原样（不被误改写成网关端点）。
-        RequestDialect::Grsai => false,
+        RequestDialect::Grsai | RequestDialect::FzyAi => false,
         // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax 在方舟上
         // 没有端点，它们自己的契约保持原样。
         RequestDialect::VolcengineArk => {
@@ -300,6 +304,9 @@ fn apply_bailian_wan_video_dialect(schema: &mut Value, identity: &str) -> bool {
 /// 网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
 /// Grsai 连接例外：端点、轮询与参数整条换成 Grsai 自有协议。
 fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    if dialect == RequestDialect::FzyAi {
+        return apply_fzy_image_dialect(schema);
+    }
     if dialect == RequestDialect::Grsai {
         return apply_grsai_image_dialect(schema, identity);
     }
@@ -326,7 +333,7 @@ fn apply_image_operation_dialect(
     match dialect {
         RequestDialect::AliyunBailian => false,
         // Grsai 连接的图片契约在 `apply_image_dialect` 入口整条改写，不会走到这里。
-        RequestDialect::Grsai => false,
+        RequestDialect::Grsai | RequestDialect::FzyAi => false,
         // 方舟原生图片接口只承载自家 Seedream；其他家族的图片契约保持原样。
         RequestDialect::VolcengineArk => {
             if !is_seedream_image_model(identity) || path != GATEWAY_IMAGE_PATH {
@@ -353,7 +360,7 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
     match dialect {
         RequestDialect::AliyunBailian => false,
         // Grsai 连接不承载文本对话模型，文本契约保持原样。
-        RequestDialect::Grsai => false,
+        RequestDialect::Grsai | RequestDialect::FzyAi => false,
         RequestDialect::VolcengineArk => {
             if !domestic_doubao || path != GATEWAY_CHAT_PATH {
                 return false;
@@ -1507,6 +1514,62 @@ fn async_image_task_parameters() -> Value {
             "order": 2
         }
     })
+}
+
+pub(crate) const FZY_IMAGE_PROFILE: &str = "fzy_image_tasks_v1";
+pub(crate) const FZY_IMAGE_OBSERVE_TEMPLATE: &str = "/v1/images/tasks/{task_id}";
+
+/// https://fzy-ai.pages.dev/api-docs/images-generations
+/// 同一连接的所有图片模型均使用 JSON + images 数组，不沿用同名模型的原生协议。
+fn apply_fzy_image_dialect(schema: &mut Value) -> bool {
+    let mut changed = false;
+    for operation in [
+        GenerationOperation::TextToImage,
+        GenerationOperation::ImageToImage,
+    ] {
+        let Some(slot) = schema.get_mut(operation.as_str()) else {
+            continue;
+        };
+        let mut parameters = async_image_task_parameters();
+        let fields = parameters.as_object_mut().expect("image parameters");
+        fields.insert(
+            "quality".into(),
+            json!({
+                "type": "string", "label": "质量", "default": "auto",
+                "enum": ["auto", "low", "medium", "high"], "order": 3
+            }),
+        );
+        fields.insert("background".into(), json!({
+            "type": "string", "label": "背景（透明填 transparent）", "optional": true, "order": 4
+        }));
+        fields.insert(
+            "mask".into(),
+            json!({
+                "type": "string", "label": "蒙版链接（HTTPS）", "optional": true, "order": 5
+            }),
+        );
+        // 不声明批量 n：接口每次只接收一张，多张沿用应用的独立任务拆分。
+        // 显式参数仍由 normalize_parameters 保留并交给服务端验证。
+        let replacement = json!({
+            "resultType": "image",
+            "requestProfileId": FZY_IMAGE_PROFILE,
+            "profileVersion": 1,
+            "request": {
+                "path": GATEWAY_IMAGE_PATH,
+                "encoding": "json",
+                "parameterContainer": "root",
+                "observePath": FZY_IMAGE_OBSERVE_TEMPLATE,
+                "mediaEncoding": "fzy_image_inputs",
+                "mediaField": "images"
+            },
+            "parameters": parameters
+        });
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Grsai 图片生成 API（gpt-image-2 系列）契约（文档
@@ -4993,6 +5056,50 @@ mod tests {
             json!({ "duration": 5, "channel_extension": true })
         );
         assert!(normalize_parameters(&schema, &json!([])).is_err());
+    }
+
+    #[test]
+    fn fzy_image_dialect_overrides_native_models_and_is_idempotent() {
+        for id in [
+            "gpt-image-2",
+            "gpt-image-2.5-sunburst",
+            "doubao-seedream-5-0-pro-260628",
+            "gemini-3-pro-image-preview",
+            "custom-model",
+        ] {
+            let operations = [
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ];
+            let mut schema =
+                schema_for_enabled_operations(&Value::Null, id, &operations, RequestDialect::FzyAi);
+            for operation in operations {
+                let definition = &schema[operation.as_str()];
+                assert_eq!(definition["requestProfileId"], FZY_IMAGE_PROFILE);
+                assert_eq!(definition["request"]["path"], "/v1/images/generations");
+                assert_eq!(
+                    definition["request"]["observePath"],
+                    "/v1/images/tasks/{task_id}"
+                );
+                assert_eq!(definition["request"]["mediaField"], "images");
+                assert!(definition["parameters"].get("size").is_none());
+                assert!(definition["parameters"].get("n").is_none());
+                let normalized = normalize_parameters(definition, &json!({"quality":"high", "background":"transparent", "mask":"https://example.com/mask.png", "n":1, "future_option":true})).unwrap();
+                assert_eq!(normalized["aspect_ratio"], "1:1");
+                assert_eq!(normalized["quality"], "high");
+                assert_eq!(normalized["n"], 1);
+                assert_eq!(normalized["future_option"], true);
+            }
+            assert!(!apply_request_dialect(
+                &mut schema,
+                id,
+                RequestDialect::FzyAi
+            ));
+        }
+        assert_eq!(
+            RequestDialect::for_adapter(FZY_ADAPTER_ID),
+            RequestDialect::FzyAi
+        );
     }
 
     #[test]

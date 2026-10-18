@@ -527,7 +527,7 @@ export function createXhsCoverWorkflowRunner(
             let attemptedSaveRecovery = false;
             for (let poll = 0; poll < 1800; poll++) {
               abort();
-              const detail = await dependencies.generationClient.get(state().taskId!);
+              const detail = await dependencies.generationClient.getProgress(state().taskId!);
               const saved = detail.results.find(
                 (result) =>
                   result.mediaType === "image" &&

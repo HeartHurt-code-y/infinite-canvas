@@ -923,7 +923,9 @@ impl GenerationTaskService {
                 attempt_id,
                 call_id,
                 tokens,
-                observation: GenerationRemoteObservation::Succeeded { result: first },
+                observation: GenerationRemoteObservation::Succeeded {
+                    result: Box::new(first),
+                },
             },
         )?;
         let event_service = self.clone();
@@ -1212,11 +1214,11 @@ impl GenerationTaskService {
                                 call_id,
                                 tokens,
                                 observation: GenerationRemoteObservation::Succeeded {
-                                    result: self.local_results.pending_text_result(
+                                    result: Box::new(self.local_results.pending_text_result(
                                         task_id,
                                         remote_task_id,
                                         text,
-                                    ),
+                                    )),
                                 },
                             },
                         )?;
@@ -1241,10 +1243,12 @@ impl GenerationTaskService {
                                         call_id,
                                         tokens,
                                         observation: GenerationRemoteObservation::Succeeded {
-                                            result: self.local_results.pending_video_result(
-                                                task_id,
-                                                remote_task_id,
-                                                video_url,
+                                            result: Box::new(
+                                                self.local_results.pending_video_result(
+                                                    task_id,
+                                                    remote_task_id,
+                                                    video_url,
+                                                ),
                                             ),
                                         },
                                     },
@@ -1297,12 +1301,12 @@ impl GenerationTaskService {
                                         call_id,
                                         tokens,
                                         observation: GenerationRemoteObservation::Succeeded {
-                                            result: self
-                                                .local_results
-                                                .pending_video_content_result(
+                                            result: Box::new(
+                                                self.local_results.pending_video_content_result(
                                                     task_id,
                                                     remote_task_id,
                                                 ),
+                                            ),
                                         },
                                     },
                                 )?;
@@ -1342,10 +1346,13 @@ impl GenerationTaskService {
                     self.cleanup_staging_leases(task_id, &staging_leases).await;
                     return Ok(());
                 }
-                "FAILURE" | "FAILED" | "CANCELED" | "CANCELLED" | "VIOLATION" => {
+                "FAILURE" | "FAILED" | "CANCELED" | "CANCELLED" | "VIOLATION" | "EXPIRED" => {
                     let failure = json!({
                         "kind": "remote_generation_failure",
-                        "message": "remote video task reported FAILURE",
+                        "message": if remote_status == "EXPIRED" {
+                            format!("远端{kind}任务已过期，请查看原任务详情并确认结算状态后再决定是否重新生成。")
+                        } else { format!("远端{kind}任务失败，请展开完整报错查看原因。") },
+                        "remoteStatus": observation.remote_status,
                         "remote": observation.failure
                     });
                     error!(

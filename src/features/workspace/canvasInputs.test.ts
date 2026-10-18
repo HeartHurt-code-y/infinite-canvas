@@ -6,6 +6,7 @@ import {
   canvasNodesByKeyFromDocument,
   connectedCanvasPromptText,
   createCanvasInputResolver,
+  createCanvasInputResolverCache,
 } from "./canvasInputs";
 import {
   createKnowledgeVideoWorkflowConfig,
@@ -66,6 +67,268 @@ const edge = (fromKey: string, toKey: string): AssetEdgeData => ({
   id: `${fromKey}->${toKey}`,
   fromKey,
   toKey,
+});
+
+describe("incremental canvas input cache", () => {
+  it("updates slot ordering and missing source/type changes without invalidating disjoint inputs", () => {
+    const cache = createCanvasInputResolverCache();
+    const image: GenNodeData = {
+      key: "image",
+      kind: "image",
+      x: 0,
+      y: 0,
+      config: {
+        modelSelection: model,
+        generationCount: 1,
+        parameterValues: {},
+        catalogResolved: true,
+        inputSlots: ["a", "b"],
+      },
+    };
+    const entries: CanvasNodeEntry[] = [
+      { type: "asset", data: material("a") },
+      { type: "asset", data: material("b") },
+      { type: "gen", data: image },
+      { type: "gen", data: prompt("other", "independent") },
+      { type: "gen", data: prompt("target") },
+    ];
+    const edges = [edge("a", "image"), edge("b", "image"), edge("other", "target")];
+    const initial = cache(canvasNodeIndex(entries), edges);
+    initial("image");
+    const unrelated = initial("target");
+    const reordered: CanvasNodeEntry[] = entries.map((entry) =>
+      entry.data.key === "image"
+        ? { type: "gen", data: { ...image, config: { ...image.config, inputSlots: ["b", "a"] } } }
+        : entry,
+    );
+    let resolver = cache(canvasNodeIndex(reordered), edges);
+    expect(resolver("image").media.map((item) => [item.sourceKey, item.slotIndex])).toEqual([
+      ["b", 0],
+      ["a", 1],
+    ]);
+    expect(resolver("target")).toBe(unrelated);
+    const missing = reordered.filter((entry) => entry.data.key !== "a");
+    resolver = cache(canvasNodeIndex(missing), edges);
+    expect(resolver("image").media.map((item) => item.sourceKey)).toEqual(["b"]);
+    expect(resolver("target")).toBe(unrelated);
+    const changedType: CanvasNodeEntry[] = missing.map((entry) =>
+      entry.data.key === "other" ? { type: "asset", data: material("other") } : entry,
+    );
+    const index = canvasNodeIndex(changedType);
+    resolver = cache(index, edges);
+    expect(resolver("target")).toEqual(createCanvasInputResolver(index, edges)("target"));
+    expect(resolver("target").texts).toHaveLength(0);
+    expect(resolver("target").media).toHaveLength(1);
+  });
+  it("invalidates only successors and keeps old snapshots stable", () => {
+    const cache = createCanvasInputResolverCache();
+    const entries: CanvasNodeEntry[] = [
+      { type: "asset", data: material("a") },
+      { type: "asset", data: material("b") },
+      { type: "result", data: { key: "relay", x: 0, y: 0 } },
+      { type: "gen", data: prompt("left") },
+      { type: "gen", data: prompt("right") },
+    ];
+    const edges = [edge("a", "relay"), edge("relay", "left"), edge("b", "right")];
+    const initialIndex = canvasNodeIndex(entries);
+    const initial = cache(initialIndex, edges);
+    const left = initial("left"),
+      right = initial("right");
+    const nextEntries: CanvasNodeEntry[] = [
+      { type: "asset", data: { ...material("a"), name: "edited" } },
+      ...entries.slice(1),
+    ];
+    const index = canvasNodeIndex(nextEntries);
+    const next = cache(index, edges);
+    expect(next("left")).not.toBe(left);
+    expect(next("right")).toBe(right);
+    expect(next("left")).toEqual(createCanvasInputResolver(index, edges)("left"));
+    expect(initial("left")).toBe(left);
+    expect(initial("left").media[0]?.name).toBe("a");
+    expect(cache(initialIndex, edges)).toBe(initial);
+  });
+
+  it("handles edge removal/reordering and leaves other components cached", () => {
+    const cache = createCanvasInputResolverCache();
+    const index = canvasNodeIndex([
+      { type: "asset", data: material("a") },
+      { type: "asset", data: material("b") },
+      { type: "asset", data: material("c") },
+      { type: "gen", data: prompt("left") },
+      { type: "gen", data: prompt("right") },
+    ]);
+    const original = [edge("a", "left"), edge("b", "left"), edge("c", "right")];
+    const before = cache(index, original);
+    const right = before("right"),
+      left = before("left");
+    const reordered = [original[2]!, original[1]!, original[0]!];
+    const after = cache(index, reordered);
+    expect(after("right")).toBe(right);
+    expect(after("left")).not.toBe(left);
+    expect(after("left").media.map((input) => input.sourceKey)).toEqual(["b", "a"]);
+    const removed = cache(index, [original[2]!, original[0]!]);
+    expect(removed("right")).toBe(right);
+    expect(removed("left").media.map((input) => input.sourceKey)).toEqual(["a"]);
+  });
+
+  it("tracks output-to-producer dependencies while provenance keeps selected outputs pinned", () => {
+    const cache = createCanvasInputResolverCache();
+    const selected = output("old", "producer", "old-task");
+    let entries: CanvasNodeEntry[] = [
+      { type: "gen", data: prompt("producer", "original") },
+      { type: "output", data: selected },
+      { type: "gen", data: prompt("live") },
+      { type: "gen", data: prompt("pinned") },
+      { type: "asset", data: material("other") },
+      { type: "gen", data: prompt("unrelated") },
+    ];
+    const edges = [
+      edge("producer", "live"),
+      edge("producer", "old"),
+      edge("old", "pinned"),
+      edge("other", "unrelated"),
+    ];
+    const original = cache(canvasNodeIndex(entries), edges);
+    const pinned = original("pinned"),
+      unrelated = original("unrelated");
+    original("live");
+    entries = [{ type: "gen", data: prompt("producer", "edited") }, ...entries.slice(1)];
+    let current = cache(canvasNodeIndex(entries), edges);
+    expect(current("pinned")).toBe(pinned);
+    expect(current("unrelated")).toBe(unrelated);
+    expect(current("live").texts[0]?.text).toBe("edited");
+    entries = [...entries, { type: "output", data: output("new", "producer", "new-task") }];
+    const index = canvasNodeIndex(entries);
+    current = cache(index, edges);
+    expect(current("pinned")).toBe(pinned);
+    expect(current("unrelated")).toBe(unrelated);
+    expect(current("live").media.map((item) => item.sourceKey)).toEqual(["new"]);
+    expect(current("live")).toEqual(createCanvasInputResolver(index, edges)("live"));
+  });
+
+  it("updates empty placeholders, late old layers and producer reassignment without staleness", () => {
+    const cache = createCanvasInputResolverCache();
+    const placeholder = { ...output("new", "p", "new-task"), finalPath: null };
+    let entries: CanvasNodeEntry[] = [
+      { type: "gen", data: prompt("p") },
+      { type: "gen", data: prompt("q") },
+      { type: "output", data: output("old", "p", "old-task") },
+      { type: "output", data: placeholder },
+      { type: "gen", data: prompt("left") },
+      { type: "gen", data: prompt("right") },
+    ];
+    const edges = [edge("p", "left"), edge("q", "right")];
+    let resolver = cache(canvasNodeIndex(entries), edges);
+    expect(resolver("left").media.map((item) => item.sourceKey)).toEqual(["old"]);
+    resolver("right");
+    entries = entries.map((entry) =>
+      entry.data.key === "new"
+        ? { type: "output", data: { ...placeholder, finalPath: "C:/new.png" } }
+        : entry,
+    );
+    entries.push({ type: "output", data: output("old-layer", "p", "old-task") });
+    resolver = cache(canvasNodeIndex(entries), edges);
+    expect(resolver("left").media.map((item) => item.sourceKey)).toEqual(["new"]);
+    entries = entries.map((entry) =>
+      entry.type === "output" && entry.data.key === "new"
+        ? { ...entry, data: { ...entry.data, sourceNodeId: "q" } }
+        : entry,
+    );
+    const index = canvasNodeIndex(entries);
+    resolver = cache(index, edges);
+    for (const key of ["left", "right"])
+      expect(resolver(key)).toEqual(createCanvasInputResolver(index, edges)(key));
+    expect(resolver("right").media.map((item) => item.sourceKey)).toEqual(["new"]);
+  });
+
+  it("shares inputs across real store layout writes and isolates semantic edits/undo between canvases", async () => {
+    const first = createCanvasState(),
+      second = createCanvasState();
+    for (const canvas of [first, second])
+      canvas.commands.insertSubgraph(
+        [
+          { type: "asset", data: material("a") },
+          { type: "asset", data: material("b") },
+          { type: "gen", data: prompt("left") },
+          { type: "gen", data: prompt("right") },
+        ],
+        [edge("a", "left"), edge("b", "right")],
+      );
+    const original = first.getSnapshot();
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const right = original.resolveInputs("right");
+    const isolated = second.getSnapshot().resolveInputs("left");
+    first.commands.patchNode("asset", "a", (node) => ({ ...node, x: 100 }));
+    expect(first.getSnapshot().resolveInputs).toBe(original.resolveInputs);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    first.commands.patchNode("asset", "a", (node) => ({ ...node, name: "edited" }));
+    expect(first.getSnapshot().resolveInputs("right")).toBe(right);
+    expect(first.getSnapshot().resolveInputs("left").media[0]?.name).toBe("edited");
+    expect(second.getSnapshot().resolveInputs("left")).toBe(isolated);
+    expect(isolated.media[0]?.name).toBe("a");
+    first.commands.undo();
+    expect(first.getSnapshot().resolveInputs("right")).toBe(right);
+    expect(first.getSnapshot().resolveInputs("left").media[0]?.name).toBe("a");
+  });
+
+  it("evaluates deep ancestry without recursive stack growth", () => {
+    const count = 12_000;
+    const entries: CanvasNodeEntry[] = [
+      { type: "asset", data: material("root") },
+      { type: "asset", data: material("end") },
+      { type: "gen", data: prompt("target") },
+      ...Array.from({ length: count }, (_, i): CanvasNodeEntry => ({
+        type: "result",
+        data: { key: `relay${i}`, x: 0, y: 0 },
+      })),
+    ];
+    const edges = [
+      edge("root", "relay0"),
+      ...Array.from({ length: count - 1 }, (_, i) => edge(`relay${i}`, `relay${i + 1}`)),
+      edge(`relay${count - 1}`, "end"),
+      edge("end", "target"),
+    ];
+    const resolved = createCanvasInputResolverCache()(canvasNodeIndex(entries), edges)("target");
+    expect(resolved.media.map((item) => item.sourceKey)).toEqual(["end", "root"]);
+  });
+
+  it("matches fresh evaluation through deterministic node/edge mutations, cycles and diamonds", () => {
+    const cache = createCanvasInputResolverCache();
+    let seed = 8127;
+    const random = (max: number) => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed % max;
+    };
+    let entries: CanvasNodeEntry[] = Array.from({ length: 24 }, (_, i) =>
+      i % 3
+        ? { type: "gen", data: prompt(`n${i}`, String(i)) }
+        : { type: "asset", data: material(`n${i}`) },
+    );
+    let edges: AssetEdgeData[] = Array.from({ length: 24 }, (_, i) =>
+      edge(`n${i}`, `n${(i + 1) % 24}`),
+    );
+    for (let iteration = 0; iteration < 60; iteration += 1) {
+      if (iteration % 3 === 0) {
+        const index = random(entries.length);
+        const entry = entries[index]!;
+        entries = entries.map((item, i) =>
+          i !== index
+            ? item
+            : entry.type === "asset"
+              ? { ...entry, data: { ...entry.data, name: `edit${iteration}` } }
+              : { type: "gen", data: prompt(entry.data.key, `edit${iteration}`) },
+        );
+      } else if (iteration % 3 === 1) {
+        const next = edge(`n${random(24)}`, `n${random(24)}`);
+        edges = [...edges.filter((item) => item.id !== next.id), next];
+      } else edges = edges.filter((_, index) => index !== random(edges.length)).reverse();
+      const index = canvasNodeIndex(entries);
+      const incremental = cache(index, edges),
+        fresh = createCanvasInputResolver(index, edges);
+      for (const entry of entries)
+        expect(incremental(entry.data.key)).toEqual(fresh(entry.data.key));
+    }
+  });
 });
 
 describe("unrestricted canvas payload graph", () => {

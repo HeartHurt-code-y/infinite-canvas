@@ -12,6 +12,10 @@ import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
 import type { AgentState } from "../workspace/agent/agentTypes";
 import {
+  createCanvasInputResolverCache,
+  type CanvasInputResolver,
+} from "../workspace/canvasInputs";
+import {
   initializeWorkflowVersions,
   mergeWorkflowVersionHistory,
   recordWorkflowVersion,
@@ -190,6 +194,7 @@ export interface CanvasGraphReadModel {
 }
 
 export interface CanvasReadModel {
+  readonly resolveInputs: CanvasInputResolver;
   readonly nodes: CanvasNodeLists;
   /** 连线语义索引；布局变化时引用保持稳定，不应用它读取最新 x/y/measured。 */
   readonly nodeByKey: CanvasNodesByKey;
@@ -588,13 +593,25 @@ function canvasGraph(edges: readonly AssetEdgeData[]): CanvasGraphReadModel {
 }
 
 const readModelCache = new WeakMap<CanvasStoreState, CanvasReadModel>();
+// Store action identities are stable across edits/undo and unique to each canvas owner.
+const inputResolverOwners = new WeakMap<
+  CanvasStoreState["addNode"],
+  ReturnType<typeof createCanvasInputResolverCache>
+>();
 
 function canvasReadModel(state: CanvasStoreState): CanvasReadModel {
   const cached = readModelCache.get(state);
   if (cached != null) return cached;
+  let inputCache = inputResolverOwners.get(state.addNode);
+  if (!inputCache) {
+    inputCache = createCanvasInputResolverCache();
+    inputResolverOwners.set(state.addNode, inputCache);
+  }
+  const nodeByKey = canvasNodesByKey(state.nodesById);
   const model: CanvasReadModel = {
+    resolveInputs: inputCache(nodeByKey, state.assetEdges),
     nodes: canvasNodeLists(state.nodesById),
-    nodeByKey: canvasNodesByKey(state.nodesById),
+    nodeByKey,
     graph: canvasGraph(state.assetEdges),
     view: { zoom: state.zoom, pan: state.pan },
     selection: { nodeKey: state.selectedNodeKey, edgeId: state.selectedEdgeId },

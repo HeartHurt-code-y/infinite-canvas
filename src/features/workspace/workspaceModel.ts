@@ -423,7 +423,8 @@ export function isNodeRectAvailable(
 
 /**
  * 从用户指定的理想左上角出发，就近寻找不与任何已有节点相交的位置。
- * 候选坐标取自每个已有节点的四条外边界；无限画布上最外侧候选必然可用。
+ * 每个候选 x 上按 y 扫描，每个障碍只激活一次，不再逐候选遍历全部节点。
+ * 最坏时间 O(N²)，额外空间 O(N)；无限画布上最外侧候选必然可用。
  */
 export function nearestAvailableNodePosition(
   desired: CanvasNodeRect,
@@ -431,25 +432,56 @@ export function nearestAvailableNodePosition(
 ): { x: number; y: number } {
   if (isNodeRectAvailable(desired, occupied)) return { x: desired.x, y: desired.y };
 
-  const candidateXs = [desired.x];
-  const candidateYs = [desired.y];
-  for (const node of occupied) {
-    // 同距离时优先放在右侧/下方，连续添加时布局方向更符合阅读顺序。
-    candidateXs.push(node.x + node.width + NEW_NODE_GAP, node.x - desired.width - NEW_NODE_GAP);
-    candidateYs.push(node.y + node.height + NEW_NODE_GAP, node.y - desired.height - NEW_NODE_GAP);
-  }
+  const candidateXs = new Set([desired.x]);
+  const candidateYs = new Set([desired.y]);
+  const obstacles = occupied.map((node) => {
+    const { x, y, width, height } = node;
+    const right = x + width + NEW_NODE_GAP;
+    const bottom = y + height + NEW_NODE_GAP;
+    // Set 去重并保留原顺序，等距离时仍按原候选顺序选择。
+    candidateXs.add(right);
+    candidateXs.add(x - desired.width - NEW_NODE_GAP);
+    candidateYs.add(bottom);
+    candidateYs.add(y - desired.height - NEW_NODE_GAP);
+    return { left: x, right, top: y, bottom };
+  });
+  obstacles.sort((a, b) => a.top - b.top);
+  const sortedYs = Array.from(candidateYs, (y, order) => ({ y, order })).sort((a, b) => a.y - b.y);
 
   let best: { x: number; y: number } | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const x of candidateXs) {
-    for (const y of candidateYs) {
-      const candidate = { ...desired, x, y };
-      if (!isNodeRectAvailable(candidate, occupied)) continue;
-      const distance = (x - desired.x) ** 2 + (y - desired.y) ** 2;
-      if (distance < bestDistance) {
-        best = { x, y };
-        bestDistance = distance;
+    const distanceX = (x - desired.x) ** 2;
+    if (distanceX >= bestDistance) continue;
+    const right = x + desired.width + NEW_NODE_GAP;
+    let obstacleIndex = 0;
+    let blockedUntil = -Infinity;
+    let columnY = desired.y;
+    let columnDistance = Infinity;
+    let columnYOrder = Infinity;
+    for (const { y, order } of sortedYs) {
+      // y 单调递增，因此每个障碍只经过一次；此列的两个扫描合计 O(N)。
+      // 沿用原碰撞公式的加法顺序，避免小数边界因减法反推产生舍入差异。
+      while (
+        obstacleIndex < obstacles.length &&
+        y + desired.height + NEW_NODE_GAP > obstacles[obstacleIndex]!.top
+      ) {
+        const obstacle = obstacles[obstacleIndex++]!;
+        if (right > obstacle.left && x < obstacle.right) {
+          blockedUntil = Math.max(blockedUntil, obstacle.bottom);
+        }
       }
+      if (y < blockedUntil) continue;
+      const distance = distanceX + (y - desired.y) ** 2;
+      if (distance < columnDistance || (distance === columnDistance && order < columnYOrder)) {
+        columnY = y;
+        columnDistance = distance;
+        columnYOrder = order;
+      }
+    }
+    if (columnDistance < bestDistance) {
+      best = { x, y: columnY };
+      bestDistance = columnDistance;
     }
   }
 

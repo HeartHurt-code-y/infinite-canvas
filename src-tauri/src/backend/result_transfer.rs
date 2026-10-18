@@ -191,8 +191,19 @@ async fn start_fresh(
                 policy.max_parts,
                 redact_url_string(url)
             );
-            return download_parallel(client, url, auth, part_path, total, &etag, policy, progress)
-                .await;
+            return download_parallel(
+                DownloadRequest {
+                    client,
+                    url,
+                    auth,
+                    part_path,
+                },
+                total,
+                &etag,
+                policy,
+                progress,
+            )
+            .await;
         }
         return stream_full(client, url, auth, part_path, policy.stall, progress).await;
     }
@@ -270,16 +281,26 @@ async fn resume_from(
     stream_into(&mut file, response, total, stall, progress).await
 }
 
-async fn download_parallel(
+struct DownloadRequest<'a> {
     client: reqwest::Client,
-    url: &str,
-    auth: &ResultDownloadAuth,
-    part_path: &Path,
+    url: &'a str,
+    auth: &'a ResultDownloadAuth,
+    part_path: &'a Path,
+}
+
+async fn download_parallel(
+    request: DownloadRequest<'_>,
     total: u64,
     etag: &str,
     policy: TransferPolicy,
     progress: &ProgressEmitter,
 ) -> BackendResult<()> {
+    let DownloadRequest {
+        client,
+        url,
+        auth,
+        part_path,
+    } = request;
     let ranges = split_ranges(total, policy.max_parts);
     let marker = parallel_marker_path(part_path);
     tokio::fs::write(&marker, b"parallel download incomplete").await?;
@@ -295,10 +316,12 @@ async fn download_parallel(
         let etag = etag.to_string();
         async move {
             download_span(
-                &client,
-                &url,
-                &auth,
-                &path,
+                DownloadRequest {
+                    client,
+                    url: &url,
+                    auth: &auth,
+                    part_path: &path,
+                },
                 start,
                 end,
                 total,
@@ -317,10 +340,7 @@ async fn download_parallel(
 }
 
 async fn download_span(
-    client: &reqwest::Client,
-    url: &str,
-    auth: &ResultDownloadAuth,
-    part_path: &Path,
+    request: DownloadRequest<'_>,
     start: u64,
     end: u64,
     total: u64,
@@ -328,8 +348,14 @@ async fn download_span(
     stall: Duration,
     progress: &ProgressEmitter,
 ) -> BackendResult<()> {
-    let response = send_range(
+    let DownloadRequest {
         client,
+        url,
+        auth,
+        part_path,
+    } = request;
+    let response = send_range(
+        &client,
         url,
         auth,
         start,
@@ -680,12 +706,14 @@ async fn http_error(status: u16, response: reqwest::Response) -> BackendError {
     )
 }
 
+type ProgressCallback = Arc<Mutex<Box<dyn FnMut(TransferProgress) + Send>>>;
+
 struct ProgressEmitter {
     started: Instant,
     last_emit: Arc<Mutex<Instant>>,
     received: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
-    on_progress: Arc<Mutex<Box<dyn FnMut(TransferProgress) + Send>>>,
+    on_progress: ProgressCallback,
 }
 
 impl ProgressEmitter {

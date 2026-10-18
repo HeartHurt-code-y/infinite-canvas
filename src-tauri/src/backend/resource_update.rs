@@ -21,6 +21,8 @@ use tokio::time::timeout;
 use url::Url;
 use uuid::Uuid;
 
+use super::runtime_components::RuntimeReadyProbe;
+
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILES: usize = 200_000;
 const MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
@@ -309,7 +311,9 @@ fn safe_path(value: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-fn component_spec(name: &str) -> Option<(&'static str, &'static str, fn(&Path) -> bool)> {
+type ComponentSpec = (&'static str, &'static str, RuntimeReadyProbe);
+
+fn component_spec(name: &str) -> Option<ComponentSpec> {
     match name {
         "blender" => Some((
             "blender",
@@ -514,6 +518,7 @@ async fn prepare_component(
     }
     let lock = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(component_dir.join(".migration.lock"))

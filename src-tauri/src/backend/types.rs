@@ -605,6 +605,13 @@ pub struct GenerationProgressResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct GenerationTaskCursor {
+    pub created_at: i64,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerationTaskListQuery {
     pub search: Option<String>,
     pub canvas_id: Option<String>,
@@ -612,7 +619,7 @@ pub struct GenerationTaskListQuery {
     pub statuses: Option<Vec<GenerationTaskStatus>>,
     pub created_from: Option<i64>,
     pub created_to: Option<i64>,
-    pub cursor_created_before: Option<i64>,
+    pub cursor: Option<GenerationTaskCursor>,
     #[serde(default = "default_page_size")]
     pub limit: u32,
 }
@@ -625,7 +632,7 @@ fn default_page_size() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskPage {
     pub items: Vec<GenerationTaskSummary>,
-    pub next_cursor_created_before: Option<i64>,
+    pub next_cursor: Option<GenerationTaskCursor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

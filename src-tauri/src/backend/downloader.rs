@@ -276,6 +276,7 @@ pub struct VideoDownloadService {
 }
 
 impl VideoDownloadService {
+    #[cfg(test)]
     pub fn new(
         downloads_dir: PathBuf,
         engine_dir: PathBuf,
@@ -593,7 +594,7 @@ impl VideoDownloadService {
         super::credentials::write_private_file(private.path(), &contents)?;
         private.as_file_mut().sync_all()?;
         let private = private.into_temp_path();
-        std::fs::rename(private.to_path_buf(), self.cookies_path())?;
+        std::fs::rename(&private, self.cookies_path())?;
         if self.cookie_browser() != Some(VideoCookieBrowser::Auto) {
             self.set_cookie_browser(None)?;
         }
@@ -1088,7 +1089,7 @@ impl VideoDownloadService {
                             }
                         }
                         VideoCookieSource::ManualFile(original) => {
-                            let private = if let Some(private) = _private_cookie.as_ref() {
+                            if let Some(private) = _private_cookie.as_ref() {
                                 AutoSourceSelection {
                                     source: VideoCookieSource::ManualFile(private.to_path_buf()),
                                     private_cookie: None,
@@ -1114,8 +1115,7 @@ impl VideoDownloadService {
                                     source: VideoCookieSource::ManualFile(private.to_path_buf()),
                                     private_cookie: Some(private),
                                 }
-                            };
-                            private
+                            }
                         }
                         source => AutoSourceSelection {
                             source: source.clone(),
@@ -1593,9 +1593,7 @@ impl VideoDownloadService {
         login_used: bool,
         login_captured: &mut Option<PathBuf>,
     ) -> Option<String> {
-        let Some(site) = browser_login::login_capture_required(url, diagnostics) else {
-            return None;
-        };
+        let site = browser_login::login_capture_required(url, diagnostics)?;
         if login_used {
             return Some(
                 "已尝试过自动登录，站点仍然拦截。请从浏览器导出 cookies.txt 手动导入后重试。"
@@ -1868,7 +1866,7 @@ fn parse_douyin_browser_output(input_url: &str, stdout: &[u8]) -> Option<Resolve
         return None;
     }
     let result: Value = serde_json::from_slice(stdout).ok()?;
-    if result.get("ok")?.as_bool()? != true {
+    if !result.get("ok")?.as_bool()? {
         return None;
     }
     let video_id = result.get("videoId")?.as_str()?;
@@ -1878,7 +1876,7 @@ fn parse_douyin_browser_output(input_url: &str, stdout: &[u8]) -> Option<Resolve
     let input = url::Url::parse(input_url).ok()?;
     if let Some(input_id) = input
         .path_segments()
-        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back())
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
         .filter(|segment| segment.len() >= 12 && segment.bytes().all(|byte| byte.is_ascii_digit()))
     {
         if input_id != video_id {
@@ -2069,10 +2067,9 @@ fn auto_failure_message(url: &str, failures: &[String]) -> String {
             .any(|failure| failure.to_ascii_lowercase().contains("fresh cookies"))
     {
         "抖音详情接口未返回视频；yt-dlp 即使收到有效 Cookies 也可能报“Fresh cookies”。请先确认链接在浏览器中可播放，若可播放则可能是站点验证或当前提取器限制，重新导入 Cookies 不保证解决。"
-    } else if let Some(hint) = super::xiaohongshu::failure_hint(url, &failure_details) {
-        hint
     } else {
-        "请检查链接、浏览器登录态或站点限制。"
+        super::xiaohongshu::failure_hint(url, &failure_details)
+            .unwrap_or("请检查链接、浏览器登录态或站点限制。")
     };
     format!("自动 Cookie 来源预检均未找到可访问视频，尚未开始下载。{guidance}{failure_details}")
 }

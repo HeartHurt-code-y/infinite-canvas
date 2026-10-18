@@ -1,6 +1,7 @@
 import type { GenerationOperation, ModelOperationSchema } from "./backend";
 import { perTaskVideoProfile } from "./perTaskVideo";
 import { isSeedanceDraftModel, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
+import { FZY_IMAGE_PROFILE } from "./providerAdapters";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -1146,6 +1147,7 @@ export function modelParameterCapabilities(
   const operationDefinition = isRecord(operationValue) ? operationValue : null;
   const declaredParameters = operationDefinition?.["parameters"];
   const draftProfile = operationDefinition?.["requestProfileId"] === SEEDANCE_DRAFT_PROFILE_ID;
+  const fzyProfile = operationDefinition?.["requestProfileId"] === FZY_IMAGE_PROFILE;
   if (!isRecord(declaredParameters)) {
     if (operationDefinition && !perTaskVideoProfile(modelId) && !isPixverseVideoModel(modelId))
       return [];
@@ -1155,9 +1157,11 @@ export function modelParameterCapabilities(
       .sort((left, right) => left.order - right.order);
   }
 
-  const fallback = draftProfile
-    ? seedanceDraftVideoParameters()
-    : fallbackParameters(modelId, operation);
+  const fallback = fzyProfile
+    ? {}
+    : draftProfile
+      ? seedanceDraftVideoParameters()
+      : fallbackParameters(modelId, operation);
   // 升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
   // 定义带有显式 `parameters: {}`；通用模型仍把空对象视为权威声明，但这些已知契约
   // 需要立即回退到当前档案，避免节点参数区空白。

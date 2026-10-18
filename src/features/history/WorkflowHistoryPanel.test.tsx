@@ -7,6 +7,7 @@ import type {
   WorkflowHistoryClient,
   WorkflowHistoryDetail,
   WorkflowHistoryRecord,
+  WorkflowHistorySummary,
 } from "../../lib/workflowHistory";
 import { completedTask, node } from "../../test/videoWorkflowFixtures";
 import { HistoryDialog } from "./HistoryDialog";
@@ -83,10 +84,24 @@ function details(item = record()): WorkflowHistoryDetail {
   };
 }
 
+function summary(item: WorkflowHistoryRecord): WorkflowHistorySummary {
+  return {
+    id: item.id,
+    canvasId: item.canvasId,
+    sourceNodeId: item.sourceNodeId,
+    workflowKind: item.workflowKind,
+    title: item.title,
+    status: item.status,
+    progress: item.progress,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+  };
+}
+
 function createClient(detail = details()) {
   return {
     list: vi.fn<WorkflowHistoryClient["list"]>(() =>
-      Promise.resolve({ items: [detail.record], nextCursor: null }),
+      Promise.resolve({ items: [summary(detail.record)], nextCursor: null }),
     ),
     get: vi.fn<WorkflowHistoryClient["get"]>(() => Promise.resolve(detail)),
     save: vi.fn<WorkflowHistoryClient["save"]>((command) => Promise.resolve(command.record)),
@@ -95,6 +110,32 @@ function createClient(detail = details()) {
 }
 
 describe("WorkflowHistoryPanel", () => {
+  it("loads only the selected snapshot while listing and paging through summaries", async () => {
+    const first = details(record("paused", "first"));
+    const second = details(record("done", "second"));
+    const third = record("failed", "third");
+    const client = createClient(first);
+    client.list
+      .mockResolvedValueOnce({
+        items: [summary(first.record), summary(second.record)],
+        nextCursor: "2",
+      })
+      .mockResolvedValueOnce({ items: [summary(third)], nextCursor: null });
+    client.get.mockImplementation((id) => Promise.resolve(id === first.record.id ? first : second));
+    render(<WorkflowHistoryPanel client={client} onSelectGenerationTask={vi.fn()} />);
+
+    await screen.findByRole("heading", { name: first.record.title });
+    expect(client.get).toHaveBeenCalledExactlyOnceWith(first.record.id);
+    fireEvent.click(screen.getByRole("button", { name: "加载更多工作流" }));
+    await screen.findByText(third.title, { selector: ".history-item__title" });
+    expect(client.get).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByText(second.record.title, { selector: ".history-item__title" }));
+    await screen.findByRole("heading", { name: second.record.title });
+    expect(client.get).toHaveBeenCalledTimes(2);
+    expect(client.get).toHaveBeenLastCalledWith(second.record.id);
+  });
+
   it("keeps persisted model failures fully expanded in both failure details and the timeline", async () => {
     const original = {
       kind: "provider",
@@ -474,7 +515,7 @@ describe("WorkflowHistoryPanel", () => {
     };
     const generation: GenerationTaskClient = {
       start: vi.fn(),
-      list: vi.fn(() => Promise.resolve({ items: [other.summary], nextCursorCreatedBefore: null })),
+      list: vi.fn(() => Promise.resolve({ items: [other.summary], nextCursor: null })),
       get: vi.fn((id) => Promise.resolve(id === linked.summary.id ? linked : other)),
       getProgress: vi.fn(),
       queryVideoTaskNow: vi.fn(),
@@ -503,7 +544,7 @@ describe("WorkflowHistoryPanel", () => {
     const workflow = createClient();
     const generation: GenerationTaskClient = {
       start: vi.fn(),
-      list: vi.fn(() => Promise.resolve({ items: [], nextCursorCreatedBefore: null })),
+      list: vi.fn(() => Promise.resolve({ items: [], nextCursor: null })),
       get: vi.fn(),
       getProgress: vi.fn(),
       queryVideoTaskNow: vi.fn(),

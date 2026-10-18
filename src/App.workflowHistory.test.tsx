@@ -223,7 +223,7 @@ beforeEach(() => {
   mocks.historyList.mockResolvedValue({ items: [record], nextCursor: null });
   mocks.historyGet.mockResolvedValue({ record, events: [], tasks: [] });
   mocks.recover.mockResolvedValue(0);
-  mocks.listTasks.mockResolvedValue({ items: [], nextCursorCreatedBefore: null });
+  mocks.listTasks.mockResolvedValue({ items: [], nextCursor: null });
   mocks.pickMaterials.mockReset().mockResolvedValue([]);
   mocks.listCanvases.mockResolvedValue([
     { id: CANVAS_ID, title: "测试画布", revision: 1, createdAt: 1, updatedAt: 1 },

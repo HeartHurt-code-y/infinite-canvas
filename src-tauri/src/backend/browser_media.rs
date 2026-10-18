@@ -181,7 +181,7 @@ pub(super) fn site_cookies_from_file(
         let Ok(expires) = expires.parse::<i64>() else {
             continue;
         };
-        if expires < 0 || expires > 4_102_444_800 || (expires > 0 && expires <= now) {
+        if !(0..=4_102_444_800).contains(&expires) || (expires > 0 && expires <= now) {
             continue;
         }
         let host = raw_domain.trim_start_matches('.').to_ascii_lowercase();
@@ -298,7 +298,7 @@ pub(super) fn read_rednote_cdn_cookies(file: &Path) -> Result<RednoteCdnCookies,
         let Ok(expires) = expires.parse::<i64>() else {
             continue;
         };
-        if expires < 0 || expires > 4_102_444_800 || (expires > 0 && expires <= now) {
+        if !(0..=4_102_444_800).contains(&expires) || (expires > 0 && expires <= now) {
             continue;
         }
         entries.push(RednoteCdnCookie {
@@ -502,7 +502,7 @@ mod tests {
         assert!(serialized.contains("xhs-secret"));
         assert!(!serialized.contains("douyin-secret"));
         let scoped = scoped_cookie_copy(file.path(), SiteResolver::Douyin).unwrap();
-        let scoped_text = std::fs::read_to_string(scoped.to_path_buf()).unwrap();
+        let scoped_text = std::fs::read_to_string(&scoped).unwrap();
         assert!(scoped_text.contains("douyin-secret"));
         assert!(scoped_text.contains("cdn-secret"));
         assert!(!scoped_text.contains("xhs-secret"));

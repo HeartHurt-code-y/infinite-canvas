@@ -19,6 +19,7 @@ import {
   toMediaSrc,
   type GenerationResultRecord,
   type GenerationTaskClient,
+  type GenerationTaskCursor,
   type GenerationTaskDetail,
   type GenerationTaskStatus,
   type GenerationTaskSummary,
@@ -638,7 +639,7 @@ export function HistoryDialog({
   const [canvasTitles, setCanvasTitles] = useState<ReadonlyMap<string, string>>(new Map());
   const [dateRange, setDateRange] = useState<HistoryDateRange>({});
   const [tasks, setTasks] = useState<readonly GenerationTaskSummary[]>([]);
-  const [cursor, setCursor] = useState<number | null>(null);
+  const [cursor, setCursor] = useState<GenerationTaskCursor | null>(null);
   // 首页是否已请求完成（含失败）：区分「加载中」与「确实没有任务」。
   const [listLoaded, setListLoaded] = useState(false);
   const [listLoading, setListLoading] = useState(false);
@@ -686,7 +687,7 @@ export function HistoryDialog({
       .then((page) => {
         if (cancelled || requestId !== listRequestRef.current) return;
         setTasks(page.items);
-        setCursor(page.nextCursorCreatedBefore);
+        setCursor(page.nextCursor);
         setListError(null);
         setListLoaded(true);
         // 默认选中第一项，打开即可看详情。
@@ -774,13 +775,13 @@ export function HistoryDialog({
         ...dateRange,
         ...generationScopeQuery(scope, canvasId),
         statuses: statusFilterToStatuses(statusFilter),
-        cursorCreatedBefore: cursor,
+        cursor,
         ...(search ? { search } : {}),
         limit: HISTORY_PAGE_SIZE,
       });
       if (requestId !== listRequestRef.current) return;
       setTasks((current) => [...current, ...page.items]);
-      setCursor(page.nextCursorCreatedBefore);
+      setCursor(page.nextCursor);
     } catch (error: unknown) {
       if (requestId !== listRequestRef.current) return;
       setListError(formatRawBackendError(error));

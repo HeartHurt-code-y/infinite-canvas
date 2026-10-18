@@ -1003,6 +1003,14 @@ fn image_edit_needs_local_bytes(
     if operation != GenerationOperation::ImageToImage {
         return false;
     }
+    // 饭众烟同名 Seedream 也接受 data URI；不能被下面的原生 Seedream URL 规则覆盖。
+    if operation_schema
+        .pointer("/request/mediaEncoding")
+        .and_then(Value::as_str)
+        == Some("fzy_image_inputs")
+    {
+        return true;
+    }
     if remote_model_id.is_some_and(is_seedream_image_model) {
         return false;
     }
@@ -1475,6 +1483,21 @@ mod tests {
             assert!(delay >= nominal);
             assert!(delay <= nominal + nominal / 5);
         }
+    }
+
+    #[test]
+    fn fzy_seedream_reference_can_use_local_bytes_without_staging() {
+        let schema = super::super::model_schema::schema_for_enabled_operations(
+            &Value::Null,
+            "doubao-seedream-5-0-260128",
+            &[GenerationOperation::ImageToImage],
+            super::super::model_schema::RequestDialect::FzyAi,
+        );
+        assert!(image_edit_needs_local_bytes(
+            GenerationOperation::ImageToImage,
+            Some("doubao-seedream-5-0-260128"),
+            &schema["image_to_image"],
+        ));
     }
 
     #[test]

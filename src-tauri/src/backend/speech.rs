@@ -523,7 +523,6 @@ struct GatewayAudioPlan {
     config: Map<String, Value>,
     /// 临时文件扩展名，让 FFmpeg 按容器探测解码器。
     container_extension: &'static str,
-    subtitle_requested: bool,
 }
 
 /// 文档给出语速/音量 `[-50, 100]`、音调 `[-12, 12]` 的硬区间，越界值在本地先拒绝，
@@ -581,7 +580,6 @@ fn gateway_audio_plan(config: Option<&SpeechAudioConfig>) -> BackendResult<Gatew
     Ok(GatewayAudioPlan {
         config: body,
         container_extension,
-        subtitle_requested,
     })
 }
 
@@ -1312,7 +1310,7 @@ mod tests {
         assert_eq!(minimal.as_object().unwrap().len(), 2);
         // 文档：不传 `audio_config` 时默认返回 mp3。
         assert_eq!(bare.container_extension, "mp3");
-        assert!(!bare.subtitle_requested);
+        assert!(bare.config.get("enable_subtitle").is_none());
     }
 
     #[test]

@@ -203,6 +203,7 @@ describe("knowledge video workflow runner", () => {
 
   it("runs planning, project media generation, frame QC, and composition automatically", async () => {
     const fake = fakeDependencies(planJson());
+    vi.mocked(fake.generation.get).mockRejectedValue(new Error("unexpected full-detail polling"));
     const checkpoints: string[] = [];
     const runner = createKnowledgeVideoWorkflowRunner({
       promptClient: fake.promptClient,
@@ -225,6 +226,8 @@ describe("knowledge video workflow runner", () => {
     expect(result.phase).toBe("done");
     expect(result.finalPath).toBe("C:\\output\\知识教学视频-完整交付.mp4");
     expect(fake.generation.start).toHaveBeenCalledTimes(7);
+    expect(fake.generation.getProgress).toHaveBeenCalledTimes(7);
+    expect(fake.generation.get).not.toHaveBeenCalled();
     expect(fake.frames.startExtraction).toHaveBeenCalledTimes(6);
     expect(fake.composer.startComposition).toHaveBeenCalledTimes(1);
     const promptCalls = vi.mocked(fake.promptClient.run).mock.calls.map(([command]) => command);
@@ -372,7 +375,7 @@ describe("knowledge video workflow runner", () => {
   it("submits a fresh task for terminal failures and allows a manual retry after the limit", async () => {
     const fake = fakeDependencies(planJson());
     let allowVideos = false;
-    vi.mocked(fake.generation.get).mockImplementation((taskId) => {
+    vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
       const task = completedTask(taskId);
       return Promise.resolve(
         !allowVideos && taskId.startsWith("video")
@@ -411,7 +414,7 @@ describe("knowledge video workflow runner", () => {
     expect(workflowErrorPresentation(failed.error).details).toContain("original terminal response");
     expect(failed.shotRuns["shot-01"]?.videoTaskId).toBeNull();
     expect(fake.generation.start).toHaveBeenCalledTimes(3);
-    expect(fake.generation.get).toHaveBeenCalledWith("video-2");
+    expect(fake.generation.getProgress).toHaveBeenCalledWith("video-2");
     allowVideos = true;
     const resumed = await runner.run({
       ...request,
@@ -428,7 +431,7 @@ describe("knowledge video workflow runner", () => {
     async (failure) => {
       const fake = fakeDependencies(planJson());
       let recovered = false;
-      vi.mocked(fake.generation.get).mockImplementation((taskId) => {
+      vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
         const detail = completedTask(taskId);
         if (recovered || !taskId.startsWith("video")) return Promise.resolve(detail);
         if (failure === "query_error") return Promise.reject(new Error("HTTP 503 查询暂时失败"));
@@ -491,7 +494,7 @@ describe("knowledge video workflow runner", () => {
       expect(completed.phase).toBe("done");
       expect(completed.shotRuns["shot-01"]?.videoTaskId).toBe("video-1");
       expect(fake.generation.start).toHaveBeenCalledTimes(7);
-      expect(fake.generation.get).toHaveBeenCalledWith("video-1");
+      expect(fake.generation.getProgress).toHaveBeenCalledWith("video-1");
     },
   );
 
@@ -500,7 +503,7 @@ describe("knowledge video workflow runner", () => {
     async (failure) => {
       const fake = fakeDependencies(planJson());
       let recovered = false;
-      vi.mocked(fake.generation.get).mockImplementation((taskId) => {
+      vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
         const detail = completedTask(taskId);
         if (recovered || !taskId.startsWith("image")) return Promise.resolve(detail);
         if (failure === "query_error") return Promise.reject(new Error("读取任务连接中断"));
@@ -572,7 +575,7 @@ describe("knowledge video workflow runner", () => {
       const previous = await runner.run(request);
       vi.mocked(fake.generation.start).mockClear().mockResolvedValue("image-asset");
       let recovered = false;
-      vi.mocked(fake.generation.get).mockImplementation((taskId) => {
+      vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
         const detail = completedTask(taskId);
         if (recovered || taskId !== "image-asset") return Promise.resolve(detail);
         if (failure === "query_error") return Promise.reject(new Error("读取资产结果连接中断"));
@@ -625,7 +628,7 @@ describe("knowledge video workflow runner", () => {
 
   it("keeps delivery incomplete when the required cover fails after automatic retries", async () => {
     const fake = fakeDependencies(planJson());
-    vi.mocked(fake.generation.get).mockImplementation((taskId) => {
+    vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
       const task = completedTask(taskId);
       return Promise.resolve({
         ...task,

@@ -1346,7 +1346,8 @@ impl StagingService {
 
     async fn run_job_reserved(&self, job_id: &str) -> BackendResult<StagingJobRecord> {
         let mut job = self.storage.get_staging_job(job_id)?;
-        let result = match self.run_job_inner(&mut job).await {
+
+        match self.run_job_inner(&mut job).await {
             Ok(()) => Ok(job),
             Err(error) => {
                 // 一旦海外平台确认收件并发回 db_id，本机超时、网络故障及上游
@@ -1421,8 +1422,7 @@ impl StagingService {
                     Err(error)
                 }
             }
-        };
-        result
+        }
     }
 
     /// 仅按原上传回执中的 db_id 续查；命令调用方不得重新提交文件。
@@ -1574,7 +1574,7 @@ impl StagingService {
                 if job.import_target.is_none() {
                     if let Some(config) = target_config.as_ref() {
                         self.storage
-                            .remember_staging_object_target(&job.id, &config)?;
+                            .remember_staging_object_target(&job.id, config)?;
                     }
                 }
                 return Ok(());
@@ -1689,7 +1689,7 @@ impl StagingService {
     }
 
     async fn staging_content_exists(&self, job: &StagingJobRecord) -> BackendResult<bool> {
-        if job.import_target.is_some() {
+        if let Some(target) = job.import_target.as_ref() {
             let Some(asset_id) = job.asset_id.as_ref() else {
                 return Ok(false);
             };
@@ -1698,7 +1698,6 @@ impl StagingService {
             if super::asset_library::is_review_task_id(asset_id) {
                 return Ok(false);
             }
-            let target = job.import_target.as_ref().expect("checked above");
             let observed = self
                 .assets
                 .observe_asset_status(ObserveAssetStatusCommand {
@@ -2189,6 +2188,7 @@ impl StagingService {
 
 /// 应用暂存对象（云端素材库导入、生成输入等）在任务结束后会清理；
 /// 已由应用管理的对象键都不能通过整桶同步变成第二份长期素材索引。
+#[cfg(test)]
 fn should_skip_bucket_object(storage: &Storage, object_key: &str) -> BackendResult<bool> {
     storage.has_staging_job_by_object_key(object_key)
 }

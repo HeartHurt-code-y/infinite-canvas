@@ -1,4 +1,8 @@
 import * as v from "valibot";
+import {
+  decodeWorkflowVersionDocument,
+  encodeWorkflowVersionDocument,
+} from "../../lib/workflowVersionStorage";
 
 import {
   canvasDocumentClient,
@@ -109,17 +113,28 @@ export function createCanvasDocumentRepository(
     if (raw === null) throw new CanvasDocumentNotFoundError(canvasId);
     const { record } = v.parse(storedDocumentSchema, JSON.parse(raw) as unknown);
     if (record.id !== canvasId) throw new Error(`画布存档身份不一致：${canvasId}`);
-    return record;
+    return { ...record, document: decodeWorkflowVersionDocument(record.document) };
   }
 
   function getDirect(canvasId: string): Promise<CanvasDocumentRecord> | CanvasDocumentRecord {
-    return desktop() ? client.get(canvasId) : browserGet(getStorage(), canvasId);
+    return desktop()
+      ? client.get(canvasId).then((record) => ({
+          ...record,
+          document: decodeWorkflowVersionDocument(record.document),
+        }))
+      : browserGet(getStorage(), canvasId);
   }
 
   function saveDirect(
     command: SaveCanvasDocumentCommand,
   ): Promise<CanvasDocumentRecord> | CanvasDocumentRecord {
-    if (desktop()) return client.save(command);
+    command = { ...command, document: encodeWorkflowVersionDocument(command.document) };
+    if (desktop())
+      return client.save(command).then((record) => ({
+        ...record,
+        document: decodeWorkflowVersionDocument(record.document),
+      }));
+    const runtimeDocument = decodeWorkflowVersionDocument(command.document);
     const storage = getStorage();
     const key = documentKey(command.id);
     const previousRaw = storage.getItem(key);
@@ -156,7 +171,7 @@ export function createCanvasDocumentRepository(
       }
       throw error;
     }
-    return record;
+    return { ...record, document: runtimeDocument };
   }
 
   function deleteDirect(canvasId: string): Promise<void> | void {
@@ -200,7 +215,10 @@ export function createCanvasDocumentRepository(
       if (deletions.has(command.id)) throw deletedError(command.id);
       // Capture the JSON at call time; edits made while another write is pending belong to a later save.
       // 文档是纯 JSON 数据，structuredClone 比 JSON 往返快数倍。
-      const snapshot = structuredClone(command);
+      const snapshot = structuredClone({
+        ...command,
+        document: encodeWorkflowVersionDocument(command.document),
+      });
       return await enqueue(command.id, () => saveDirect(snapshot));
     },
     rename(canvasId, title) {

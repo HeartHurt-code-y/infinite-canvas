@@ -14,6 +14,7 @@ import {
   type ModelParameterCapability,
 } from "./modelCapabilities";
 import { isSeedanceDraftModel, supportsSeedanceDraft } from "./seedanceDraft";
+import { FZY_IMAGE_PROFILE } from "./providerAdapters";
 
 const capability = (patch: Partial<ModelParameterCapability>): ModelParameterCapability => ({
   key: "ratio",
@@ -31,6 +32,46 @@ const capability = (patch: Partial<ModelParameterCapability>): ModelParameterCap
 });
 
 describe("model capabilities", () => {
+  it.each(["gpt-image-2", "doubao-seedream-5-0-pro-260628", "custom-image"])(
+    "uses the FZY schema without inheriting native defaults for %s",
+    (modelId) => {
+      const schema = {
+        image_to_image: {
+          requestProfileId: FZY_IMAGE_PROFILE,
+          resultType: "image",
+          parameters: {
+            aspect_ratio: { type: "string", default: "1:1" },
+            resolution: { type: "string", default: "2k" },
+            quality: { type: "string", default: "auto" },
+            background: { type: "string", optional: true },
+            mask: { type: "string", optional: true },
+          },
+        },
+      };
+      const capabilities = modelParameterCapabilities(schema, "image_to_image", modelId);
+      expect(generationParameters(capabilities, {}, false)).toEqual({
+        aspect_ratio: "1:1",
+        resolution: "2k",
+        quality: "auto",
+      });
+      expect(modelSupportsBatchCount(schema, "image_to_image", modelId)).toBe(false);
+      expect(
+        generationParameters(
+          capabilities,
+          {
+            aspect_ratio: "7:4",
+            background: "transparent",
+            mask: "https://example.com/mask.png",
+          },
+          true,
+        ),
+      ).toMatchObject({
+        aspect_ratio: "7:4",
+        background: "transparent",
+        mask: "https://example.com/mask.png",
+      });
+    },
+  );
   it.each(["PixVerse-V6", "PixVerse-C1"])(
     "declares the documented PixVerse generation profile for %s",
     (modelId) => {

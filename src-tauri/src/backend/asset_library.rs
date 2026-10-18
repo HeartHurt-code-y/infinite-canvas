@@ -1897,7 +1897,7 @@ impl AssetLibrary {
                 json!({ "dbId": db_id, "providerConnectionId": provider_connection_id }),
             ));
         }
-        self.wait_for_overseas_import(&provider_connection_id, db_id, display_name)
+        self.wait_for_overseas_import(provider_connection_id, db_id, display_name)
             .await
     }
 

@@ -136,7 +136,7 @@ function invoke(command: string, args?: Record<string, unknown>): Promise<unknow
         })),
       );
     case "list_generation_tasks":
-      return Promise.resolve({ items: generationTasks, nextCursorCreatedBefore: null });
+      return Promise.resolve({ items: generationTasks, nextCursor: null });
     case "start_generation":
       return Promise.resolve(submittedTaskId);
     case "list_assets":

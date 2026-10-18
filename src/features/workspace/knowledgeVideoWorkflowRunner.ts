@@ -503,7 +503,7 @@ async function waitForGenerationResult(
 ): Promise<string> {
   for (let poll = 0; poll < 3600; poll += 1) {
     throwIfAborted(signal);
-    const detail = await client.get(taskId).catch((error: unknown) => {
+    const detail = await client.getProgress(taskId).catch((error: unknown) => {
       if (isAbortError(error)) throw error;
       throw workflowUsageError(
         "storage",
@@ -773,14 +773,21 @@ export function createKnowledgeVideoWorkflowRunner(
       const workflowTitle = definition?.title ?? "知识视频";
       let checkpoint = node.config.checkpoint;
       let requestedAspectRatio = storedManifestAspectRatio(checkpoint.manifest) ?? "16:9";
+      let executingSteps = false;
+      let reviewPaused = false;
       const commit = (
         update: (current: KnowledgeVideoWorkflowCheckpoint) => KnowledgeVideoWorkflowCheckpoint,
       ) => {
         const next = update(checkpoint);
+        if (executingSteps && next.phase === "awaiting_approval") reviewPaused = true;
         const executionPlan =
           next.executionPlan ?? checkpoint.executionPlan ?? node.config.executionPlan;
         checkpoint = {
           ...next,
+          // Independent in-flight calls still save their identities/results after a QC pause.
+          ...(reviewPaused && ["generating", "qc", "composing"].includes(next.phase)
+            ? { phase: "awaiting_approval" as const }
+            : {}),
           ...(executionPlan ? { executionPlan } : {}),
           updatedAt: dependencies.now(),
         };
@@ -791,7 +798,10 @@ export function createKnowledgeVideoWorkflowRunner(
         percentage: number,
         message: string,
         error: string | null = null,
-      ) => onProgress({ phase, progress: percentage, message, error });
+      ) => {
+        if (reviewPaused && ["generating", "qc", "composing"].includes(phase)) return;
+        onProgress({ phase, progress: percentage, message, error });
+      };
       const context = (): WorkflowPlanningContext => ({
         request,
         dependencies,
@@ -1452,6 +1462,7 @@ export function createKnowledgeVideoWorkflowRunner(
             attempt += 1
           ) {
             throwIfAborted(signal);
+            if (reviewPaused) return;
             run = checkpoint.shotRuns[shot.id]!;
             try {
               let taskId = run.videoTaskId ?? null;
@@ -1535,6 +1546,7 @@ export function createKnowledgeVideoWorkflowRunner(
                   });
                   prompt += `\n【镜头接续】参考图 ${referenceIndex} 是前置镜头 ${shot.continuationFromShotId} 的实际尾帧；从该画面的角色位置、朝向、构图和动作状态连续起拍。`;
                 }
+                if (reviewPaused) return;
                 taskId = await dependencies.generationClient.start({
                   canvasId: CANVAS_ID,
                   sourceNodeId: node.key,
@@ -1611,7 +1623,7 @@ export function createKnowledgeVideoWorkflowRunner(
         };
 
         const checkShot = async (shot: KnowledgeVideoWorkflowShot) => {
-          const index = checkpoint.shots.findIndex((item) => item.id === shot.id);
+          const index = shotIndexes.get(shot.id) ?? -1;
           commit((current) => ({ ...current, phase: "qc", lastActivePhase: "qc" }));
           progress("qc", 74, "正在按 30% / 60% / 80% / 95% / 99% 自动抽帧验收…");
           throwIfAborted(signal);
@@ -1945,6 +1957,10 @@ export function createKnowledgeVideoWorkflowRunner(
           checkpoint.executionPlan?.scope === "delivery"
             ? checkpoint.executionPlan.steps
             : createVideoWorkflowExecutionSteps(checkpoint);
+        // Shot membership/order is fixed for this run; checkpoint updates can replace shot values.
+        const shotIndexes = new Map(checkpoint.shots.map((shot, index) => [shot.id, index]));
+        const pilotShotId = orderedWorkflowShots(checkpoint)[0]?.id;
+        executingSteps = true;
         await executeWorkflowSteps(
           executionSteps,
           async (step) => {
@@ -1959,13 +1975,14 @@ export function createKnowledgeVideoWorkflowRunner(
               return;
             }
             if (step.action === "compose") return composeDelivery();
-            const shot = checkpoint.shots.find((item) => item.id === step.shotId);
+            const shotIndex = step.shotId ? shotIndexes.get(step.shotId) : undefined;
+            const shot = shotIndex === undefined ? undefined : checkpoint.shots[shotIndex];
             if (!shot) throw new Error(`执行计划引用了不存在的镜头：${step.shotId ?? step.id}`);
             if (step.action === "video") {
               await generateShot(shot);
               if (
                 (node.config.comicDrama || definition?.requiresMediaReview) &&
-                orderedWorkflowShots(checkpoint)[0]?.id === shot.id
+                pilotShotId === shot.id
               ) {
                 if ((await checkShot(shot)) === false) return false;
                 if (!requireMediaReview("first_shot")) return false;

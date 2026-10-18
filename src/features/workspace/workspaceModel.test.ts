@@ -6,6 +6,7 @@ import {
   DEFAULT_ZOOM,
   MAX_ZOOM,
   MIN_ZOOM,
+  NEW_NODE_GAP,
   OUTPUT_NODE_HEIGHT,
   OUTPUT_NODE_WIDTH,
   UPLOAD_ABANDONED_MS,
@@ -17,6 +18,7 @@ import {
   isNodeRectAvailable,
   knowledgeVideoWorkflowNodeWidth,
   mergeStagingJobsIntoUploads,
+  nearestAvailableNodePosition,
   nextFrameExtractorOutputSlot,
   nextOutputSlot,
   nextVideoComposerOutputSlot,
@@ -34,12 +36,122 @@ import {
   stagingImportReachedLibrary,
   type AssetUploadEntry,
   type AssetNodeData,
+  type CanvasNodeRect,
   type GenNodeData,
   type OutputNodeData,
   textResultFromSource,
 } from "./workspaceModel";
 
 const outputSource = { key: "source", kind: "image", x: 0, y: 0, config: {} } as GenNodeData;
+
+/** Small exhaustive oracle preserves the original distance and tie-breaking policy. */
+function exhaustiveNodePosition(desired: CanvasNodeRect, occupied: readonly CanvasNodeRect[]) {
+  const xs = [desired.x];
+  const ys = [desired.y];
+  for (const node of occupied) {
+    xs.push(node.x + node.width + NEW_NODE_GAP, node.x - desired.width - NEW_NODE_GAP);
+    ys.push(node.y + node.height + NEW_NODE_GAP, node.y - desired.height - NEW_NODE_GAP);
+  }
+  let best = { x: desired.x, y: desired.y };
+  let distance = Infinity;
+  for (const x of xs) {
+    for (const y of ys) {
+      const nextDistance = (x - desired.x) ** 2 + (y - desired.y) ** 2;
+      if (nextDistance < distance && isNodeRectAvailable({ ...desired, x, y }, occupied)) {
+        best = { x, y };
+        distance = nextDistance;
+      }
+    }
+  }
+  return best;
+}
+
+describe("new node placement", () => {
+  it("keeps an available drop point, including an exact minimum gap", () => {
+    const desired = { x: -40, y: 20, width: 100, height: 80 };
+    expect(nearestAvailableNodePosition(desired, [])).toEqual({ x: -40, y: 20 });
+    expect(
+      nearestAvailableNodePosition(desired, [
+        { ...desired, x: desired.x + desired.width + NEW_NODE_GAP },
+      ]),
+    ).toEqual({ x: -40, y: 20 });
+  });
+
+  it("preserves the original candidate order when distances tie", () => {
+    const desired = { x: 0, y: 0, width: 100, height: 100 };
+    expect(nearestAvailableNodePosition(desired, [desired])).toEqual({ x: 0, y: 124 });
+    expect(
+      nearestAvailableNodePosition({ ...desired, height: 300 }, [{ ...desired, height: 300 }]),
+    ).toEqual({ x: 124, y: 0 });
+  });
+
+  it("can use the exact gap between touching forbidden intervals", () => {
+    const desired = { x: 0, y: 0, width: 100, height: 100 };
+    const occupied = [
+      { x: -1000, y: -124, width: 2000, height: 100 },
+      { x: -1000, y: 124, width: 2000, height: 100 },
+      { x: -1000, y: 0, width: 2000, height: 50 },
+    ];
+    expect(nearestAvailableNodePosition(desired, occupied)).toEqual({ x: 0, y: -248 });
+    expect(nearestAvailableNodePosition({ ...desired, y: 20 }, occupied.slice(0, 2))).toEqual({
+      x: 0,
+      y: 0,
+    });
+  });
+
+  it("matches exhaustive search across overlapping, mixed-size and fractional rectangles", () => {
+    let seed = 0x17ab53;
+    const random = (limit: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % limit;
+    };
+    for (let sample = 0; sample < 120; sample += 1) {
+      const divisor = sample % 2 === 0 ? 2 : 10;
+      const desired = {
+        x: (random(800) - 400) / divisor,
+        y: (random(800) - 400) / divisor,
+        width: (random(400) + 1) / divisor,
+        height: (random(400) + 1) / divisor,
+      };
+      const occupied = [
+        desired,
+        ...Array.from({ length: random(12) }, () => ({
+          x: (random(1600) - 800) / divisor,
+          y: (random(1600) - 800) / divisor,
+          width: (random(1000) + 1) / divisor,
+          height: (random(1000) + 1) / divisor,
+        })),
+      ];
+      const actual = nearestAvailableNodePosition(desired, occupied);
+      expect(actual, `sample ${sample}`).toEqual(exhaustiveNodePosition(desired, occupied));
+      expect(isNodeRectAvailable({ ...desired, ...actual }, occupied)).toBe(true);
+    }
+  });
+
+  it("bounds geometry reads on a large canvas instead of rescanning every coordinate pair", () => {
+    let geometryReads = 0;
+    const desired = { x: 0, y: 0, width: 100, height: 100 };
+    const occupied = [
+      ...Array.from({ length: 80 }, (_, index) => ({
+        x: 2000 + index * 500,
+        y: 2000 + index * 500,
+        width: 100,
+        height: 100,
+      })),
+      desired,
+    ].map((rect) => ({
+      ...rect,
+      get x() {
+        geometryReads += 1;
+        return rect.x;
+      },
+    }));
+    const position = nearestAvailableNodePosition(desired, occupied);
+    expect(position).toEqual({ x: 0, y: 124 });
+    // Count obstacle-coordinate reads so CI timing noise cannot hide repeated collision scans.
+    expect(geometryReads).toBeLessThan(8 * occupied.length ** 2);
+  });
+});
 
 describe("local Base64 media identity", () => {
   it("keeps a stable local ID in canvas references and labels the local body", () => {

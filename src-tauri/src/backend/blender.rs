@@ -674,6 +674,7 @@ async fn detect_engine(explicit: Option<&str>, bundled_roots: &[PathBuf]) -> Ble
     unavailable
 }
 impl BlenderRenderService {
+    #[cfg(test)]
     pub fn new(
         downloads_dir: PathBuf,
         composer: VideoCompositionService,

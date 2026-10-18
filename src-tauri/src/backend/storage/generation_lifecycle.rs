@@ -179,7 +179,7 @@ pub enum GenerationLifecycleFact {
 pub enum GenerationRemoteObservation {
     Queued { progress: Option<f64> },
     Running { progress: Option<f64> },
-    Succeeded { result: GenerationResultRecord },
+    Succeeded { result: Box<GenerationResultRecord> },
     Failed { progress: Option<f64>, error: Value },
     Unknown { progress: Option<f64>, error: Value },
 }
@@ -1897,7 +1897,7 @@ mod tests {
                     call_id: "observe-call-1".into(),
                     tokens: None,
                     observation: GenerationRemoteObservation::Succeeded {
-                        result: result.clone(),
+                        result: Box::new(result.clone()),
                     },
                 },
             )

@@ -561,7 +561,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([
             cloudAsset("moyu-production", {
@@ -653,7 +653,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           // 后端按类型扫描分页：图片 tab 的请求不返回视频素材。
           const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
@@ -742,7 +742,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
           if (commandPayload["kind"] != null && commandPayload["kind"] !== "image") {
@@ -837,7 +837,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([]);
         case "list_asset_groups":
@@ -928,7 +928,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
           if (commandPayload["kind"] != null && commandPayload["kind"] !== "video") {
@@ -1018,7 +1018,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([
             cloudAsset("moyu-prod", {
@@ -1112,7 +1112,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           // Rust 素材库 module 已把国际版 data.items/preview_url 归一为稳定记录；
           // 类型过滤由后端 browse 扫描实现，这里模拟其行为（按 command.kind 过滤）。
@@ -1275,7 +1275,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "get_credential":
           return Promise.resolve("");
         case "set_credential":
@@ -1358,7 +1358,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.reject(
             new Error(
@@ -1429,7 +1429,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([]);
         case "plugin:event|listen":
@@ -1503,7 +1503,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const providerId = (
             (args?.["command"] as { providerConnectionId?: string } | undefined) ?? {}
@@ -1579,7 +1579,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const providerId = (
             (args?.["command"] as { providerConnectionId?: string } | undefined) ?? {}
@@ -1668,7 +1668,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const providerId = (
             (args?.["command"] as { providerConnectionId?: string } | undefined) ?? {}
@@ -1763,7 +1763,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
           listAssetCalls.push(commandPayload);
@@ -1844,7 +1844,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets": {
           const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
           listAssetCalls.push(commandPayload);
@@ -1918,7 +1918,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([
             cloudAsset("moyu-prod", {
@@ -2050,7 +2050,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([]);
         case "list_local_base64_assets":
@@ -2186,7 +2186,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_local_assets":
           return Promise.resolve({
             items: [],
@@ -2280,7 +2280,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([
             cloudAsset("moyu-prod", {
@@ -2429,7 +2429,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_asset_groups":
           return Promise.resolve([
             { id: "0", name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
@@ -2566,7 +2566,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([]);
         case "list_local_base64_assets":
@@ -2637,7 +2637,7 @@ describe("App workspace", () => {
         case "list_provider_model_bindings":
           return Promise.resolve([]);
         case "list_generation_tasks":
-          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [], nextCursor: null });
         case "list_assets":
           return Promise.resolve([]);
         case "list_local_base64_assets":

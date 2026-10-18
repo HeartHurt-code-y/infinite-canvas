@@ -58,7 +58,7 @@ const detail: GenerationTaskDetail = {
 function client(): GenerationTaskClient {
   return {
     start: vi.fn(),
-    list: vi.fn().mockResolvedValue({ items: [detail.summary], nextCursorCreatedBefore: null }),
+    list: vi.fn().mockResolvedValue({ items: [detail.summary], nextCursor: null }),
     get: vi.fn().mockResolvedValue(detail),
     getProgress: vi.fn(),
     queryVideoTaskNow: vi.fn(),

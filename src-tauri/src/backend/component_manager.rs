@@ -19,7 +19,7 @@ use super::component_archive::{
     validate_files, verify_tree,
 };
 use super::component_download::download_zip;
-use super::runtime_components::RuntimeComponent;
+use super::runtime_components::{RuntimeComponent, RuntimeReadyProbe};
 
 const IDS: [&str; 7] = [
     "blender",
@@ -186,7 +186,9 @@ pub struct ComponentManager {
     inner: Arc<Inner>,
 }
 
-fn spec(id: &str) -> Option<(&'static str, &'static str, &'static str, fn(&Path) -> bool)> {
+type ComponentSpec = (&'static str, &'static str, &'static str, RuntimeReadyProbe);
+
+fn spec(id: &str) -> Option<ComponentSpec> {
     match id {
         "blender" => Some((
             "blender",
@@ -597,7 +599,7 @@ impl ComponentManager {
             }),
         }
     }
-    fn runtime_component(&self, id: &str) -> Result<(RuntimeComponent, fn(&Path) -> bool), String> {
+    fn runtime_component(&self, id: &str) -> Result<(RuntimeComponent, RuntimeReadyProbe), String> {
         let (name, _, _, ready) = spec(id).ok_or("组件不存在")?;
         Ok((
             self.inner.native.get(name).ok_or("组件不存在")?.clone(),
@@ -1131,8 +1133,11 @@ impl ComponentManager {
             manager.inner.cache.lock().unwrap().insert(staged_component.id.clone(), CachedComponent { root: Some(destination), bytes, error: None, stamps });
             manager.phase(&staged_component.id, "ready", bytes, bytes); Ok(())
             })();
-            if result.is_err() && staged_root.exists() {
-                if let Err(cleanup) = remove_guarded_stage(&staged_parent, &staged_root) { return Err(format!("{}；暂存清理已停止：{cleanup}", result.unwrap_err())); }
+            if let Err(error) = &result
+                && staged_root.exists()
+                && let Err(cleanup) = remove_guarded_stage(&staged_parent, &staged_root)
+            {
+                return Err(format!("{error}；暂存清理已停止：{cleanup}"));
             }
             result
         }).await.map_err(|error| error.to_string())?;

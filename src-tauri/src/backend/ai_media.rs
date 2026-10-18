@@ -772,10 +772,7 @@ fn validate_worker_outputs(
             output.mime_type.as_str(),
         ) {
             (AiMediaOperation::VideoDepth, "depth_video", "video", Some("mp4"), "video/mp4")
-                if output.width.is_some_and(|v| v > 0) && output.height.is_some_and(|v| v > 0) =>
-            {
-                ()
-            }
+                if output.width.is_some_and(|v| v > 0) && output.height.is_some_and(|v| v > 0) => {}
             (
                 AiMediaOperation::VideoDepth,
                 "depth_data",

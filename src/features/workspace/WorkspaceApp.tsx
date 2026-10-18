@@ -517,17 +517,9 @@ function stableCanvasFlowNode(
 // 巨型订阅拆分后，WorkspaceApp 壳只订阅选区/视图/成员与布局指纹；节点卡片经
 // useCanvasNodeEntry 各自订阅自己的切片，单节点内容补丁只重渲染受影响的卡片。
 
-/** 输入解析器按读模型快照共享：同一次 store 写入触发的所有 per-node 订阅共用一份索引。 */
-const canvasInputResolverCache = new WeakMap<
-  CanvasReadModel,
-  (targetKey: string) => ResolvedCanvasInputs
->();
+/** Store-owned semantic snapshots retain cached inputs outside the changed successor closure. */
 function sharedCanvasInputResolver(state: CanvasReadModel) {
-  const cached = canvasInputResolverCache.get(state);
-  if (cached != null) return cached;
-  const resolver = createCanvasInputResolver(state.nodeByKey, state.graph.edges);
-  canvasInputResolverCache.set(state, resolver);
-  return resolver;
+  return state.resolveInputs;
 }
 
 interface CanvasNodeInputBadgeText {
@@ -535,32 +527,23 @@ interface CanvasNodeInputBadgeText {
   readonly details: string;
 }
 const EMPTY_CANVAS_NODE_INPUT_BADGE: CanvasNodeInputBadgeText = { summary: "", details: "" };
-const canvasNodeInputBadgeCache = new WeakMap<
-  CanvasReadModel,
-  Map<string, CanvasNodeInputBadgeText>
->();
+const canvasNodeInputBadgeCache = new WeakMap<ResolvedCanvasInputs, CanvasNodeInputBadgeText>();
 
 /** 节点输入角标文本：直达来源数（剔除产物溯源边）+ 解析后的媒体/文本/等待清单。 */
 function canvasNodeInputBadgeFor(
   state: CanvasReadModel,
   nodeKey: string,
 ): CanvasNodeInputBadgeText {
-  let byKey = canvasNodeInputBadgeCache.get(state);
-  if (byKey == null) {
-    byKey = new Map();
-    canvasNodeInputBadgeCache.set(state, byKey);
-  }
-  const cached = byKey.get(nodeKey);
-  if (cached != null) return cached;
   const output = state.nodeByKey.output.get(nodeKey);
   const incoming = (state.graph.byTarget.get(nodeKey) ?? []).filter(
     (edge) => output?.sourceNodeId !== edge.fromKey,
   );
   if (incoming.length === 0) {
-    byKey.set(nodeKey, EMPTY_CANVAS_NODE_INPUT_BADGE);
     return EMPTY_CANVAS_NODE_INPUT_BADGE;
   }
   const inputs = sharedCanvasInputResolver(state)(nodeKey);
+  const cached = canvasNodeInputBadgeCache.get(inputs);
+  if (cached != null) return cached;
   const summary =
     `已连接 ${incoming.length} 个来源 · ${inputs.media.length} 项媒体 · ${inputs.texts.length} 份文本` +
     (inputs.pending.length ? ` · 等待 ${inputs.pending.length} 项输出` : "");
@@ -570,11 +553,11 @@ function canvasNodeInputBadgeFor(
     ...inputs.pending.map((input) => `${input.name}：等待可用输出`),
   ].join("\n");
   const badge = { summary, details };
-  byKey.set(nodeKey, badge);
+  canvasNodeInputBadgeCache.set(inputs, badge);
   return badge;
 }
 
-/** 输入角标自订阅：结果对象按快照+key 缓存，字符串不变时其余写入不触发重渲染。 */
+/** 输入角标自订阅：未受影响的解析结果共享角标引用，其他分支写入不触发重渲染。 */
 const CanvasNodeInputBadge = memo(function CanvasNodeInputBadge({
   nodeKey,
 }: {

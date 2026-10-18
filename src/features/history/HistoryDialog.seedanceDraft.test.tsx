@@ -62,7 +62,7 @@ const DRAFT: GenerationTaskDetail = {
 function clientFor(detail = DRAFT): GenerationTaskClient {
   return {
     start: vi.fn(() => Promise.resolve("ordinary-task")),
-    list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursorCreatedBefore: null })),
+    list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursor: null })),
     get: vi.fn(() => Promise.resolve(detail)),
     getProgress: vi.fn(() =>
       Promise.resolve({ summary: detail.summary, results: [], finalError: null }),

@@ -1155,11 +1155,11 @@ fn validate_data(draft: &ReelbenchShotDraft, track: Option<&MotionTrack>) -> Ree
         "transition",
         shots
             .iter()
-            .filter_map(|shot| {
-                (!shot.transition_in.is_empty()
-                    && !TRANSITIONS.contains(&shot.transition_in.as_str()))
-                .then(|| format!("{} 的转场类型不在词表中", shot.id))
+            .filter(|&shot| {
+                !shot.transition_in.is_empty()
+                    && !TRANSITIONS.contains(&shot.transition_in.as_str())
             })
+            .map(|shot| format!("{} 的转场类型不在词表中", shot.id))
             .collect(),
     ));
 
@@ -1273,13 +1273,12 @@ fn validate_data(draft: &ReelbenchShotDraft, track: Option<&MotionTrack>) -> Ree
         shots
             .iter()
             .skip(1)
-            .filter_map(|shot| {
-                (!permitted.iter().any(|cut| (cut - shot.start).abs() <= 0.1)).then(|| {
-                    format!(
-                        "{} 的起点 {:.2} 秒不在检测或人工补刀记录中",
-                        shot.id, shot.start
-                    )
-                })
+            .filter(|&shot| !permitted.iter().any(|cut| (cut - shot.start).abs() <= 0.1))
+            .map(|shot| {
+                format!(
+                    "{} 的起点 {:.2} 秒不在检测或人工补刀记录中",
+                    shot.id, shot.start
+                )
             })
             .collect(),
     ));

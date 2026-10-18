@@ -106,6 +106,7 @@ pub struct RemotionRenderService {
 }
 
 impl RemotionRenderService {
+    #[cfg(test)]
     pub fn new(downloads_dir: PathBuf, resource_dir: PathBuf) -> Self {
         Self::new_with_runtime_store(downloads_dir, resource_dir, None)
     }

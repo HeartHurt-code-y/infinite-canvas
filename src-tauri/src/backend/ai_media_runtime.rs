@@ -430,7 +430,7 @@ fn is_link(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        return metadata.file_attributes() & 0x400 != 0;
+        metadata.file_attributes() & 0x400 != 0
     }
     #[cfg(not(windows))]
     false

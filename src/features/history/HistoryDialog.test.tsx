@@ -95,7 +95,7 @@ const DETAIL: GenerationTaskDetail = {
 function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClient {
   return {
     start: vi.fn(() => Promise.resolve(detail.summary.id)),
-    list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursorCreatedBefore: null })),
+    list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursor: null })),
     get: vi.fn(() => Promise.resolve(detail)),
     getProgress: vi.fn(() =>
       Promise.resolve({ summary: detail.summary, results: [], finalError: detail.finalError }),
@@ -105,12 +105,59 @@ function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClie
 }
 
 describe("HistoryDialog diagnostics", () => {
+  it("carries the task ID with the timestamp across pages of same-millisecond tasks", async () => {
+    const client = createClient();
+    const list = vi.mocked(client.list);
+    const firstCursor = { createdAt: SUMMARY.createdAt, id: "task-a" };
+    const secondCursor = { createdAt: SUMMARY.createdAt, id: "task-b" };
+    list.mockResolvedValueOnce({
+      items: [{ ...SUMMARY, id: "task-a" }],
+      nextCursor: firstCursor,
+    });
+    render(<HistoryDialog open onClose={vi.fn()} client={client} canvasId="canvas-1" />);
+
+    list.mockResolvedValueOnce({
+      items: [{ ...SUMMARY, id: "task-b" }],
+      nextCursor: secondCursor,
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        canvasId: "canvas-1",
+        statuses: null,
+        limit: 30,
+        cursor: firstCursor,
+      }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("任务列表")).getAllByRole("listitem")).toHaveLength(2),
+    );
+
+    list.mockResolvedValueOnce({
+      items: [{ ...SUMMARY, id: "task-c" }],
+      nextCursor: null,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        canvasId: "canvas-1",
+        statuses: null,
+        limit: 30,
+        cursor: secondCursor,
+      }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByLabelText("任务列表")).getAllByRole("listitem")).toHaveLength(3),
+    );
+    expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument();
+  });
+
   it("opens an original task outside the first page and searches names in the backend scope", async () => {
     const client = createClient({
       ...DETAIL,
       summary: { ...SUMMARY, id: "old-task", outputName: "第01集_镜头003" },
     });
-    vi.mocked(client.list).mockResolvedValue({ items: [], nextCursorCreatedBefore: null });
+    vi.mocked(client.list).mockResolvedValue({ items: [], nextCursor: null });
     render(
       <HistoryDialog
         open
@@ -138,7 +185,10 @@ describe("HistoryDialog diagnostics", () => {
   it("keeps generation history scoped to the canvas across pagination and canvas changes", async () => {
     const client = createClient();
     const list = vi.mocked(client.list);
-    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    list.mockResolvedValueOnce({
+      items: [SUMMARY],
+      nextCursor: { createdAt: SUMMARY.createdAt, id: SUMMARY.id },
+    });
     const onClose = vi.fn();
     const { rerender } = render(
       <HistoryDialog open onClose={onClose} client={client} canvasId="canvas-1" />,
@@ -146,21 +196,21 @@ describe("HistoryDialog diagnostics", () => {
 
     const loadMore = await screen.findByRole("button", { name: "加载更多" });
     expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-1", statuses: null, limit: 30 });
-    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [], nextCursor: null });
     fireEvent.click(loadMore);
     await waitFor(() =>
       expect(list).toHaveBeenLastCalledWith({
         canvasId: "canvas-1",
         statuses: null,
         limit: 30,
-        cursorCreatedBefore: SUMMARY.createdAt,
+        cursor: { createdAt: SUMMARY.createdAt, id: SUMMARY.id },
       }),
     );
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument(),
     );
 
-    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [], nextCursor: null });
     rerender(<HistoryDialog open onClose={onClose} client={client} canvasId="canvas-2" />);
     await screen.findByText("没有符合条件的任务。");
     expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-2", statuses: null, limit: 30 });
@@ -193,7 +243,7 @@ describe("HistoryDialog diagnostics", () => {
           : DETAIL,
       ),
     );
-    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursor: null });
     try {
       render(<HistoryDialog open onClose={vi.fn()} client={client} canvasId="canvas-1" />);
 
@@ -209,7 +259,7 @@ describe("HistoryDialog diagnostics", () => {
       // 切到全部画布：canvasId 传 null（后端不过滤），并取一次画布清单做标注。
       list.mockResolvedValue({
         items: [SUMMARY, { ...SUMMARY, id: "task-2", canvasId: "canvas-2" }],
-        nextCursorCreatedBefore: null,
+        nextCursor: null,
       });
       fireEvent.click(screen.getByRole("radio", { name: "全部画布" }));
       await waitFor(() =>
@@ -249,7 +299,7 @@ describe("HistoryDialog diagnostics", () => {
   it("queries creation time in local time, carries the range into pagination, and resets it", async () => {
     const client = createClient();
     const list = vi.mocked(client.list);
-    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursor: null });
     render(<HistoryDialog open onClose={vi.fn()} client={client} />);
     await screen.findByText("文生图 · image-model");
     fireEvent.change(screen.getByLabelText("开始时间"), {
@@ -259,7 +309,10 @@ describe("HistoryDialog diagnostics", () => {
       target: { value: "2026-09-05T23:59:59" },
     });
     expect(list).toHaveBeenCalledTimes(1);
-    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    list.mockResolvedValueOnce({
+      items: [SUMMARY],
+      nextCursor: { createdAt: SUMMARY.createdAt, id: SUMMARY.id },
+    });
     fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
     const range = {
       createdFrom: new Date(2026, 8, 1, 12, 34, 56).getTime(),
@@ -268,14 +321,14 @@ describe("HistoryDialog diagnostics", () => {
     await waitFor(() =>
       expect(list).toHaveBeenLastCalledWith({ ...range, statuses: null, limit: 30 }),
     );
-    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [], nextCursor: null });
     fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
     await waitFor(() =>
       expect(list).toHaveBeenLastCalledWith({
         ...range,
         statuses: null,
         limit: 30,
-        cursorCreatedBefore: SUMMARY.createdAt,
+        cursor: { createdAt: SUMMARY.createdAt, id: SUMMARY.id },
       }),
     );
     fireEvent.click(screen.getByRole("button", { name: /^重置$/ }));
@@ -287,7 +340,10 @@ describe("HistoryDialog diagnostics", () => {
   it("rejects inverted ranges without requesting and ignores an older page after a new search", async () => {
     const client = createClient();
     const list = vi.mocked(client.list);
-    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    list.mockResolvedValueOnce({
+      items: [SUMMARY],
+      nextCursor: { createdAt: SUMMARY.createdAt, id: SUMMARY.id },
+    });
     render(<HistoryDialog open onClose={vi.fn()} client={client} />);
     await screen.findByRole("button", { name: "加载更多" });
     fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-06T00:00" } });
@@ -305,12 +361,15 @@ describe("HistoryDialog diagnostics", () => {
         }),
     );
     fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
-    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    list.mockResolvedValueOnce({ items: [], nextCursor: null });
     fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-01T00:00" } });
     fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
     await screen.findByText("没有符合条件的任务。");
     act(() => {
-      finishOldPage({ items: [{ ...SUMMARY, id: "obsolete" }], nextCursorCreatedBefore: 1 });
+      finishOldPage({
+        items: [{ ...SUMMARY, id: "obsolete" }],
+        nextCursor: { createdAt: 1, id: "obsolete" },
+      });
     });
     expect(screen.queryByText("文生图 · image-model")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument();

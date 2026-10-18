@@ -92,43 +92,89 @@ export function topologicallySortWorkflowSteps<
   return ordered;
 }
 
-/** Execute dependency-ready waves; failures/pause prevent downstream work, active calls settle first. */
+/** Release successors on completion; failures/pause stop dispatch while active calls settle. */
 export async function executeWorkflowSteps<T extends WorkflowExecutionStep>(
   steps: readonly T[],
   execute: (step: T) => Promise<void | false>,
   options: { readonly signal?: AbortSignal; readonly concurrency?: number } = {},
 ): Promise<boolean> {
   const ordered = topologicallySortWorkflowSteps(steps);
-  const completed = new Set<string>();
-  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 1));
-  while (completed.size < ordered.length) {
-    if (options.signal?.aborted) throw new DOMException("已暂停", "AbortError");
-    const ready = ordered.filter(
-      (step) => !completed.has(step.id) && step.dependsOn.every((id) => completed.has(id)),
-    );
+  if (!ordered.length) return true;
+  const byId = new Map(ordered.map((step) => [step.id, step]));
+  const remaining = new Map(ordered.map((step) => [step.id, step.dependsOn.length]));
+  const children = new Map<string, string[]>();
+  const ready: T[] = [];
+  for (const step of ordered) {
+    if (!step.dependsOn.length) ready.push(step);
+    for (const dependency of step.dependsOn) {
+      const successors = children.get(dependency) ?? [];
+      successors.push(step.id);
+      children.set(dependency, successors);
+    }
+  }
+  const requested = options.concurrency ?? 1;
+  const concurrency =
+    requested === Number.POSITIVE_INFINITY
+      ? ordered.length
+      : Math.max(1, Math.floor(Number.isFinite(requested) ? requested : 1));
+  return new Promise<boolean>((resolve, reject) => {
     let cursor = 0;
+    let active = 0;
+    let completed = 0;
     let stopped = false;
     let failed = false;
     let failure: unknown;
-    await Promise.all(
-      Array.from({ length: Math.min(concurrency, ready.length) }, async () => {
-        while (!stopped && !failed && cursor < ready.length) {
-          const step = ready[cursor++]!;
-          try {
-            if (options.signal?.aborted) throw new DOMException("已暂停", "AbortError");
-            if ((await execute(step)) === false) stopped = true;
-            else completed.add(step.id);
-          } catch (error) {
-            failed = true;
-            failure = error;
+    const settle = () => {
+      if (active || (!failed && !stopped && completed < ordered.length)) return;
+      options.signal?.removeEventListener("abort", abort);
+      if (failed) {
+        // Preserve structured backend errors for the existing workflow error presentation.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        reject(failure);
+      } else resolve(!stopped);
+    };
+    const abort = () => {
+      if (!failed) {
+        failed = true;
+        failure = new DOMException("已暂停", "AbortError");
+      }
+      settle();
+    };
+    const run = async (step: T) => {
+      try {
+        if ((await execute(step)) === false) stopped = true;
+        else {
+          completed += 1;
+          if (!stopped && !failed) {
+            for (const child of children.get(step.id) ?? []) {
+              const count = remaining.get(child)! - 1;
+              remaining.set(child, count);
+              if (count === 0) ready.push(byId.get(child)!);
+            }
           }
         }
-      }),
-    );
-    if (failed) throw failure;
-    if (stopped) return false;
-  }
-  return true;
+      } catch (error) {
+        if (!failed) {
+          failed = true;
+          failure = error;
+        }
+      } finally {
+        active -= 1;
+        dispatch();
+      }
+    };
+    const dispatch = () => {
+      while (!failed && !stopped && active < concurrency && cursor < ready.length) {
+        const step = ready[cursor++]!;
+        active += 1;
+        void run(step);
+      }
+      settle();
+    };
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) abort();
+    else dispatch();
+  });
 }
 
 /** Presentation URLs and runtime progress cannot change an approval's durable input identity. */

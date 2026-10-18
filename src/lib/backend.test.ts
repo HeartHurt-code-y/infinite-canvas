@@ -6,12 +6,19 @@ import {
   BackendContractError,
   backendErrorDetails,
   backendErrorMessage,
+  canvasDocumentClient,
+  generationClient,
   localBase64AssetClient,
   providerSettingsClient,
   refreshMediaUrlWithStagingFallback,
   tosStagingClient,
   type CloudAsset,
 } from "./backend";
+import {
+  initializeWorkflowVersions,
+  recordWorkflowVersion,
+} from "../features/workspace/workflowVersionHistory";
+import { createKnowledgeVideoWorkflowConfig } from "../features/workspace/workspaceModel";
 
 type InvokeFn = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
 
@@ -21,6 +28,85 @@ function mockDesktopInvoke(invoke: InvokeFn): void {
 
 afterEach(() => {
   delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];
+});
+
+describe("canvas version storage IPC", () => {
+  it("sends incremental versions and normalizes save/get responses back to full configs", async () => {
+    let config = initializeWorkflowVersions({
+      ...createKnowledgeVideoWorkflowConfig(
+        {
+          prompt: { providerId: "p", modelDefinitionId: "text" },
+          image: { providerId: "p", modelDefinitionId: "image" },
+          video: { providerId: "p", modelDefinitionId: "video" },
+        },
+        true,
+      ),
+      brief: "原始要求",
+    });
+    config = recordWorkflowVersion(config, {
+      ...config,
+      checkpoint: {
+        ...config.checkpoint,
+        phase: "planning",
+        lastActivePhase: "planning",
+        script: "正文",
+      },
+    });
+    const document = {
+      version: 2,
+      knowledgeVideoWorkflowNodes: [
+        { key: "workflow", kind: "knowledge_video_workflow", x: 0, y: 0, config },
+      ],
+    };
+    let persisted: unknown;
+    const response = () => ({
+      id: "canvas",
+      title: "画布",
+      document: persisted,
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 2,
+    });
+    const invoke = vi.fn<InvokeFn>((command, args) => {
+      if (command === "save_canvas_document")
+        persisted = (args?.["command"] as { document: unknown }).document;
+      return Promise.resolve(response());
+    });
+    mockDesktopInvoke(invoke);
+    expect(
+      (await canvasDocumentClient.save({ id: "canvas", title: "画布", document })).document,
+    ).toEqual(document);
+    expect(persisted).toMatchObject({
+      knowledgeVideoWorkflowNodes: [{ config: { versionHistory: { version: 2 } } }],
+    });
+    expect((await canvasDocumentClient.get("canvas")).document).toEqual(document);
+    expect(config.versionHistory?.version).toBe(1);
+  });
+});
+
+describe("generationClient.list", () => {
+  it("forwards and validates the complete history cursor at the IPC boundary", async () => {
+    const cursor = { createdAt: 2_000, id: "task-b" };
+    const page = { items: [], nextCursor: { createdAt: 2_000, id: "task-c" } };
+    const invoke = vi.fn<InvokeFn>(() => Promise.resolve(page));
+    mockDesktopInvoke(invoke);
+
+    await expect(
+      generationClient.list({ canvasId: "canvas-1", cursor, limit: 2 }),
+    ).resolves.toEqual(page);
+    expect(invoke.mock.calls[0]?.[0]).toBe("list_generation_tasks");
+    expect(invoke.mock.calls[0]?.[1]).toEqual({
+      query: { canvasId: "canvas-1", cursor, limit: 2 },
+    });
+  });
+
+  it.each([2_000, { createdAt: 2_000 }, { id: "task-b" }, { createdAt: "2000", id: "task-b" }])(
+    "rejects incomplete or invalid history cursors: %j",
+    async (nextCursor) => {
+      mockDesktopInvoke(() => Promise.resolve({ items: [], nextCursor }));
+      await expect(generationClient.list({})).rejects.toBeInstanceOf(BackendContractError);
+    },
+  );
 });
 
 describe("assetLibraryClient.list", () => {

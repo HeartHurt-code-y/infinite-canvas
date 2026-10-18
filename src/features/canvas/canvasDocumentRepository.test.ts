@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CanvasDocumentClient, CanvasDocumentRecord } from "../../lib/backend";
 import {
+  initializeWorkflowVersions,
+  recordWorkflowVersion,
+} from "../workspace/workflowVersionHistory";
+import { createKnowledgeVideoWorkflowConfig } from "../workspace/workspaceModel";
+import {
   ACTIVE_CANVAS_STORAGE_KEY,
   CANVAS_CATALOG_STORAGE_KEY,
   CANVAS_DOCUMENT_STORAGE_PREFIX,
@@ -48,6 +53,71 @@ afterEach(() => {
 });
 
 describe("browser canvas document repository", () => {
+  it("persists incremental workflow versions, reloads full configs and keeps encoding after rename", async () => {
+    let config = initializeWorkflowVersions({
+      ...createKnowledgeVideoWorkflowConfig(
+        {
+          prompt: { providerId: "p", modelDefinitionId: "text" },
+          image: { providerId: "p", modelDefinitionId: "image" },
+          video: { providerId: "p", modelDefinitionId: "video" },
+        },
+        true,
+      ),
+      brief: "原始要求",
+    });
+    config = recordWorkflowVersion(config, {
+      ...config,
+      checkpoint: {
+        ...config.checkpoint,
+        phase: "planning",
+        lastActivePhase: "planning",
+        script: "完整正文".repeat(1000),
+      },
+    });
+    config = recordWorkflowVersion(config, {
+      ...config,
+      checkpoint: {
+        ...config.checkpoint,
+        phase: "generating",
+        lastActivePhase: "generating",
+        runId: "paid-run",
+        coverImagePath: "C:/cover.png",
+      },
+    });
+    const source = {
+      ...document("workflow"),
+      knowledgeVideoWorkflowNodes: [
+        { key: "workflow", kind: "knowledge_video_workflow", x: 0, y: 0, config },
+      ],
+    };
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    const saved = await repository.save({ id: "versions", title: "版本", document: source });
+    expect(saved.document).toEqual(source);
+    const raw = () =>
+      JSON.parse(localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}versions`)!) as {
+        record: {
+          document: {
+            knowledgeVideoWorkflowNodes: { config: { versionHistory: { version: number } } }[];
+          };
+        };
+      };
+    expect(
+      raw().record.document.knowledgeVideoWorkflowNodes[0]?.config.versionHistory.version,
+    ).toBe(2);
+    const reopened = createCanvasDocumentRepository({ isDesktop: () => false });
+    expect((await reopened.get("versions")).document).toEqual(source);
+    expect((await reopened.rename("versions", "新名称")).document).toEqual(source);
+    expect(
+      raw().record.document.knowledgeVideoWorkflowNodes[0]?.config.versionHistory.version,
+    ).toBe(2);
+    // V1 archives remain readable, and their next write upgrades storage without losing versions.
+    localStorage.setItem(
+      `${CANVAS_DOCUMENT_STORAGE_PREFIX}legacy`,
+      JSON.stringify({ version: 1, record: { ...saved, id: "legacy", document: source } }),
+    );
+    expect((await reopened.get("legacy")).document).toEqual(source);
+    expect((await reopened.rename("legacy", "旧记录升级")).document).toEqual(source);
+  });
   it("persists independent documents, prompts, viewports and names across repository instances", async () => {
     const repository = createCanvasDocumentRepository({ isDesktop: () => false, now: () => 10 });
     await expect(repository.list()).resolves.toEqual([]);

@@ -35,6 +35,8 @@ import {
   DOUBAO_VOICE_ADAPTER_ID,
   DOUBAO_VOICE_BASE_URL,
   GRSAI_ADAPTER_ID,
+  FZY_ADAPTER_ID,
+  FZY_BASE_URL,
   MOYU_ADAPTER_ID,
   assembleBailianBaseUrl,
   doubaoSamiCredentialRefs,
@@ -64,6 +66,12 @@ interface ProviderPreset {
 }
 
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
+  {
+    id: "fzy-ai",
+    displayName: "饭众烟 AI（异步出图）",
+    baseUrl: FZY_BASE_URL,
+    adapterId: FZY_ADAPTER_ID,
+  },
   {
     id: "doubao-voice",
     displayName: "火山豆包语音",

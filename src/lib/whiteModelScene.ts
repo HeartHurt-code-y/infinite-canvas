@@ -253,8 +253,44 @@ export function verticalFovDegrees(lens: number, aspect: number): number {
 // 关键帧工具
 // ---------------------------------------------------------------------------
 
+// Scene edits replace keyframe arrays immutably, as required by the path-segment cache.
+const sortedFrameCache = new WeakMap<readonly { time: number }[], { time: number }[]>();
+const intervalCache = new WeakMap<readonly { time: number }[], number>();
+
 function sortedByTime<T extends { time: number }>(frames: readonly T[]): T[] {
-  return [...frames].sort((a, b) => a.time - b.time);
+  const cached = sortedFrameCache.get(frames);
+  if (cached) return cached as T[];
+  const sorted = [...frames].sort((a, b) => a.time - b.time);
+  sortedFrameCache.set(frames, sorted);
+  return sorted;
+}
+
+/** First keyframe strictly after t, minus one; duplicate timestamps retain the old tie order. */
+function keyframeInterval(frames: readonly { time: number }[], time: number): number {
+  const cached = intervalCache.get(frames);
+  if (cached !== undefined) {
+    if (time >= frames[cached]!.time && time < frames[cached + 1]!.time) return cached;
+    if (
+      cached + 2 < frames.length &&
+      time >= frames[cached + 1]!.time &&
+      time < frames[cached + 2]!.time
+    ) {
+      intervalCache.set(frames, cached + 1);
+      return cached + 1;
+    }
+  }
+  let low = 0;
+  let high = frames.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (frames[middle]!.time <= time) low = middle + 1;
+    else high = middle;
+  }
+  const index = Number.isNaN(time)
+    ? frames.length - 2
+    : Math.max(0, Math.min(frames.length - 2, low - 1));
+  intervalCache.set(frames, index);
+  return index;
 }
 
 /**
@@ -348,6 +384,10 @@ interface PathSegment {
 }
 
 const segmentCache = new WeakMap<WhiteModelObject, PathSegment[]>();
+const actorStateCache = new WeakMap<
+  WhiteModelObject,
+  { readonly time: number; readonly state: WhiteModelActorState }
+>();
 
 function pathSegments(actor: WhiteModelObject): PathSegment[] {
   const cached = segmentCache.get(actor);
@@ -421,6 +461,15 @@ function pathHeading(segments: PathSegment[], index: number, time: number): numb
 
 /** 角色在时间 t 的根变换与运动状态。路径为线性插值，与 Blender 的 LINEAR 关键帧一致。 */
 export function evaluateActor(actor: WhiteModelObject, time: number): WhiteModelActorState {
+  const cached = actorStateCache.get(actor);
+  if (cached?.time === time) return cached.state;
+  const state = computeActorState(actor, time);
+  // One sample per actor, shared by the camera, viewport and bake, never the entire timeline.
+  actorStateCache.set(actor, { time, state });
+  return state;
+}
+
+function computeActorState(actor: WhiteModelObject, time: number): WhiteModelActorState {
   const frames = sortedByTime(actor.keyframes);
   const first = frames[0];
   if (!first) return { position: [0, 0, 0], yaw: 0, speed: 0, phase: 0 };
@@ -444,8 +493,7 @@ export function evaluateActor(actor: WhiteModelObject, time: number): WhiteModel
       phase: tail.phaseStart + tail.phaseRate * (tail.end.time - tail.start.time),
     };
   }
-  let index = segments.findIndex((segment) => time < segment.end.time);
-  if (index < 0) index = segments.length - 1;
+  const index = keyframeInterval(frames, time);
   const segment = segments[index]!;
   const local = time - segment.start.time;
   const factor = clamp(local / Math.max(EPSILON, segment.end.time - segment.start.time), 0, 1);
@@ -839,10 +887,9 @@ function interpolateCamera(camera: WhiteModelCamera, time: number): WhiteModelCa
     return { position: first.position, target: first.target };
   const last = frames.at(-1)!;
   if (time >= last.time) return { position: last.position, target: last.target };
-  let index = frames.findIndex((frame) => time < frame.time);
-  if (index <= 0) index = frames.length - 1;
-  const start = frames[index - 1]!;
-  const end = frames[index]!;
+  const index = keyframeInterval(frames, time);
+  const start = frames[index]!;
+  const end = frames[index + 1]!;
   const factor = ease(
     clamp((time - start.time) / Math.max(EPSILON, end.time - start.time), 0, 1),
     camera.interpolation,

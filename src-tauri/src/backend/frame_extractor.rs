@@ -31,6 +31,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 内存中最多保留的任务数；超出后清掉已终态的最旧记录，防止长会话无界增长。
 const JOB_RETAIN_LIMIT: usize = 100;
 
+// Share decoding only for nearby points. Sparse requests keep input seeking, and each JPEG
+// encoder uses one thread so a dense request does not multiply the engine's worker count.
+const FRAME_BATCH_LIMIT: usize = 8;
+const FRAME_BATCH_MAX_GAP: f64 = 0.5;
+const FRAME_BATCH_MAX_SPAN: f64 = 2.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -115,6 +121,7 @@ pub struct VideoFrameExtractionService {
 }
 
 impl VideoFrameExtractionService {
+    #[cfg(test)]
     pub fn new(downloads_dir: PathBuf, composer: VideoCompositionService) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -169,6 +176,7 @@ impl VideoFrameExtractionService {
 
     /// 比例采样由后端在探测实际视频时长后换算，避免生成模型实际时长与计划值略有
     /// 偏差时，99% 尾帧被误判为越界。
+    #[cfg(test)]
     pub fn start_extraction_with_percentages(
         &self,
         video_path: &str,
@@ -479,15 +487,39 @@ impl VideoFrameExtractionService {
         Ok(())
     }
 
-    fn set_progress(&self, job_id: &str, percent: f64) -> BackendResult<()> {
-        self.update_record(job_id, |record| {
-            let percent = percent.clamp(0.0, 99.0);
-            record.progress = Some(
-                record
-                    .progress
-                    .map_or(percent, |current| current.max(percent)),
-            );
-        })
+    fn checkpoint_frame(
+        &self,
+        job_id: &str,
+        index: usize,
+        frame: ExtractedFrame,
+        total: usize,
+    ) -> BackendResult<()> {
+        let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+        let entry = jobs
+            .get_mut(job_id)
+            .ok_or_else(|| BackendError::NotFound(format!("frame extraction job {job_id}")))?;
+        ensure_not_cancelled(&entry.cancelled)?;
+        if index > entry.record.frames.len() {
+            return Err(BackendError::protocol(
+                "抽帧检查点顺序异常，请继续抽帧恢复",
+                Value::Null,
+            ));
+        }
+        let progress = (((index + 1) as f64 / total as f64) * 100.0).clamp(0.0, 99.0);
+        let progress = entry
+            .record
+            .progress
+            .map_or(progress, |value| value.max(progress));
+        let updated_at = now_ms();
+        if let Some(storage) = &self.inner.storage {
+            storage.checkpoint_frame_extraction(job_id, index, &frame, progress, updated_at)?;
+        }
+        // Mutate memory only after the incremental DB transaction commits.
+        entry.record.frames.truncate(index);
+        entry.record.frames.push(frame);
+        entry.record.progress = Some(progress);
+        entry.record.updated_at = updated_at;
+        Ok(())
     }
 
     fn fail_job(&self, job_id: &str, message: String) {
@@ -625,42 +657,57 @@ impl VideoFrameExtractionService {
             video_stem(Path::new(&saved.video_path))
         });
         let mut frames = Vec::with_capacity(timestamps.len());
-        for (index, timestamp) in timestamps.iter().enumerate() {
+        let mut saved_frames: Vec<_> = saved.frames.iter().collect();
+        saved_frames.sort_by(|a, b| a.timestamp_seconds.total_cmp(&b.timestamp_seconds));
+        let existing_frame = |timestamp: f64| {
+            let index = saved_frames
+                .partition_point(|frame| frame.timestamp_seconds < timestamp - 0.000001);
+            saved_frames.get(index).copied().filter(|frame| {
+                (frame.timestamp_seconds - timestamp).abs() < 0.000001
+                    && verified_frame(frame, &out_dir)
+            })
+        };
+        let mut index = 0;
+        while index < timestamps.len() {
             ensure_not_cancelled(&cancelled)?;
-            let existing = saved
-                .frames
-                .iter()
-                .find(|frame| (frame.timestamp_seconds - timestamp).abs() < 0.000001);
-            let frame =
-                if let Some(frame) = existing.filter(|frame| verified_frame(frame, &out_dir)) {
-                    frame.clone()
+            if let Some(frame) = existing_frame(timestamps[index]) {
+                self.checkpoint_frame(job_id, index, frame.clone(), timestamps.len())?;
+                frames.push(frame.clone());
+                index += 1;
+                continue;
+            }
+            let end = frame_batch_end(&timestamps, index);
+            let mut targets = Vec::with_capacity(end - index);
+            for (offset, timestamp) in timestamps[index..end].iter().copied().enumerate() {
+                let next = index + offset;
+                if next > index && existing_frame(timestamp).is_some() {
+                    break;
+                }
+                let candidate = out_dir.join(format!(
+                    "{:06}-{stem}@{}.jpg",
+                    next + 1,
+                    format_seconds(timestamp)
+                ));
+                // Never overwrite a damaged/changed prior artifact or an uncheckpointed file.
+                let output = if candidate.exists() {
+                    out_dir.join(format!(
+                        "{:06}-{stem}@{}-{}.jpg",
+                        next + 1,
+                        format_seconds(timestamp),
+                        Uuid::new_v4()
+                    ))
                 } else {
-                    let candidate = out_dir.join(format!(
-                        "{:06}-{stem}@{}.jpg",
-                        index + 1,
-                        format_seconds(*timestamp)
-                    ));
-                    // Never overwrite a damaged/changed previous artifact or an uncheckpointed file.
-                    let output = if candidate.exists() {
-                        out_dir.join(format!(
-                            "{:06}-{stem}@{}-{}.jpg",
-                            index + 1,
-                            format_seconds(*timestamp),
-                            Uuid::new_v4()
-                        ))
-                    } else {
-                        candidate
-                    };
-                    extract_frame(&ffmpeg, &local_source, *timestamp, &output, &cancelled).await?
+                    candidate
                 };
-            frames.push(frame);
-            self.update_record(job_id, |record| {
-                record.frames = frames.clone();
-            })?;
-            self.set_progress(
-                job_id,
-                ((index + 1) as f64 / timestamps.len() as f64) * 100.0,
-            )?;
+                targets.push(FrameExtractionTarget { timestamp, output });
+            }
+            extract_frame_batch(&ffmpeg, &local_source, &targets, &cancelled, |frame| {
+                self.checkpoint_frame(job_id, frames.len(), frame.clone(), timestamps.len())?;
+                frames.push(frame);
+                Ok(())
+            })
+            .await?;
+            index += targets.len();
         }
         // Source changes while processing invalidate the whole attempt; retained outputs stay visible.
         let final_fingerprint = fingerprint_file_async(local_source, cancelled.clone()).await?;
@@ -714,8 +761,7 @@ pub(crate) fn parse_duration(text: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-/// 用 ffmpeg 从 source 的 timestamp 秒抽取 1 帧到 output（jpg，高质量）。
-/// 成功返回经真实解码与内容校验的图片记录。
+#[cfg(test)]
 async fn extract_frame(
     ffmpeg: &Path,
     source: &Path,
@@ -723,16 +769,73 @@ async fn extract_frame(
     output: &Path,
     cancelled: &Arc<AtomicBool>,
 ) -> BackendResult<ExtractedFrame> {
-    let temporary = TemporaryFile(output.with_file_name(format!(".frame-{}.jpg", Uuid::new_v4())));
+    let targets = [FrameExtractionTarget {
+        timestamp: timestamp_seconds,
+        output: output.to_path_buf(),
+    }];
+    let mut result = None;
+    extract_frame_batch(ffmpeg, source, &targets, cancelled, |frame| {
+        result = Some(frame);
+        Ok(())
+    })
+    .await?;
+    result.ok_or_else(|| BackendError::protocol("抽帧结果为空，请重试", Value::Null))
+}
+
+struct FrameExtractionTarget {
+    timestamp: f64,
+    output: PathBuf,
+}
+
+fn frame_batch_end(timestamps: &[f64], start: usize) -> usize {
+    let mut end = start + 1;
+    while end < timestamps.len()
+        && end - start < FRAME_BATCH_LIMIT
+        && timestamps[end] - timestamps[end - 1] <= FRAME_BATCH_MAX_GAP
+        && timestamps[end] - timestamps[start] <= FRAME_BATCH_MAX_SPAN
+    {
+        end += 1;
+    }
+    end
+}
+
+/// One input decode, independent output seeks: close points can legitimately share a source
+/// frame, including VFR media. Publish/checkpoint each verified output before handling the next.
+async fn extract_frame_batch(
+    ffmpeg: &Path,
+    source: &Path,
+    targets: &[FrameExtractionTarget],
+    cancelled: &Arc<AtomicBool>,
+    mut on_frame: impl FnMut(ExtractedFrame) -> BackendResult<()>,
+) -> BackendResult<()> {
+    let Some(first) = targets.first() else {
+        return Ok(());
+    };
+    let temporary: Vec<_> = targets
+        .iter()
+        .map(|target| {
+            TemporaryFile(
+                target
+                    .output
+                    .with_file_name(format!(".frame-{}.jpg", Uuid::new_v4())),
+            )
+        })
+        .collect();
     let mut command = tokio::process::Command::new(ffmpeg);
     command
         .arg("-n")
         .arg("-ss")
-        .arg(format_seconds(timestamp_seconds))
+        .arg(format_seconds(first.timestamp))
         .arg("-i")
-        .arg(source)
-        .args(["-frames:v", "1", "-q:v", "2"])
-        .arg(&temporary.0)
+        .arg(source);
+    for (target, temporary) in targets.iter().zip(&temporary) {
+        command
+            .arg("-ss")
+            .arg(format_seconds(target.timestamp - first.timestamp))
+            .args(["-frames:v", "1", "-q:v", "2", "-threads:v", "1"])
+            .arg(&temporary.0);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -747,10 +850,24 @@ async fn extract_frame(
             serde_json::json!({ "detail": truncate_text(&stderr, 400) }),
         ));
     }
-    let mut frame = inspect_frame(&temporary.0, timestamp_seconds)?;
+    for (target, temporary) in targets.iter().zip(&temporary) {
+        ensure_not_cancelled(cancelled)?;
+        let frame = publish_frame(&temporary.0, target.timestamp, &target.output, cancelled)?;
+        on_frame(frame)?;
+    }
+    Ok(())
+}
+
+fn publish_frame(
+    temporary: &Path,
+    timestamp_seconds: f64,
+    output: &Path,
+    cancelled: &Arc<AtomicBool>,
+) -> BackendResult<ExtractedFrame> {
+    let mut frame = inspect_frame(temporary, timestamp_seconds)?;
     ensure_not_cancelled(cancelled)?;
     // create_new works on removable disks too and cannot clobber a prior artifact.
-    let mut source_file = std::fs::File::open(&temporary.0)?;
+    let mut source_file = std::fs::File::open(temporary)?;
     let mut destination = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1122,6 +1239,18 @@ fn retain_recent_jobs(jobs: &mut HashMap<String, JobEntry>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn batches_nearby_points_without_decoding_across_sparse_gaps_or_unbounded_outputs() {
+        let dense: Vec<_> = (0..20).map(|index| index as f64 * 0.1).collect();
+        assert_eq!(frame_batch_end(&dense, 0), 8);
+        assert_eq!(frame_batch_end(&dense, 8), 16);
+        assert_eq!(frame_batch_end(&dense, 16), 20);
+        assert_eq!(frame_batch_end(&[0.0, 0.5, 1.0, 1.5, 2.0, 2.5], 0), 5);
+        assert_eq!(frame_batch_end(&[0.0, 20.0, 40.0], 0), 1);
+        assert_eq!(frame_batch_end(&[0.0, 0.1, 20.0, 20.1], 0), 2);
+        assert_eq!(frame_batch_end(&[0.0, 0.1, 20.0, 20.1], 2), 4);
+    }
+
     fn composer(directory: &Path) -> VideoCompositionService {
         VideoCompositionService::new(
             directory.join("downloads"),
@@ -1452,6 +1581,166 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "set INFINITE_CANVAS_TEST_FFMPEG to the already installed project engine"]
+    async fn real_ffmpeg_batches_match_individual_seeks_and_keep_cancelled_checkpoints() {
+        let ffmpeg = PathBuf::from(
+            std::env::var("INFINITE_CANVAS_TEST_FFMPEG").expect("existing FFmpeg path"),
+        );
+        let temporary = tempfile::tempdir().unwrap();
+        // Includes points closer than one frame, an exact frame boundary and duplicate points
+        // (percentage sampling near a short clip's end may resolve to the same timestamp).
+        let timestamps = [0.13, 0.145, 0.21, 0.6, 0.83, 1.2, 1.2];
+        let cancelled = Arc::new(AtomicBool::new(false));
+        for profile in ["cfr", "vfr", "offset"] {
+            let source = temporary.path().join(format!("{profile}.mp4"));
+            let mut command = tokio::process::Command::new(&ffmpeg);
+            command.args([
+                "-n",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x64:rate=30:duration=3",
+                "-an",
+                "-c:v",
+                "libx264",
+            ]);
+            match profile {
+                "vfr" => {
+                    command.args([
+                        "-vf",
+                        "select=not(mod(n\\,3))+not(mod(n\\,7))",
+                        "-fps_mode",
+                        "vfr",
+                    ]);
+                }
+                "offset" => {
+                    command.args(["-vf", "setpts=PTS+5/TB", "-fps_mode", "passthrough"]);
+                }
+                _ => {}
+            }
+            command.arg(&source).stdin(Stdio::null());
+            #[cfg(windows)]
+            command.creation_flags(CREATE_NO_WINDOW);
+            let generated = run_cancellable_command(command, &cancelled).await.unwrap();
+            assert!(
+                generated.status.success(),
+                "{}",
+                String::from_utf8_lossy(&generated.stderr)
+            );
+            let mut expected = Vec::new();
+            for (index, timestamp) in timestamps.iter().enumerate() {
+                let output = temporary
+                    .path()
+                    .join(format!("{profile}-individual-{index}.jpg"));
+                let mut command = tokio::process::Command::new(&ffmpeg);
+                command
+                    .args(["-n", "-ss", &format_seconds(*timestamp), "-i"])
+                    .arg(&source)
+                    .args(["-frames:v", "1", "-q:v", "2"])
+                    .arg(&output)
+                    .stdin(Stdio::null());
+                #[cfg(windows)]
+                command.creation_flags(CREATE_NO_WINDOW);
+                let result = run_cancellable_command(command, &cancelled).await.unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                expected.push(inspect_frame(&output, *timestamp).unwrap());
+            }
+            let targets: Vec<_> = timestamps
+                .iter()
+                .enumerate()
+                .map(|(index, timestamp)| FrameExtractionTarget {
+                    timestamp: *timestamp,
+                    output: temporary
+                        .path()
+                        .join(format!("{profile}-batch-{index}.jpg")),
+                })
+                .collect();
+            let mut frames = Vec::new();
+            extract_frame_batch(&ffmpeg, &source, &targets, &cancelled, |frame| {
+                frames.push(frame);
+                Ok(())
+            })
+            .await
+            .unwrap();
+            assert_eq!(frames.len(), timestamps.len());
+            for (actual, expected) in frames.iter().zip(expected) {
+                assert_eq!(
+                    actual.sha256, expected.sha256,
+                    "{profile} at {}",
+                    actual.timestamp_seconds
+                );
+                assert_eq!(
+                    (actual.width, actual.height),
+                    (expected.width, expected.height)
+                );
+            }
+            // Publishing cannot overwrite an existing output, even when FFmpeg succeeded.
+            assert!(
+                extract_frame_batch(&ffmpeg, &source, &targets[..1], &cancelled, |_| Ok(()))
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                inspect_frame(&targets[0].output, timestamps[0])
+                    .unwrap()
+                    .sha256,
+                frames[0].sha256
+            );
+        }
+
+        let source = temporary.path().join("cfr.mp4");
+        let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let mut record = persisted_job(temporary.path(), &source, "frame-extract-batch-cancel");
+        record.resolved_timestamps = timestamps.to_vec();
+        record.requested_percentages.clear();
+        record.requested_timestamps = timestamps.to_vec();
+        record.progress = Some(0.0);
+        storage.save_frame_extraction_job(&record).unwrap();
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+            storage.clone(),
+        )
+        .unwrap();
+        let targets: Vec<_> = timestamps
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| FrameExtractionTarget {
+                timestamp: *timestamp,
+                output: temporary.path().join(format!("cancel-{index}.jpg")),
+            })
+            .collect();
+        let signal = service.cancellation_flag(&record.job_id).unwrap();
+        let result = extract_frame_batch(&ffmpeg, &source, &targets, &signal, |frame| {
+            service.checkpoint_frame(&record.job_id, 0, frame, timestamps.len())?;
+            service.cancel_job(&record.job_id)?;
+            Ok(())
+        })
+        .await;
+        assert!(result.is_err());
+        let recovered = storage
+            .get_frame_extraction_job(&record.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, VideoFrameExtractionStatus::Cancelled);
+        assert_eq!(recovered.frames.len(), 1);
+        assert!(targets[0].output.is_file());
+        assert!(!targets[1].output.exists());
+        assert!(std::fs::read_dir(temporary.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".frame-")
+        }));
+    }
+
+    #[tokio::test]
+    #[ignore = "set INFINITE_CANVAS_TEST_FFMPEG to the already installed project engine"]
     async fn real_ffmpeg_resume_reuses_verified_frame_and_completes_same_job() {
         let ffmpeg = PathBuf::from(
             std::env::var("INFINITE_CANVAS_TEST_FFMPEG").expect("existing FFmpeg path"),
@@ -1484,8 +1773,12 @@ mod tests {
         let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
         storage.ensure_frame_extraction_storage().unwrap();
         let mut record = persisted_job(temporary.path(), &source, "frame-extract-real-resume");
+        record.requested_percentages = vec![0.25, 0.3125, 0.375, 0.75];
+        record.resolved_timestamps = vec![1.0, 1.25, 1.5, 3.0];
         let output_dir = PathBuf::from(&record.output_directory);
         std::fs::create_dir_all(&output_dir).unwrap();
+        let prior_output = output_dir.join("000002-clip@1.25.jpg");
+        std::fs::write(&prior_output, b"uncheckpointed prior output").unwrap();
         let completed_frame = output_dir.join("000001-clip@1.jpg");
         let cancellation_flag = Arc::new(AtomicBool::new(false));
         record.frames.push(
@@ -1536,8 +1829,21 @@ mod tests {
             "{:?}",
             completed.error
         );
-        assert_eq!(completed.frames.len(), 2);
+        assert_eq!(completed.frames.len(), 4);
         assert_eq!(completed.frames[0].path, record.frames[0].path);
+        assert_ne!(completed.frames[1].path, prior_output.to_string_lossy());
+        assert_eq!(
+            std::fs::read(&prior_output).unwrap(),
+            b"uncheckpointed prior output"
+        );
+        assert_eq!(
+            completed
+                .frames
+                .iter()
+                .map(|frame| frame.timestamp_seconds)
+                .collect::<Vec<_>>(),
+            record.resolved_timestamps
+        );
         assert_eq!(
             std::fs::metadata(&completed_frame)
                 .unwrap()

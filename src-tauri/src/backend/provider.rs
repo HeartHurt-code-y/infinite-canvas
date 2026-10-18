@@ -12,6 +12,8 @@ use tauri_plugin_log::log::{error, info, warn};
 use url::Url;
 use uuid::Uuid;
 
+#[cfg(test)]
+mod fzy_tests;
 mod pixverse;
 
 use self::pixverse::{build_pixverse_video_body, parse_pixverse_video_task_id};
@@ -21,14 +23,15 @@ use super::{
     error::{BackendError, BackendResult},
     gateway_profile::GatewayProfile,
     model_schema::{
-        GRSAI_IMAGE_PROFILE, RequestDialect, apply_request_dialect, default_model_schema,
-        grsai_pixel_dimensions, infer_catalog_schema, is_grsai_pixel_image_model,
-        is_pixverse_video_model, is_seedance_25_video_model, is_seedance_draft_video_model,
-        operations_from_schema, provider_scoped_model_definition_id, schema_for_enabled_operations,
+        FZY_IMAGE_OBSERVE_TEMPLATE, FZY_IMAGE_PROFILE, GRSAI_IMAGE_PROFILE, RequestDialect,
+        apply_request_dialect, default_model_schema, grsai_pixel_dimensions, infer_catalog_schema,
+        is_grsai_pixel_image_model, is_pixverse_video_model, is_seedance_25_video_model,
+        is_seedance_draft_video_model, operations_from_schema, provider_scoped_model_definition_id,
+        schema_for_enabled_operations,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
-        self, ARK_ADAPTER_ID, ProviderAdapterKind, catalog_path_for_adapter,
+        self, ARK_ADAPTER_ID, FZY_ADAPTER_ID, ProviderAdapterKind, catalog_path_for_adapter,
         extra_headers_for_adapter, finalize_video_body,
     },
     storage::{
@@ -1218,11 +1221,11 @@ fn finalize_streamed_text_payload(
     dialect: &mut dyn SseDialect,
     sink: &mut StreamSink<'_>,
     status: u16,
-    transcript: &str,
     stats: &SseReadStats,
     task_id: &str,
     call_id: &str,
 ) -> Result<Value, ()> {
+    let transcript = &stats.transcript;
     parser.flush_pending(dialect, sink);
     let deliverable = dialect.text().to_string();
     let mut payload = parser.assemble(dialect);
@@ -1404,8 +1407,7 @@ impl ProviderRuntime {
             .is_some_and(|kind| !kind.supports_asset_library())
         {
             return Err(BackendError::Conflict(format!(
-                "供应商连接 {} 没有云端素材库：阿里云百炼只提供模型推理接口，\
-                 素材请使用本地素材库或本地生成结果。",
+                "供应商连接 {} 未接入云端素材库；素材请使用本地素材库或本地生成结果。",
                 context.provider_connection_id
             )));
         }
@@ -1436,7 +1438,9 @@ impl ProviderRuntime {
         let context = self.resolve_frozen(task)?;
         match task.operation {
             GenerationOperation::TextToImage => {
-                let body = if resolved.operation_schema["requestProfileId"] == GRSAI_IMAGE_PROFILE {
+                let body = if resolved.operation_schema["requestProfileId"] == FZY_IMAGE_PROFILE {
+                    build_fzy_image_body(task, resolved)?
+                } else if resolved.operation_schema["requestProfileId"] == GRSAI_IMAGE_PROFILE {
                     build_grsai_image_body(task, resolved)?
                 } else {
                     build_text_to_image_body(task, resolved)?
@@ -1445,7 +1449,7 @@ impl ProviderRuntime {
                 let response = self
                     .send_submission_json(task, attempt_id, &context, "submit", &path, body)
                     .await?;
-                let submission = parse_image_submission(&response)?;
+                let submission = parse_task_image_submission(task, &response)?;
                 Ok((submission, response))
             }
             GenerationOperation::ImageToImage => {
@@ -1472,6 +1476,7 @@ impl ProviderRuntime {
                             build_gemini_image_to_image_body(task, resolved)?
                         }
                         "grsai_image_inputs" => build_grsai_image_body(task, resolved)?,
+                        "fzy_image_inputs" => build_fzy_image_body(task, resolved)?,
                         _ => build_seedream_image_to_image_body(task, resolved)?,
                     };
                     self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
@@ -1480,7 +1485,7 @@ impl ProviderRuntime {
                     self.captured_image_edit(task, attempt_id, &context, resolved, &path)
                         .await?
                 };
-                let submission = parse_image_submission(&response)?;
+                let submission = parse_task_image_submission(task, &response)?;
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
@@ -1901,6 +1906,23 @@ impl ProviderRuntime {
         path: &str,
         body: Value,
     ) -> BackendResult<CapturedHttpResponse> {
+        if is_fzy_image_task(task) {
+            // 出图 POST 不剥离字段后重发；响应丢失也可能已经创建并冻结费用。
+            return self
+                .captured_json(
+                    task,
+                    attempt_id,
+                    context,
+                    CapturedJsonRequest {
+                        phase,
+                        method: Method::POST,
+                        path,
+                        body: &body,
+                    },
+                )
+                .await
+                .map_err(fzy_ambiguous_submission_error);
+        }
         let mut body = body;
         self.drop_rejected_fields(task, &mut body);
         for _round in 0..MAX_STRIP_RESEND_ROUNDS {
@@ -2536,7 +2558,6 @@ impl ProviderRuntime {
             dialect.as_mut(),
             &mut delta_sink,
             status,
-            &stats.transcript,
             &stats,
             task_id,
             call_id,
@@ -3756,6 +3777,62 @@ fn build_gemini_image_to_image_body(
 /// vip 系（-vip / -flare / -sunburst）只收像素值，由「画幅 × 分辨率档位」查文档
 /// 参考表得到（`auto` 直接透传）。`background` 是布尔参数，仅在勾选时发送
 /// `transparent`（文档只接受该取值）。
+/// 饭众烟图片接口：文生图与参考图生成使用同一路径，参考图始终为数组。
+fn build_fzy_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty()
+        || !resolved.audios.is_empty()
+        || (task.operation == GenerationOperation::TextToImage && !resolved.images.is_empty())
+    {
+        return Err(BackendError::validation(
+            "饭众烟出图只能编码图片参考；请使用图生图并连接图片素材。",
+            resolved.archive(),
+        ));
+    }
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存图片模型。", json!({"taskId": task.id}))
+        })?;
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(resolved.rendered_prompt));
+    if task.operation == GenerationOperation::ImageToImage {
+        let inputs = resolved
+            .images
+            .iter()
+            .map(|image| {
+                if let Some(reference) = image
+                    .remote_reference
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                {
+                    return Ok(json!(reference));
+                }
+                let bytes = image.bytes.as_ref().ok_or_else(|| {
+                    BackendError::validation(
+                        "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+                        image.archive(),
+                    )
+                })?;
+                Ok(json!(format!(
+                    "data:{};base64,{}",
+                    image.mime_type,
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )))
+            })
+            .collect::<BackendResult<Vec<_>>>()?;
+        body.insert("images".into(), Value::Array(inputs));
+    }
+    insert_mapped_parameters(&mut body, "metadata", mapped_parameters(resolved, "root")?)?;
+    Ok(Value::Object(body))
+}
+
 fn build_grsai_image_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
@@ -3953,6 +4030,13 @@ const IMAGE_TASK_OBSERVE_TEMPLATE: &str = "/v1/images/tasks/{task_id}";
 /// 的接口声明 `/v1/api/result?id={task_id}`。
 fn image_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
     let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
+    if is_fzy_image_task(task) {
+        // 只使用提交时冻结的连接与原任务 ID；修改/删除当前模型配置不改变查询协议。
+        return checked_observe_path(render_observe_template(
+            FZY_IMAGE_OBSERVE_TEMPLATE,
+            remote_task_id,
+        ));
+    }
     let operations = storage
         .list_model_definitions()?
         .into_iter()
@@ -5121,6 +5205,60 @@ fn video_media_content(media: &ResolvedMedia, reference: &str) -> Value {
     }
 }
 
+fn is_fzy_image_task(task: &TaskExecutionRecord) -> bool {
+    task.adapter_id_snapshot == FZY_ADAPTER_ID
+        && matches!(
+            task.operation,
+            GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+        )
+}
+
+fn fzy_ambiguous_submission_error(error: BackendError) -> BackendError {
+    BackendError::protocol(
+        "饭众烟出图的提交结果尚未确认，任务可能已经创建。请保留本次记录和请求编号，联系管理员核查回执后再决定是否重新生成。",
+        json!({ "ambiguousPaidSubmission": true, "source": error.runtime_record() }),
+    )
+}
+
+fn parse_task_image_submission(
+    task: &TaskExecutionRecord,
+    response: &CapturedHttpResponse,
+) -> BackendResult<GenerationSubmission> {
+    if !is_fzy_image_task(task) {
+        return parse_image_submission(response);
+    }
+    if let Err(mut error) = require_success(response) {
+        let value: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let code = value
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        // 文档明确这些响应在创建任务前拒绝；其余 5xx、未知回执与传输中断均不能自动重投。
+        let rejected = matches!(
+            response.status,
+            400 | 401 | 402 | 403 | 404 | 413 | 422 | 429
+        ) || code == "exchange_rate_unavailable";
+        if rejected {
+            if let BackendError::Protocol { details, .. } = &mut error {
+                details["noChargeTerminal"] = json!(true);
+            }
+            return Err(error);
+        }
+        return Err(fzy_ambiguous_submission_error(error));
+    }
+    let value: Value = serde_json::from_str(&response.body).map_err(|error| {
+        fzy_ambiguous_submission_error(BackendError::protocol("出图回执不是有效 JSON。",
+            json!({"httpStatus": response.status, "headers": response.headers, "rawResponse": response.body, "jsonError": error.to_string()})))
+    })?;
+    let id = value.get("id").and_then(Value::as_str).map(str::trim).filter(|id| !id.is_empty())
+        .ok_or_else(|| fzy_ambiguous_submission_error(BackendError::protocol("出图回执缺少任务编号。",
+            json!({"httpStatus": response.status, "headers": response.headers, "rawResponse": response.body}))))?;
+    // 即使快速任务已经结束，也先保存真实远端 ID，再由原任务查询收取终态与结果。
+    Ok(GenerationSubmission::RemoteImageTask {
+        task_id: id.to_string(),
+    })
+}
+
 fn parse_image_submission(response: &CapturedHttpResponse) -> BackendResult<GenerationSubmission> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
@@ -5172,15 +5310,24 @@ fn parse_image_observation(
         .and_then(parse_progress);
     let fail_reason = value
         .get("error")
+        .filter(|value| !value.is_null())
         .cloned()
+        .or_else(|| value.get("errorDetail").cloned())
         .or_else(|| value.get("message").cloned());
     // Grsai 把内容违规单独标记为 `violation`（终态，不再轮询）。
     let remote_failed = matches!(
         remote_status.to_ascii_lowercase().as_str(),
-        "failure" | "failed" | "canceled" | "cancelled" | "error" | "violation"
+        "failure" | "failed" | "canceled" | "cancelled" | "error" | "violation" | "expired"
     );
     let failure = if remote_failed {
-        Some(json!({ "failReason": fail_reason }))
+        Some(json!({
+            "failReason": fail_reason,
+            "errorCode": value.get("errorCode"),
+            "errorDetail": value.get("errorDetail"),
+            "httpStatus": response.status,
+            "headers": response.headers,
+            "rawResponse": response.body
+        }))
     } else {
         None
     };
@@ -6487,7 +6634,6 @@ mod tests {
             &mut dialect,
             &mut sink,
             200,
-            sse,
             &stalled_stats(sse, 23),
             "task-1",
             "call-1",
@@ -6511,7 +6657,6 @@ mod tests {
             &mut dialect,
             &mut sink,
             200,
-            transcript,
             &stalled_stats(transcript, 23),
             "task-1",
             "call-1",
@@ -6534,7 +6679,6 @@ mod tests {
                 &mut dialect,
                 &mut sink,
                 200,
-                sse,
                 &stalled_stats(sse, 2),
                 "task-1",
                 "call-1",
@@ -6570,7 +6714,6 @@ mod tests {
             &mut dialect,
             &mut sink,
             200,
-            &stats.transcript,
             &stats,
             "task-1",
             "call-1",
@@ -7038,7 +7181,7 @@ mod tests {
         );
     }
 
-    fn task(operation: GenerationOperation) -> TaskExecutionRecord {
+    pub(super) fn task(operation: GenerationOperation) -> TaskExecutionRecord {
         TaskExecutionRecord {
             id: "task-1".into(),
             operation,
@@ -7056,7 +7199,7 @@ mod tests {
         }
     }
 
-    fn resolved(operation_schema: Value, parameters: Value) -> ResolvedGeneration {
+    pub(super) fn resolved(operation_schema: Value, parameters: Value) -> ResolvedGeneration {
         ResolvedGeneration {
             rendered_prompt: "A train arrives".into(),
             content: vec![CompiledContentItem::Text("A train arrives".into())],
@@ -7069,7 +7212,7 @@ mod tests {
         }
     }
 
-    fn resolved_media(
+    pub(super) fn resolved_media(
         media_type: MediaType,
         type_position: u32,
         role: &str,
@@ -8788,15 +8931,14 @@ mod tests {
         );
     }
 
-    fn seedance_draft_mock_runtime(
-        status: u16,
-        payload: Value,
-    ) -> (
+    type SeedanceDraftMockRuntime = (
         tempfile::TempDir,
         ProviderRuntime,
         TaskExecutionRecord,
         std::thread::JoinHandle<Vec<(String, Value)>>,
-    ) {
+    );
+
+    fn seedance_draft_mock_runtime(status: u16, payload: Value) -> SeedanceDraftMockRuntime {
         seedance_draft_mock_runtime_for_model("doubao-seedance-2-5-260628", status, payload)
     }
 
@@ -8804,12 +8946,7 @@ mod tests {
         model: &str,
         status: u16,
         payload: Value,
-    ) -> (
-        tempfile::TempDir,
-        ProviderRuntime,
-        TaskExecutionRecord,
-        std::thread::JoinHandle<Vec<(String, Value)>>,
-    ) {
+    ) -> SeedanceDraftMockRuntime {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};

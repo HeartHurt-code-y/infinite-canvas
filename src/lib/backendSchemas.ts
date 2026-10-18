@@ -424,7 +424,7 @@ const generationTaskSummarySchema = v.looseObject({
 
 export const generationTaskPageSchema = v.looseObject({
   items: v.array(generationTaskSummarySchema),
-  nextCursorCreatedBefore: nullableNumberSchema,
+  nextCursor: v.nullable(v.object({ createdAt: v.number(), id: v.string() })),
 }) satisfies v.GenericSchema<GenerationTaskPage>;
 
 export const remoteVideoTaskPageSchema = v.looseObject({

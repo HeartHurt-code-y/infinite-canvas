@@ -240,6 +240,44 @@ function workflowPayload(key: string, checkpoint: KnowledgeVideoWorkflowCheckpoi
   return { media, texts };
 }
 
+export type CanvasInputResolver = (targetKey: string) => ResolvedCanvasInputs;
+type ProducerPayloads = Map<string, Map<string, NodePayload[]>>;
+interface InputSnapshot {
+  readonly nodeByKey: CanvasNodesByKey;
+  readonly edges: readonly AssetEdgeData[];
+  readonly nodes: ReadonlyMap<string, CanvasNodeEntry>;
+  readonly incoming: ReadonlyMap<string, readonly AssetEdgeData[]>;
+  readonly outgoing: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly producerOutputs: ReadonlyMap<string, readonly OutputNodeData[]>;
+  readonly outputsByProducer: ProducerPayloads;
+  readonly ownPayloads: Map<string, NodePayload>;
+  readonly resolved: Map<string, ResolvedCanvasInputs>;
+  readonly resolve: CanvasInputResolver;
+}
+
+/** One owner per canvas. Returned resolvers remain immutable snapshots, including after undo. */
+export function createCanvasInputResolverCache(): (
+  nodes: CanvasNodesByKey,
+  edges: readonly AssetEdgeData[],
+) => CanvasInputResolver {
+  const snapshots = new WeakMap<
+    CanvasNodesByKey,
+    WeakMap<readonly AssetEdgeData[], InputSnapshot>
+  >();
+  let previous: InputSnapshot | undefined;
+  return (nodes, edges) => {
+    let byEdges = snapshots.get(nodes);
+    if (!byEdges) {
+      byEdges = new WeakMap();
+      snapshots.set(nodes, byEdges);
+    }
+    const snapshot = byEdges.get(edges) ?? buildInputSnapshot(nodes, edges, previous);
+    byEdges.set(edges, snapshot);
+    previous = snapshot;
+    return snapshot.resolve;
+  };
+}
+
 /**
  * One index per semantic graph snapshot; each target is resolved once. All node families relay
  * ordered inputs. Iterative traversal avoids stack overflow and visits each node at most once,
@@ -248,32 +286,114 @@ function workflowPayload(key: string, checkpoint: KnowledgeVideoWorkflowCheckpoi
 export function createCanvasInputResolver(
   nodeByKey: CanvasNodesByKey,
   edges: readonly AssetEdgeData[],
-): (targetKey: string) => ResolvedCanvasInputs {
-  const nodes = new Map<string, CanvasNodeEntry>();
+): CanvasInputResolver {
+  return buildInputSnapshot(nodeByKey, edges).resolve;
+}
+
+function buildInputSnapshot(
+  nodeByKey: CanvasNodesByKey,
+  edges: readonly AssetEdgeData[],
+  previous?: InputSnapshot,
+): InputSnapshot {
+  const changed = new Set<string>();
+  const nodes = new Map(previous?.nodes);
   for (const type of Object.keys(nodeByKey) as (keyof CanvasNodesByKey)[]) {
-    for (const [key, data] of nodeByKey[type]) nodes.set(key, { type, data } as CanvasNodeEntry);
+    if (previous?.nodeByKey[type] === nodeByKey[type]) continue;
+    for (const key of previous?.nodeByKey[type].keys() ?? []) {
+      if (!nodeByKey[type].has(key)) {
+        if (nodes.get(key)?.type === type) nodes.delete(key);
+        changed.add(key);
+      }
+    }
+    for (const [key, data] of nodeByKey[type]) {
+      if (previous?.nodeByKey[type].get(key) === data) continue;
+      nodes.set(key, { type, data } as CanvasNodeEntry);
+      changed.add(key);
+    }
   }
-  const incoming = new Map<string, AssetEdgeData[]>();
-  for (const edge of edges) {
-    const target = nodeByKey.output.get(edge.toKey);
-    // This automatic edge records provenance. A selected output stays pinned to its own task.
-    if (target?.sourceNodeId === edge.fromKey) continue;
-    const list = incoming.get(edge.toKey) ?? [];
-    list.push(edge);
-    incoming.set(edge.toKey, list);
+  let incoming = previous?.incoming;
+  let outgoing = previous?.outgoing;
+  if (!previous || previous.edges !== edges || previous.nodeByKey.output !== nodeByKey.output) {
+    const nextIncoming = new Map<string, AssetEdgeData[]>();
+    const nextOutgoing = new Map<string, Set<string>>();
+    for (const edge of edges) {
+      // Provenance is not a data dependency: selected outputs stay pinned to their own task.
+      if (nodeByKey.output.get(edge.toKey)?.sourceNodeId === edge.fromKey) continue;
+      const list = nextIncoming.get(edge.toKey) ?? [];
+      list.push(edge);
+      nextIncoming.set(edge.toKey, list);
+      const targets = nextOutgoing.get(edge.fromKey) ?? new Set<string>();
+      targets.add(edge.toKey);
+      nextOutgoing.set(edge.fromKey, targets);
+    }
+    for (const key of new Set([...nextIncoming.keys(), ...(previous?.incoming.keys() ?? [])])) {
+      const before = previous?.incoming.get(key) ?? [];
+      const next = nextIncoming.get(key) ?? [];
+      if (
+        before.length !== next.length ||
+        before.some(
+          (edge, index) =>
+            edge.id !== next[index]!.id ||
+            edge.fromKey !== next[index]!.fromKey ||
+            edge.toKey !== next[index]!.toKey,
+        )
+      )
+        changed.add(key);
+    }
+    incoming = nextIncoming;
+    outgoing = nextOutgoing;
   }
-  const outputsByProducer = new Map<string, Map<string, NodePayload[]>>();
-  for (const output of nodeByKey.output.values()) {
-    // A task's first placeholder fixes its order. Late layers from an older task must not
-    // make that task newer than a subsequent completed run from the same producer.
-    const tasks = outputsByProducer.get(output.sourceNodeId) ?? new Map<string, NodePayload[]>();
-    const taskOutputs = tasks.get(output.taskId) ?? [];
-    const payload = outputPayload(output);
-    if (payload.media.length > 0 || payload.texts.length > 0) taskOutputs.push(payload);
-    tasks.set(output.taskId, taskOutputs);
-    outputsByProducer.set(output.sourceNodeId, tasks);
+  let producerOutputs = previous?.producerOutputs;
+  let outputsByProducer = previous?.outputsByProducer;
+  if (!previous || previous.nodeByKey.output !== nodeByKey.output) {
+    const groups = new Map<string, OutputNodeData[]>();
+    for (const output of nodeByKey.output.values()) {
+      const group = groups.get(output.sourceNodeId) ?? [];
+      group.push(output);
+      groups.set(output.sourceNodeId, group);
+    }
+    outputsByProducer = new Map(previous?.outputsByProducer);
+    for (const producer of new Set([
+      ...groups.keys(),
+      ...(previous?.producerOutputs.keys() ?? []),
+    ])) {
+      const before = previous?.producerOutputs.get(producer) ?? [];
+      const next = groups.get(producer) ?? [];
+      if (before.length === next.length && before.every((output, index) => output === next[index]))
+        continue;
+      changed.add(producer);
+      if (!next.length) {
+        outputsByProducer.delete(producer);
+        continue;
+      }
+      const tasks = new Map<string, NodePayload[]>();
+      for (const output of next) {
+        // First placeholder fixes task order, including empty or late-arriving output layers.
+        const payloads = tasks.get(output.taskId) ?? [];
+        const payload = outputPayload(output);
+        if (payload.media.length || payload.texts.length) payloads.push(payload);
+        tasks.set(output.taskId, payloads);
+      }
+      outputsByProducer.set(producer, tasks);
+    }
+    producerOutputs = groups;
   }
-  const ownPayloads = new Map<string, NodePayload>();
+  const ownPayloads = new Map(previous?.ownPayloads);
+  for (const key of changed) ownPayloads.delete(key);
+  const affected = new Set(changed);
+  const queue = [...changed];
+  for (let index = 0; index < queue.length; index += 1) {
+    const key = queue[index]!;
+    for (const targets of [outgoing!.get(key), previous?.outgoing.get(key)]) {
+      for (const target of targets ?? []) {
+        if (affected.has(target)) continue;
+        affected.add(target);
+        queue.push(target);
+      }
+    }
+  }
+  const resolved = new Map(previous?.resolved);
+  for (const key of affected) resolved.delete(key);
   const ownPayload = (entry: CanvasNodeEntry): NodePayload => {
     const key = entry.data.key;
     const cached = ownPayloads.get(key);
@@ -338,7 +458,7 @@ export function createCanvasInputResolver(
     }
     if (entry.type !== "asset" && entry.type !== "output") {
       const latest =
-        Array.from(outputsByProducer.get(key)?.values() ?? [])
+        Array.from(outputsByProducer!.get(key)?.values() ?? [])
           .reverse()
           .find((outputs) => outputs.length > 0) ?? [];
       payload = {
@@ -349,8 +469,7 @@ export function createCanvasInputResolver(
     ownPayloads.set(key, payload);
     return payload;
   };
-  const resolved = new Map<string, ResolvedCanvasInputs>();
-  return (targetKey) => {
+  const resolve: CanvasInputResolver = (targetKey) => {
     const cached = resolved.get(targetKey);
     if (cached) return cached;
     const media: ConnectedCanvasMediaInput[] = [];
@@ -362,7 +481,7 @@ export function createCanvasInputResolver(
     const seenNodes = new Set([targetKey]);
     const seenMedia = new Set([targetKey]);
     const seenTexts = new Set([targetKey]);
-    const stack = (incoming.get(targetKey) ?? [])
+    const stack = (incoming!.get(targetKey) ?? [])
       .map((edge) => ({ key: edge.fromKey, edgeId: edge.id }))
       .reverse();
     while (stack.length) {
@@ -370,7 +489,7 @@ export function createCanvasInputResolver(
       if (seenNodes.has(next.key)) continue;
       seenNodes.add(next.key);
       const entry = nodes.get(next.key);
-      const parents = incoming.get(next.key) ?? [];
+      const parents = incoming!.get(next.key) ?? [];
       const payload = entry ? ownPayload(entry) : { media: [], texts: [] };
       for (const item of payload.media) {
         if (seenMedia.has(item.sourceKey)) continue;
@@ -401,20 +520,30 @@ export function createCanvasInputResolver(
     // 例如 A → B → 生成节点，当前 DFS 会先收集 B 再收集 A，此处重排为 [A, B]。
     // 直连素材深度相同，相对顺序保持不变；直连素材的位置另有槽位账本，见下。
     const depthByKey = new Map<string, number>();
-    const depthVisited = new Set<string>();
     const computeDepth = (key: string): number => {
       if (depthByKey.has(key)) return depthByKey.get(key)!;
-      if (depthVisited.has(key)) return 0; // 防循环引用
-      depthVisited.add(key);
-      const parents = incoming.get(key) ?? [];
-      let maxParentDepth = 0;
-      for (const parent of parents) {
-        maxParentDepth = Math.max(maxParentDepth, computeDepth(parent.fromKey));
+      const active = new Set([key]);
+      const stack = [{ key, cursor: 0, maximum: 0 }];
+      while (stack.length) {
+        const current = stack.at(-1)!;
+        const parents = incoming!.get(current.key) ?? [];
+        if (current.cursor < parents.length) {
+          const parent = parents[current.cursor++]!.fromKey;
+          const known = depthByKey.get(parent);
+          if (known !== undefined) current.maximum = Math.max(current.maximum, known);
+          else if (!active.has(parent)) {
+            active.add(parent);
+            stack.push({ key: parent, cursor: 0, maximum: 0 });
+          }
+        } else {
+          const depth = current.maximum + 1;
+          depthByKey.set(current.key, depth);
+          active.delete(current.key);
+          stack.pop();
+          if (stack.length) stack.at(-1)!.maximum = Math.max(stack.at(-1)!.maximum, depth);
+        }
       }
-      depthVisited.delete(key);
-      const depth = maxParentDepth + 1;
-      depthByKey.set(key, depth);
-      return depth;
+      return depthByKey.get(key)!;
     };
     media.sort((a, b) => computeDepth(b.sourceKey) - computeDepth(a.sourceKey));
     // 生成节点（图片/视频）若配置了 inputSlots，则直连素材按槽位位置落座：
@@ -430,7 +559,7 @@ export function createCanvasInputResolver(
         ? targetEntry.data.config.inputSlots
         : undefined;
     if (targetSlots && targetSlots.length > 0) {
-      const occupyingKeys = occupyingGenerationInputKeys(incoming.get(targetKey) ?? [], (key) =>
+      const occupyingKeys = occupyingGenerationInputKeys(incoming!.get(targetKey) ?? [], (key) =>
         nodes.get(key),
       );
       const effectiveSlots = adoptMissingGenerationInputSlots(targetSlots, occupyingKeys);
@@ -475,6 +604,18 @@ export function createCanvasInputResolver(
     const result = { media, texts, pending, mediaSlotCount, mediaPosition };
     resolved.set(targetKey, result);
     return result;
+  };
+  return {
+    nodeByKey,
+    edges,
+    nodes,
+    incoming: incoming!,
+    outgoing: outgoing!,
+    producerOutputs: producerOutputs!,
+    outputsByProducer: outputsByProducer!,
+    ownPayloads,
+    resolved,
+    resolve,
   };
 }
 

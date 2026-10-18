@@ -1,5 +1,9 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as v from "valibot";
+import {
+  decodeWorkflowVersionDocument,
+  encodeWorkflowVersionDocument,
+} from "./workflowVersionStorage";
 import type { SeedanceTaskMode } from "./seedanceTasks";
 // 跨语言契约类型：由 ts-rs 从 src-tauri 的 Rust 类型生成（pnpm codegen），
 // 手写 union 一律不再维护；需要前端独有变体时在本地联合里显式扩展（见 StagingStatus）。
@@ -1472,6 +1476,12 @@ export interface GenerationTaskSummary {
   readonly completedAt: number | null;
 }
 
+/** Matches history ordering: creation time descending, then task ID ascending. */
+export interface GenerationTaskCursor {
+  readonly createdAt: number;
+  readonly id: string;
+}
+
 export interface GenerationTaskListQuery {
   readonly search?: string;
   readonly canvasId?: string | null;
@@ -1479,13 +1489,13 @@ export interface GenerationTaskListQuery {
   readonly statuses?: readonly GenerationTaskStatus[] | null;
   readonly createdFrom?: number;
   readonly createdTo?: number;
-  readonly cursorCreatedBefore?: number | null;
+  readonly cursor?: GenerationTaskCursor | null;
   readonly limit?: number;
 }
 
 export interface GenerationTaskPage {
   readonly items: readonly GenerationTaskSummary[];
-  readonly nextCursorCreatedBefore: number | null;
+  readonly nextCursor: GenerationTaskCursor | null;
 }
 
 export type { MediaType };
@@ -1706,10 +1716,22 @@ export interface CanvasDocumentClient {
 
 export const canvasDocumentClient: CanvasDocumentClient = {
   list: () => invokeDesktop("list_canvas_documents", canvasDocumentSummariesSchema),
-  save: (command) => invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, { command }),
-  get: (canvasId) => invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
+  save: async (command) =>
+    decodeCanvasVersionRecord(
+      await invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, {
+        command: { ...command, document: encodeWorkflowVersionDocument(command.document) },
+      }),
+    ),
+  get: async (canvasId) =>
+    decodeCanvasVersionRecord(
+      await invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
+    ),
   delete: (canvasId) => invokeDesktopVoid("delete_canvas_document", { canvasId }),
 };
+
+function decodeCanvasVersionRecord(record: CanvasDocumentRecord): CanvasDocumentRecord {
+  return { ...record, document: decodeWorkflowVersionDocument(record.document) };
+}
 
 /** 提示词优化模式：决定注入哪份内置提示词方法作为文本模型的系统提示词。 */
 export type PromptOptimizationMode =

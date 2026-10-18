@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+pub(crate) type RuntimeReadyProbe = fn(&Path) -> bool;
+
 #[derive(Clone)]
 pub struct RuntimeComponent {
     store_base: PathBuf,
@@ -49,7 +51,7 @@ pub struct ComponentPlan {
 /// installation directory: a WiX uninstall can remove that directory before the new app runs.
 pub fn check_persistent_components(app_local_data_dir: &Path) -> Result<(), String> {
     let store = app_local_data_dir.join("runtime-components");
-    let checks: [(&str, &str, fn(&Path) -> bool); 4] = [
+    let checks: [(&str, &str, RuntimeReadyProbe); 4] = [
         (
             "blender",
             "manifest.json",
@@ -172,11 +174,10 @@ impl RuntimeComponentMigration {
                     let result = plan.component.migrate(plan.ready, |copied, total| {
                         let mut status = state.status.lock().expect("migration status poisoned");
                         status.completed_bytes = completed_bytes
-                            + if total == 0 {
-                                0
-                            } else {
-                                copied.saturating_mul(estimated_bytes) / total
-                            };
+                            + copied
+                                .saturating_mul(estimated_bytes)
+                                .checked_div(total)
+                                .unwrap_or(0);
                     });
                     let mut status = state.status.lock().expect("migration status poisoned");
                     if let Err(error) = result {
@@ -272,7 +273,7 @@ impl RuntimeComponent {
                 Some((modified, path))
             })
             .collect::<Vec<_>>();
-        candidates.sort_by(|left, right| right.0.cmp(&left.0));
+        candidates.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         candidates
             .into_iter()
             .map(|(_, path)| path)
@@ -308,6 +309,7 @@ impl RuntimeComponent {
             .map_err(|error| format!("创建 {} 的持久目录失败：{error}", self.name))?;
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(self.component_dir().join(".migration.lock"))
@@ -447,6 +449,7 @@ impl RuntimeComponent {
         let parent = self.component_dir();
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(parent.join(".migration.lock"))
@@ -495,7 +498,7 @@ impl RuntimeComponent {
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             older.push((modified, path));
         }
-        older.sort_by(|left, right| right.0.cmp(&left.0));
+        older.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let mut kept_rollback = false;
         for (_, path) in older {
             if !kept_rollback && self.rollback_version_ready(&path, ready) {

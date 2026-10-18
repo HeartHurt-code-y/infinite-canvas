@@ -136,7 +136,7 @@ fn validate_name(name: &str) -> BackendResult<&str> {
     if matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (device.len() == 4
             && (device.starts_with("COM") || device.starts_with("LPT"))
-            && matches!(device.as_bytes()[3], b'0'..=b'9'))
+            && device.as_bytes()[3].is_ascii_digit())
     {
         return Err(invalid("设计交付文件名不能使用系统保留名称"));
     }
@@ -423,6 +423,74 @@ fn validate_svg(bytes: &[u8]) -> BackendResult<()> {
     Ok(())
 }
 
+fn write_new(path: &Path, bytes: &[u8]) -> BackendResult<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+pub fn export_bundle(
+    command: ExportBrandDesignBundleCommand,
+) -> BackendResult<BrandDesignExportResult> {
+    let directory = Path::new(&command.directory);
+    if command.directory.trim().is_empty() || !directory.is_absolute() || !directory.is_dir() {
+        return Err(invalid("请选择有效的设计交付目录"));
+    }
+    if command.files.is_empty() {
+        return Err(invalid("没有可导出的设计文件"));
+    }
+    let manifest: Value = serde_json::from_str(&command.manifest)?;
+    let parent = directory.canonicalize()?;
+    // TempDir owns only this freshly created child. Any failure removes just
+    // that child; the destination appears only after every file validates.
+    let staging = tempfile::Builder::new()
+        .prefix(".brand-design-")
+        .tempdir_in(&parent)?;
+    let mut names = HashSet::new();
+    let mut receipts = Vec::new();
+    for file in &command.files {
+        let format = validate_name(&file.name)?;
+        if !names.insert(file.name.to_lowercase()) {
+            return Err(invalid("设计交付文件名重复"));
+        }
+        let bytes = STANDARD
+            .decode(&file.base64)
+            .map_err(|_| invalid("设计交付文件编码无效"))?;
+        let size = if format == "png" {
+            let (width, height) = validate_png(&bytes)?;
+            json!({"width": width, "height": height})
+        } else {
+            match format {
+                "svg" => validate_svg(&bytes)?,
+                "json" => {
+                    serde_json::from_slice::<Value>(&bytes)?;
+                }
+                _ => unreachable!(),
+            }
+            Value::Null
+        };
+        write_new(&staging.path().join(&file.name), &bytes)?;
+        receipts.push(json!({
+            "name": file.name, "format": format, "byteSize": bytes.len(),
+            "sha256": hex::encode(Sha256::digest(&bytes)), "dimensions": size,
+        }));
+    }
+    let receipt = serde_json::to_vec_pretty(&json!({
+        "schemaVersion": 1, "manifest": manifest, "files": receipts,
+    }))?;
+    write_new(&staging.path().join(RECEIPT_NAME), &receipt)?;
+    let output = parent.join(format!("品牌设计-{}", Uuid::new_v4()));
+    if output.exists() {
+        return Err(invalid("设计交付目录已存在，请重试"));
+    }
+    fs::rename(staging.path(), &output)?;
+    Ok(BrandDesignExportResult {
+        directory: output.to_string_lossy().into_owned(),
+        count: command.files.len(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,72 +686,4 @@ mod tests {
             }
         }
     }
-}
-
-fn write_new(path: &Path, bytes: &[u8]) -> BackendResult<()> {
-    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-pub fn export_bundle(
-    command: ExportBrandDesignBundleCommand,
-) -> BackendResult<BrandDesignExportResult> {
-    let directory = Path::new(&command.directory);
-    if command.directory.trim().is_empty() || !directory.is_absolute() || !directory.is_dir() {
-        return Err(invalid("请选择有效的设计交付目录"));
-    }
-    if command.files.is_empty() {
-        return Err(invalid("没有可导出的设计文件"));
-    }
-    let manifest: Value = serde_json::from_str(&command.manifest)?;
-    let parent = directory.canonicalize()?;
-    // TempDir owns only this freshly created child. Any failure removes just
-    // that child; the destination appears only after every file validates.
-    let staging = tempfile::Builder::new()
-        .prefix(".brand-design-")
-        .tempdir_in(&parent)?;
-    let mut names = HashSet::new();
-    let mut receipts = Vec::new();
-    for file in &command.files {
-        let format = validate_name(&file.name)?;
-        if !names.insert(file.name.to_lowercase()) {
-            return Err(invalid("设计交付文件名重复"));
-        }
-        let bytes = STANDARD
-            .decode(&file.base64)
-            .map_err(|_| invalid("设计交付文件编码无效"))?;
-        let size = if format == "png" {
-            let (width, height) = validate_png(&bytes)?;
-            json!({"width": width, "height": height})
-        } else {
-            match format {
-                "svg" => validate_svg(&bytes)?,
-                "json" => {
-                    serde_json::from_slice::<Value>(&bytes)?;
-                }
-                _ => unreachable!(),
-            }
-            Value::Null
-        };
-        write_new(&staging.path().join(&file.name), &bytes)?;
-        receipts.push(json!({
-            "name": file.name, "format": format, "byteSize": bytes.len(),
-            "sha256": hex::encode(Sha256::digest(&bytes)), "dimensions": size,
-        }));
-    }
-    let receipt = serde_json::to_vec_pretty(&json!({
-        "schemaVersion": 1, "manifest": manifest, "files": receipts,
-    }))?;
-    write_new(&staging.path().join(RECEIPT_NAME), &receipt)?;
-    let output = parent.join(format!("品牌设计-{}", Uuid::new_v4()));
-    if output.exists() {
-        return Err(invalid("设计交付目录已存在，请重试"));
-    }
-    fs::rename(staging.path(), &output)?;
-    Ok(BrandDesignExportResult {
-        directory: output.to_string_lossy().into_owned(),
-        count: command.files.len(),
-    })
 }

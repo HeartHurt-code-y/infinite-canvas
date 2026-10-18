@@ -449,12 +449,12 @@ pub async fn align_mv_lyrics(
     let unmatched_lyrics = expected
         .iter()
         .enumerate()
-        .filter_map(|(index, line)| {
-            (lines
+        .filter(|&(index, line)| {
+            lines
                 .get(index)
-                .is_none_or(|aligned| normalized_lyrics(&aligned.text) != normalized_lyrics(line)))
-            .then(|| (*line).to_string())
+                .is_none_or(|aligned| normalized_lyrics(&aligned.text) != normalized_lyrics(line))
         })
+        .map(|(_, line)| (*line).to_string())
         .collect();
     mv_media::verify_source(&command.source_path, &command.source_signature).await?;
     Ok(MvLyricsAlignment {

@@ -579,16 +579,16 @@ pub(crate) fn extract_zip(
     if extracted.len() != expected.len() {
         return Err("组件 ZIP 缺少登记文件".into());
     }
+    #[cfg(unix)]
     for (path, target) in links {
         check_cancel(cancel)?;
-        #[cfg(unix)]
         std::os::unix::fs::symlink(target, path)
             .map_err(|error| format!("恢复组件软链接失败：{error}"))?;
-        #[cfg(not(unix))]
-        {
-            let _ = (path, target);
-            return Err("此平台不支持组件软链接".into());
-        }
+    }
+    #[cfg(not(unix))]
+    if !links.is_empty() {
+        check_cancel(cancel)?;
+        return Err("此平台不支持组件软链接".into());
     }
     verify_tree(&root, files, false, cancel)
 }

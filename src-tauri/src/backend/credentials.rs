@@ -312,7 +312,7 @@ pub(crate) fn write_private_file(path: &Path, body: &str) -> std::io::Result<()>
             .truncate(true)
             .open(path)?;
         file.write_all(body.as_bytes())?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(unix, windows)))]

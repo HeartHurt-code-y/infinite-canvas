@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   JOINT,
   JOINT_COUNT,
@@ -75,6 +75,83 @@ function plan(overrides: Partial<WhiteModelScenePlan> = {}): WhiteModelScenePlan
 }
 
 describe("角色路径求值", () => {
+  it("reuses sorted keyframes and same-frame actor state, invalidating on immutable edits", () => {
+    const actor = walker({
+      keyframes: [
+        { time: 4, position: [4, 0, 0], yaw: 0 },
+        { time: 0, position: [0, 0, 0], yaw: 0 },
+        { time: 2, position: [2, 0, 0], yaw: 0 },
+      ],
+    });
+    const source = plan({
+      objects: [actor],
+      camera: {
+        ...plan().camera,
+        follow: { actorId: actor.id, mode: "aim" },
+      },
+    });
+    const sort = vi.spyOn(Array.prototype, "sort");
+    try {
+      const state = evaluateActor(actor, 1);
+      evaluateCamera(source, 1);
+      expect(evaluateActor(actor, 1)).toBe(state);
+      const initialSorts = sort.mock.calls.length;
+      for (const time of [0.5, 1, 1.5, 2, 3.9, 0.1, 3, 2, 0.5]) {
+        expect(evaluateActor(actor, time).position[0]).toBeCloseTo(time);
+        evaluateCamera(source, time);
+      }
+      expect(sort).toHaveBeenCalledTimes(initialSorts);
+      const edited = {
+        ...actor,
+        keyframes: upsertKeyframe(actor.keyframes, 2, 10, () => ({
+          time: 2,
+          position: [6, 0, 0] as [number, number, number],
+          yaw: 0,
+        })),
+      };
+      expect(evaluateActor(edited, 1).position[0]).toBeCloseTo(3);
+      expect(evaluateActor(actor, 1).position[0]).toBeCloseTo(1);
+      const editedCamera = {
+        ...source,
+        camera: {
+          ...source.camera,
+          follow: null,
+          keyframes: source.camera.keyframes.map((frame) => ({
+            ...frame,
+            position: [0, -10, 2] as [number, number, number],
+          })),
+        },
+      };
+      expect(evaluateCamera(editedCamera, 1).position).toEqual([0, -10, 2]);
+      expect(actor.keyframes.map(({ time }) => time)).toEqual([4, 0, 2]);
+    } finally {
+      sort.mockRestore();
+    }
+  });
+
+  it("keeps exact-boundary and duplicate-time interpolation when scrubbing in both directions", () => {
+    const actor = walker({
+      facing: "manual",
+      keyframes: [
+        { time: 0, position: [0, 0, 0], yaw: 0 },
+        { time: 1, position: [1, 0, 0], yaw: 0 },
+        { time: 1, position: [3, 0, 0], yaw: 90 },
+        { time: 2, position: [5, 0, 0], yaw: 90 },
+        { time: 3, position: [7, 0, 0], yaw: 90 },
+      ],
+    });
+    for (const [time, x] of [
+      [1.5, 4],
+      [2, 5],
+      [0.5, 0.5],
+      [1, 3],
+      [2.5, 6],
+      [-1, 0],
+      [9, 7],
+    ]) {
+      expect(evaluateActor(actor, time!).position[0]).toBeCloseTo(x!);
+    }
+  });
   it("线性插值位置、按路径方向自动朝向并累计步行相位", () => {
     const actor = walker();
     const middle = evaluateActor(actor, 2);

@@ -677,7 +677,7 @@ describe("MV human-reviewed production", () => {
     const recovered = await flow.run();
     expect(recovered.executionPlan?.review?.kind).toBe("first_shot");
     expect(recovered.shotRuns["shot-1"]?.videoTaskId).toBe("already-submitted");
-    expect(flow.fake.generation.get).toHaveBeenCalledWith("already-submitted");
+    expect(flow.fake.generation.getProgress).toHaveBeenCalledWith("already-submitted");
     expect(flow.media.prepareAudioWindow).not.toHaveBeenCalled();
     expect(
       vi

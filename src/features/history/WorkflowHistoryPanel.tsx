@@ -11,6 +11,7 @@ import {
   type WorkflowHistoryClient,
   type WorkflowHistoryDetail,
   type WorkflowHistoryRecord,
+  type WorkflowHistorySummary,
 } from "../../lib/workflowHistory";
 import { aiFilmDeliveryMarkdown } from "../workspace/aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown } from "../workspace/comicDramaWorkflowModel";
@@ -568,7 +569,7 @@ export function WorkflowHistoryPanel({
 }: WorkflowHistoryPanelProps) {
   const [filterId, setFilterId] = useState("all");
   const [dateRange, setDateRange] = useState<HistoryDateRange>({});
-  const [items, setItems] = useState<readonly WorkflowHistoryRecord[]>([]);
+  const [items, setItems] = useState<readonly WorkflowHistorySummary[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState(initialWorkflowId);
   const [detail, setDetail] = useState<WorkflowHistoryDetail | null>(null);

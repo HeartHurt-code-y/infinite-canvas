@@ -1,4 +1,5 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import { decodeWorkflowVersionHistory } from "../../lib/workflowVersionStorage";
 import {
   createWorkflowExecutionPlan,
   workflowExecutionInputSignature,
@@ -402,9 +403,40 @@ function originalBrief(config: KnowledgeVideoWorkflowConfig): string {
 }
 
 function snapshot(config: KnowledgeVideoWorkflowConfig): WorkflowVersionConfig {
-  return clone(
-    without(config as unknown as Record<string, unknown>, ["versionHistory"]),
+  const cached = configurationSnapshots.get(config);
+  if (cached) return cached;
+  const content = Object.fromEntries(
+    Object.entries(config)
+      .filter(([key, value]) => key !== "versionHistory" && jsonField(value))
+      .map(([key, value]) => [key, immutableSnapshotValue(value)]),
   ) as unknown as WorkflowVersionConfig;
+  configurationSnapshots.set(config, content);
+  return content;
+}
+
+// Configs are immutable JSON values. Copy each new subtree once, sharing only our owned
+// snapshots; restoring still takes a separate mutable copy, so edits cannot alter history.
+const configurationSnapshots = new WeakMap<object, WorkflowVersionConfig>();
+const snapshotValues = new WeakMap<object, unknown>();
+const jsonField = (value: unknown) =>
+  value !== undefined && typeof value !== "function" && typeof value !== "symbol";
+function immutableSnapshotValue(value: unknown): unknown {
+  if (typeof value === "bigint") throw new TypeError("工作流版本只支持可保存的 JSON 数据。");
+  if (typeof value === "number") return Number.isFinite(value) ? (value === 0 ? 0 : value) : null;
+  if (typeof value !== "object" || value === null) return value;
+  if (value instanceof Date) return value.toJSON();
+  if (snapshotValues.has(value)) return snapshotValues.get(value);
+  const copied: unknown = Array.isArray(value)
+    ? Array.from(value, (child: unknown) =>
+        jsonField(child) ? immutableSnapshotValue(child) : null,
+      )
+    : Object.fromEntries(
+        Object.entries(value)
+          .filter(([, child]) => jsonField(child))
+          .map(([key, child]) => [key, immutableSnapshotValue(child)]),
+      );
+  snapshotValues.set(value, copied);
+  return copied;
 }
 
 function mergeRuntimeArchives(
@@ -749,14 +781,17 @@ function assertHistory(value: unknown): asserts value is WorkflowVersionHistory 
 
 function historyOf(config: KnowledgeVideoWorkflowConfig): WorkflowVersionHistory | undefined {
   if (config.versionHistory === undefined) return undefined;
-  assertHistory(config.versionHistory);
-  return config.versionHistory;
+  const history = decodeWorkflowVersionHistory(config.versionHistory);
+  assertHistory(history);
+  return history;
 }
 
 export function initializeWorkflowVersions(
   config: KnowledgeVideoWorkflowConfig,
 ): KnowledgeVideoWorkflowConfig {
-  if (historyOf(config)) return config;
+  const existing = historyOf(config);
+  if (existing)
+    return existing === config.versionHistory ? config : { ...config, versionHistory: existing };
   // 初始版本就是一个工作副本：生成开始前的所有参数/模式调整都改写在它身上。
   const initial = newVersion(config, null, "初始版本", true);
   return {

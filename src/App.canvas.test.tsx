@@ -1279,7 +1279,7 @@ function baseInvokeImplementation(
         },
       ]);
     case "list_generation_tasks":
-      return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+      return Promise.resolve({ items: [], nextCursor: null });
     case "list_assets":
       return Promise.resolve(CLOUD_ASSETS);
     case "count_assets_by_kind":
@@ -1403,7 +1403,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       if (command === "list_generation_tasks")
         return Promise.resolve({
           items: submitted ? [summary()] : [],
-          nextCursorCreatedBefore: null,
+          nextCursor: null,
         });
       if (command === "get_generation_task")
         return Promise.resolve({
@@ -3367,7 +3367,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         if (!query.canvasId) throw new Error("删除前检查必须指定所属画布");
         return Promise.resolve({
           items: [makeTaskSummary({ canvasId: query.canvasId, status: "running" })],
-          nextCursorCreatedBefore: null,
+          nextCursor: null,
         });
       }
       return baseInvokeImplementation(command, args);
@@ -5466,7 +5466,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       if (command === "list_generation_tasks")
         return Promise.resolve({
           items: starts ? [detail.summary] : [],
-          nextCursorCreatedBefore: null,
+          nextCursor: null,
         });
       if (command === "get_generation_task") return Promise.resolve(detail);
       return baseInvokeImplementation(command, args);
@@ -6984,7 +6984,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const runningTask = makeTaskSummary({ status: "running", progress: 38 });
     invokeMock.mockImplementation((command) => {
       if (command === "list_generation_tasks") {
-        return Promise.resolve({ items: [runningTask], nextCursorCreatedBefore: null });
+        return Promise.resolve({ items: [runningTask], nextCursor: null });
       }
       return baseInvokeImplementation(command);
     });
@@ -7948,7 +7948,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
             status: taskStatus,
             progress: taskStatus === "running" ? 46 : null,
           });
-          return Promise.resolve({ items: [task], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [task], nextCursor: null });
         }
         if (command === "get_canvas_document") {
           return Promise.resolve({
@@ -8012,7 +8012,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     invokeMock.mockImplementation((command) => {
       if (command === "list_generation_tasks") {
-        return Promise.resolve({ items: [succeededTask], nextCursorCreatedBefore: null });
+        return Promise.resolve({ items: [succeededTask], nextCursor: null });
       }
       if (command === "get_canvas_document") {
         return Promise.resolve({
@@ -8205,7 +8205,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     };
     invokeMock.mockImplementation((command) => {
       if (command === "list_generation_tasks") {
-        return Promise.resolve({ items: [succeededTask], nextCursorCreatedBefore: null });
+        return Promise.resolve({ items: [succeededTask], nextCursor: null });
       }
       if (command === "get_generation_task") {
         return Promise.resolve({
@@ -8302,7 +8302,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
               completedAt: taskStatus === "succeeded" ? 1 : null,
             }),
           ],
-          nextCursorCreatedBefore: null,
+          nextCursor: null,
         });
       }
       if (command === "start_generation") return Promise.resolve(taskId);
@@ -8428,7 +8428,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
             status: taskStatus,
             progress: taskStatus === "running" ? 52 : null,
           });
-          return Promise.resolve({ items: [task], nextCursorCreatedBefore: null });
+          return Promise.resolve({ items: [task], nextCursor: null });
         }
         return baseInvokeImplementation(command);
       });
@@ -8533,7 +8533,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     };
     invokeMock.mockImplementation((command) => {
       if (command === "list_generation_tasks") {
-        return Promise.resolve({ items: [failedTask], nextCursorCreatedBefore: null });
+        return Promise.resolve({ items: [failedTask], nextCursor: null });
       }
       if (command === "get_generation_task") {
         return Promise.resolve(failedDetail);

@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { catalog, fakeDependencies, node, planJson } from "../../test/videoWorkflowFixtures";
+import {
+  catalog,
+  completedTask,
+  fakeDependencies,
+  node,
+  planJson,
+} from "../../test/videoWorkflowFixtures";
 import {
   approveWorkflowExecutionPlan,
   createWorkflowDeliveryPlan,
@@ -33,6 +39,122 @@ function approve(source: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflow
     },
   };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+describe("incremental DAG scheduling", () => {
+  const step = (id: string, dependsOn: string[] = []) => ({ id, title: id, dependsOn });
+
+  it("releases a fast branch before an unrelated slow branch finishes, within the concurrency limit", async () => {
+    const slow = deferred<void>();
+    const fast = deferred<void>();
+    const childStarted = deferred<void>();
+    const calls: string[] = [];
+    const running = executeWorkflowSteps(
+      [step("slow"), step("fast"), step("child", ["fast"]), step("join", ["slow", "child"])],
+      async ({ id }) => {
+        calls.push(id);
+        if (id === "slow") await slow.promise;
+        if (id === "fast") await fast.promise;
+        if (id === "child") childStarted.resolve();
+      },
+      { concurrency: 2 },
+    );
+    expect(calls).toEqual(["slow", "fast"]);
+    fast.resolve();
+    await childStarted.promise;
+    expect(calls).toEqual(["slow", "fast", "child"]);
+    slow.resolve();
+    expect(await running).toBe(true);
+    expect(calls).toEqual(["slow", "fast", "child", "join"]);
+  });
+
+  it.each(["pause", "failure"])(
+    "stops dispatch after %s and drains already active work",
+    async (mode) => {
+      const first = deferred<void | false>();
+      const active = deferred<void>();
+      const calls: string[] = [];
+      let settled = false;
+      const outcome = executeWorkflowSteps(
+        [step("first"), step("active"), step("queued"), step("child", ["active"])],
+        async ({ id }) => {
+          calls.push(id);
+          if (id === "first") {
+            const result = await first.promise;
+            if (mode === "failure") throw new Error("original failure");
+            return result;
+          }
+          await active.promise;
+        },
+        { concurrency: 2 },
+      ).then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      first.resolve(false);
+      await first.promise;
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      expect(calls).toEqual(["first", "active"]);
+      active.resolve();
+      if (mode === "pause") expect(await outcome).toBe(false);
+      else expect(await outcome).toEqual(new Error("original failure"));
+      expect(calls).toEqual(["first", "active"]);
+    },
+  );
+
+  it("aborts queued steps and waits for active calls to settle", async () => {
+    const active = deferred<void>();
+    const controller = new AbortController();
+    const execute = vi.fn(() => active.promise);
+    let settled = false;
+    const outcome = executeWorkflowSteps([step("active"), step("queued")], execute, {
+      signal: controller.signal,
+    }).catch((error: unknown) => {
+      settled = true;
+      return error;
+    });
+    controller.abort();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    active.resolve();
+    expect(await outcome).toMatchObject({ name: "AbortError" });
+    expect(execute).toHaveBeenCalledTimes(1);
+    await expect(
+      executeWorkflowSteps([step("never")], execute, { signal: controller.signal }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("processes long dependency chains with linear dependency reads", async () => {
+    let reads = 0;
+    const steps = Array.from({ length: 2000 }, (_, index) => ({
+      id: String(index),
+      title: String(index),
+      get dependsOn() {
+        reads += 1;
+        return index === 0 ? [] : [String(index - 1)];
+      },
+    }));
+    const execute = vi.fn(() => Promise.resolve());
+    expect(await executeWorkflowSteps(steps, execute)).toBe(true);
+    expect(execute).toHaveBeenCalledTimes(2000);
+    expect(reads).toBeLessThanOrEqual(steps.length * 8);
+  });
+});
 
 describe("workflow dependency plans and human review", () => {
   it("binds video shot analysis approval to its source and export choice", () => {
@@ -372,6 +494,108 @@ describe("workflow dependency plans and human review", () => {
     );
     expect(result.shotRuns["child"]?.continuationReferencePath).toBe("C:\\output\\sample.png");
   });
+
+  it.each(["succeeded", "failed"] as const)(
+    "retains a QC pause when an independent in-flight submission is later %s",
+    async (status) => {
+      const fake = fakeDependencies(planJson());
+      const submitted = deferred<string>();
+      const reviewReached = deferred<void>();
+      vi.mocked(fake.generation.start).mockImplementation(() => submitted.promise);
+      if (status === "failed")
+        vi.mocked(fake.generation.getProgress).mockImplementation((taskId) => {
+          const task = completedTask(taskId);
+          return Promise.resolve({
+            ...task,
+            summary: { ...task.summary, status: "failed" },
+            results: [],
+            finalError: { kind: "protocol", message: "provider rejected", details: null },
+          });
+        });
+      vi.mocked(fake.frames.getJob).mockResolvedValue({
+        jobId: "incomplete",
+        videoPath: "C:/pilot.mp4",
+        status: "completed",
+        progress: 100,
+        frames: [],
+        error: null,
+        createdAt: 1,
+        updatedAt: 2,
+      });
+      const parsed = parseKnowledgeVideoPlan(planJson());
+      const shots = parsed.shots.slice(0, 3).map((shot, index) => ({
+        ...shot,
+        id: ["pilot", "independent", "child"][index]!,
+        dependsOn: index === 2 ? ["pilot"] : [],
+      }));
+      const initial = node();
+      const checkpoint = {
+        ...initial.config.checkpoint,
+        runId: "pause-with-active-submission",
+        phase: "paused" as const,
+        planRevision: 1,
+        manifest: parsed.manifest,
+        script: parsed.script,
+        storyboard: parsed.storyboard,
+        coverImagePath: "C:/cover.png",
+        shots,
+        shotRuns: Object.fromEntries(
+          shots.map((shot, index) => [
+            shot.id,
+            {
+              shotId: shot.id,
+              qcStatus: "pending" as const,
+              retryCount: 0,
+              ...(index === 0 ? { videoTaskId: "video-pilot", clipPath: "C:/pilot.mp4" } : {}),
+            },
+          ]),
+        ),
+      };
+      const planned = {
+        ...initial,
+        config: { ...initial.config, maxAutomaticRetries: 1, checkpoint },
+      };
+      const source = approve({
+        ...planned,
+        config: { ...planned.config, executionPlan: createWorkflowDeliveryPlan(planned) },
+      });
+      const runner = createKnowledgeVideoWorkflowRunner({
+        promptClient: fake.promptClient,
+        generationClient: fake.generation,
+        frameClient: fake.frames,
+        composerClient: fake.composer,
+        sleep: () => Promise.resolve(),
+      });
+      const phases: string[] = [];
+      const running = runner.run({
+        node: source,
+        resume: true,
+        providerCatalog: catalog,
+        signal: new AbortController().signal,
+        onCheckpoint: (current) => {
+          if (current.phase === "awaiting_approval" && current.decision?.kind === "qc")
+            reviewReached.resolve();
+        },
+        onProgress: (state) => phases.push(state.phase),
+      });
+      await reviewReached.promise;
+      expect(fake.generation.start).toHaveBeenCalledTimes(1);
+      submitted.resolve("video-independent");
+      const result = await running;
+      expect(result.phase).toBe("awaiting_approval");
+      expect(result.decision?.kind).toBe("qc");
+      if (status === "succeeded") {
+        expect(result.shotRuns["independent"]?.videoTaskId).toBe("video-independent");
+        expect(result.shotRuns["independent"]?.clipPath).toBeTruthy();
+      } else {
+        expect(result.shotRuns["independent"]?.videoTaskId).toBeNull();
+        expect(result.shotRuns["independent"]?.retryCount).toBe(1);
+      }
+      expect(phases.at(-1)).toBe("awaiting_approval");
+      expect(fake.generation.start).toHaveBeenCalledTimes(1);
+      expect(fake.composer.startComposition).not.toHaveBeenCalled();
+    },
+  );
 
   it("pauses comic production at assets, pilot shot, clips and final delivery without regenerating approved results", async () => {
     const fake = fakeDependencies(planJson());

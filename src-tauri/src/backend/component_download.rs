@@ -472,7 +472,10 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             let mut buffer = [0; 2048];
-            socket.read(&mut buffer).unwrap();
+            assert!(
+                socket.read(&mut buffer).unwrap() > 0,
+                "expected a download request"
+            );
             socket.write_all(b"HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\nabcd").unwrap();
             socket.flush().unwrap();
             std::thread::sleep(Duration::from_millis(300));

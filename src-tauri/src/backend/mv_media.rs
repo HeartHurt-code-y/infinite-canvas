@@ -290,8 +290,7 @@ async fn decoded_stream_duration(ffmpeg: &Path, source: &str, audio: bool) -> Ba
     String::from_utf8_lossy(&result.stdout)
         .lines()
         .filter_map(|line| line.strip_prefix("out_time_us=")?.parse::<f64>().ok())
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .last()
+        .rfind(|value| value.is_finite() && *value > 0.0)
         .map(|value| value / 1_000_000.0)
         .ok_or_else(|| invalid("无法确定实际媒体时长。"))
 }

@@ -754,19 +754,20 @@ fn processing_arguments(
                 "-pix_fmt".into(),
                 "yuv420p".into(),
             ]);
-            if record.operation == VideoPreparationOperation::SilentVideo
-                || record.audio_stream_index.is_none()
+            if let Some(audio_stream_index) = record
+                .audio_stream_index
+                .filter(|_| record.operation != VideoPreparationOperation::SilentVideo)
             {
-                args.push("-an".into());
-            } else {
                 args.extend([
                     "-map".into(),
-                    format!("0:{}", record.audio_stream_index.unwrap()),
+                    format!("0:{audio_stream_index}"),
                     "-c:a".into(),
                     "aac".into(),
                     "-b:a".into(),
                     "192k".into(),
                 ]);
+            } else {
+                args.push("-an".into());
             }
             args.extend(["-movflags".into(), "+faststart".into()]);
         }

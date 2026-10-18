@@ -20,14 +20,17 @@ pub const DOUBAO_VOICE_ADAPTER_ID: &str = "doubao_voice_v1";
 /// Grsai 图片生成 API（gpt-image-2 系列）：`POST /v1/api/generate` 提交、
 /// `GET /v1/api/result?id=` 轮询，与 OpenAI 兼容网关的 `/v1/images/*` 完全不同。
 pub const GRSAI_ADAPTER_ID: &str = "grsai_v1";
+/// 饭众烟异步出图：所有图片型号共用提交与任务查询协议。
+pub const FZY_ADAPTER_ID: &str = "fzy_ai_v1";
 pub const DOUBAO_VOICE_BASE_URL: &str = "https://openspeech.bytedance.com";
 
-pub const SUPPORTED_ADAPTER_IDS: [&str; 5] = [
+pub const SUPPORTED_ADAPTER_IDS: [&str; 6] = [
     MOYU_ADAPTER_ID,
     ARK_ADAPTER_ID,
     BAILIAN_ADAPTER_ID,
     DOUBAO_VOICE_ADAPTER_ID,
     GRSAI_ADAPTER_ID,
+    FZY_ADAPTER_ID,
 ];
 
 /// 华北2（北京）百炼 MaaS 主机后缀。业务空间 ID 作为子域拼进完整 Base URL。
@@ -50,6 +53,7 @@ pub enum ProviderAdapterKind {
     AliyunBailian,
     DoubaoVoice,
     Grsai,
+    FzyAi,
 }
 
 impl ProviderAdapterKind {
@@ -60,6 +64,7 @@ impl ProviderAdapterKind {
             BAILIAN_ADAPTER_ID => Some(Self::AliyunBailian),
             DOUBAO_VOICE_ADAPTER_ID => Some(Self::DoubaoVoice),
             GRSAI_ADAPTER_ID => Some(Self::Grsai),
+            FZY_ADAPTER_ID => Some(Self::FzyAi),
             _ => None,
         }
     }
@@ -85,6 +90,7 @@ impl ProviderAdapterKind {
             Self::AliyunBailian => BAILIAN_ADAPTER_ID,
             Self::DoubaoVoice => DOUBAO_VOICE_ADAPTER_ID,
             Self::Grsai => GRSAI_ADAPTER_ID,
+            Self::FzyAi => FZY_ADAPTER_ID,
         }
     }
 
@@ -96,7 +102,7 @@ impl ProviderAdapterKind {
             // Grsai 与豆包语音一样没有目录接口：`list_models` 直接返回文档列明的
             // 固定模型清单，不走这个路径。
             Self::Grsai | Self::DoubaoVoice => "",
-            Self::Moyu => GATEWAY_MODELS_PATH,
+            Self::Moyu | Self::FzyAi => GATEWAY_MODELS_PATH,
         }
     }
 
@@ -107,7 +113,9 @@ impl ProviderAdapterKind {
                 ("page_size", "1".into()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai | Self::FzyAi => {
+                Vec::new()
+            }
         }
     }
 
@@ -118,7 +126,9 @@ impl ProviderAdapterKind {
                 ("page_size", page_size.to_string()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai | Self::FzyAi => {
+                Vec::new()
+            }
         }
     }
 
@@ -140,7 +150,10 @@ impl ProviderAdapterKind {
 
     pub fn supports_asset_library(self) -> bool {
         // Grsai 只有 generate / result 两个接口，没有素材库浏览或上传。
-        !matches!(self, Self::AliyunBailian | Self::DoubaoVoice | Self::Grsai)
+        !matches!(
+            self,
+            Self::AliyunBailian | Self::DoubaoVoice | Self::Grsai | Self::FzyAi
+        )
     }
 
     pub fn uses_dashscope_wan_envelope(self) -> bool {
@@ -175,7 +188,7 @@ impl ProviderAdapterKind {
                 let parsed = Url::parse(&base_url)?;
                 if parsed.scheme() != "https"
                     || parsed.host_str() != Some("openspeech.bytedance.com")
-                    || parsed.path().trim_end_matches('/') != ""
+                    || !parsed.path().trim_end_matches('/').is_empty()
                     || parsed.query().is_some()
                     || parsed.fragment().is_some()
                 {
@@ -188,7 +201,7 @@ impl ProviderAdapterKind {
             }
             // Grsai 有全球 / 国内两个官方节点，也常见自建中转：像 OpenAI 兼容网关一样
             // 保留用户填写的 Base URL，不做主机白名单。
-            Self::Grsai | Self::Moyu => Ok(base_url),
+            Self::Grsai | Self::Moyu | Self::FzyAi => Ok(base_url),
         }
     }
 }

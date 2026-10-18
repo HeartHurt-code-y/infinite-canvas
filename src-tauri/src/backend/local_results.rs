@@ -1778,7 +1778,7 @@ mod tests {
                     call_id: format!("call-{index}"),
                     tokens: None,
                     observation: GenerationRemoteObservation::Succeeded {
-                        result: result.clone(),
+                        result: Box::new(result.clone()),
                     },
                 },
             ] {
@@ -2064,7 +2064,7 @@ mod tests {
                     call_id: "observe-call".into(),
                     tokens: None,
                     observation: GenerationRemoteObservation::Succeeded {
-                        result: result.clone(),
+                        result: Box::new(result.clone()),
                     },
                 },
             )
@@ -2223,7 +2223,7 @@ mod tests {
                     .expect("arrivals lock")
                     .push(std::time::Instant::now());
                 let mut request = [0_u8; 1024];
-                stream.read(&mut request).expect("request");
+                assert!(stream.read(&mut request).expect("request") > 0);
                 stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nvideo",

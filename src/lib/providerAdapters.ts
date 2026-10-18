@@ -7,6 +7,10 @@ export const DOUBAO_VOICE_ADAPTER_ID = "doubao_voice_v1";
 export const DOUBAO_VOICE_BASE_URL = "https://openspeech.bytedance.com";
 /** Grsai 图片生成 API：自有协议（`/v1/api/generate` + `/v1/api/result`）。 */
 export const GRSAI_ADAPTER_ID = "grsai_v1";
+/** 饭众烟异步出图：所有图片型号均提交任务后查询结果。 */
+export const FZY_ADAPTER_ID = "fzy_ai_v1";
+export const FZY_BASE_URL = "https://fzy-ai.pages.dev";
+export const FZY_IMAGE_PROFILE = "fzy_image_tasks_v1";
 
 /**
  * 语音合成的两个请求档案，与后端 `model_schema.rs` 一一对应：豆包语音 OpenSpeech
@@ -48,7 +52,8 @@ export function adapterSupportsAssetLibrary(adapterId: string): boolean {
   return (
     !isBailianAdapter(adapterId) &&
     adapterId !== DOUBAO_VOICE_ADAPTER_ID &&
-    adapterId !== GRSAI_ADAPTER_ID
+    adapterId !== GRSAI_ADAPTER_ID &&
+    adapterId !== FZY_ADAPTER_ID
   );
 }
 

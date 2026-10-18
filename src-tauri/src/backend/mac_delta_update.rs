@@ -2,18 +2,28 @@
 //! A Tauri-generated tar.gz cannot be patched from an installed .app: its original
 //! tar metadata and gzip stream are not retained by the installation.
 
+#[cfg(any(target_os = "macos", test))]
 use std::collections::{HashMap, HashSet};
+#[cfg(any(target_os = "macos", test))]
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(target_os = "macos", test))]
 use std::{fs, io};
 
+#[cfg(any(target_os = "macos", test))]
 use flate2::{Compression, GzBuilder};
-use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", test))]
+use serde::Deserialize;
+use serde::Serialize;
+#[cfg(any(target_os = "macos", test))]
 use unicode_normalization::UnicodeNormalization as _;
 
 #[cfg(target_os = "macos")]
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(any(target_os = "macos", test))]
 const MAX_ENTRIES: usize = 200_000;
+#[cfg(any(target_os = "macos", test))]
 const MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+#[cfg(any(target_os = "macos", test))]
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -27,7 +37,7 @@ pub struct MacDeltaUpdateStatus {
     pub reused_bytes: u64,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DeltaManifest {
@@ -36,11 +46,18 @@ struct DeltaManifest {
     version: String,
     platform: String,
     app_name: String,
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            dead_code,
+            reason = "仅 macOS 安装器读取下载地址，其他平台保留完整清单以运行校验测试"
+        )
+    )]
     object_base_url: String,
     files: Vec<DeltaEntry>,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum DeltaEntry {
@@ -53,6 +70,13 @@ enum DeltaEntry {
         mode: u32,
         size: u64,
         sha256: String,
+        #[cfg_attr(
+            not(target_os = "macos"),
+            expect(
+                dead_code,
+                reason = "仅 macOS 安装器按来源组装文件，其他平台测试保留完整清单契约"
+            )
+        )]
         source: FileSource,
     },
     Symlink {
@@ -61,6 +85,7 @@ enum DeltaEntry {
     },
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 enum FileSource {
@@ -68,6 +93,7 @@ enum FileSource {
     Object,
 }
 
+#[cfg(any(target_os = "macos", test))]
 impl DeltaEntry {
     fn path(&self) -> &str {
         match self {
@@ -76,6 +102,7 @@ impl DeltaEntry {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn valid_version(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -84,6 +111,7 @@ fn valid_version(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn valid_hash(value: &str) -> bool {
     value.len() == 64
         && value
@@ -91,6 +119,7 @@ fn valid_hash(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     if value.is_empty()
         || value.len() > 1024
@@ -114,6 +143,7 @@ fn safe_relative_path(value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn resolve_link(path: &str, target: &str) -> Result<PathBuf, String> {
     if target.is_empty()
         || target.len() > 1024
@@ -158,6 +188,7 @@ fn resolve_link(path: &str, target: &str) -> Result<PathBuf, String> {
 /// Resolve every path segment, including links in the middle of a framework
 /// path (for example `Versions/Current -> A`). A single lexical target check
 /// would incorrectly reject valid `Resources -> Versions/Current/Resources`.
+#[cfg(any(target_os = "macos", test))]
 fn resolve_manifest_link(path: &str, paths: &HashMap<&str, &DeltaEntry>) -> Result<(), String> {
     let mut current = path.to_owned();
     let mut followed = HashSet::new();
@@ -202,6 +233,7 @@ fn resolve_manifest_link(path: &str, paths: &HashMap<&str, &DeltaEntry>) -> Resu
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_manifest(manifest: &DeltaManifest, current: &str, target: &str) -> Result<(), String> {
     if manifest.schema_version != 1
         || manifest.platform != "darwin-aarch64"
@@ -266,6 +298,7 @@ fn validate_manifest(manifest: &DeltaManifest, current: &str, target: &str) -> R
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn validate_mode(mode: u32) -> Result<(), String> {
     if mode > 0o7777 || (mode & 0o7000) != 0 {
         return Err("macOS 差分清单包含不安全的权限位".into());
@@ -277,6 +310,7 @@ fn validate_mode(mode: u32) -> Result<(), String> {
 /// entry has a single .app prefix, which the updater strips on extraction.
 /// Archive bytes are authenticated by the signed tree manifest, not by the
 /// signature of the independently built full fallback archive.
+#[cfg(any(target_os = "macos", test))]
 fn pack_tree(root: &Path, manifest: &DeltaManifest, output: &Path) -> Result<(), String> {
     let file =
         fs::File::create(output).map_err(|error| format!("创建 macOS 更新归档失败：{error}"))?;

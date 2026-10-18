@@ -157,6 +157,7 @@ struct MediaProbe {
 }
 
 /// 即使异步探测被取消，也移除临时媒体副本。
+#[cfg(test)]
 struct VideoProbeFile(PathBuf);
 
 struct CompositionFilterFile(PathBuf);
@@ -167,6 +168,7 @@ impl Drop for CompositionFilterFile {
     }
 }
 
+#[cfg(test)]
 impl Drop for VideoProbeFile {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -174,6 +176,7 @@ impl Drop for VideoProbeFile {
 }
 
 impl VideoCompositionService {
+    #[cfg(test)]
     pub fn new(
         downloads_dir: PathBuf,
         engine_dir: PathBuf,
@@ -419,6 +422,7 @@ impl VideoCompositionService {
         probe_media_via_ffmpeg(&self.ffmpeg_binary(), source).await
     }
 
+    #[cfg(test)]
     pub async fn probe_video_bytes_duration(&self, bytes: &[u8]) -> BackendResult<f64> {
         let temporary = VideoProbeFile(
             std::env::temp_dir().join(format!("infinite-canvas-video-probe-{}", Uuid::new_v4())),
