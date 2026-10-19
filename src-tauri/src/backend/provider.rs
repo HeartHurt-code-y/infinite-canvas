@@ -12,6 +12,7 @@ use tauri_plugin_log::log::{error, info, warn};
 use url::Url;
 use uuid::Uuid;
 
+mod fzy;
 #[cfg(test)]
 mod fzy_tests;
 mod pixverse;
@@ -1495,6 +1496,9 @@ impl ProviderRuntime {
                     GatewayProfile::from_task(task) == Some(GatewayProfile::SeedanceDraft);
                 let family = match GatewayProfile::from_operation_schema(&resolved.operation_schema)
                 {
+                    _ if GatewayProfile::from_task(task) == Some(GatewayProfile::FzyVideo) => {
+                        Some(GatewayProfile::FzyVideo)
+                    }
                     Some(
                         family @ (GatewayProfile::Sp25PerUse
                         | GatewayProfile::RdVideo
@@ -1504,6 +1508,10 @@ impl ProviderRuntime {
                     _ => None,
                 };
                 let body = match family {
+                    Some(GatewayProfile::FzyVideo) => {
+                        self.prepare_fzy_video_body(task, attempt_id, &context, resolved)
+                            .await?
+                    }
                     Some(GatewayProfile::Sp25PerUse) => {
                         self.prepare_sp25_video_body(task, attempt_id, &context, resolved)
                             .await?
@@ -1540,6 +1548,7 @@ impl ProviderRuntime {
                     )
                     .await
                     .map_err(|error| match family {
+                        Some(GatewayProfile::FzyVideo) => fzy::ambiguous_submission_error(error),
                         Some(GatewayProfile::PixVerse) => {
                             pixverse::ambiguous_submission_error(error)
                         }
@@ -1553,6 +1562,7 @@ impl ProviderRuntime {
                         .await?
                 };
                 let task_id = match family {
+                    Some(GatewayProfile::FzyVideo) => fzy::parse_task_id(&response)?,
                     Some(GatewayProfile::Sp25PerUse) => parse_sp25_video_task_id(&response)?,
                     Some(GatewayProfile::PixVerse) => parse_pixverse_video_task_id(&response)?,
                     Some(GatewayProfile::SeedanceDraft) => parse_seedance_draft_task_id(&response)?,
@@ -1714,7 +1724,7 @@ impl ProviderRuntime {
                     request,
                 )
                 .await?;
-            return parse_sp25_upload_url(&response);
+            return parse_gateway_upload_url(&response, label);
         }
         let reference = media.remote_reference.as_deref().ok_or_else(|| {
             BackendError::validation(
@@ -1742,14 +1752,18 @@ impl ProviderRuntime {
         let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
             BackendError::validation("远程任务 ID 缺失", json!({ "taskId": task.id }))
         })?;
-        if !valid_sp25_task_id(remote_task_id) {
+        if family != GatewayProfile::FzyVideo && !valid_sp25_task_id(remote_task_id) {
             return Err(BackendError::validation(
                 "远程任务 ID 格式无效",
                 json!({ "taskId": task.id }),
             ));
         }
         let context = self.resolve_frozen(task)?;
-        let path = checked_observe_path(format!("/v1/video/generations/{remote_task_id}"))?;
+        let path = if family == GatewayProfile::FzyVideo {
+            fzy::observe_path(remote_task_id)?
+        } else {
+            checked_observe_path(format!("/v1/video/generations/{remote_task_id}"))?
+        };
         let response = self
             .send_raw_json_request(&context, Method::GET, &path, &[], None, &[])
             .await?;
@@ -1762,6 +1776,7 @@ impl ProviderRuntime {
         }
         let payload: Value = serde_json::from_str(&response.body)?;
         let observed_id = match family {
+            GatewayProfile::FzyVideo => payload.get("id"),
             // 草稿样片的任务身份与状态在网关的 data 信封里。
             GatewayProfile::SeedanceDraft => payload
                 .pointer("/data/task_id")
@@ -1770,6 +1785,9 @@ impl ProviderRuntime {
         }
         .and_then(Value::as_str);
         let succeeded = match family {
+            GatewayProfile::FzyVideo => {
+                payload.get("status").and_then(Value::as_str) == Some("success")
+            }
             GatewayProfile::SeedanceDraft => payload
                 .pointer("/data/status")
                 .or_else(|| payload.get("status"))
@@ -1787,7 +1805,18 @@ impl ProviderRuntime {
                 json!({ "taskId": task.id, "remoteTaskId": remote_task_id, "response": redact_request_value(&payload) }),
             ));
         }
-        let fresh_url = extract_video_url(&payload).ok_or_else(|| {
+        let fresh_url = if family == GatewayProfile::FzyVideo {
+            let captured = CapturedHttpResponse {
+                call_id: String::new(),
+                status: response.status,
+                headers: response.headers,
+                body: response.body,
+            };
+            fzy::parse_observation(&captured, remote_task_id)?.video_url
+        } else {
+            extract_video_url(&payload)
+        }
+        .ok_or_else(|| {
             BackendError::protocol(
                 "视频任务成功响应缺少下载链接",
                 json!({ "taskId": task.id, "remoteTaskId": remote_task_id }),
@@ -1834,6 +1863,11 @@ impl ProviderRuntime {
             .await?;
         let observation = if image_task {
             parse_image_observation(&response)?
+        } else if GatewayProfile::from_task(task) == Some(GatewayProfile::FzyVideo) {
+            fzy::parse_observation(
+                &response,
+                task.remote_task_id.as_deref().unwrap_or_default(),
+            )?
         } else if GatewayProfile::from_task(task) == Some(GatewayProfile::PixVerse) {
             pixverse::parse_observation(
                 &response,
@@ -3965,6 +3999,9 @@ fn build_grsai_image_body(
 /// 使用 `GET /v1/videos/{task_id}`。路径会经过与提交路径相同的合法性校验。
 fn video_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
     let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
+    if GatewayProfile::from_task(task) == Some(GatewayProfile::FzyVideo) {
+        return fzy::observe_path(remote_task_id);
+    }
     // 草稿及其正片的查询端点属于已提交任务的冻结网关合同。之后修改或
     // 替换模型绑定不能让原任务转向另一个接口；签名结果续查使用同一路径。
     if GatewayProfile::from_task(task) == Some(GatewayProfile::SeedanceDraft) {
@@ -5600,22 +5637,22 @@ fn sp25_submission_unknown(message: &str, details: Value) -> BackendError {
     )
 }
 
-fn parse_sp25_upload_url(response: &CapturedHttpResponse) -> BackendResult<String> {
+fn parse_gateway_upload_url(response: &CapturedHttpResponse, label: &str) -> BackendResult<String> {
     if !response.is_success() {
         return Err(sp25_response_error(
             response.status,
             &response.body,
-            "按次视频参考素材上传失败",
+            &format!("{label}参考素材上传失败"),
         ));
     }
     let payload: Value = serde_json::from_str(&response.body)?;
     let reference = payload.get("url").and_then(Value::as_str).ok_or_else(|| {
         BackendError::protocol(
-            "按次视频素材上传响应缺少顶层 url",
+            format!("{label}素材上传响应缺少顶层 url，请重新上传素材。"),
             json!({ "httpStatus": response.status, "response": redact_request_value(&payload) }),
         )
     })?;
-    require_sp25_public_reference_url_value(reference)?;
+    require_public_reference_url_value_with(reference, label)?;
     Ok(reference.to_string())
 }
 
@@ -12055,7 +12092,7 @@ mod tests {
             body: json!({ "object": "reference_asset", "url": "https://assets.example.com/ref.png?signature=x", "data": { "kind": "image" } }).to_string(),
         };
         assert_eq!(
-            parse_sp25_upload_url(&upload).unwrap(),
+            parse_gateway_upload_url(&upload, "按次视频").unwrap(),
             "https://assets.example.com/ref.png?signature=x"
         );
         let rejected = CapturedHttpResponse {
@@ -12063,7 +12100,7 @@ mod tests {
             body: json!({ "error": { "type": "video_asset_upload_error", "code": "file_too_large", "message": "Uploaded image exceeds 10 MB" } }).to_string(),
             ..upload
         };
-        let error = parse_sp25_upload_url(&rejected).unwrap_err();
+        let error = parse_gateway_upload_url(&rejected, "按次视频").unwrap_err();
         assert!(error.to_string().contains("file_too_large"));
     }
 

@@ -55,7 +55,7 @@ pub enum RequestDialect {
     /// 轮询 `GET /v1/api/result?id={task_id}`；同名模型在聚合网关上走
     /// `/v1/images/generations`，契约必须按连接方言区分。
     Grsai,
-    /// 饭众烟异步出图：图片契约由连接决定，不按型号名推断同步或异步。
+    /// 饭众烟图片与视频任务：契约由连接决定，不套用同名模型的原生协议。
     FzyAi,
 }
 
@@ -154,6 +154,9 @@ fn set_request_field(request: &mut Map<String, Value>, field: &str, value: Value
 /// 视频：网关 `/v1/video/generations` ↔ 方舟原生 `/contents/generations/tasks`
 /// ↔ 百炼官方万相 `/api/v1/services/aigc/video-generation/video-synthesis`。
 fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    if dialect == RequestDialect::FzyAi {
+        return apply_fzy_video_dialect(schema);
+    }
     if dialect == RequestDialect::AliyunBailian {
         return apply_bailian_wan_video_dialect(schema, identity);
     }
@@ -1518,6 +1521,49 @@ fn async_image_task_parameters() -> Value {
 
 pub(crate) const FZY_IMAGE_PROFILE: &str = "fzy_image_tasks_v1";
 pub(crate) const FZY_IMAGE_OBSERVE_TEMPLATE: &str = "/v1/images/tasks/{task_id}";
+
+/// https://fzy-ai.pages.dev/api-docs/video-generations
+/// 顶层参数与公网素材 URL 合同覆盖该连接中的全部视频型号。
+fn apply_fzy_video_dialect(schema: &mut Value) -> bool {
+    let Some(slot) = schema.get_mut("video_generation") else {
+        return false;
+    };
+    let replacement = json!({
+        "resultType": "video",
+        "requestProfileId": GatewayProfile::FzyVideo.profile_id(),
+        "profileVersion": 1,
+        "request": {
+            "path": GATEWAY_VIDEO_PATH,
+            "encoding": "json",
+            "parameterContainer": "root",
+            "observePath": "/v1/video/generations/{task_id}",
+            "mediaEncoding": "fzy_video_urls",
+            "mediaField": "images",
+            "videoField": "reference_videos",
+            "audioField": "reference_audios"
+        },
+        "parameters": {
+            "duration": {
+                "type": "integer", "label": "时长", "default": 5, "order": 0
+            },
+            "ratio": {
+                "type": "string", "label": "画幅", "default": "16:9",
+                "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"], "order": 1
+            },
+            "resolution": {
+                "type": "string", "label": "分辨率（由模型档位决定）", "optional": true, "order": 2
+            },
+            "generate_audio": {
+                "type": "boolean", "label": "生成音频", "optional": true, "order": 3
+            }
+        }
+    });
+    if *slot == replacement {
+        return false;
+    }
+    *slot = replacement;
+    true
+}
 
 /// https://fzy-ai.pages.dev/api-docs/images-generations
 /// 同一连接的所有图片模型均使用 JSON + images 数组，不沿用同名模型的原生协议。

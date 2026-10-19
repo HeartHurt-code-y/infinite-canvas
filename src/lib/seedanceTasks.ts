@@ -1,10 +1,12 @@
 import {
   generationParameters,
+  isFzyVideoSchema,
   isRdVideoModel,
   isSeedance25VideoModel,
   type ModelParameterCapability,
   type ModelParameterValue,
 } from "./modelCapabilities";
+import type { ModelOperationSchema } from "./backend";
 
 export type SeedanceTaskMode =
   "auto" | "reference" | "first_frame" | "first_last_frame" | "edit" | "extend";
@@ -102,8 +104,9 @@ export function resolveSeedanceTask(
   capabilities: readonly ModelParameterCapability[],
   config: SeedanceTaskSettings,
   inputs: readonly TaskInput[],
+  operationSchema?: ModelOperationSchema,
 ): SeedanceTaskState {
-  const enabled = isSeedance25VideoModel(modelId);
+  const enabled = !isFzyVideoSchema(operationSchema ?? {}) && isSeedance25VideoModel(modelId);
   const mode = enabled ? restoredMode(config, inputs) : "auto";
   const parameterValues = { ...config.parameterValues };
   const mediaRoles: Record<string, string> = { ...config.mediaRoles };
@@ -155,11 +158,13 @@ export function selectSeedanceTask<T extends SeedanceTaskSettings>(
   config: T,
   inputs: readonly TaskInput[],
   mode: SeedanceTaskMode,
+  operationSchema?: ModelOperationSchema,
 ): T & { readonly seedanceTaskMode: SeedanceTaskMode } {
   const next = {
     ...config,
     seedanceTaskMode: mode,
     parameterValues:
+      !isFzyVideoSchema(operationSchema ?? {}) &&
       !isRdVideoModel(modelId) &&
       (mode === "auto" || frameMode(mode) || mode === "edit" || mode === "extend")
         ? {
@@ -169,6 +174,6 @@ export function selectSeedanceTask<T extends SeedanceTaskSettings>(
           }
         : config.parameterValues,
   };
-  const state = resolveSeedanceTask(modelId, capabilities, next, inputs);
+  const state = resolveSeedanceTask(modelId, capabilities, next, inputs, operationSchema);
   return { ...next, parameterValues: state.parameterValues, mediaRoles: state.mediaRoles };
 }

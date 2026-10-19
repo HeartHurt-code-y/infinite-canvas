@@ -29,6 +29,8 @@ const RD_VIDEO_PROFILE: &str = "rd_video_v1";
 const MOYU_PIXVERSE_VIDEO_PROFILE: &str = "moyu_pixverse_video_v1";
 /// 魔芋 Seedance 2.5 草稿样片（draft_task 晋升合同）。
 const MOYU_SEEDANCE_DRAFT_PROFILE: &str = "moyu_seedance_25_draft_v1";
+/// 饭众烟连接的全部视频模型使用统一任务与素材上传协议。
+const FZY_VIDEO_PROFILE: &str = "fzy_video_tasks_v1";
 
 /// 视频任务的默认轮询间隔。恒定节奏的家族档案与通用回退共用。
 pub(crate) const DEFAULT_VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -46,17 +48,19 @@ pub(crate) enum GatewayProfile {
     PixVerse,
     /// 魔芋 Seedance 2.5 草稿样片。
     SeedanceDraft,
+    FzyVideo,
 }
 
 impl GatewayProfile {
     /// 家族成员清单（遍历顺序即模型 ID 判定顺序）。已注册家族的模型 ID 互不
     /// 交叠；一旦出现子串包含关系（如 RD 的 `seedance-2.5` 含在通用 Seedance
     /// 系里），必须把更专属的家族排在前面。
-    pub(crate) const REGISTRY: [GatewayProfile; 4] = [
+    pub(crate) const REGISTRY: [GatewayProfile; 5] = [
         GatewayProfile::Sp25PerUse,
         GatewayProfile::RdVideo,
         GatewayProfile::PixVerse,
         GatewayProfile::SeedanceDraft,
+        GatewayProfile::FzyVideo,
     ];
 
     pub(crate) fn profile_id(self) -> &'static str {
@@ -65,6 +69,7 @@ impl GatewayProfile {
             GatewayProfile::RdVideo => RD_VIDEO_PROFILE,
             GatewayProfile::PixVerse => MOYU_PIXVERSE_VIDEO_PROFILE,
             GatewayProfile::SeedanceDraft => MOYU_SEEDANCE_DRAFT_PROFILE,
+            GatewayProfile::FzyVideo => FZY_VIDEO_PROFILE,
         }
     }
 
@@ -76,6 +81,7 @@ impl GatewayProfile {
             RD_VIDEO_PROFILE => Some(Self::RdVideo),
             MOYU_PIXVERSE_VIDEO_PROFILE => Some(Self::PixVerse),
             MOYU_SEEDANCE_DRAFT_PROFILE => Some(Self::SeedanceDraft),
+            FZY_VIDEO_PROFILE => Some(Self::FzyVideo),
             _ => None,
         }
     }
@@ -104,13 +110,19 @@ impl GatewayProfile {
             GatewayProfile::RdVideo => is_rd_video_model(model_id),
             GatewayProfile::PixVerse => is_pixverse_video_model(model_id),
             GatewayProfile::SeedanceDraft => is_seedance_draft_video_model(model_id),
+            // 连接决定协议；不能把同名型号在其他供应商上的协议改成饭众烟。
+            GatewayProfile::FzyVideo => false,
         }
     }
 
     /// 已知家族合同是否适用于该连接方言。按次与 RD 本就只存在于 OpenAI 兼容
     /// 网关；PixVerse 与草稿样片在方舟等原生连接上必须让位给原生契约。
     pub(crate) fn available_on(self, dialect: RequestDialect) -> bool {
+        if dialect == RequestDialect::FzyAi {
+            return self == Self::FzyVideo;
+        }
         match self {
+            GatewayProfile::FzyVideo => false,
             GatewayProfile::Sp25PerUse | GatewayProfile::RdVideo => true,
             GatewayProfile::PixVerse | GatewayProfile::SeedanceDraft => {
                 dialect == RequestDialect::OpenAiCompatible
@@ -122,6 +134,9 @@ impl GatewayProfile {
     /// 取代散落各处的 `is_pixverse_gateway_task` / `is_seedance_draft_gateway_task`
     /// 与「模型判定 || 方言判定」的手工组合。
     pub(crate) fn from_task(task: &TaskExecutionRecord) -> Option<Self> {
+        if task.operation != super::types::GenerationOperation::VideoGeneration {
+            return None;
+        }
         Self::for_frozen_snapshot(
             task.remote_model_id_snapshot.as_deref(),
             &task.adapter_id_snapshot,
@@ -133,10 +148,18 @@ impl GatewayProfile {
         remote_model_id: Option<&str>,
         adapter_id: &str,
     ) -> Option<Self> {
+        Self::for_dialect(remote_model_id, RequestDialect::for_adapter(adapter_id))
+    }
+
+    pub(crate) fn for_dialect(
+        remote_model_id: Option<&str>,
+        dialect: RequestDialect,
+    ) -> Option<Self> {
+        if dialect == RequestDialect::FzyAi {
+            return Some(Self::FzyVideo);
+        }
         let family = Self::from_model_id(remote_model_id?)?;
-        family
-            .available_on(RequestDialect::for_adapter(adapter_id))
-            .then_some(family)
+        family.available_on(dialect).then_some(family)
     }
 
     /// 解析阶段是否必须拿到本地字节：这些家族通过供应商上传接口把本地素材换成
@@ -145,7 +168,10 @@ impl GatewayProfile {
     pub(crate) fn needs_local_bytes(self) -> bool {
         matches!(
             self,
-            GatewayProfile::Sp25PerUse | GatewayProfile::RdVideo | GatewayProfile::PixVerse
+            GatewayProfile::Sp25PerUse
+                | GatewayProfile::RdVideo
+                | GatewayProfile::PixVerse
+                | GatewayProfile::FzyVideo
         )
     }
 
@@ -160,6 +186,7 @@ impl GatewayProfile {
             },
             GatewayProfile::Sp25PerUse
             | GatewayProfile::RdVideo
+            | GatewayProfile::FzyVideo
             | GatewayProfile::SeedanceDraft => {
                 GatewayPollCadence::uniform(DEFAULT_VIDEO_POLL_INTERVAL)
             }
@@ -254,7 +281,7 @@ mod tests {
                 family.profile_id()
             );
         }
-        assert_eq!(GatewayProfile::REGISTRY.len(), 4);
+        assert_eq!(GatewayProfile::REGISTRY.len(), 5);
     }
 
     #[test]
@@ -390,6 +417,12 @@ mod tests {
 
     #[test]
     fn frozen_snapshots_gate_on_dialect() {
+        for model_id in ["PixVerse-V6", "doubao-seedance-2.5", "custom-video"] {
+            assert_eq!(
+                GatewayProfile::for_frozen_snapshot(Some(model_id), "fzy_ai_v1"),
+                Some(GatewayProfile::FzyVideo)
+            );
+        }
         assert_eq!(
             GatewayProfile::for_frozen_snapshot(Some("PixVerse-V6"), "moyu_v1"),
             Some(GatewayProfile::PixVerse)

@@ -14,7 +14,8 @@ import {
   type ModelParameterCapability,
 } from "./modelCapabilities";
 import { isSeedanceDraftModel, supportsSeedanceDraft } from "./seedanceDraft";
-import { FZY_IMAGE_PROFILE } from "./providerAdapters";
+import { resolveSeedanceTask } from "./seedanceTasks";
+import { FZY_IMAGE_PROFILE, FZY_VIDEO_PROFILE } from "./providerAdapters";
 
 const capability = (patch: Partial<ModelParameterCapability>): ModelParameterCapability => ({
   key: "ratio",
@@ -32,6 +33,52 @@ const capability = (patch: Partial<ModelParameterCapability>): ModelParameterCap
 });
 
 describe("model capabilities", () => {
+  it.each(["PixVerse-V6", "doubao-seedance-2.5", "sp2.5-720p-30s-ch5", "wan3.0-video"])(
+    "keeps FZY video parameters independent of native defaults for %s",
+    (modelId) => {
+      const schema = {
+        video_generation: {
+          requestProfileId: FZY_VIDEO_PROFILE,
+          parameters: {
+            duration: { type: "integer", default: 5 },
+            ratio: { type: "string", default: "16:9" },
+            resolution: { type: "string", optional: true },
+            generate_audio: { type: "boolean", optional: true },
+          },
+        },
+      };
+      const capabilities = modelParameterCapabilities(schema, "video_generation", modelId);
+      expect(capabilities.map((item) => item.key)).toEqual([
+        "duration",
+        "ratio",
+        "resolution",
+        "generate_audio",
+      ]);
+      expect(capabilities.find((item) => item.key === "duration")?.options).toEqual([]);
+      expect(generationParameters(capabilities, {}, false)).toEqual({ duration: 5, ratio: "16:9" });
+      expect(
+        generationParameters(
+          capabilities,
+          { duration: 20, ratio: "7:4", generate_audio: false },
+          true,
+        ),
+      ).toEqual({ duration: 20, ratio: "7:4", generate_audio: false });
+      const state = resolveSeedanceTask(
+        modelId,
+        capabilities,
+        {
+          parameterValues: { duration: 20, ratio: "7:4" },
+          seedanceTaskMode: "auto",
+          mediaRoles: { image: "first_frame" },
+        },
+        [{ key: "image", kind: "image" }],
+        schema,
+      );
+      expect(state.enabled).toBe(false);
+      expect(state.mediaRoles).toEqual({ image: "first_frame" });
+      expect(state.parameters).toEqual({ duration: 20, ratio: "7:4" });
+    },
+  );
   it.each(["gpt-image-2", "doubao-seedream-5-0-pro-260628", "custom-image"])(
     "uses the FZY schema without inheriting native defaults for %s",
     (modelId) => {

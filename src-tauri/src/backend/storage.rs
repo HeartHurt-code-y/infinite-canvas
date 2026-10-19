@@ -336,7 +336,7 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
     (
         "provider-fzy-ai",
-        "饭众烟 AI（异步出图）",
+        "饭众烟 AI（图片与视频）",
         "https://fzy-ai.pages.dev",
         "fzy_ai_v1",
     ),
@@ -3663,7 +3663,7 @@ mod tests {
                 "SD2.0",
                 "海外平台",
                 "火山引擎",
-                "饭众烟 AI（异步出图）",
+                "饭众烟 AI（图片与视频）",
                 "魔芋AI",
             ]
         );

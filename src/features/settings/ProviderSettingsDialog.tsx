@@ -68,7 +68,7 @@ interface ProviderPreset {
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
     id: "fzy-ai",
-    displayName: "饭众烟 AI（异步出图）",
+    displayName: "饭众烟 AI（图片与视频）",
     baseUrl: FZY_BASE_URL,
     adapterId: FZY_ADAPTER_ID,
   },

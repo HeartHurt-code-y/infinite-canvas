@@ -7,6 +7,7 @@ import {
   modelParameterCapabilities,
 } from "../../lib/modelCapabilities";
 import { resolveSeedanceTask } from "../../lib/seedanceTasks";
+import { FZY_ADAPTER_ID, FZY_VIDEO_PROFILE } from "../../lib/providerAdapters";
 import { VideoNodeSettings } from "./PromptNodeViews";
 import type { ConnectedAssetInput, VideoNodeConfig } from "./workspaceModel";
 
@@ -87,6 +88,64 @@ function mountSettings(
 }
 
 describe("VideoNodeSettings Seedance task interaction", () => {
+  it.each(["PixVerse-V6", DOMESTIC, PER_TASK])(
+    "uses the FZY video contract and accessible frame roles for %s",
+    (modelId) => {
+      const fzyCatalog: readonly ProviderCatalogEntry[] = [
+        {
+          ...catalog[0]!,
+          provider: { ...catalog[0]!.provider, adapterId: FZY_ADAPTER_ID },
+          models: [
+            {
+              definitionId: modelId,
+              remoteModelId: modelId,
+              displayName: modelId,
+              operations: ["video_generation"],
+              operationSchema: {
+                video_generation: {
+                  resultType: "video",
+                  requestProfileId: FZY_VIDEO_PROFILE,
+                  parameters: {
+                    duration: { type: "integer", label: "时长", default: 5 },
+                    ratio: { type: "string", label: "画幅", default: "16:9" },
+                    resolution: {
+                      type: "string",
+                      label: "分辨率（由模型档位决定）",
+                      optional: true,
+                    },
+                    generate_audio: { type: "boolean", label: "生成音频", optional: true },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ];
+      const { changed } = mountSettings(modelId, [first, last], fzyCatalog, {
+        parameterValues: {},
+      });
+      expect(screen.getByLabelText("时长")).toHaveValue(5);
+      const audio = screen.getByRole("combobox", { name: "生成音频" });
+      expect(audio).toHaveValue("");
+      fireEvent.change(audio, { target: { value: "false" } });
+      expect(changed.mock.lastCall?.[0].parameterValues["generate_audio"]).toBe(false);
+      fireEvent.change(audio, { target: { value: "" } });
+      expect(changed.mock.lastCall?.[0].parameterValues).not.toHaveProperty("generate_audio");
+      expect(screen.queryByRole("combobox", { name: "能力模式" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("combobox", { name: "任务类型" })).not.toBeInTheDocument();
+      expect(screen.queryByText(/固定 30 秒/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/1080p 需要账户开通权限/)).not.toBeInTheDocument();
+      expect(screen.getByText(/本地参考图、视频和音频会先免费上传/)).toBeInTheDocument();
+      const firstRole = screen.getByRole("combobox", { name: "首图 的素材角色" });
+      fireEvent.change(firstRole, { target: { value: "first_frame" } });
+      expect(screen.getByRole("alert")).toHaveTextContent("首尾帧需要成对使用");
+      expect(firstRole).toHaveAttribute("aria-describedby", screen.getByRole("alert").id);
+      fireEvent.change(screen.getByRole("combobox", { name: "尾图 的素材角色" }), {
+        target: { value: "last_frame" },
+      });
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    },
+  );
   it("offers PixVerse defaults and returns explicit generation modes to automatic inference", () => {
     const { changed } = mountSettings("PixVerse-V6", [first], catalog, { parameterValues: {} });
     const mode = screen.getByRole("combobox", { name: "能力模式" });

@@ -1,7 +1,7 @@
 import type { GenerationOperation, ModelOperationSchema } from "./backend";
 import { perTaskVideoProfile } from "./perTaskVideo";
 import { isSeedanceDraftModel, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
-import { FZY_IMAGE_PROFILE } from "./providerAdapters";
+import { FZY_IMAGE_PROFILE, FZY_VIDEO_PROFILE } from "./providerAdapters";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -1138,6 +1138,11 @@ function fallbackParameters(
   return {};
 }
 
+export function isFzyVideoSchema(operationSchema: ModelOperationSchema): boolean {
+  const operation = operationSchema["video_generation"];
+  return isRecord(operation) && operation["requestProfileId"] === FZY_VIDEO_PROFILE;
+}
+
 export function modelParameterCapabilities(
   operationSchema: ModelOperationSchema,
   operation: GenerationOperation,
@@ -1147,8 +1152,11 @@ export function modelParameterCapabilities(
   const operationDefinition = isRecord(operationValue) ? operationValue : null;
   const declaredParameters = operationDefinition?.["parameters"];
   const draftProfile = operationDefinition?.["requestProfileId"] === SEEDANCE_DRAFT_PROFILE_ID;
-  const fzyProfile = operationDefinition?.["requestProfileId"] === FZY_IMAGE_PROFILE;
+  const fzyProfile =
+    operationDefinition?.["requestProfileId"] === FZY_IMAGE_PROFILE ||
+    operationDefinition?.["requestProfileId"] === FZY_VIDEO_PROFILE;
   if (!isRecord(declaredParameters)) {
+    if (fzyProfile) return [];
     if (operationDefinition && !perTaskVideoProfile(modelId) && !isPixverseVideoModel(modelId))
       return [];
     const fallback = fallbackParameters(modelId, operation);

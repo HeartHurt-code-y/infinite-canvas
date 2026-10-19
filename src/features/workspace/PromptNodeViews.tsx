@@ -8,7 +8,15 @@ import {
   ingestPromptAttachments,
   type PromptAttachmentIngestReport,
 } from "../../lib/promptAttachments";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
 import { PromptRichTextToolbar } from "./PromptRichTextToolbar";
@@ -19,6 +27,7 @@ import {
   type ProviderCatalogEntry,
 } from "../../lib/backend";
 import {
+  isFzyVideoSchema,
   isMinimaxH3VideoModel,
   isPixverseVideoModel,
   isWan30VideoModel,
@@ -1711,6 +1720,24 @@ function GenerationParameterField({
   readonly onChange: (value: ModelParameterValue) => void;
 }) {
   const disabled = locked;
+  if (capability.type === "boolean" && capability.optional && allowAutomatic) {
+    return (
+      <label className="canvas-gen-node__field canvas-gen-node__field--half">
+        <span>{capability.label}</span>
+        <select
+          value={typeof value === "boolean" ? String(value) : ""}
+          disabled={disabled}
+          onChange={(event) =>
+            onChange(event.target.value === "" ? "" : event.target.value === "true")
+          }
+        >
+          <option value="">自动</option>
+          <option value="true">开启</option>
+          <option value="false">关闭</option>
+        </select>
+      </label>
+    );
+  }
   if (capability.type === "boolean") {
     const checked = !disabled && value === true;
     return (
@@ -1835,7 +1862,8 @@ export function VideoNodeSettings({
   const selectedModel = availableModels.find(
     (model) => model.definitionId === config.modelSelection.modelDefinitionId,
   );
-  const perTaskProfile = perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
+  const fzyVideo = isFzyVideoSchema(selectedModel?.operationSchema ?? {});
+  const perTaskProfile = fzyVideo ? null : perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
   const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
   const perTaskInputIssue = perTaskVideoUrlIssue(perTaskPublicUrls);
   const parameterCapabilities = selectedModel
@@ -1859,6 +1887,7 @@ export function VideoNodeSettings({
     parameterCapabilities,
     greenScreen ? { ...config, seedanceTaskMode: greenScreen.taskMode } : config,
     seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])),
+    selectedModel?.operationSchema,
   );
   const currentTaskLabel = seedanceTaskOptions(selectedModel?.remoteModelId ?? "").find(
     (option) => option.value === taskState.mode,
@@ -1870,7 +1899,7 @@ export function VideoNodeSettings({
     selectedModel?.remoteModelId ?? "",
   );
   const seedanceDraftEnabled = showSeedanceDraft && config.parameterValues["draft"] === true;
-  const pixverse = isPixverseVideoModel(selectedModel?.remoteModelId ?? "");
+  const pixverse = !fzyVideo && isPixverseVideoModel(selectedModel?.remoteModelId ?? "");
   const pixverseHasImages = (mediaInputs ?? []).some((input) => input.kind === "image");
 
   return (
@@ -2013,6 +2042,13 @@ export function VideoNodeSettings({
         </div>
       ) : null}
 
+      {fzyVideo ? (
+        <div className="canvas-gen-node__media-roles" role="status" aria-label="饭众烟视频生成说明">
+          <small>本地参考图、视频和音频会先免费上传，再提交视频任务。</small>
+          <small>按秒计费模型按当前时长冻结费用；分辨率由模型档位决定，可留空。</small>
+          <small>首尾帧须成对使用，不能与参考图混用；具体支持范围由服务端返回。</small>
+        </div>
+      ) : null}
       {pixverse ? (
         <div className="canvas-gen-node__media-roles" role="status" aria-label="PixVerse 生成说明">
           <small>
@@ -2043,6 +2079,7 @@ export function VideoNodeSettings({
                     config,
                     mediaInputs ?? [],
                     event.target.value as SeedanceTaskMode,
+                    selectedModel?.operationSchema,
                   ),
                 )
               }
@@ -2249,15 +2286,18 @@ export function VideoNodeSettings({
         );
       })}
 
-      {isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
+      {fzyVideo ||
+      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
       isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
         <VideoMediaRoleSection
           inputs={mediaInputs ?? []}
           roles={config.mediaRoles ?? {}}
+          pairedFrames={fzyVideo}
           onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
         />
       ) : null}
-      {isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
+      {!fzyVideo &&
+      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
         <VideoUrlMediaSection
           urlMedia={config.urlMedia ?? []}
           hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
@@ -2288,21 +2328,38 @@ function VideoMediaRoleSection({
   inputs,
   roles,
   onChange,
+  pairedFrames = false,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly roles: Readonly<Record<string, string>>;
   readonly onChange: (roles: Readonly<Record<string, string>>) => void;
+  readonly pairedFrames?: boolean;
 }) {
+  const issueId = useId();
   if (inputs.length === 0) return null;
   const effectiveRoles = inputs.map((input) => roles[input.key] ?? defaultWanMediaRole(input.kind));
   const hasFrame = effectiveRoles.some((role) => role === "first_frame" || role === "last_frame");
-  const hasReference = effectiveRoles.some((role) => role.startsWith("reference_"));
+  const hasReference = effectiveRoles.some(
+    (role, index) =>
+      role.startsWith("reference_") && (!pairedFrames || inputs[index]?.kind === "image"),
+  );
   const conflict = hasFrame && hasReference;
+  const unpaired =
+    pairedFrames &&
+    hasFrame &&
+    (!effectiveRoles.includes("first_frame") || !effectiveRoles.includes("last_frame"));
+  const issue = unpaired
+    ? "首尾帧需要成对使用。"
+    : conflict
+      ? "当前请求同时包含首尾帧与参考素材。"
+      : null;
   return (
     <div className="canvas-gen-node__media-roles" aria-label="素材角色">
       <div className="canvas-gen-node__section-title">
         <span>素材角色</span>
-        <small>首帧/首尾帧与参考素材不可混用</small>
+        <small>
+          {pairedFrames ? "首尾帧须成对，不能与参考图混用" : "首帧/首尾帧与参考素材不可混用"}
+        </small>
       </div>
       <ol className="canvas-gen-node__media-role-list">
         {inputs.map((input, index) => {
@@ -2318,6 +2375,7 @@ function VideoMediaRoleSection({
                 className="canvas-gen-node__media-role-select"
                 value={current}
                 aria-label={`${input.name} 的素材角色`}
+                aria-describedby={issue ? issueId : undefined}
                 onChange={(event) => {
                   const next = { ...roles, [input.key]: event.target.value };
                   onChange(next);
@@ -2325,7 +2383,7 @@ function VideoMediaRoleSection({
               >
                 {options.map((option) => (
                   <option key={option.value} value={option.value}>
-                    {option.label}
+                    {pairedFrames && option.value === "last_frame" ? "尾帧" : option.label}
                   </option>
                 ))}
               </select>
@@ -2333,11 +2391,16 @@ function VideoMediaRoleSection({
           );
         })}
       </ol>
-      {conflict ? (
-        <div className="canvas-gen-node__media-role-warning" role="alert">
-          <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          <span>当前请求同时包含首尾帧与参考素材，将完整提交；支持范围由服务端返回。</span>
-        </div>
+      {issue ? (
+        <ErrorAlert
+          id={issueId}
+          error={issue}
+          hint={
+            pairedFrames
+              ? "请分别指定首帧和尾帧，并移除其他参考图；或把所有图片都设为参考图。"
+              : "请确认素材用途；当前输入将完整提交，支持范围由服务端返回。"
+          }
+        />
       ) : null}
     </div>
   );

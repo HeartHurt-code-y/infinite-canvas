@@ -6496,11 +6496,15 @@ export function WorkspaceApp({
         target.config,
         [...inputs, media],
         "reference",
+        selection.model.operationSchema,
       );
-      const task = resolveSeedanceTask(selection.model.remoteModelId, capabilities, nextConfig, [
-        ...inputs,
-        media,
-      ]);
+      const task = resolveSeedanceTask(
+        selection.model.remoteModelId,
+        capabilities,
+        nextConfig,
+        [...inputs, media],
+        selection.model.operationSchema,
+      );
       if (!task.enabled || task.issue)
         throw new Error(task.issue ?? "当前模型不支持 Seedance 2.5 白模参考视频。");
       const edges = remainingEdges.some((edge) => edge.fromKey === key && edge.toKey === nodeKey)
@@ -6705,12 +6709,14 @@ export function WorkspaceApp({
         target.config,
         [...inputs, frame],
         "edit",
+        selection.model.operationSchema,
       );
       const taskState = resolveSeedanceTask(
         selection.model.remoteModelId,
         capabilities,
         nextConfig,
         [...inputs, frame],
+        selection.model.operationSchema,
       );
       if (!taskState.enabled || taskState.issue)
         throw new Error(taskState.issue ?? "当前模型不支持 Seedance 2.5 视频局部编辑。");
@@ -7714,6 +7720,7 @@ export function WorkspaceApp({
                 ? { ...genNode.config, seedanceTaskMode: greenScreenPreparation.taskMode }
                 : genNode.config,
               seedanceTaskInputs(connections),
+              resolvedSelection.model.operationSchema,
             )
           : null;
       if (seedanceTask?.issue) {
@@ -12244,12 +12251,14 @@ export function WorkspaceApp({
                 node.config,
                 inputs,
                 "reference",
+                selection.model.operationSchema,
               );
               const task = resolveSeedanceTask(
                 selection.model.remoteModelId,
                 capabilities,
                 proposed,
                 inputs,
+                selection.model.operationSchema,
               );
               if (task.enabled && !task.issue) {
                 nextConfig = proposed;

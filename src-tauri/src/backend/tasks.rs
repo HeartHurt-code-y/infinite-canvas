@@ -46,9 +46,7 @@ struct VideoPollingPolicy {
 
 impl VideoPollingPolicy {
     fn for_model(model_id: Option<&str>, dialect: RequestDialect) -> Self {
-        let family = model_id
-            .and_then(GatewayProfile::from_model_id)
-            .filter(|family| family.available_on(dialect));
+        let family = GatewayProfile::for_dialect(model_id, dialect);
         let cadence = family
             .map(GatewayProfile::poll_cadence)
             .unwrap_or_else(|| GatewayPollCadence::uniform(video_poll_interval(model_id)));
@@ -110,6 +108,11 @@ fn operation_schema_for_start(
     remote_model_id: Option<&str>,
     dialect: RequestDialect,
 ) -> Option<Value> {
+    if operation == GenerationOperation::VideoGeneration && dialect == RequestDialect::FzyAi {
+        let mut refreshed = stored_operations.clone();
+        apply_request_dialect(&mut refreshed, remote_model_id.unwrap_or_default(), dialect);
+        return refreshed.get(operation.as_str()).cloned();
+    }
     if operation == GenerationOperation::VideoGeneration
         && let Some(model_id) = remote_model_id
         && let Some(family) = GatewayProfile::from_model_id(model_id)
@@ -1734,6 +1737,45 @@ fn video_poll_interval(model_id: Option<&str>) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fzy_video_start_refreshes_native_schemas_and_keeps_its_own_polling_contract() {
+        for model_id in [
+            "PixVerse-V6",
+            "doubao-seedance-2.5",
+            "sp2.5-720p-30s-ch5",
+            "wan3.0-video",
+        ] {
+            let stale = default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+            let schema = operation_schema_for_start(
+                &stale,
+                GenerationOperation::VideoGeneration,
+                Some(model_id),
+                RequestDialect::FzyAi,
+            )
+            .unwrap();
+            assert_eq!(
+                schema["requestProfileId"],
+                GatewayProfile::FzyVideo.profile_id()
+            );
+            assert_eq!(schema["request"]["mediaEncoding"], "fzy_video_urls");
+            let policy = VideoPollingPolicy::for_model(Some(model_id), RequestDialect::FzyAi);
+            assert_eq!(policy.family, Some(GatewayProfile::FzyVideo));
+            assert_eq!(
+                policy.next_wait(std::time::Duration::from_secs(600)),
+                Some(DEFAULT_VIDEO_POLL_INTERVAL)
+            );
+        }
+        assert!(
+            operation_schema_for_start(
+                &json!({}),
+                GenerationOperation::VideoGeneration,
+                Some("custom-video"),
+                RequestDialect::FzyAi
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn pixverse_polling_changes_cadence_and_stops_at_ten_minutes() {

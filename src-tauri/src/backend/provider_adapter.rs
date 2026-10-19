@@ -20,7 +20,7 @@ pub const DOUBAO_VOICE_ADAPTER_ID: &str = "doubao_voice_v1";
 /// Grsai 图片生成 API（gpt-image-2 系列）：`POST /v1/api/generate` 提交、
 /// `GET /v1/api/result?id=` 轮询，与 OpenAI 兼容网关的 `/v1/images/*` 完全不同。
 pub const GRSAI_ADAPTER_ID: &str = "grsai_v1";
-/// 饭众烟异步出图：所有图片型号共用提交与任务查询协议。
+/// 饭众烟图片与视频：按连接使用统一异步任务协议。
 pub const FZY_ADAPTER_ID: &str = "fzy_ai_v1";
 pub const DOUBAO_VOICE_BASE_URL: &str = "https://openspeech.bytedance.com";
 
