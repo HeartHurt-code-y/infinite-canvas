@@ -1,6 +1,6 @@
 [package]
 name = "infinite-canvas"
-version = "0.2.6"
+version = "0.2.7"
 description = "A Tauri desktop application for an infinite canvas"
 # publish = false 的私有应用；此字段仅为满足 cargo-deny 许可证治理。
 license = "MIT"
