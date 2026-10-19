@@ -2201,20 +2201,6 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             response.body.len()
         );
-        if (200..300).contains(&response.status)
-            && looks_like_html_document(response.body.as_bytes())
-        {
-            return Err(html_document_rejection(
-                response.status,
-                &sanitized_url,
-                &content_type_header(&response.headers),
-                response.body.as_bytes(),
-                format!(
-                    "供应商返回了网页而不是接口数据（HTTP {}）。通常是 API 地址没有指向接口（一般应以 /v1 结尾），或该网关不支持此接口：请在供应商设置里核对 API 地址。",
-                    response.status
-                ),
-            ));
-        }
         Ok(response)
     }
 
@@ -2435,18 +2421,18 @@ impl ProviderRuntime {
             task.id, call_id, sanitized_url, call.dialect
         );
         let started_at = std::time::Instant::now();
-        let sent_at = now_ms();
-        self.lifecycle.commit(
-            &task.id,
-            GenerationLifecycleFact::ProviderCallSent {
-                call_id: call_id.clone(),
-                sent_at,
-            },
-        )?;
-
         let label = format!("POST / phase=text_generation / taskId={}", task.id);
         let (status, headers, body_text, payload) = match call.dialect {
             Some(dialect) => {
+                // Non-stream calls record this inside send_captured; record it only once.
+                let sent_at = now_ms();
+                self.lifecycle.commit(
+                    &task.id,
+                    GenerationLifecycleFact::ProviderCallSent {
+                        call_id: call_id.clone(),
+                        sent_at,
+                    },
+                )?;
                 match self
                     .read_streamed_text_response(
                         &task.id, &call_id, sent_at, &label, request, dialect, delta_sink,
@@ -2553,6 +2539,7 @@ impl ProviderRuntime {
         };
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
+        let response_url = sanitize_url(response.url());
         let mut stream = response.bytes_stream();
         let mut parser = SseFrameParser::default();
         let mut dialect = sse_dialect(dialect);
@@ -2587,6 +2574,21 @@ impl ProviderRuntime {
                 return Err(backend_error);
             }
         };
+        if let Err(error) =
+            reject_html_api_response(status, &headers, &stats.transcript, &response_url)
+        {
+            self.lifecycle.commit(
+                task_id,
+                GenerationLifecycleFact::ProviderCallResponded {
+                    call_id: call_id.to_string(),
+                    sent_at,
+                    status,
+                    headers,
+                    raw_response: stats.transcript,
+                },
+            )?;
+            return Err(error);
+        }
         let payload = match finalize_streamed_text_payload(
             parser,
             dialect.as_mut(),
@@ -2819,6 +2821,7 @@ impl ProviderRuntime {
         };
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
+        let response_url = sanitize_url(response.url());
         let bytes = match response.bytes().await {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -2849,6 +2852,7 @@ impl ProviderRuntime {
                 raw_response: body.clone(),
             },
         )?;
+        reject_html_api_response(status, &headers, &body, &response_url)?;
         Ok(CapturedHttpResponse {
             call_id: call_id.to_string(),
             status,
@@ -2934,6 +2938,7 @@ impl ProviderRuntime {
         let response = request.send().await?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
+        let response_url = sanitize_url(response.url());
         let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
         info!(
             "[provider] 收到直连响应: providerConnectionId={}, credentialReference={}, POST {sanitized_url} (multipart), HTTP {status}, 耗时 {}ms, 响应体 {} 字符",
@@ -2942,6 +2947,7 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             body.len()
         );
+        reject_html_api_response(status, &headers, &body, &response_url)?;
         Ok(RawProviderResponse {
             status,
             headers,
@@ -2986,6 +2992,7 @@ impl ProviderRuntime {
         let response = request.send().await?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
+        let response_url = sanitize_url(response.url());
         let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
         info!(
             "[provider] 收到直连响应: providerConnectionId={}, credentialReference={}, {method_str} {sanitized_url}, HTTP {status}, 耗时 {}ms, 响应体 {} 字符",
@@ -2994,17 +3001,7 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             body.len()
         );
-        if (200..300).contains(&status) && looks_like_html_document(body.as_bytes()) {
-            return Err(html_document_rejection(
-                status,
-                &sanitized_url,
-                &content_type_header(&headers),
-                body.as_bytes(),
-                format!(
-                    "供应商返回了网页而不是接口数据（HTTP {status}）。通常是 API 地址没有指向接口（一般应以 /v1 结尾），或该网关不支持此接口：请在供应商设置里核对 API 地址。"
-                ),
-            ));
-        }
+        reject_html_api_response(status, &headers, &body, &response_url)?;
         Ok(RawProviderResponse {
             status,
             headers,
@@ -3106,6 +3103,7 @@ impl ProviderRuntime {
         let response = request.send().await?;
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
+        let response_url = sanitize_url(response.url());
         let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
         info!(
             "[provider] 收到 Ark 直连响应: providerConnectionId={}, credentialReference={}, POST {sanitized_url} (Action={action}), HTTP {status}, 耗时 {}ms, 响应体 {} 字符",
@@ -3114,6 +3112,7 @@ impl ProviderRuntime {
             started_at.elapsed().as_millis(),
             body.len()
         );
+        reject_html_api_response(status, &headers, &body, &response_url)?;
         Ok(RawProviderResponse {
             status,
             headers,
@@ -5949,7 +5948,7 @@ pub fn parse_token_usage(response: &CapturedHttpResponse) -> Option<TokenUsage> 
 
 fn require_success(response: &CapturedHttpResponse) -> BackendResult<()> {
     if response.is_success() {
-        Ok(())
+        reject_html_api_response(response.status, &response.headers, &response.body, "")
     } else {
         let payload: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
         let message = payload
@@ -6151,6 +6150,7 @@ fn parse_model_catalog(
         ));
     }
 
+    reject_html_api_response(response.status, &response.headers, &response.body, "")?;
     let value: Value = serde_json::from_str(&response.body).map_err(|error| {
         BackendError::protocol(
             "model list response is not valid JSON",
@@ -6446,8 +6446,36 @@ fn starts_with_ignore_case(haystack: &[u8], prefix: &[u8]) -> bool {
             .all(|(byte, expected)| byte.eq_ignore_ascii_case(expected))
 }
 
-/// 网页兜底响应的统一协议错误：给用户指路的文案放在摘要里，HTML 前缀只进
-/// 「展开完整报错」的载荷，不整页印给用户。
+/// All JSON API transports and parsers share this check, including multipart uploads.
+/// Inspect the body rather than trusting Content-Type: gateways can mislabel either format.
+pub(super) fn reject_html_api_response(
+    status: u16,
+    headers: &Value,
+    body: &str,
+    url: &str,
+) -> BackendResult<()> {
+    if !(200..300).contains(&status) || !looks_like_html_document(body.as_bytes()) {
+        return Ok(());
+    }
+    let mut error = html_document_rejection(
+        status,
+        url,
+        &content_type_header(headers),
+        body.as_bytes(),
+        format!(
+            "供应商返回了网页而不是接口数据（HTTP {status}）。请在供应商设置里核对 API 地址，并向供应商确认当前接口是否已开通。"
+        ),
+    );
+    if let BackendError::Protocol { details, .. } = &mut error {
+        details["headers"] = headers.clone();
+        details["responseType"] = json!("html");
+        details["retryable"] = json!(false);
+    }
+    Err(error)
+}
+
+/// 网页兜底响应的统一协议错误：给用户指路的文案放在摘要里，完整 HTML 只进
+/// 「展开完整报错」与复制载荷，保留排障信息。
 pub(crate) fn html_document_rejection(
     status: u16,
     url: &str,
@@ -6463,6 +6491,7 @@ pub(crate) fn html_document_rejection(
             "url": redact_url_string(url),
             "contentType": content_type,
             "rawResponsePrefix": prefix,
+            "rawResponse": String::from_utf8_lossy(body),
             "rawResponseBytes": body.len(),
         }),
     )
@@ -8984,6 +9013,45 @@ mod tests {
         status: u16,
         payload: Value,
     ) -> SeedanceDraftMockRuntime {
+        seedance_draft_mock_runtime_with_body(model, status, payload.to_string())
+    }
+
+    fn seedance_draft_mock_runtime_with_body(
+        model: &str,
+        status: u16,
+        payload: String,
+    ) -> SeedanceDraftMockRuntime {
+        use std::time::Duration;
+        seedance_draft_mock_runtime_with_body_and_window(
+            model,
+            status,
+            payload,
+            Duration::from_millis(250),
+        )
+    }
+
+    /// `next_request_window`：每次响应后为脚本里的下一个请求保留的等待窗口。退避
+    /// 重发前固定 sleep 500ms，覆盖退避链路的测试需要放宽这个窗口才能接到第二个
+    /// 请求；脚本用尽后线程立即收摊，多余的请求会被拒收而不是收到重复响应。
+    fn seedance_draft_mock_runtime_with_body_and_window(
+        model: &str,
+        status: u16,
+        payload: String,
+        next_request_window: std::time::Duration,
+    ) -> SeedanceDraftMockRuntime {
+        seedance_draft_mock_runtime_with_responses(
+            model,
+            vec![(status, payload)],
+            next_request_window,
+        )
+    }
+
+    /// 按脚本顺序回响应的 mock 运行时：第 N 个请求收到第 N 个 `(status, body)`。
+    fn seedance_draft_mock_runtime_with_responses(
+        model: &str,
+        responses: Vec<(u16, String)>,
+        next_request_window: std::time::Duration,
+    ) -> SeedanceDraftMockRuntime {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
         use std::time::{Duration, Instant};
@@ -8994,7 +9062,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut deadline = Instant::now() + Duration::from_secs(5);
             let mut requests = Vec::new();
-            while Instant::now() < deadline {
+            while Instant::now() < deadline && requests.len() < responses.len() {
                 let mut stream = match listener.accept() {
                     Ok((stream, _)) => stream,
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
@@ -9032,16 +9100,22 @@ mod tests {
                 let body = if length == 0 {
                     Value::Null
                 } else {
-                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap_or_else(
+                        |_| {
+                            json!(String::from_utf8_lossy(
+                                &bytes[header_end..header_end + length]
+                            ))
+                        },
+                    )
                 };
                 requests.push((headers, body));
-                let payload = payload.to_string();
+                let (status, payload) = responses[requests.len() - 1].clone();
                 let response = format!(
                     "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
                     payload.len()
                 );
                 stream.write_all(response.as_bytes()).unwrap();
-                deadline = Instant::now() + Duration::from_millis(250);
+                deadline = Instant::now() + next_request_window;
             }
             requests
         });
@@ -9094,6 +9168,265 @@ mod tests {
             .unwrap();
         let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
         (directory, runtime, task, server)
+    }
+
+    #[test]
+    fn html_api_response_check_uses_the_body_and_preserves_complete_diagnostics() {
+        let html = format!("<!doctype html><html>{}</html>", "首页".repeat(600));
+        let headers = json!({ "content-type": "application/json" });
+        let error = reject_html_api_response(
+            200,
+            &headers,
+            &html,
+            "https://example.com/v1/assets/list?api_key=private-value",
+        )
+        .unwrap_err()
+        .runtime_record();
+        assert_eq!(error["details"]["rawResponse"], html);
+        assert_eq!(error["details"]["headers"], headers);
+        assert_eq!(error["details"]["responseType"], "html");
+        assert_eq!(error["details"]["retryable"], false);
+        assert!(
+            !error["details"]["url"]
+                .as_str()
+                .unwrap()
+                .contains("private-value")
+        );
+        // A mislabeled JSON body, including generated HTML inside JSON, is still valid API data.
+        reject_html_api_response(
+            200,
+            &json!({ "content-type": "text/html" }),
+            r#"{"data":[{"text":"<html>generated content</html>"}]}"#,
+            "",
+        )
+        .unwrap();
+        // Preserve genuine HTTP failures for their existing status-specific handling.
+        reject_html_api_response(503, &headers, &html, "").unwrap();
+    }
+
+    #[tokio::test]
+    async fn paid_video_html_response_is_recorded_and_never_resubmitted() {
+        for model in ["doubao-seedance-2-5-260628", "PixVerse-V6"] {
+            let body = "<!doctype html><html><title>魔芋AI</title></html>";
+            let (_directory, runtime, task, server) =
+                seedance_draft_mock_runtime_with_body(model, 200, body.into());
+            let request = resolved(
+                video_schema_for_dialect(model, RequestDialect::OpenAiCompatible),
+                json!({}),
+            );
+            let error = runtime
+                .submit(&task, "submit-1", &request)
+                .await
+                .unwrap_err()
+                .runtime_record();
+            assert_eq!(error["details"]["ambiguousPaidSubmission"], true, "{model}");
+            assert_eq!(
+                error["details"]["source"]["details"]["responseType"],
+                "html"
+            );
+            assert_eq!(error["details"]["source"]["details"]["rawResponse"], body);
+            let calls = runtime.storage.get_task_detail(&task.id).unwrap().calls;
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].raw_response.as_deref(), Some(body));
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn multipart_upload_html_response_stops_before_paid_submission() {
+        for asset_library in [false, true] {
+            let body = "<!doctype html><html><title>魔芋AI</title></html>";
+            let (directory, runtime, task, server) = seedance_draft_mock_runtime_with_body(
+                "doubao-seedance-2-5-260628",
+                200,
+                body.into(),
+            );
+            let error = if asset_library {
+                let file_path = directory.path().join("frame.png");
+                std::fs::write(&file_path, b"fixture").unwrap();
+                runtime
+                    .raw_asset_multipart_request(
+                        &task.provider_connection_id,
+                        "/v1/assets/upload",
+                        &[],
+                        "file",
+                        "frame.png",
+                        "image/png",
+                        &file_path,
+                        7,
+                    )
+                    .await
+                    .unwrap_err()
+            } else {
+                let context = runtime.resolve_frozen(&task).unwrap();
+                let mut media = resolved_media(MediaType::Image, 1, "reference_image", "", None);
+                media.bytes = Some(b"fixture".to_vec());
+                media.remote_reference = None;
+                runtime
+                    .gateway_reference_url(&task, "submit-1", &context, &media, "视频")
+                    .await
+                    .unwrap_err()
+            }
+            .runtime_record();
+            assert_eq!(error["kind"], "protocol");
+            assert_eq!(error["details"]["rawResponse"], body);
+            assert_eq!(error["details"]["responseType"], "html");
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].0.contains("multipart/form-data"));
+            assert!(!requests[0].0.contains("/video/generations"));
+        }
+    }
+
+    #[tokio::test]
+    async fn non_stream_text_response_records_one_send_and_reads_valid_json() {
+        let body = json!({ "choices": [{ "message": { "content": "正常结果" } }] });
+        let (_directory, runtime, task, server) = seedance_draft_mock_runtime_with_body(
+            "doubao-seedance-2-5-260628",
+            200,
+            body.to_string(),
+        );
+        let request = json!({ "model": "text-model", "messages": [] });
+        let (response, payload) = runtime
+            .captured_text_json(
+                &task,
+                "submit-1",
+                "/v1/chat/completions",
+                &[],
+                &request,
+                &request,
+                &[],
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(payload, body);
+        assert_eq!(response.body, body.to_string());
+        let calls = runtime.storage.get_task_detail(&task.id).unwrap().calls;
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].sent_at.is_some());
+        assert_eq!(
+            calls[0].raw_response.as_deref(),
+            Some(response.body.as_str())
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn streaming_fallback_to_non_stream_records_one_send_per_call() {
+        // 回归背景：上游忽略流式、按完整 JSON 回 2xx 时（提示词优化对 Gemini 系列
+        // /缓冲型网关必现），captured_text_json 退避改走非流式端点重发一次。该
+        // 重发曾把同一条 provider call 的「已发送」提交两次，第二条 UPDATE 命中
+        // 0 行，任务以「provider call … does not belong to generation task …」
+        // 的假状态冲突终态失败。
+        let body = json!({ "choices": [{ "message": { "content": "退避后的完整结果" } }] });
+        let (_directory, runtime, task, server) = seedance_draft_mock_runtime_with_responses(
+            "doubao-seedance-2-5-260628",
+            vec![
+                // 首呼（流式）：上游忽略流式，回的不是 SSE 也不是完整 JSON——
+                // 2xx 且 0 个 SSE 帧，命中 should_retry_without_streaming 的退避条件。
+                (200, "暂不支持流式".to_string()),
+                // 退避重发（非流式）：正常完整 JSON。
+                (200, body.to_string()),
+            ],
+            std::time::Duration::from_secs(3),
+        );
+        let request = json!({ "model": "text-model", "messages": [], "stream": true });
+        let (response, payload) = runtime
+            .captured_text_json(
+                &task,
+                "submit-1",
+                "/v1/chat/completions",
+                &[],
+                &request,
+                &request,
+                &[],
+                Some(TextModelStream::OpenAiChat),
+                None,
+                Some("/v1/chat/completions"),
+                None,
+            )
+            .await
+            .expect("非流式退避重发必须成功，不得产生假状态冲突");
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "退避后的完整结果"
+        );
+        let calls = runtime.storage.get_task_detail(&task.id).unwrap().calls;
+        assert_eq!(
+            calls.len(),
+            2,
+            "流式首呼与非流式退避各记录一条 provider call"
+        );
+        for call in &calls {
+            assert!(
+                call.sent_at.is_some(),
+                "每条 call 恰好记录一次发送: {}",
+                call.id
+            );
+            assert_eq!(call.http_status, Some(200), "{}", call.id);
+            assert!(call.runtime_error.is_none(), "{}", call.id);
+        }
+        // 首呼按流式重组存档（0 帧时带 x_stream 诊断）；退避重发存档完整 JSON。
+        assert!(
+            calls[0]
+                .raw_response
+                .as_deref()
+                .unwrap_or_default()
+                .contains("x_stream"),
+            "{}",
+            calls[0].raw_response.as_deref().unwrap_or_default()
+        );
+        assert!(
+            calls[1]
+                .raw_response
+                .as_deref()
+                .unwrap_or_default()
+                .contains("退避后的完整结果"),
+            "{}",
+            calls[1].raw_response.as_deref().unwrap_or_default()
+        );
+        assert_eq!(server.join().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn text_html_response_retains_original_body_without_fallback_resubmission() {
+        for stream in [None, Some(TextModelStream::OpenAiChat)] {
+            let body = "<!doctype html><html><title>魔芋AI</title></html>";
+            let (_directory, runtime, task, server) = seedance_draft_mock_runtime_with_body(
+                "doubao-seedance-2-5-260628",
+                200,
+                body.into(),
+            );
+            let request = json!({ "model": "text-model", "messages": [] });
+            let error = runtime
+                .captured_text_json(
+                    &task,
+                    "submit-1",
+                    "/v1/chat/completions",
+                    &[],
+                    &request,
+                    &request,
+                    &[],
+                    stream,
+                    None,
+                    Some("/fallback"),
+                    None,
+                )
+                .await
+                .unwrap_err()
+                .runtime_record();
+            assert_eq!(error["details"]["rawResponse"], body);
+            assert_eq!(error["details"]["responseType"], "html");
+            let calls = runtime.storage.get_task_detail(&task.id).unwrap().calls;
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].raw_response.as_deref(), Some(body));
+            assert_eq!(server.join().unwrap().len(), 1);
+        }
     }
 
     #[test]
