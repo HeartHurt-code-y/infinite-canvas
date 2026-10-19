@@ -1,4 +1,6 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { errorCopyText } from "../../lib/clipboard";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   formatBytes,
@@ -8,7 +10,6 @@ import {
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { assetPickKey } from "./assetGroups";
 import { AssetKindIcon } from "./PromptNodeViews";
-import { copyTextToDesktopClipboard } from "./desktopActions";
 import { useRecoveredPreviewUrl } from "./assetPreviewRecovery";
 import {
   isCloudPreviewConfirmedDead,
@@ -702,7 +703,6 @@ export function AssetUploadRow({
       ? stagingErrorFullText(abandoned ? abandonedUploadError(entry.status) : entry.error)
       : null;
   const [errorExpanded, setErrorExpanded] = useState(false);
-  const [errorCopied, setErrorCopied] = useState(false);
   // 完整原始错误过长才提供折叠/展开；摘要本身也可能被 -webkit-line-clamp 收成两行。
   const showErrorToggle = errorDetail != null && errorDetail.length > 80;
 
@@ -752,37 +752,15 @@ export function AssetUploadRow({
             <span className="asset-upload__error asset-upload__error-detail" role="alert">
               {errorDetail}
             </span>
-            <button
-              type="button"
-              className="asset-upload__error-copy"
-              aria-label={errorCopied ? "已复制报错" : "复制完整报错"}
-              title={errorCopied ? "已复制" : "复制完整报错"}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                void (async () => {
-                  try {
-                    await copyTextToDesktopClipboard(errorDetail);
-                    setErrorCopied(true);
-                    window.setTimeout(() => setErrorCopied(false), 2000);
-                  } catch {
-                    // 剪贴板不可用时静默失败
-                  }
-                })();
-              }}
-            >
-              {errorCopied ? (
-                <Icon name="check" aria-hidden="true" size="xs" />
-              ) : (
-                <Icon name="copy-simple" aria-hidden="true" size="xs" />
-              )}
-              {errorCopied ? "已复制" : "复制"}
-            </button>
+            <ErrorCopyButton text={errorDetail} />
           </span>
         ) : errorSummary != null ? (
-          <span className="asset-upload__error" role="alert">
-            {errorSummary}
-          </span>
+          <>
+            <span className="asset-upload__error" role="alert">
+              {errorSummary}
+            </span>
+            <ErrorCopyButton text={errorSummary} />
+          </>
         ) : null}
         {showErrorToggle ? (
           <button
@@ -838,21 +816,24 @@ export function AssetPanelError({
 }) {
   const presentation = assetErrorPresentation(error);
   return (
-    <div className="asset-panel__error" role="alert">
-      <div className="asset-panel__error-heading">
-        <Icon name="warning-circle" aria-hidden="true" size="lg" />
-        <strong>{title}</strong>
+    <>
+      <div className="asset-panel__error" role="alert">
+        <div className="asset-panel__error-heading">
+          <Icon name="warning-circle" aria-hidden="true" size="lg" />
+          <strong>{title}</strong>
+        </div>
+        <p className="asset-panel__error-summary">{presentation.summary}</p>
+        <details className="asset-panel__error-details">
+          <summary>完整技术详情</summary>
+          <pre tabIndex={0}>{presentation.details}</pre>
+        </details>
+        {actionLabel && onAction ? (
+          <button type="button" onClick={onAction}>
+            {actionLabel}
+          </button>
+        ) : null}
       </div>
-      <p className="asset-panel__error-summary">{presentation.summary}</p>
-      <details className="asset-panel__error-details">
-        <summary>完整技术详情</summary>
-        <pre tabIndex={0}>{presentation.details}</pre>
-      </details>
-      {actionLabel && onAction ? (
-        <button type="button" onClick={onAction}>
-          {actionLabel}
-        </button>
-      ) : null}
-    </div>
+      <ErrorCopyButton text={errorCopyText(presentation.summary, presentation.details)} />
+    </>
   );
 }

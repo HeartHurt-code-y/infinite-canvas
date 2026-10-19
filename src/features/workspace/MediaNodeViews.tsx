@@ -2,7 +2,7 @@ import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
-import { toast } from "sonner";
+import { toast } from "../../lib/toast";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { requestRuntimeComponents } from "../../lib/runtimeComponents";
 import {
@@ -34,6 +34,7 @@ import {
   exportArtifactToDesktop,
 } from "./desktopActions";
 import { NodeNameEditor } from "./NodeNameEditor";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { artifactFileName } from "./artifactNames";
 import { localAssetNodeMediaUrl } from "./localAssetMedia";
 import { useMediaByteSource } from "./mediaByteCache";
@@ -345,21 +346,24 @@ export function CanvasGenNode({
       )}
 
       {startError ? (
-        <div className="canvas-gen-node__error" role="alert">
-          {!isVideo ? (
-            <strong>
-              <Icon name="warning-circle" aria-hidden="true" size="sm" />
-              未能开始生成 · 检查配置后重试
-            </strong>
-          ) : null}
-          <pre
-            className="raw-error canvas-gen-node__start-error"
-            aria-label="发起任务失败"
-            tabIndex={0}
-          >
-            {startError}
-          </pre>
-        </div>
+        <>
+          <div className="canvas-gen-node__error" role="alert">
+            {!isVideo ? (
+              <strong>
+                <Icon name="warning-circle" aria-hidden="true" size="sm" />
+                未能开始生成 · 检查配置后重试
+              </strong>
+            ) : null}
+            <pre
+              className="raw-error canvas-gen-node__start-error"
+              aria-label="发起任务失败"
+              tabIndex={0}
+            >
+              {startError}
+            </pre>
+          </div>
+          <ErrorCopyButton text={startError} />
+        </>
       ) : null}
 
       <div className="canvas-gen-node__footer">
@@ -721,9 +725,12 @@ export function CanvasVideoComposerNode({
         ) : null}
       </div>
       {runState?.status === "error" && runState.error ? (
-        <pre className="canvas-video-composer__error" role="alert" tabIndex={0}>
-          {runState.error}
-        </pre>
+        <>
+          <pre className="canvas-video-composer__error" role="alert" tabIndex={0}>
+            {runState.error}
+          </pre>
+          <ErrorCopyButton text={runState.error} />
+        </>
       ) : null}
       <span className="node-port node-port--left node-port--video" aria-hidden="true" />
       <span className="node-port node-port--right node-port--video" aria-hidden="true" />
@@ -1110,12 +1117,16 @@ export function CanvasVideoDownloaderNode({
               准备网页解析组件
             </button>
           ) : null}
+          <ErrorCopyButton text={runState.error} />
         </>
       ) : null}
       {engineStatus?.state === "failed" && engineStatus.lastError ? (
-        <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
-          {engineStatus.lastError}
-        </pre>
+        <>
+          <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
+            {engineStatus.lastError}
+          </pre>
+          <ErrorCopyButton text={engineStatus.lastError} />
+        </>
       ) : null}
       <button
         type="button"
@@ -1381,9 +1392,12 @@ export function CanvasVideoFrameExtractorNode({
       </div>
 
       {runState?.status === "error" && runState.error ? (
-        <pre className="canvas-video-frame-extractor__error" role="alert" tabIndex={0}>
-          {runState.error}
-        </pre>
+        <>
+          <pre className="canvas-video-frame-extractor__error" role="alert" tabIndex={0}>
+            {runState.error}
+          </pre>
+          <ErrorCopyButton text={runState.error} />
+        </>
       ) : null}
 
       <div

@@ -136,7 +136,7 @@ impl RemotionRenderService {
     pub(crate) fn runtime_dir(&self) -> Option<PathBuf> {
         if let Some(component) = &self.inner.persistent_component {
             if let Some(root) = component.resolve(runtime_ready) {
-                return Some(root);
+                return Some(node_runtime_path(&root));
             }
             if !cfg!(debug_assertions) {
                 return None;
@@ -146,7 +146,7 @@ impl RemotionRenderService {
             .runtime_candidates
             .iter()
             .find(|path| runtime_ready(path))
-            .cloned()
+            .map(|path| node_runtime_path(path))
     }
 
     pub fn preflight(&self) -> RemotionRendererPreflight {
@@ -442,6 +442,13 @@ impl RemotionRenderService {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
+}
+
+/// Windows canonicalize / Tauri 资源目录可能带 \\?\ 前缀。内置 Node 24
+/// 把这种脚本路径或工作目录解析成 `lstat('C:')`，在执行脚本前就崩溃。
+/// 只在交给 Node 的边界移除可安全简化的前缀，组件校验仍使用原始路径。
+fn node_runtime_path(directory: &Path) -> PathBuf {
+    dunce::simplified(directory).to_path_buf()
 }
 
 pub(crate) fn runtime_ready(directory: &Path) -> bool {
@@ -924,6 +931,43 @@ mod tests {
             runtime_paths("linux"),
             ("node", "browser/chrome-headless-shell")
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_dir_returns_a_node_compatible_windows_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().canonicalize().unwrap();
+        assert!(runtime.to_string_lossy().starts_with(r"\\?\"));
+        for name in [
+            "node.exe",
+            "render.mjs",
+            "plan.mjs",
+            "resolve-douyin.mjs",
+            "resolve-rednote.mjs",
+            "Composition.tsx",
+            "bundle/index.html",
+            "runtime-manifest.json",
+            "browser/chrome-headless-shell.exe",
+            "node_modules/@remotion/renderer/package.json",
+            "node_modules/playwright-core/package.json",
+            "node_modules/source-map/package.json",
+        ] {
+            let file = runtime.join(name);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"fixture").unwrap();
+        }
+        let service = RemotionRenderService {
+            inner: Arc::new(Inner {
+                jobs: std::sync::Mutex::new(HashMap::new()),
+                jobs_dir: directory.path().join("jobs"),
+                runtime_candidates: vec![runtime.clone()],
+                persistent_component: None,
+            }),
+        };
+        let resolved = service.runtime_dir().unwrap();
+        assert!(!resolved.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(resolved.canonicalize().unwrap(), runtime);
     }
 
     #[test]

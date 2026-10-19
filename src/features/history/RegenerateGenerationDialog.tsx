@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   useEffect,
@@ -1014,14 +1015,20 @@ export function RegenerateGenerationDialog({
                     ) : null}
                     {localImportSuccess ? <p role="status">{localImportSuccess}</p> : null}
                     {localImportError ? (
-                      <p role="alert" className="regenerate-add__error">
-                        {localImportError}
-                      </p>
+                      <>
+                        <p role="alert" className="regenerate-add__error">
+                          {localImportError}
+                        </p>
+                        <ErrorCopyButton text={localImportError} />
+                      </>
                     ) : null}
                     {!runtime ? (
                       <p className="regenerate-add__error">本地素材库需要桌面应用运行环境。</p>
                     ) : localError ? (
-                      <p className="regenerate-add__error">{localError}</p>
+                      <>
+                        <p className="regenerate-add__error">{localError}</p>
+                        <ErrorCopyButton text={localError} />
+                      </>
                     ) : localAssets == null ? (
                       <p className="regenerate-add__empty">正在加载本地素材…</p>
                     ) : localAssets.length === 0 ? (

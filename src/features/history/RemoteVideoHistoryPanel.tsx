@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   formatRawBackendError,
@@ -344,27 +345,33 @@ export function RemoteVideoHistoryPanel({
         按提交时间查询，使用本机时区。应用关闭期间的任务仍可在这里查询；选择提交时使用的供应商和令牌。仅查询视频任务。
       </p>
       {settingsError ? (
-        <div className="remote-video-history__error" role="alert">
-          {settingsError}{" "}
-          <button
-            type="button"
-            onClick={() => {
-              setSettingsError(null);
-              setGroups(null);
-              setSettingsRevision((value) => value + 1);
-            }}
-          >
-            重试加载配置
-          </button>
-        </div>
+        <>
+          <div className="remote-video-history__error" role="alert">
+            {settingsError}{" "}
+            <button
+              type="button"
+              onClick={() => {
+                setSettingsError(null);
+                setGroups(null);
+                setSettingsRevision((value) => value + 1);
+              }}
+            >
+              重试加载配置
+            </button>
+          </div>
+          <ErrorCopyButton text={settingsError} />
+        </>
       ) : null}
       {providersLoaded && !providers.length && !settingsError ? (
         <p className="remote-video-history__hint">请先在供应商设置中配置并启用连接。</p>
       ) : null}
       {error ? (
-        <p ref={errorRef} tabIndex={-1} className="remote-video-history__error" role="alert">
-          {error}
-        </p>
+        <>
+          <p ref={errorRef} tabIndex={-1} className="remote-video-history__error" role="alert">
+            {error}
+          </p>
+          <ErrorCopyButton text={error} />
+        </>
       ) : null}
       {notice ? (
         <p className="remote-video-history__notice" role="status">

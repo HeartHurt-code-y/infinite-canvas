@@ -17,6 +17,7 @@ import {
   subscribeRuntimeComponentsChanged,
 } from "../../lib/runtimeComponents";
 import { sameMediaSourceIdentity } from "../../lib/promptReferenceTarget";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import type { VideoPreparationProbe } from "../../lib/videoPreparation";
 import type { VideoPreparationSource } from "./VideoPreparationDialog";
 import { NodeNameEditor } from "./NodeNameEditor";
@@ -500,9 +501,12 @@ export function AiMediaPanel({
             ) : null}
           </div>
           {runtimeError || runtime?.error ? (
-            <p className="ai-media__error" role="alert">
-              {runtimeError ?? runtime?.error}
-            </p>
+            <>
+              <p className="ai-media__error" role="alert">
+                {runtimeError ?? runtime?.error}
+              </p>
+              <ErrorCopyButton text={runtimeError || runtime?.error || ""} />
+            </>
           ) : null}
           <div className="ai-media__controls">
             <label>
@@ -608,17 +612,25 @@ export function AiMediaPanel({
           </p>
           {device === "cpu" ? <p className="ai-media__hint">CPU 处理可能耗时较长。</p> : null}
           {runtime?.ready && !operationReady ? (
-            <p className="ai-media__error" role="alert">
-              当前离线包尚不包含{OPERATION_LABELS[operation]}所需组件。
-            </p>
+            <>
+              <p className="ai-media__error" role="alert">
+                当前离线包尚不包含{OPERATION_LABELS[operation]}所需组件。
+              </p>
+              <ErrorCopyButton
+                text={`当前离线包尚不包含${OPERATION_LABELS[operation]}所需组件。`}
+              />
+            </>
           ) : null}
           {operation === "audio_separation" && validAudioIndex == null ? (
             <p className="ai-media__hint">没有可分离的音轨，请选择带有声音的视频。</p>
           ) : null}
           {nameError ? (
-            <p className="ai-media__error" role="alert">
-              {nameError}
-            </p>
+            <>
+              <p className="ai-media__error" role="alert">
+                {nameError}
+              </p>
+              <ErrorCopyButton text={nameError} />
+            </>
           ) : null}
           <button
             className="ai-media__primary"
@@ -634,9 +646,12 @@ export function AiMediaPanel({
               关闭窗口后任务继续处理。重启中断的任务可从头重新处理当前选区。
             </p>
             {pollError ? (
-              <p className="ai-media__error" role="alert">
-                读取 AI 任务失败：{pollError}
-              </p>
+              <>
+                <p className="ai-media__error" role="alert">
+                  读取 AI 任务失败：{pollError}
+                </p>
+                <ErrorCopyButton text={`读取 AI 任务失败：${pollError}`} />
+              </>
             ) : null}
             {!jobs.length ? (
               <p className="ai-media__hint">
@@ -706,9 +721,12 @@ export function AiMediaPanel({
                   </button>
                 ) : null}
                 {selectedJob.error ? (
-                  <p className="ai-media__error" role="alert">
-                    {selectedJob.error}
-                  </p>
+                  <>
+                    <p className="ai-media__error" role="alert">
+                      {selectedJob.error}
+                    </p>
+                    <ErrorCopyButton text={selectedJob.error} />
+                  </>
                 ) : null}
                 {selectedJob.status === "completed" && selectedOutput ? (
                   <>
@@ -771,9 +789,12 @@ export function AiMediaPanel({
             </p>
           ) : null}
           {error ? (
-            <p className="ai-media__error" role="alert">
-              {error}
-            </p>
+            <>
+              <p className="ai-media__error" role="alert">
+                {error}
+              </p>
+              <ErrorCopyButton text={error} />
+            </>
           ) : null}
         </>
       )}

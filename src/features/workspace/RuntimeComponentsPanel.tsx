@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatRawBackendError, isDesktopRuntime } from "../../lib/backend";
+import { isDesktopRuntime } from "../../lib/backend";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import {
   isRuntimeComponentFeature,
   publishRuntimeComponentsChanged,
@@ -38,12 +39,15 @@ function formatComponentBytes(value: number): string {
 export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeComponentsPanelProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
+  const errorId = useId();
+  const catalogErrorId = `${errorId}-catalog`;
+  const operationErrorId = `${errorId}-operation`;
   const desktop = isDesktopRuntime();
   const featureId = isRuntimeComponentFeature(initialFeatureId) ? initialFeatureId : null;
   const [status, setStatus] = useState<RuntimeComponentManagerStatus | null>(null);
   const [feature, setFeature] = useState<RuntimeFeatureStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pollError, setPollError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [pollError, setPollError] = useState<unknown>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const mounted = useRef(false);
   const previousStatus = useRef<RuntimeComponentManagerStatus | null>(null);
@@ -108,7 +112,7 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
       if (managerResult.status === "fulfilled") {
         acceptStatus(managerResult.value);
         setPollError(null);
-      } else setPollError(formatRawBackendError(managerResult.reason));
+      } else setPollError(managerResult.reason);
       if (featureResult.status === "fulfilled") setFeature(featureResult.value);
       else setFeature(null);
       timer = setTimeout(() => void poll(), 1000);
@@ -132,7 +136,7 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
       if (mounted.current && request === requestId.current) acceptStatus(next);
       if (next.transfer.phase === "ready") publishRuntimeComponentsChanged();
     } catch (reason) {
-      if (mounted.current) setError(formatRawBackendError(reason));
+      if (mounted.current) setError(reason);
     } finally {
       if (mounted.current) setBusy((current) => (current === action ? null : current));
     }
@@ -175,6 +179,15 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
           关闭
         </button>
       </header>
+      {desktop && status && !status.catalogReady ? (
+        <div className="runtime-components__catalog">
+          <ErrorAlert
+            id={catalogErrorId}
+            error={status.catalogError ?? "当前应用的组件目录不可用。"}
+            hint="在线安装和离线导入均不可用，因为应用暂时无法校验组件安装包。请重新安装当前版本的完整应用，或联系提供安装包的人员补齐组件目录。"
+          />
+        </div>
+      ) : null}
       <div className="runtime-components__body">
         {!desktop ? (
           <p role="status">组件安装需要在桌面应用中运行。画布编辑与浏览器预览可继续使用。</p>
@@ -185,22 +198,23 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                 {feature.ready
                   ? `${feature.title}所需组件已就绪，可返回继续使用。`
                   : `${feature.title}需要准备下方标记的组件。`}
-                {feature.error ? ` ${feature.error}` : ""}
               </p>
+            ) : null}
+            {feature?.error ? (
+              <ErrorAlert
+                error={feature.error}
+                hint="请先检查下方标记的组件；安装或修复完成后，返回原功能继续操作。"
+              />
             ) : null}
             {!status && !error && !pollError ? (
               <p role="status">正在检查已安装组件与下载目录…</p>
             ) : null}
-            {status && !status.catalogReady ? (
-              <p className="runtime-components__notice" role="status">
-                {status.catalogError ??
-                  "当前无法获取组件下载目录。可导入与此应用匹配的离线安装包。"}
-              </p>
-            ) : null}
-            {error || pollError ? (
-              <p className="runtime-components__error" role="alert">
-                {error ?? pollError}
-              </p>
+            {error != null || pollError != null ? (
+              <ErrorAlert
+                id={operationErrorId}
+                error={error ?? pollError}
+                hint="安装失败可重新选择安装或导入与当前应用匹配的离线 ZIP；已下载的内容会在重试时自动复用。状态检查失败时会自动重试，仍失败可关闭并重新打开面板。"
+              />
             ) : null}
             {transfer && transfer.phase !== "idle" ? (
               <section className="runtime-components__transfer" aria-label="组件安装进度">
@@ -231,9 +245,10 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                   </p>
                 ) : null}
                 {transfer.error ? (
-                  <p className="runtime-components__error" role="alert">
-                    {transfer.error}
-                  </p>
+                  <ErrorAlert
+                    error={transfer.error}
+                    hint="可重试安装以复用已下载的内容，或重新导入与当前应用匹配的离线 ZIP。"
+                  />
                 ) : null}
                 {active ? (
                   <button
@@ -252,6 +267,18 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                 const interrupted =
                   transfer?.componentId === component.id &&
                   ["cancelled", "error"].includes(transfer.phase);
+                const componentErrorId = `${errorId}-${component.id}`;
+                const checking = component.state === "checking";
+                const checkingId = `${componentErrorId}-checking`;
+                const actionDescription =
+                  [
+                    component.error ? componentErrorId : null,
+                    checking ? checkingId : null,
+                    !status.catalogReady ? catalogErrorId : null,
+                    error != null || pollError != null ? operationErrorId : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ") || undefined;
                 return (
                   <li
                     key={component.id}
@@ -263,12 +290,17 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                   >
                     <div className="runtime-components__identity">
                       <h3>{component.title}</h3>
-                      <span>
-                        {component.state === "ready"
-                          ? "已就绪"
-                          : component.state === "damaged"
-                            ? "需要修复"
-                            : "尚未安装"}
+                      <span
+                        id={checking ? checkingId : undefined}
+                        role={checking ? "status" : undefined}
+                      >
+                        {checking
+                          ? "正在校验"
+                          : component.state === "ready"
+                            ? "已就绪"
+                            : component.state === "damaged"
+                              ? "需要修复"
+                              : "尚未安装"}
                         {required ? " · 此功能需要" : ""}
                       </span>
                     </div>
@@ -289,12 +321,21 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                       </p>
                     ) : null}
                     {component.error ? (
-                      <p className="runtime-components__error">{component.error}</p>
+                      <ErrorAlert
+                        id={componentErrorId}
+                        error={component.error}
+                        hint={
+                          status.catalogReady
+                            ? "点击“修复组件”重新安装并校验文件，或导入与当前应用匹配的离线 ZIP。"
+                            : "请先按面板顶部提示恢复组件目录，再修复组件或导入离线 ZIP。"
+                        }
+                      />
                     ) : null}
                     <div className="runtime-components__actions">
                       <button
                         type="button"
-                        disabled={active || busy != null || !status.catalogReady}
+                        disabled={checking || active || busy != null || !status.catalogReady}
+                        aria-describedby={actionDescription}
                         onClick={() =>
                           void run(component.id, () =>
                             runtimeComponentsClient.install(
@@ -304,17 +345,20 @@ export function RuntimeComponentsPanel({ onClose, initialFeatureId }: RuntimeCom
                           )
                         }
                       >
-                        {component.state === "ready" || component.state === "damaged"
-                          ? "修复组件"
-                          : interrupted
-                            ? transfer?.phase === "cancelled"
-                              ? "继续安装"
-                              : "重试安装"
-                            : "安装组件"}
+                        {checking
+                          ? "正在校验"
+                          : component.state === "ready" || component.state === "damaged"
+                            ? "修复组件"
+                            : interrupted
+                              ? transfer?.phase === "cancelled"
+                                ? "继续安装"
+                                : "重试安装"
+                              : "安装组件"}
                       </button>
                       <button
                         type="button"
-                        disabled={active || busy != null}
+                        disabled={checking || active || busy != null || !status.catalogReady}
+                        aria-describedby={actionDescription}
                         onClick={() => void importArchive(component.id)}
                       >
                         导入离线 ZIP

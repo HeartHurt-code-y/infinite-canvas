@@ -753,6 +753,31 @@ class DesktopInvocationErrorShape extends Error {
 }
 
 describe("backendErrorMessage", () => {
+  it("summarizes legacy HTTP diagnostics while retaining their original response body", () => {
+    const html = 'HTTP 200\n<!doctype html><html lang="zh"><title>魔芋AI</title></html>';
+    expect(backendErrorMessage(html)).toBe(
+      "供应商返回了网页而不是接口数据（HTTP 200）。请核对 API 地址，并向供应商确认当前接口是否已开通。",
+    );
+    expect(backendErrorDetails(html)).toBe(html);
+    const rejected =
+      'HTTP 429\n{"error":{"message":"provider rate limit","request_id":"req-raw-1"}}';
+    expect(backendErrorMessage(rejected)).toBe("provider rate limit（HTTP 429）");
+    expect(backendErrorDetails(new Error(rejected))).toBe(rejected);
+  });
+
+  it("summarizes serialized backend errors and retains their complete diagnostics", () => {
+    const payload = {
+      kind: "protocol",
+      message: "protocol error: 供应商返回了网页而不是接口数据。请核对 API 地址。",
+      details: { httpStatus: 200, rawResponse: "<!doctype html><html>魔芋AI</html>" },
+    };
+    const serialized = JSON.stringify(payload);
+    for (const error of [serialized, new Error(serialized)]) {
+      expect(backendErrorMessage(error)).toBe("供应商返回了网页而不是接口数据。请核对 API 地址。");
+      expect(backendErrorDetails(error)).toBe(serialized);
+    }
+  });
+
   it("reads the backend payload message without the internal kind prefix", () => {
     expect(
       backendErrorMessage({

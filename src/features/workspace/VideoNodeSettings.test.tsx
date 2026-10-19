@@ -154,7 +154,24 @@ describe("VideoNodeSettings Seedance task interaction", () => {
       within(mode)
         .getAllByRole("option")
         .map((option) => option.textContent),
-    ).toEqual(["自动", "文生视频", "图生视频", "多图融合"]);
+    ).toEqual([
+      "自动",
+      "文生视频",
+      "图生视频",
+      "首尾帧生成",
+      "延长",
+      "多图融合",
+      "对口型",
+      "音效生成",
+      "视频重绘",
+      "主体替换",
+      "智能多帧",
+      "动作模仿",
+      "视频编辑",
+      "超清视频",
+      "图片数字人",
+      "爆款复刻",
+    ]);
     expect(screen.getByLabelText("清晰度")).toHaveValue("540p");
     expect(screen.getByLabelText("时长")).toHaveValue("5");
     expect(screen.getByRole("checkbox", { name: "生成音频" })).not.toBeChecked();
@@ -188,6 +205,29 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     expect(screen.queryByRole("checkbox", { name: "多镜头" })).not.toBeInTheDocument();
     expect(screen.getByText(/画幅参数仅在无参考图的文生视频中生效/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps audio alongside multiple PixVerse images and preserves exact source task IDs", () => {
+    const { changed } = mountSettings(
+      "PixVerse-V6",
+      [first, last, asset("参考图3", "image"), asset("声音", "audio")],
+      catalog,
+      {
+        parameterValues: { action: "fusion", duration: 30 },
+      },
+    );
+    expect(screen.getByLabelText("时长")).toHaveValue("30");
+    expect(screen.getByText(/视频和音频会先上传取得素材引用/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("能力模式"), { target: { value: "lip_sync" } });
+    fireEvent.change(screen.getByLabelText("源视频任务 ID"), {
+      target: { value: "18446744073709551615" },
+    });
+    expect(changed.mock.lastCall?.[0].parameterValues).toMatchObject({
+      action: "lip_sync",
+      source_video_id: "18446744073709551615",
+      duration: 30,
+    });
   });
 
   it.each([DOMESTIC, DOMESTIC_ALIAS])(

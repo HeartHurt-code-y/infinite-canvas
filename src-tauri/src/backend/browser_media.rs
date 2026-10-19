@@ -406,7 +406,8 @@ pub(super) async fn resolve(
         .current_dir(runtime)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // stderr 平时不入日志，仅在 stdout 契约被破坏时截取尾部（见失败分支）。
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
@@ -455,9 +456,30 @@ pub(super) async fn resolve(
     };
     drop(process_tree);
     if !output.status.success() || output.stdout.len() > MAX_RESULT_BYTES {
+        // 脚本契约是「失败也把单行 JSON 写到 stdout」（exitCode=1）：写得出
+        // JSON 说明脚本正常跑完并自报了失败 code；写不出 JSON 才是启动即
+        // 崩溃（模块加载期，浏览器尚未启动），截取 stderr 尾部定位。
+        if let Some(code) = script_reported_failure_code(&output.stdout) {
+            tauri_plugin_log::log::warn!("[站点解析] 脚本上报失败：code={code}");
+        } else if serde_json::from_slice::<serde_json::Value>(&output.stdout).is_err() {
+            super::browser_login::log_stderr_tail("站点解析", &output.stderr);
+        }
         return Err("site resolver returned invalid output");
     }
     Ok(output.stdout)
+}
+
+/// stdout 契约里的失败上报（`{"ok":false,"code":...}`）；ok:true 或非 JSON
+/// 一律返回 None。
+fn script_reported_failure_code(stdout: &[u8]) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    if payload.get("ok").and_then(serde_json::Value::as_bool) != Some(false) {
+        return None;
+    }
+    payload
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 async fn wait_for_cancel(cancelled: &AtomicBool) {

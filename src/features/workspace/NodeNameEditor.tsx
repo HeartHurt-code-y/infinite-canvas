@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { formatRawBackendError } from "../../lib/backend";
 import { validateArtifactName } from "./artifactNames";
 import "./NodeNameEditor.css";
@@ -79,9 +80,12 @@ export function NodeNameEditor({
             取消
           </button>
           {error ? (
-            <span className="node-name-editor__error" role="alert">
-              {error}
-            </span>
+            <>
+              <span className="node-name-editor__error" role="alert">
+                {error}
+              </span>
+              <ErrorCopyButton text={error} />
+            </>
           ) : null}
         </>
       ) : (

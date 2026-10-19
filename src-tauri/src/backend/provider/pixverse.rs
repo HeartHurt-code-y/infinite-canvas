@@ -1,7 +1,7 @@
 //! PixVerse gateway contract: images/IDs at the root, feature switches in metadata.
-//! Source: https://doc.moyu.info/9520931m0.md
+//! Source: https://doc.moyu.info/9563101m0.md
 //!
-//! 对父模块的接口面只有五个函数：[`prepare_pixverse_video_body`]（本地图片
+//! 对父模块的接口面只有五个函数：[`prepare_pixverse_video_body`]（图片/视频/音频
 //! 上传 + 提交体）、`build_pixverse_video_body`（纯请求体）、
 //! [`parse_pixverse_video_task_id`] 与 [`parse_observation`]（响应解析）、
 //! `ambiguous_submission_error`（模糊失败包装）。家族身份的判定不在本模块，
@@ -13,13 +13,13 @@ use uuid::Uuid;
 
 use crate::backend::error::{BackendError, BackendResult};
 use crate::backend::storage::{GenerationLifecycleFact, TaskExecutionRecord};
+use crate::backend::types::MediaType;
 
 use super::{
     CapturedHttpResponse, GenerationObservation, ProviderRuntime, ResolvedGeneration,
-    ResolvedProviderContext, endpoint, ensure_request_encoding, insert_mapped_parameters,
-    mapped_parameters, parse_video_observation, redact_request_value,
-    require_public_reference_url_value_with, require_success, sanitize_url, valid_sp25_task_id,
-    video_prompt,
+    ResolvedMedia, ResolvedProviderContext, endpoint, ensure_request_encoding,
+    insert_mapped_parameters, mapped_parameters, parse_video_observation, redact_request_value,
+    require_success, sanitize_url, valid_sp25_task_id, video_prompt,
 };
 
 impl ProviderRuntime {
@@ -33,57 +33,97 @@ impl ProviderRuntime {
         let model = task.remote_model_id_snapshot.as_deref().ok_or_else(|| {
             BackendError::validation("PixVerse 任务缺少模型 ID", json!({ "taskId": task.id }))
         })?;
-        validate_media(resolved)?;
-        // Compile the complete request before uploading anything. Placeholders only stand
-        // in for images that will be replaced with platform IDs after a successful upload.
-        let planned = resolved
-            .images
-            .iter()
-            .map(|media| media.remote_reference.clone().unwrap_or_else(|| "1".into()))
-            .collect::<Vec<_>>();
-        build_pixverse_video_body(model, resolved, &planned)?;
+        ensure_request_encoding(&resolved.operation_schema, "json")?;
         let mut images = Vec::with_capacity(resolved.images.len());
         for media in &resolved.images {
-            if let Some(bytes) = &media.bytes {
-                let path = "/pixverse/openapi/v2/image/upload";
-                let url = upload_endpoint(&context.base_url, path)?;
-                let call_id = Uuid::new_v4().to_string();
-                self.lifecycle.commit(&task.id, GenerationLifecycleFact::ProviderCallPrepared {
-                    call_id: call_id.clone(), attempt_id: attempt_id.to_string(), phase: "upload".into(),
-                    request: json!({
-                        "providerConnectionId": context.provider_connection_id,
-                        "adapterId": context.adapter_id, "credentialReference": context.api_key_ref,
-                        "method": "POST", "url": sanitize_url(&url), "bodyType": "multipart",
-                        "file": { "field": "image", "fileName": media.file_name,
-                            "mimeType": media.mime_type, "byteSize": media.byte_size,
-                            "sha256": media.sha256, "stableIdentity": media.stable_identity }
-                    }),
-                })?;
-                let part = multipart::Part::bytes(bytes.clone())
-                    .file_name(media.file_name.clone())
-                    .mime_str(&media.mime_type)?;
-                let response = self
-                    .send_captured(
-                        &task.id,
-                        &call_id,
-                        &format!("POST / phase=upload / taskId={}", task.id),
-                        self.client
-                            .post(url)
-                            .bearer_auth(&context.api_key)
-                            .multipart(multipart::Form::new().part("image", part)),
-                    )
-                    .await?;
-                images.push(parse_upload_id(&response)?);
-            } else {
-                images.push(media.remote_reference.clone().ok_or_else(|| {
-                    BackendError::validation(
-                        "PixVerse 参考图缺少图片字节或公网 URL",
-                        media.archive(),
-                    )
-                })?);
-            }
+            images.push(
+                self.upload_pixverse_reference(task, attempt_id, context, media)
+                    .await?,
+            );
         }
-        build_pixverse_video_body(model, resolved, &images)
+        let mut videos = Vec::with_capacity(resolved.videos.len());
+        for media in &resolved.videos {
+            videos.push(
+                self.upload_pixverse_reference(task, attempt_id, context, media)
+                    .await?,
+            );
+        }
+        let mut audios = Vec::with_capacity(resolved.audios.len());
+        for media in &resolved.audios {
+            audios.push(
+                self.upload_pixverse_reference(task, attempt_id, context, media)
+                    .await?,
+            );
+        }
+        build_body_with_media(model, resolved, &images, &videos, &audios)
+    }
+
+    async fn upload_pixverse_reference(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        media: &ResolvedMedia,
+    ) -> BackendResult<String> {
+        let is_image = media.media_type == MediaType::Image;
+        if is_image && media.bytes.is_none() {
+            return existing_reference(media);
+        }
+        let (path, field, id_field) = if is_image {
+            ("/pixverse/openapi/v2/image/upload", "image", "img_id")
+        } else {
+            ("/pixverse/openapi/v2/media/upload", "file", "media_id")
+        };
+        // Use the stable media type, never a URL suffix (an Audio asset can have a .jpg URL).
+        let media_type = match media.media_type {
+            MediaType::Audio => "audio",
+            MediaType::Video => "video",
+            _ => "image",
+        };
+        let mut form = multipart::Form::new();
+        if let Some(bytes) = &media.bytes {
+            let part = multipart::Part::bytes(bytes.clone())
+                .file_name(media.file_name.clone())
+                .mime_str(&media.mime_type)?;
+            form = form.part(field, part);
+        } else {
+            form = form.text("file_url", existing_reference(media)?);
+        }
+        if !is_image {
+            form = form.text("media_type", media_type);
+        }
+        let url = upload_endpoint(&context.base_url, path)?;
+        let call_id = Uuid::new_v4().to_string();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallPrepared {
+                call_id: call_id.clone(),
+                attempt_id: attempt_id.to_string(),
+                phase: "upload".into(),
+                request: json!({
+                    "providerConnectionId": context.provider_connection_id,
+                    "adapterId": context.adapter_id, "credentialReference": context.api_key_ref,
+                    "method": "POST", "url": sanitize_url(&url), "bodyType": "multipart",
+                    "mediaType": media_type,
+                    "fileUrl": media.remote_reference.as_deref().map(super::redact_url_string),
+                    "file": { "field": field, "fileName": media.file_name,
+                        "mimeType": media.mime_type, "byteSize": media.byte_size,
+                        "sha256": media.sha256, "stableIdentity": media.stable_identity }
+                }),
+            },
+        )?;
+        let response = self
+            .send_captured(
+                &task.id,
+                &call_id,
+                &format!("POST / phase=upload / taskId={}", task.id),
+                self.client
+                    .post(url)
+                    .bearer_auth(&context.api_key)
+                    .multipart(form),
+            )
+            .await?;
+        parse_upload_id(&response, id_field)
     }
 }
 
@@ -97,46 +137,11 @@ fn upload_endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     endpoint(base.as_str(), path)
 }
 
-fn validate_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
-    ensure_request_encoding(&resolved.operation_schema, "json")?;
-    // The document does not specify the metadata keys that consume video/audio IDs.
-    // Do not guess a field name or silently drop connected media.
-    if !resolved.videos.is_empty()
-        || !resolved.audios.is_empty()
-        || resolved
-            .images
-            .iter()
-            .any(|media| !matches!(media.role.as_str(), "reference_image" | "first_frame"))
-    {
-        return Err(BackendError::validation(
-            "当前 PixVerse 文档未定义视频、音频或尾帧的生成字段映射，请使用参考图片或已确认的扩展参数",
-            json!({ "videos": resolved.videos.len(), "audios": resolved.audios.len(),
-                "imageRoles": resolved.images.iter().map(|media| &media.role).collect::<Vec<_>>() }),
-        ));
-    }
-    for media in &resolved.images {
-        if media.bytes.as_ref().is_some_and(Vec::is_empty) {
-            return Err(BackendError::validation(
-                "PixVerse 参考图文件为空",
-                media.archive(),
-            ));
-        }
-        if media.bytes.is_none() {
-            validate_image_reference(media.remote_reference.as_deref().unwrap_or_default())?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_image_reference(reference: &str) -> BackendResult<()> {
-    if !reference.is_empty()
-        && reference.len() <= 128
-        && reference.bytes().all(|byte| byte.is_ascii_digit())
-        && reference.bytes().any(|byte| byte != b'0')
-    {
-        return Ok(());
-    }
-    require_public_reference_url_value_with(reference, "PixVerse 图片")
+fn existing_reference(media: &ResolvedMedia) -> BackendResult<String> {
+    media
+        .remote_reference
+        .clone()
+        .ok_or_else(|| BackendError::validation("PixVerse 素材需要先上传取得引用", media.archive()))
 }
 
 pub(super) fn build_pixverse_video_body(
@@ -144,15 +149,35 @@ pub(super) fn build_pixverse_video_body(
     resolved: &ResolvedGeneration,
     images: &[String],
 ) -> BackendResult<Value> {
-    validate_media(resolved)?;
-    if images.len() != resolved.images.len() {
+    let videos = resolved
+        .videos
+        .iter()
+        .map(existing_reference)
+        .collect::<BackendResult<Vec<_>>>()?;
+    let audios = resolved
+        .audios
+        .iter()
+        .map(existing_reference)
+        .collect::<BackendResult<Vec<_>>>()?;
+    build_body_with_media(model, resolved, images, &videos, &audios)
+}
+
+fn build_body_with_media(
+    model: &str,
+    resolved: &ResolvedGeneration,
+    images: &[String],
+    videos: &[String],
+    audios: &[String],
+) -> BackendResult<Value> {
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if images.len() != resolved.images.len()
+        || videos.len() != resolved.videos.len()
+        || audios.len() != resolved.audios.len()
+    {
         return Err(BackendError::protocol(
-            "PixVerse 图片上传结果数量不匹配",
+            "PixVerse 素材上传结果数量不匹配",
             json!({}),
         ));
-    }
-    for image in images {
-        validate_image_reference(image)?;
     }
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
@@ -166,7 +191,16 @@ pub(super) fn build_pixverse_video_body(
         body.insert("prompt".into(), json!(prompt));
     }
     if !images.is_empty() {
-        body.insert("images".into(), json!(images));
+        let mut ordered = resolved.images.iter().zip(images).collect::<Vec<_>>();
+        ordered.sort_by_key(|(media, _)| match media.role.as_str() {
+            "first_frame" => 0,
+            "last_frame" => 2,
+            _ => 1,
+        });
+        body.insert(
+            "images".into(),
+            json!(ordered.iter().map(|(_, id)| id).collect::<Vec<_>>()),
+        );
     }
     // Preserve the exact explicit metadata object. Nested fields take precedence over
     // schema defaults; metadata.duration is also documented to override root duration.
@@ -195,6 +229,10 @@ pub(super) fn build_pixverse_video_body(
                 | "lip_sync_tts_content"
                 | "lip_sync_tts_speaker_id"
                 | "template_id"
+                | "video_media_id"
+                | "audio_media_id"
+                | "source_video_id"
+                | "restyle_id"
         ) {
             parameter.container = "metadata".into();
         }
@@ -207,35 +245,80 @@ pub(super) fn build_pixverse_video_body(
             .ok_or_else(|| BackendError::validation("PixVerse metadata 字段冲突", json!({})))?
             .extend(metadata.clone());
     }
-    if let Some(images) = body.get("images") {
-        let references = images.as_array().ok_or_else(|| {
-            BackendError::validation("PixVerse images 必须是字符串数组", json!({}))
-        })?;
-        for reference in references {
-            validate_image_reference(reference.as_str().ok_or_else(|| {
-                BackendError::validation("PixVerse images 必须是字符串数组", json!({}))
-            })?)?;
+    let image_count = body
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let metadata = body
+        .entry("metadata")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| BackendError::validation("PixVerse metadata 字段冲突", json!({})))?;
+    metadata.entry("quality").or_insert_with(|| json!("540p"));
+    for field in [
+        "video_media_id",
+        "audio_media_id",
+        "source_video_id",
+        "restyle_id",
+    ] {
+        if let Some(Value::String(id)) = metadata.get(field) {
+            let encoded = numeric_id(id);
+            metadata.insert(field.into(), encoded);
         }
-        if !references.is_empty()
-            && !body.contains_key("duration")
-            && body
-                .get("metadata")
-                .and_then(|metadata| metadata.get("duration"))
-                .is_none()
+    }
+    for (field, references) in [("video_media_id", videos), ("audio_media_id", audios)] {
+        if !references.is_empty() {
+            // The provider decides media-count limits. Preserve every reference; for
+            // multiple inputs send an array in the same field rather than dropping any.
+            let ids = references
+                .iter()
+                .map(|id| numeric_id(id))
+                .collect::<Vec<_>>();
+            let value = if ids.len() == 1 {
+                ids[0].clone()
+            } else {
+                json!(ids)
+            };
+            let value = match metadata.get(field) {
+                Some(explicit) if explicit != &value => json!([explicit, value]),
+                _ => value,
+            };
+            metadata.insert(field.into(), value);
+        }
+    }
+    if !metadata.contains_key("action") {
+        if resolved
+            .images
+            .iter()
+            .any(|media| media.role == "last_frame")
         {
-            body.insert("duration".into(), json!(5));
+            metadata.insert("action".into(), json!("transition"));
+        } else if image_count > 1
+            || metadata
+                .get("image_references")
+                .and_then(Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        {
+            metadata.insert("action".into(), json!("fusion"));
         }
+    }
+    if !metadata.contains_key("duration") && !body.contains_key("duration") {
+        body.insert("duration".into(), json!(5));
     }
     Ok(Value::Object(body))
 }
 
-fn parse_upload_id(response: &CapturedHttpResponse) -> BackendResult<String> {
+fn numeric_id(id: &str) -> Value {
+    id.parse::<u64>().map_or_else(|_| json!(id), |id| json!(id))
+}
+
+fn parse_upload_id(response: &CapturedHttpResponse, id_field: &str) -> BackendResult<String> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
     if value.get("ErrCode").and_then(Value::as_i64) != Some(0) {
         return Err(BackendError::protocol(
             format!(
-                "PixVerse 图片上传失败：{}",
+                "PixVerse 素材上传失败：{}",
                 value
                     .get("ErrMsg")
                     .and_then(Value::as_str)
@@ -244,14 +327,17 @@ fn parse_upload_id(response: &CapturedHttpResponse) -> BackendResult<String> {
             json!({ "response": redact_request_value(&value) }),
         ));
     }
-    let id = match value.pointer("/Resp/img_id") {
+    let id = match value
+        .get("Resp")
+        .and_then(|response| response.get(id_field))
+    {
         Some(Value::Number(number)) if number.as_u64().is_some_and(|id| id > 0) => {
             number.to_string()
         }
         Some(Value::String(id)) => id.clone(),
         _ => {
             return Err(BackendError::protocol(
-                "PixVerse 上传响应缺少有效 img_id",
+                format!("PixVerse 上传响应缺少有效 {id_field}"),
                 json!({}),
             ));
         }
@@ -261,7 +347,7 @@ fn parse_upload_id(response: &CapturedHttpResponse) -> BackendResult<String> {
         || !id.bytes().any(|byte| byte != b'0')
     {
         return Err(BackendError::protocol(
-            "PixVerse 上传响应 img_id 无效",
+            format!("PixVerse 上传响应 {id_field} 无效"),
             json!({}),
         ));
     }
@@ -321,9 +407,9 @@ pub(super) fn parse_observation(
 ) -> BackendResult<GenerationObservation> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
-    for field in ["task_id", "id"] {
+    for field in ["/data/task_id", "/data/id", "/task_id", "/id"] {
         if value
-            .get(field)
+            .pointer(field)
             .is_some_and(|id| id.as_str() != Some(expected_task_id))
         {
             return Err(BackendError::protocol(
@@ -332,10 +418,20 @@ pub(super) fn parse_observation(
             ));
         }
     }
-    let mut observation = parse_video_observation(response)?;
-    if let Some(status) = value.get("status").and_then(Value::as_str) {
-        observation.remote_status = status.to_string();
-    }
+    // data.status is authoritative. Never let top-level query status/code override it.
+    let task_data = value
+        .get("data")
+        .filter(|data| data.get("status").is_some())
+        .unwrap_or(&value);
+    let mut observation = parse_video_observation(&CapturedHttpResponse {
+        call_id: response.call_id.clone(),
+        status: response.status,
+        headers: response.headers.clone(),
+        body: task_data.to_string(),
+    })?;
+    observation.progress = observation
+        .progress
+        .or_else(|| value.get("progress").and_then(super::parse_progress));
     Ok(observation)
 }
 
@@ -464,7 +560,33 @@ mod tests {
     }
 
     #[test]
-    fn pixverse_encoding_rejects_dropped_media_and_conflicting_image_fields() {
+    fn pixverse_three_images_and_audio_reach_request_compilation() {
+        let mut request = generation(json!({
+            "duration": 8, "quality": "720p",
+            "metadata": { "audio_media_id": 429048496816171_u64 }
+        }));
+        for id in ["11", "12", "13"] {
+            request.images.push(image(Some(id), None));
+        }
+        let mut audio = image(Some("429048496816171"), None);
+        audio.media_type = MediaType::Audio;
+        audio.role = "reference_audio".into();
+        audio.file_name = "周敏之教授.wav".into();
+        audio.mime_type = "audio/wav".into();
+        request.audios.push(audio);
+        let body = build_pixverse_video_body(
+            "PixVerse-V6",
+            &request,
+            &["11".into(), "12".into(), "13".into()],
+        )
+        .expect("connected audio must be encoded and left to the provider to judge");
+        assert_eq!(body["images"], json!(["11", "12", "13"]));
+        assert_eq!(body["metadata"]["audio_media_id"], 429048496816171_u64);
+        assert_eq!(body["metadata"]["action"], "fusion");
+    }
+
+    #[test]
+    fn pixverse_encoding_preserves_tail_frames_and_explicit_image_inputs() {
         let mut request = generation(json!({ "images": ["2"] }));
         request
             .images
@@ -472,7 +594,9 @@ mod tests {
         assert!(build_pixverse_video_body("PixVerse-V6", &request, &["1".into()]).is_err());
         request.parameters = json!({});
         request.images[0].role = "last_frame".into();
-        assert!(build_pixverse_video_body("PixVerse-V6", &request, &["1".into()]).is_err());
+        let body = build_pixverse_video_body("PixVerse-V6", &request, &["1".into()]).unwrap();
+        assert_eq!(body["metadata"]["action"], "transition");
+        assert_eq!(body["images"], json!(["1"]));
         request.images.clear();
         request.parameters =
             json!({ "images": ["4929800001234567"], "metadata": { "action": "fusion" } });
@@ -487,14 +611,14 @@ mod tests {
             serde_json::from_str(r#"{"ErrCode":0,"Resp":{"img_id":18446744073709551615}}"#)
                 .unwrap();
         assert_eq!(
-            parse_upload_id(&response(200, payload)).unwrap(),
+            parse_upload_id(&response(200, payload), "img_id").unwrap(),
             "18446744073709551615"
         );
         for payload in [
             json!({ "ErrCode": 400017, "ErrMsg": "invalid image" }),
             json!({ "ErrCode": 0, "Resp": { "img_id": 0 } }),
         ] {
-            assert!(parse_upload_id(&response(200, payload)).is_err());
+            assert!(parse_upload_id(&response(200, payload), "img_id").is_err());
         }
     }
 
@@ -533,7 +657,7 @@ mod tests {
             "1",
         )
         .unwrap();
-        assert_eq!(observed.remote_status, "success");
+        assert_eq!(observed.remote_status, "SUCCESS");
         assert_eq!(observed.progress, Some(100.0));
         assert_eq!(
             observed.video_url.as_deref(),
@@ -555,6 +679,86 @@ mod tests {
             )
             .is_err()
         );
+        for (status, expected) in [("IN_PROGRESS", false), ("FAILURE", true), ("QUEUED", false)] {
+            let observed = parse_observation(
+                &response(
+                    200,
+                    json!({
+                        "code": "success", "status": "success",
+                        "data": { "task_id": "1", "status": status, "progress": "50%",
+                            "fail_reason": "provider rejected audio", "result_url": "" }
+                    }),
+                ),
+                "1",
+            )
+            .unwrap();
+            assert_eq!(observed.remote_status, status);
+            assert_eq!(observed.failure.is_some(), expected);
+            if expected {
+                assert_eq!(
+                    observed.failure.unwrap()["failReason"],
+                    "provider rejected audio"
+                );
+            }
+        }
+        assert!(
+            parse_observation(
+                &response(
+                    200,
+                    json!({
+                        "code": "success", "data": { "task_id": "other", "status": "SUCCESS" }
+                    })
+                ),
+                "1"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pixverse_frames_are_ordered_and_explicit_actions_and_new_parameters_reach_server() {
+        let mut request = generation(
+            json!({ "metadata": { "source_video_id": "18446744073709551615" },
+            "restyle_id": "337045047335104", "duration": 30, "quality": "4k" }),
+        );
+        let mut last = image(Some("22"), None);
+        last.role = "last_frame".into();
+        let mut first = image(Some("11"), None);
+        first.role = "first_frame".into();
+        request.images = vec![last, first];
+        let body = build_pixverse_video_body("PixVerse-C1", &request, &["22".into(), "11".into()])
+            .unwrap();
+        assert_eq!(body["images"], json!(["11", "22"]));
+        assert_eq!(body["metadata"]["action"], "transition");
+        assert_eq!(body["metadata"]["source_video_id"], u64::MAX);
+        assert_eq!(body["metadata"]["restyle_id"], 337045047335104_u64);
+        assert_eq!(body["metadata"]["quality"], "4k");
+        assert_eq!(body["duration"], 30);
+        request.parameters = json!({ "action": "future_action", "images": "future-image-format" });
+        request.images.clear();
+        let body = build_pixverse_video_body("PixVerse-C1", &request, &[]).unwrap();
+        assert_eq!(body["metadata"]["action"], "future_action");
+        assert_eq!(body["images"], "future-image-format");
+        assert_eq!(body["duration"], 5);
+        assert_eq!(body["metadata"]["quality"], "540p");
+    }
+
+    #[test]
+    fn pixverse_multiple_media_references_are_left_to_server_without_dropping_inputs() {
+        let mut request =
+            generation(json!({ "metadata": { "source_video_id": 30, "action": "lip_sync" } }));
+        for id in ["11", "12"] {
+            let mut video = image(Some(id), None);
+            video.media_type = MediaType::Video;
+            request.videos.push(video);
+            let mut audio = image(Some(id), None);
+            audio.media_type = MediaType::Audio;
+            request.audios.push(audio);
+        }
+        let body = build_pixverse_video_body("PixVerse-V6", &request, &[]).unwrap();
+        assert_eq!(body["metadata"]["video_media_id"], json!([11, 12]));
+        assert_eq!(body["metadata"]["audio_media_id"], json!([11, 12]));
+        assert_eq!(body["metadata"]["source_video_id"], 30);
     }
 
     #[test]
@@ -612,8 +816,8 @@ mod tests {
     }
 
     async fn submit_to_mock(
-        upload: bool,
-        reject: bool,
+        request: ResolvedGeneration,
+        responses: Vec<(u16, Value)>,
     ) -> (
         BackendResult<(GenerationSubmission, CapturedHttpResponse)>,
         Vec<(String, Vec<u8>)>,
@@ -624,7 +828,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut captured = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(10);
-            for index in 0..if upload { 2 } else { 1 } {
+            for (status, payload) in responses {
                 let mut stream = loop {
                     match listener.accept() {
                         Ok((stream, _)) => break stream,
@@ -637,23 +841,6 @@ mod tests {
                 };
                 stream.set_nonblocking(false).unwrap();
                 captured.push(read_request(&mut stream));
-                let is_upload = upload && index == 0;
-                let (status, payload) = if is_upload {
-                    (
-                        200,
-                        json!({ "ErrCode": 0, "Resp": { "img_id": 4929800001234567_u64 } }),
-                    )
-                } else if reject {
-                    (
-                        400,
-                        json!({ "error": { "message": "Unknown parameter: quality", "code": "pixverse_submit_failed", "param": "quality" } }),
-                    )
-                } else {
-                    (
-                        200,
-                        json!({ "id": "4929809973433869", "task_id": "4929809973433869", "status": "" }),
-                    )
-                };
                 let body = payload.to_string();
                 write!(stream, "HTTP/1.1 {status} response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             }
@@ -718,20 +905,28 @@ mod tests {
             })
             .unwrap();
         let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
-        let mut request =
-            generation(json!({ "duration": 5, "quality": "720p", "generate_audio_switch": true }));
-        if upload {
-            request
-                .images
-                .push(image(None, Some(b"\x89PNG\r\n\x1a\nimage".to_vec())));
-        }
         let result = runtime.submit(&task, "submit", &request).await;
         (result, server.join().unwrap())
     }
 
     #[tokio::test]
     async fn pixverse_local_image_upload_uses_frozen_credentials_and_submits_once() {
-        let (result, calls) = submit_to_mock(true, false).await;
+        let mut request =
+            generation(json!({ "duration": 5, "quality": "720p", "generate_audio_switch": true }));
+        request
+            .images
+            .push(image(None, Some(b"\x89PNG\r\n\x1a\nimage".to_vec())));
+        let (result, calls) = submit_to_mock(
+            request,
+            vec![
+                (
+                    200,
+                    json!({ "ErrCode": 0, "Resp": { "img_id": 4929800001234567_u64 } }),
+                ),
+                (200, json!({ "task_id": "4929809973433869", "status": "" })),
+            ],
+        )
+        .await;
         assert!(
             matches!(result.unwrap().0, GenerationSubmission::RemoteVideoTask { task_id } if task_id == "4929809973433869")
         );
@@ -763,7 +958,15 @@ mod tests {
 
     #[tokio::test]
     async fn pixverse_channel_rejection_keeps_error_and_does_not_strip_and_resubmit() {
-        let (result, calls) = submit_to_mock(false, true).await;
+        let (result, calls) = submit_to_mock(
+            generation(json!({ "duration": 5, "quality": "720p" })),
+            vec![(
+                400,
+                json!({ "error": { "message": "Unknown parameter: quality",
+                "code": "pixverse_submit_failed", "param": "quality" } }),
+            )],
+        )
+        .await;
         let error = result.unwrap_err().runtime_record();
         assert_eq!(calls.len(), 1);
         assert_eq!(error["details"]["httpStatus"], 400);
@@ -775,5 +978,97 @@ mod tests {
         );
         let body: Value = serde_json::from_slice(&calls[0].1).unwrap();
         assert_eq!(body["metadata"]["quality"], "720p");
+    }
+
+    #[tokio::test]
+    async fn pixverse_three_images_and_local_or_cloud_audio_are_uploaded_and_submitted() {
+        for bytes in [None, Some(b"RIFF....WAVEaudio".to_vec())] {
+            let mut request = generation(json!({ "duration": 8, "quality": "720p" }));
+            for name in ["person", "room", "pose"] {
+                request.images.push(image(
+                    Some(&format!("https://example.com/{name}.png")),
+                    None,
+                ));
+            }
+            let mut audio = image(
+                Some("https://example.com/asset/asset-20261017205449-pxngg.jpg"),
+                bytes.clone(),
+            );
+            audio.media_type = MediaType::Audio;
+            audio.role = "reference_audio".into();
+            audio.file_name = "周敏之教授.wav".into();
+            audio.mime_type = "audio/wav".into();
+            request.audios.push(audio);
+            let (result, calls) = submit_to_mock(request, vec![
+                (200, json!({ "ErrCode": 0, "Resp": { "media_id": u64::MAX, "media_type": "audio" } })),
+                (200, json!({ "task_id": "4929809973433869", "status": "" })),
+            ]).await;
+            result.unwrap();
+            assert_eq!(calls.len(), 2);
+            assert!(
+                calls[0]
+                    .0
+                    .starts_with("POST /pixverse/openapi/v2/media/upload HTTP/1.1")
+            );
+            let multipart = String::from_utf8_lossy(&calls[0].1);
+            assert!(multipart.contains("name=\"media_type\"\r\n\r\naudio"));
+            if bytes.is_some() {
+                assert!(multipart.contains("name=\"file\"; filename=\"周敏之教授.wav\""));
+                assert!(multipart.contains("RIFF....WAVEaudio"));
+            } else {
+                assert!(multipart.contains("name=\"file_url\""));
+                assert!(multipart.contains("asset-20261017205449-pxngg.jpg"));
+            }
+            assert!(calls.iter().all(|(headers, _)| {
+                headers
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer sk-frozen")
+            }));
+            let body: Value = serde_json::from_slice(&calls[1].1).unwrap();
+            assert_eq!(body["metadata"]["audio_media_id"], u64::MAX);
+            assert_eq!(body["metadata"]["action"], "fusion");
+            assert_eq!(body["images"].as_array().unwrap().len(), 3);
+            assert!(body.get("audio_media_id").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn pixverse_video_and_audio_ids_reach_lip_sync_and_service_errors_are_preserved() {
+        let mut request = generation(
+            json!({ "duration": 60, "quality": "4k", "action": "lip_sync", "future_flag": true }),
+        );
+        for media_type in [MediaType::Video, MediaType::Audio] {
+            let mut media = image(Some("https://example.com/source"), None);
+            media.media_type = media_type;
+            media.role = if media_type == MediaType::Video {
+                "reference_video"
+            } else {
+                "reference_audio"
+            }
+            .into();
+            if media_type == MediaType::Video {
+                request.videos.push(media);
+            } else {
+                request.audios.push(media);
+            }
+        }
+        let (result, calls) = submit_to_mock(request, vec![
+            (200, json!({ "ErrCode": 0, "Resp": { "media_id": 429048494022506_u64 } })),
+            (200, json!({ "ErrCode": 0, "Resp": { "media_id": 429048496816171_u64 } })),
+            (400, json!({ "error": { "code": "pixverse_submit_failed", "message": "[400017] invalid param" } })),
+        ]).await;
+        let error = result.unwrap_err().runtime_record();
+        assert_eq!(error["details"]["httpStatus"], 400);
+        assert!(error.to_string().contains("[400017] invalid param"));
+        assert_eq!(calls.len(), 3);
+        assert!(String::from_utf8_lossy(&calls[0].1).contains("name=\"media_type\"\r\n\r\nvideo"));
+        assert!(String::from_utf8_lossy(&calls[1].1).contains("name=\"media_type\"\r\n\r\naudio"));
+        let body: Value = serde_json::from_slice(&calls[2].1).unwrap();
+        assert_eq!(body["metadata"]["video_media_id"], 429048494022506_u64);
+        assert_eq!(body["metadata"]["audio_media_id"], 429048496816171_u64);
+        assert_eq!(body["metadata"]["action"], "lip_sync");
+        assert_eq!(body["duration"], 60);
+        assert_eq!(body["metadata"]["quality"], "4k");
+        assert_eq!(body["future_flag"], true);
     }
 }

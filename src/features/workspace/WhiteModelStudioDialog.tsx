@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { open } from "@tauri-apps/plugin-dialog";
 import { toMediaSrc } from "../../lib/backend";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { captureMotionFromVideo, poseCaptureAvailable } from "../../lib/poseCapture";
 import {
   ensureRuntimeFeatureInstalled,
@@ -775,9 +776,12 @@ export function WhiteModelStudioDialog({
                 />
               )}
               {sceneIssue ? (
-                <p className="white-model-studio__error" role="alert">
-                  {sceneIssue}
-                </p>
+                <>
+                  <p className="white-model-studio__error" role="alert">
+                    {sceneIssue}
+                  </p>
+                  <ErrorCopyButton text={sceneIssue} />
+                </>
               ) : null}
               {captureNotice ? (
                 <p className="white-model-studio__hint" role="status">
@@ -1035,9 +1039,12 @@ export function WhiteModelStudioDialog({
           </form>
           {blocking ? (
             error ? (
-              <p role="alert" className="white-model-studio__error">
-                {error}
-              </p>
+              <>
+                <p role="alert" className="white-model-studio__error">
+                  {error}
+                </p>
+                <ErrorCopyButton text={error} />
+              </>
             ) : null
           ) : (
             <section className="white-model-studio__output" aria-label="白模渲染结果">
@@ -1070,9 +1077,12 @@ export function WhiteModelStudioDialog({
                     {Math.round(loadedJob.progress)}%
                   </small>
                   {loadedJob.error ? (
-                    <p role="alert" className="white-model-studio__error">
-                      {loadedJob.error}
-                    </p>
+                    <>
+                      <p role="alert" className="white-model-studio__error">
+                        {loadedJob.error}
+                      </p>
+                      <ErrorCopyButton text={loadedJob.error} />
+                    </>
                   ) : null}
                   {loadedJob.status === "cancelled" ? (
                     <p>渲染已取消，可以调整设置后重新渲染。</p>
@@ -1081,12 +1091,15 @@ export function WhiteModelStudioDialog({
                 </div>
               ) : null}
               {pollError ? (
-                <div role="alert" className="white-model-studio__error">
-                  <p>读取任务失败：{pollError}</p>
-                  <button type="button" onClick={() => setPollVersion((version) => version + 1)}>
-                    重试读取任务
-                  </button>
-                </div>
+                <>
+                  <div role="alert" className="white-model-studio__error">
+                    <p>读取任务失败：{pollError}</p>
+                    <button type="button" onClick={() => setPollVersion((version) => version + 1)}>
+                      重试读取任务
+                    </button>
+                  </div>
+                  <ErrorCopyButton text={`读取任务失败：${pollError}`} />
+                </>
               ) : null}
               {activeJob(loadedJob) || restoring ? (
                 <>
@@ -1143,9 +1156,12 @@ export function WhiteModelStudioDialog({
                 </div>
               ) : null}
               {error ? (
-                <p role="alert" className="white-model-studio__error">
-                  {error}
-                </p>
+                <>
+                  <p role="alert" className="white-model-studio__error">
+                    {error}
+                  </p>
+                  <ErrorCopyButton text={error} />
+                </>
               ) : null}
             </section>
           )}

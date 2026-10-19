@@ -2,6 +2,8 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ComponentsModule from "../../lib/runtimeComponents";
+import type * as BackendModule from "../../lib/backend";
+import type * as ClipboardModule from "../../lib/clipboard";
 import type { RuntimeComponentManagerStatus } from "../../lib/runtimeComponents";
 import { RuntimeComponentsPanel } from "./RuntimeComponentsPanel";
 
@@ -14,11 +16,15 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   open: vi.fn(),
   changed: vi.fn(),
+  copy: vi.fn(),
 }));
-vi.mock("../../lib/backend", () => ({
+vi.mock("../../lib/backend", async (importOriginal) => ({
+  ...(await importOriginal<typeof BackendModule>()),
   isDesktopRuntime: mocks.desktop,
-  formatRawBackendError: (reason: unknown) =>
-    reason instanceof Error ? reason.message : String(reason),
+}));
+vi.mock("../../lib/clipboard", async (importOriginal) => ({
+  ...(await importOriginal<typeof ClipboardModule>()),
+  copyErrorTextToClipboard: mocks.copy,
 }));
 vi.mock("../../lib/runtimeComponents", async (importOriginal) => ({
   ...(await importOriginal<typeof ComponentsModule>()),
@@ -83,9 +89,22 @@ beforeEach(() => {
   mocks.install.mockResolvedValue(undefined);
   mocks.importArchive.mockResolvedValue(undefined);
   mocks.cancel.mockResolvedValue(undefined);
+  mocks.copy.mockResolvedValue(undefined);
 });
 
 describe("RuntimeComponentsPanel", () => {
+  it("waits for component validation before offering installation or repair", async () => {
+    current = { ...current, components: [{ ...current.components[0]!, state: "checking" }] };
+    render(<RuntimeComponentsPanel onClose={vi.fn()} />);
+    expect(await screen.findByRole("button", { name: "正在校验" })).toBeDisabled();
+    expect(row().getByRole("status")).toHaveTextContent("正在校验");
+    expect(row().getByRole("button", { name: "导入离线 ZIP" })).toBeDisabled();
+    expect(row().queryByText("尚未安装")).not.toBeInTheDocument();
+    current = { ...current, components: [{ ...current.components[0]!, state: "ready" }] };
+    expect(await screen.findByRole("button", { name: "修复组件" })).toBeEnabled();
+    expect(mocks.install).not.toHaveBeenCalled();
+  });
+
   it("shows initial sizes and dependencies and installs only after an explicit click", async () => {
     const user = userEvent.setup();
     render(<RuntimeComponentsPanel onClose={vi.fn()} initialFeatureId="white-model-render" />);
@@ -142,12 +161,29 @@ describe("RuntimeComponentsPanel", () => {
     expect(mocks.changed).not.toHaveBeenCalled();
   });
 
-  it("imports the selected ZIP and keeps download unavailable when the catalog is missing", async () => {
-    current = { ...current, catalogReady: false, catalogError: "下载目录暂不可用，请导入离线包。" };
+  it("explains unavailable installation and import when the trusted catalog is missing", async () => {
+    current = { ...current, catalogReady: false, catalogError: "组件目录文件缺失" };
     const user = userEvent.setup();
     render(<RuntimeComponentsPanel onClose={vi.fn()} />);
-    expect(await screen.findByText("下载目录暂不可用，请导入离线包。")).toBeInTheDocument();
+    expect(await screen.findByText("组件目录文件缺失")).toBeInTheDocument();
     expect(row().getByRole("button", { name: "安装组件" })).toBeDisabled();
+    expect(row().getByRole("button", { name: "导入离线 ZIP" })).toBeDisabled();
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("在线安装和离线导入均不可用");
+    expect(alert).toHaveTextContent("重新安装");
+    expect(row().getByRole("button", { name: "安装组件" })).toHaveAttribute(
+      "aria-describedby",
+      expect.stringContaining(alert.id),
+    );
+    await user.click(screen.getByRole("button", { name: "复制完整报错" }));
+    expect(mocks.copy).toHaveBeenCalledWith(expect.stringContaining(current.catalogError!));
+    expect(mocks.importArchive).not.toHaveBeenCalled();
+  });
+
+  it("imports the selected ZIP when a trusted catalog is available", async () => {
+    const user = userEvent.setup();
+    render(<RuntimeComponentsPanel onClose={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Blender 白模引擎" });
     await user.click(row().getByRole("button", { name: "导入离线 ZIP" }));
     expect(mocks.importArchive).toHaveBeenCalledExactlyOnceWith(
       "blender",
@@ -159,6 +195,50 @@ describe("RuntimeComponentsPanel", () => {
         filters: [{ name: "组件安装包", extensions: ["zip"] }],
       }),
     );
+  });
+
+  it("shows a damaged component as an actionable summary and copies the full diagnostics", async () => {
+    const diagnostic = "组件文件校验失败：models/depth/model.onnx 的 SHA-256 与当前版本不符。";
+    current = {
+      ...current,
+      components: [{ ...current.components[0]!, state: "damaged", error: diagnostic }],
+    };
+    const user = userEvent.setup();
+    render(<RuntimeComponentsPanel onClose={vi.fn()} />);
+    await screen.findByRole("heading", { name: "Blender 白模引擎" });
+    const alert = row().getByRole("alert");
+    expect(alert).toHaveTextContent(diagnostic);
+    expect(alert).toHaveTextContent("修复组件");
+    expect(row().getByRole("button", { name: "修复组件" })).toBeEnabled();
+    expect(row().getByRole("button", { name: "修复组件" })).toHaveAttribute(
+      "aria-describedby",
+      expect.stringContaining(alert.id),
+    );
+    await user.click(row().getByRole("button", { name: "复制完整报错" }));
+    expect(mocks.copy).toHaveBeenCalledWith(expect.stringContaining(diagnostic));
+    await user.click(row().getByRole("button", { name: "修复组件" }));
+    expect(mocks.install).toHaveBeenCalledExactlyOnceWith("blender", true);
+  });
+
+  it("retains structured action errors for readable summaries, expansion and full copying", async () => {
+    const diagnostic = {
+      kind: "validation",
+      message: "离线包文件校验失败。",
+      details: { path: "models/depth/model.onnx", reason: "SHA-256 mismatch" },
+    };
+    mocks.importArchive.mockRejectedValueOnce(diagnostic);
+    const user = userEvent.setup();
+    render(<RuntimeComponentsPanel onClose={vi.fn()} />);
+    await user.click(await screen.findByRole("button", { name: "导入离线 ZIP" }));
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(diagnostic.message);
+    expect(alert).not.toHaveTextContent("models/depth/model.onnx");
+    await user.click(screen.getByRole("button", { name: "复制完整报错" }));
+    expect(mocks.copy).toHaveBeenCalledWith(
+      expect.stringContaining(JSON.stringify(diagnostic, null, 2)),
+    );
+    await user.click(screen.getByText("展开完整报错"));
+    expect(screen.getByText(/"path": "models\/depth\/model.onnx"/)).toBeVisible();
   });
 
   it("retains an import error and closes without cancelling an active installation", async () => {

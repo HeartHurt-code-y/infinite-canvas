@@ -2,6 +2,7 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { mkdir, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { Icon, type IconSize } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { localBase64AssetClient } from "../../lib/backend";
 import {
   PROMPT_ATTACHMENT_ACCEPT,
@@ -2018,10 +2019,13 @@ export function VideoNodeSettings({
             ；以上为模型目录中的参考信息，素材和参数限制以服务端返回为准。
           </small>
           {perTaskInputIssue ? (
-            <div className="canvas-gen-node__media-role-warning" role="alert">
-              <Icon name="warning-circle" aria-hidden="true" size="sm" />
-              <span>{perTaskInputIssue}</span>
-            </div>
+            <>
+              <div className="canvas-gen-node__media-role-warning" role="alert">
+                <Icon name="warning-circle" aria-hidden="true" size="sm" />
+                <span>{perTaskInputIssue}</span>
+              </div>
+              <ErrorCopyButton text={perTaskInputIssue} />
+            </>
           ) : null}
         </div>
       ) : null}
@@ -2052,7 +2056,7 @@ export function VideoNodeSettings({
       {pixverse ? (
         <div className="canvas-gen-node__media-roles" role="status" aria-label="PixVerse 生成说明">
           <small>
-            生成模式选择自动时，有参考图生成图生视频，无参考图生成文生视频；图生视频需要时长，默认 5
+            自动模式下，单图用于图生视频，多张参考图使用多图融合，首尾帧使用首尾帧生成；默认时长 5
             秒。
           </small>
           <small>
@@ -2061,6 +2065,7 @@ export function VideoNodeSettings({
               : "画幅参数仅在无参考图的文生视频中生效。"}
           </small>
           <small>1080p 需要账户开通权限；支持范围及参数组合以服务端返回为准。</small>
+          <small>视频和音频会先上传取得素材引用；视频延长、编辑或对口型请选择对应能力模式。</small>
         </div>
       ) : null}
 
@@ -2103,10 +2108,13 @@ export function VideoNodeSettings({
             ) : null}
           </div>
           {taskState.issue ? (
-            <div className="canvas-gen-node__media-role-warning" role="alert">
-              <Icon name="warning-circle" aria-hidden="true" size="sm" />
-              <span>{taskState.issue}</span>
-            </div>
+            <>
+              <div className="canvas-gen-node__media-role-warning" role="alert">
+                <Icon name="warning-circle" aria-hidden="true" size="sm" />
+                <span>{taskState.issue}</span>
+              </div>
+              <ErrorCopyButton text={taskState.issue} />
+            </>
           ) : null}
           {(taskState.mode === "first_frame" || taskState.mode === "first_last_frame") &&
           (mediaInputs?.length ?? 0) > 0 ? (
@@ -2542,10 +2550,13 @@ function VideoUrlMediaSection({
         </div>
       )}
       {draftError ? (
-        <div className="canvas-gen-node__url-error" role="alert">
-          <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          {draftError}
-        </div>
+        <>
+          <div className="canvas-gen-node__url-error" role="alert">
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
+            {draftError}
+          </div>
+          <ErrorCopyButton text={draftError} />
+        </>
       ) : null}
     </div>
   );
@@ -2667,9 +2678,12 @@ function PerTaskVideoUrlSection({
         </div>
       )}
       {draftError ? (
-        <div className="canvas-gen-node__url-error" role="alert">
-          {draftError}
-        </div>
+        <>
+          <div className="canvas-gen-node__url-error" role="alert">
+            {draftError}
+          </div>
+          <ErrorCopyButton text={draftError} />
+        </>
       ) : null}
     </div>
   );

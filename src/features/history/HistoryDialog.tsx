@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import {
   useCallback,
@@ -1330,9 +1331,12 @@ export function HistoryDialog({
                       </p>
                     ) : null}
                     {regenerateError ? (
-                      <p role="alert" className="history-regenerate__error">
-                        {regenerateError}
-                      </p>
+                      <>
+                        <p role="alert" className="history-regenerate__error">
+                          {regenerateError}
+                        </p>
+                        <ErrorCopyButton text={regenerateError} />
+                      </>
                     ) : null}
                   </section>
                 ) : null}

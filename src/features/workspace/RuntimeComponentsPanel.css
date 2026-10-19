@@ -40,19 +40,21 @@
   overflow-y: auto;
   padding: var(--space-md);
 }
+.runtime-components__catalog {
+  flex: 0 0 auto;
+  max-height: 40dvh;
+  overflow-y: auto;
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: var(--rule-thin) solid var(--color-chrome-rule);
+}
 .runtime-components__feature {
   padding: var(--space-sm);
   border-left: var(--rule-active) solid var(--color-accent);
 }
-.runtime-components__notice,
 .runtime-components__dependencies,
 .runtime-components__size {
   color: var(--color-chrome-muted);
   font-size: var(--text-xs);
-}
-.runtime-components__error {
-  color: var(--color-error);
-  overflow-wrap: anywhere;
 }
 .runtime-components__transfer {
   padding: var(--space-sm);
@@ -72,6 +74,7 @@
   list-style: none;
 }
 .runtime-components__item {
+  min-width: 0;
   padding: var(--space-md) 0;
   border-bottom: var(--rule-thin) solid var(--color-chrome-rule);
 }
@@ -87,6 +90,7 @@
   gap: var(--space-xs);
 }
 .runtime-components__identity h3 {
+  overflow-wrap: anywhere;
   margin: 0;
   font-size: var(--text-md);
 }

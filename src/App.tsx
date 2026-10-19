@@ -5,6 +5,8 @@ import { Toaster } from "sonner";
 import "./App.css";
 import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { createQueryClient } from "./lib/queryClient";
+import { FeedbackHub } from "./features/feedback/FeedbackHub";
+import { WorkspaceErrorBoundary } from "./features/feedback/WorkspaceErrorBoundary";
 import "./styles/studio.css";
 
 export {
@@ -28,7 +30,10 @@ function App() {
   const [queryClient] = useState(createQueryClient);
   return (
     <QueryClientProvider client={queryClient}>
-      <CanvasWorkspace />
+      <WorkspaceErrorBoundary>
+        <CanvasWorkspace />
+      </WorkspaceErrorBoundary>
+      <FeedbackHub />
       <Toaster
         className="app-toaster"
         closeButton

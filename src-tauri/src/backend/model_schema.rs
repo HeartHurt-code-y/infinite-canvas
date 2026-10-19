@@ -533,7 +533,25 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
         },
         "action": {
             "type": "string", "label": "能力模式", "optional": true,
-            "enum": ["text", "img", "fusion"], "requestLocation": "metadata", "order": 7
+            "enum": ["text", "img", "transition", "extend", "fusion", "lip_sync",
+                "sound_effect", "restyle", "swap", "multi_transition", "mimic", "modify",
+                "upscale", "avatar", "agent"], "requestLocation": "metadata", "order": 7
+        },
+        "source_video_id": {
+            "type": "string", "label": "源视频任务 ID", "optional": true,
+            "requestLocation": "metadata", "order": 8
+        },
+        "restyle_id": {
+            "type": "string", "label": "重绘风格 ID", "optional": true,
+            "requestLocation": "metadata", "order": 9
+        },
+        "lip_sync_tts_content": {
+            "type": "string", "label": "对口型朗读文本", "optional": true,
+            "requestLocation": "metadata", "order": 10
+        },
+        "lip_sync_tts_speaker_id": {
+            "type": "string", "label": "对口型音色 ID", "optional": true,
+            "requestLocation": "metadata", "order": 11
         }
     });
     if model_id.eq_ignore_ascii_case("PixVerse-V6") {
@@ -2580,6 +2598,16 @@ pub fn refresh_pixverse_video_defaults(schema: &mut Value, model_id: &str) -> bo
                 changed = true;
             }
         }
+        // Expand only our old built-in action list; keep actual provider customizations.
+        if let Some(action) = parameters.get_mut("action").and_then(Value::as_object_mut)
+            && action.get("enum") == Some(&json!(["text", "img", "fusion"]))
+        {
+            action.insert(
+                "enum".into(),
+                canonical_parameters["action"]["enum"].clone(),
+            );
+            changed = true;
+        }
         return changed;
     }
     if let Some(provided_parameters) = operation.get("parameters").and_then(Value::as_object)
@@ -3543,7 +3571,23 @@ mod tests {
             assert!(operation["parameters"]["action"].get("default").is_none());
             assert_eq!(
                 operation["parameters"]["action"]["enum"],
-                json!(["text", "img", "fusion"])
+                json!([
+                    "text",
+                    "img",
+                    "transition",
+                    "extend",
+                    "fusion",
+                    "lip_sync",
+                    "sound_effect",
+                    "restyle",
+                    "swap",
+                    "multi_transition",
+                    "mimic",
+                    "modify",
+                    "upscale",
+                    "avatar",
+                    "agent"
+                ])
             );
             assert_eq!(
                 operation["parameters"]
@@ -3646,6 +3690,32 @@ mod tests {
             "PixVerse-V6",
             RequestDialect::OpenAiCompatible
         ));
+    }
+
+    #[test]
+    fn pixverse_saved_image_only_actions_are_extended_without_replacing_custom_schema() {
+        let mut schema =
+            default_model_schema("PixVerse-V6", &[GenerationOperation::VideoGeneration]);
+        schema["video_generation"]["parameters"]["action"]["enum"] =
+            json!(["text", "img", "fusion"]);
+        schema["video_generation"]["request"]["path"] = json!("/custom/video");
+        assert!(refresh_pixverse_video_defaults(&mut schema, "PixVerse-V6"));
+        assert!(
+            schema["video_generation"]["parameters"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("lip_sync"))
+        );
+        assert_eq!(
+            schema["video_generation"]["request"]["path"],
+            "/custom/video"
+        );
+        schema["video_generation"]["parameters"]["action"]["enum"] = json!(["custom_action"]);
+        assert!(!refresh_pixverse_video_defaults(&mut schema, "PixVerse-V6"));
+        assert_eq!(
+            schema["video_generation"]["parameters"]["action"]["enum"],
+            json!(["custom_action"])
+        );
     }
 
     #[test]

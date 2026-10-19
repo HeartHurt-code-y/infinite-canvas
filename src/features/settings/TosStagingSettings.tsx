@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as v from "valibot";
 import {
@@ -295,10 +296,13 @@ export function TosStagingSettings({
       ) : null}
 
       {rawError ? (
-        <div className="settings-error" role="alert">
-          <strong>完整原始错误</strong>
-          <pre tabIndex={0}>{rawError}</pre>
-        </div>
+        <>
+          <div className="settings-error" role="alert">
+            <strong>完整原始错误</strong>
+            <pre tabIndex={0}>{rawError}</pre>
+          </div>
+          <ErrorCopyButton text={rawError} />
+        </>
       ) : null}
       {successMessage ? (
         <p className="settings-success" role="status">

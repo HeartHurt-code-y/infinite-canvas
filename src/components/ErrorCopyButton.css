@@ -1,0 +1,38 @@
+/* 复制报错按钮：中性低调、可点面积足够，状态切换用图标 + 文字双编码。 */
+.error-copy-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  align-items: center;
+}
+.error-copy-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  min-height: 0;
+  width: fit-content;
+  padding: 2px 6px;
+  color: var(--color-text-3);
+  background: var(--color-field);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+
+.error-copy-button:hover {
+  color: var(--color-text);
+  border-color: var(--color-text-3);
+}
+
+/* 已复制：绿色 + 对勾 + 文字，不靠颜色单独传达（WCAG 1.4.1）。 */
+.error-copy-button[data-state="copied"] {
+  color: var(--color-success);
+  border-color: var(--color-success);
+}

@@ -135,7 +135,19 @@ describe("model capabilities", () => {
         options: [
           { value: "text", label: "文生视频" },
           { value: "img", label: "图生视频" },
+          { value: "transition", label: "首尾帧生成" },
+          { value: "extend", label: "延长" },
           { value: "fusion", label: "多图融合" },
+          { value: "lip_sync", label: "对口型" },
+          { value: "sound_effect", label: "音效生成" },
+          { value: "restyle", label: "视频重绘" },
+          { value: "swap", label: "主体替换" },
+          { value: "multi_transition", label: "智能多帧" },
+          { value: "mimic", label: "动作模仿" },
+          { value: "modify", label: "视频编辑" },
+          { value: "upscale", label: "超清视频" },
+          { value: "avatar", label: "图片数字人" },
+          { value: "agent", label: "爆款复刻" },
         ],
       });
       expect(capabilities.find((capability) => capability.key === "duration")?.options).toEqual(
@@ -164,6 +176,13 @@ describe("model capabilities", () => {
       expect(defaults).not.toHaveProperty("action");
       expect(defaults).not.toHaveProperty("seed");
       expect(defaults).not.toHaveProperty("template_id");
+      expect(defaults).not.toHaveProperty("source_video_id");
+      expect(capabilities.find((capability) => capability.key === "source_video_id")).toMatchObject(
+        {
+          type: "string",
+          optional: true,
+        },
+      );
       expect(
         generationParameters(
           capabilities,

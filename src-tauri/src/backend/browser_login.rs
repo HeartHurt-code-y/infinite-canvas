@@ -3,8 +3,9 @@
 //! 运行时脚本通过 playwright 读取该站点 Cookie，Rust 侧校验后写成
 //! Netscape 会话文件，供本次重试与后续下载复用。
 //!
-//! 安全边界：URL 与临时 profile 路径走 stdin，不进进程参数与日志；
-//! Cookie 只允许目标站点主域（含官方 CDN），会话文件经
+//! 安全边界：URL 与临时 profile 路径走 stdin，不进进程参数与日志；脚本
+//! stderr 只在 stdout 契约被破坏（启动即崩溃、浏览器尚未启动）时截取尾部
+//! 进日志。Cookie 只允许目标站点主域（含官方 CDN），会话文件经
 //! `credentials::write_private_file` 落盘；浏览器使用独立临时 profile，
 //! 不读取也不污染用户已登录的真实浏览器。
 
@@ -23,6 +24,9 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(360);
 const MAX_RESULT_BYTES: usize = 512 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_SITE_COOKIES: usize = 64;
+/// 契约被破坏时 stderr 尾部日志的行数与单行字符上限，防止刷爆日志。
+const STDERR_TAIL_LINES: usize = 5;
+const STDERR_TAIL_LINE_CHARS: usize = 300;
 
 /// 支持登录捕获的站点。判定与 Cookie 范围都只认主域及其子域。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -219,11 +223,48 @@ fn netscape_text(site: LoginSite, cookies: &[ScriptCookie]) -> String {
     text
 }
 
+/// 契约被破坏时（脚本崩溃于模块加载期、浏览器尚未启动，不可能有 Cookie）
+/// 截取 stderr 尾部进日志，把「bytes=0」这类盲区变成可诊断的信号。
+/// 逐行去空白、只留尾部、按字符截断，避免截出半个字符或刷爆日志。
+fn stderr_tail_lines(stderr: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(STDERR_TAIL_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| line.chars().take(STDERR_TAIL_LINE_CHARS).collect())
+        .collect()
+}
+
+/// 登录捕获与站点解析共用：脚本没写出 JSON 契约时记录 stderr 尾部。
+pub(super) fn log_stderr_tail(context: &str, stderr: &[u8]) {
+    let lines = stderr_tail_lines(stderr);
+    if lines.is_empty() {
+        tauri_plugin_log::log::warn!("{context} 脚本无任何输出（stdout 未写出 JSON，stderr 为空）");
+        return;
+    }
+    tauri_plugin_log::log::warn!(
+        "{context} 脚本启动即失败（stdout 未写出 JSON），stderr 尾部 {} 行：",
+        lines.len()
+    );
+    for line in lines {
+        tauri_plugin_log::log::warn!("{context} stderr| {line}");
+    }
+}
+
 /// 解析脚本回传的 stdout 契约。脚本无论成败都把单行 JSON 写到 stdout
 /// （失败时 exitCode=1），所以错误原因以 stdout 为准，退出码只用来兜底
-/// 识别脚本连 JSON 都没写出来的崩溃。日志只记 code/detail 与字节数，
-/// 不记 stdout 原文（成功路径含 Cookie 值）。
-fn interpret_capture_output(status_success: bool, stdout: &[u8]) -> Result<Value, &'static str> {
+/// 识别脚本连 JSON 都没写出来的崩溃——此时附带 stderr 尾部定位启动失败。
+/// 日志只记 code/detail 与字节数，不记 stdout 原文（成功路径含 Cookie 值）。
+fn interpret_capture_output(
+    status_success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Value, &'static str> {
     if stdout.len() > MAX_RESULT_BYTES {
         tauri_plugin_log::log::warn!("[登录捕获] 脚本输出超限：bytes={}", stdout.len());
         return Err("login capture returned invalid output");
@@ -236,6 +277,7 @@ fn interpret_capture_output(status_success: bool, stdout: &[u8]) -> Result<Value
                 stdout.len(),
                 status_success
             );
+            log_stderr_tail("[登录捕获]", stderr);
             return Err("login capture returned invalid output");
         }
     };
@@ -298,8 +340,9 @@ pub(super) async fn capture(
         .current_dir(runtime)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        // stderr 可能含引擎调试输出，且不允许 Cookie 相关内容进入日志。
-        .stderr(Stdio::null())
+        // stderr 平时不入日志：只有 stdout 契约被破坏（启动即崩溃、浏览器
+        // 尚未启动）时才截取尾部，崩溃路径不可能携带 Cookie。
+        .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
     // 只隐藏 node 自身的控制台；浏览器是 GUI 子进程，窗口照常弹出。
@@ -365,7 +408,8 @@ pub(super) async fn capture(
     };
     drop(process_tree);
     drop(profile);
-    let payload = interpret_capture_output(output.status.success(), &output.stdout)?;
+    let payload =
+        interpret_capture_output(output.status.success(), &output.stdout, &output.stderr)?;
     // 站点与允许域由本侧再判定一次，不信任脚本回传的站点字段。
     parse_script_cookies(&payload, site)
         .map(|cookies| netscape_text(site, &cookies))
@@ -439,34 +483,53 @@ mod tests {
         // 失败也带结构化 code：退出码非 0 不再掩盖真实原因。
         let payload = serde_json::json!({"ok": false, "code": "login_timeout"}).to_string();
         assert_eq!(
-            interpret_capture_output(false, payload.as_bytes()),
+            interpret_capture_output(false, payload.as_bytes(), b""),
             Err("login capture login timeout")
         );
         let payload = serde_json::json!({"ok": false, "code": "browser_unavailable"}).to_string();
         assert_eq!(
-            interpret_capture_output(false, payload.as_bytes()),
+            interpret_capture_output(false, payload.as_bytes(), b""),
             Err("login capture browser unavailable")
         );
         // 未知 code 归入脚本错误；完全没写出 JSON 才是 invalid output。
         let payload = serde_json::json!({"ok": false, "code": "future_code"}).to_string();
         assert_eq!(
-            interpret_capture_output(false, payload.as_bytes()),
+            interpret_capture_output(false, payload.as_bytes(), b""),
             Err("login capture script error")
         );
         assert_eq!(
-            interpret_capture_output(false, b""),
+            interpret_capture_output(false, b"", b""),
             Err("login capture returned invalid output")
         );
         assert_eq!(
-            interpret_capture_output(true, b"not json"),
+            interpret_capture_output(true, b"not json", b""),
             Err("login capture returned invalid output")
         );
         // ok:true 即成功，退出码不影响。
         let payload = serde_json::json!({"ok": true, "cookies": []}).to_string();
         assert_eq!(
-            interpret_capture_output(true, payload.as_bytes()).unwrap(),
+            interpret_capture_output(true, payload.as_bytes(), b"").unwrap(),
             serde_json::json!({"ok": true, "cookies": []})
         );
+    }
+
+    #[test]
+    fn stderr_tail_is_trimmed_tail_only_and_char_safe() {
+        assert!(stderr_tail_lines(b"").is_empty());
+        assert_eq!(
+            stderr_tail_lines(b"first\n\n   second  \n"),
+            vec!["first", "second"]
+        );
+        let many: String = (0..10).map(|i| format!("line{i}\n")).collect();
+        assert_eq!(
+            stderr_tail_lines(many.as_bytes()),
+            vec!["line5", "line6", "line7", "line8", "line9"]
+        );
+        // 按字符截断：超长单行（含非 ASCII）不截出半个字符。
+        let long = "界".repeat(STDERR_TAIL_LINE_CHARS + 40);
+        let lines = stderr_tail_lines(long.as_bytes());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].chars().count(), STDERR_TAIL_LINE_CHARS);
     }
 
     #[test]
@@ -521,6 +584,32 @@ mod tests {
                 LoginSite::Douyin,
             )
             .is_none()
+        );
+    }
+
+    /// Windows canonicalize 后的运行时路径带 \\?\ 前缀；仍须进入脚本并返回
+    /// JSON。用不受支持的 URL 在打开浏览器前结束，不访问网络或真实 Cookie。
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires prepared bundled Node runtime; does not open a browser or access the network"]
+    async fn canonical_runtime_login_script_returns_structured_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let resources = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .canonicalize()
+            .unwrap();
+        assert!(resources.to_string_lossy().starts_with(r"\\?\"));
+        let renderer = RemotionRenderService::new(directory.path().into(), resources);
+        assert!(renderer.preflight().ready);
+        assert_eq!(
+            capture(
+                &renderer,
+                LoginSite::Douyin,
+                "https://example.com/",
+                &AtomicBool::new(false),
+            )
+            .await,
+            Err("login capture input rejected")
         );
     }
 

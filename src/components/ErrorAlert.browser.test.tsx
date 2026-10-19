@@ -7,6 +7,48 @@ import { formatWorkflowFailure, modelWorkflowError } from "../lib/workflowErrors
 import "../App.css";
 
 describe("workflow error readability in the browser", () => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])("keeps saved API errors readable with raw=%s and legacyHTTP=%s", async (raw, legacyHTTP) => {
+    const summary = legacyHTTP
+      ? "供应商返回了网页而不是接口数据（HTTP 200）。请核对 API 地址，并向供应商确认当前接口是否已开通。"
+      : "供应商返回了网页而不是接口数据（HTTP 200）。请核对 API 地址。";
+    const html = `<!doctype html><html>${"魔芋AI".repeat(400)}</html>`;
+    const error = legacyHTTP
+      ? `HTTP 200\n${html}`
+      : JSON.stringify({
+          kind: "protocol",
+          message: `protocol error: ${summary}`,
+          details: {
+            httpStatus: 200,
+            rawResponse: html,
+          },
+        });
+    await render(
+      <section data-testid="saved-error-card" style={{ width: 280 }}>
+        <ErrorAlert raw={raw} error={error} hint="确认供应商已开放当前接口后，再刷新素材列表。" />
+      </section>,
+    );
+    await expect.element(page.getByText(summary, { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "复制完整报错", exact: true }))
+      .toBeVisible();
+    const card = document.querySelector<HTMLElement>('[data-testid="saved-error-card"]')!;
+    expect(card.querySelector('[role="alert"]')).not.toHaveTextContent("<!doctype");
+    const details = card.querySelector("details")!;
+    if (raw) expect(details).toHaveAttribute("open");
+    else expect(details).not.toHaveAttribute("open");
+    expect(details.querySelector("pre")).toHaveTextContent(error, {
+      normalizeWhitespace: false,
+    });
+    if (!raw) await page.getByText("展开完整报错", { exact: true }).click();
+    expect(details).toHaveAttribute("open");
+    expect(card.scrollWidth).toBeLessThanOrEqual(card.clientWidth + 1);
+  });
+
   it("keeps guidance and full model responses readable within a narrow workflow card", async () => {
     const original = {
       kind: "protocol",

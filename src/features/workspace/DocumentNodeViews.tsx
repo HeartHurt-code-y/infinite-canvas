@@ -8,6 +8,7 @@ import {
 } from "../../lib/backend";
 
 import { MarkdownView } from "../../components/MarkdownView";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ImeTextarea } from "../../components/ImeTextField";
 
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
@@ -558,9 +559,12 @@ export function CanvasDocumentSkillNode({
         ) : null}
 
         {error ? (
-          <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-            {error}
-          </pre>
+          <>
+            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
+              {error}
+            </pre>
+            <ErrorCopyButton text={error} />
+          </>
         ) : null}
       </div>
     </div>
@@ -920,9 +924,12 @@ export function CanvasViralRemixNode({
         </div>
 
         {error ? (
-          <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-            {error}
-          </pre>
+          <>
+            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
+              {error}
+            </pre>
+            <ErrorCopyButton text={error} />
+          </>
         ) : null}
       </div>
     </div>
@@ -1544,9 +1551,12 @@ export function CanvasPromptNode({
           <span className={node.config.generatedPrompt ? "is-ready" : ""}>{promptStatusText}</span>
         </div>
         {error ? (
-          <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-            {error}
-          </pre>
+          <>
+            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
+              {error}
+            </pre>
+            <ErrorCopyButton text={error} />
+          </>
         ) : null}
         {targetConnections.length > 0 ? (
           <div className="canvas-prompt-node__connections">

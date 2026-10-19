@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { useEffect } from "react";
 import { isDesktopRuntime } from "../../lib/backend";
 import {
@@ -76,10 +77,13 @@ export function AppUpdateSettings() {
       <div className="app-update-settings__actions">{actionButtons(snapshot, desktop)}</div>
 
       {snapshot.error ? (
-        <p className="settings-error" role="alert">
-          <Icon name="warning-circle" aria-hidden="true" size="md" />
-          {snapshot.error}
-        </p>
+        <>
+          <p className="settings-error" role="alert">
+            <Icon name="warning-circle" aria-hidden="true" size="md" />
+            {snapshot.error}
+          </p>
+          <ErrorCopyButton text={snapshot.error} />
+        </>
       ) : null}
     </section>
   );

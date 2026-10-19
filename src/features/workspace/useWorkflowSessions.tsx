@@ -26,7 +26,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import { toast } from "sonner";
+import { toast } from "../../lib/toast";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import {
   isDesktopRuntime,

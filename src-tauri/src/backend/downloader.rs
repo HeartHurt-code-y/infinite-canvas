@@ -2628,6 +2628,19 @@ fn login_capture_failure_reason(detail: &str) -> String {
         "login capture script error" => "登录窗口脚本运行出错。".into(),
         "login capture input rejected" => "登录请求参数未通过脚本校验。".into(),
         "login capture process failed" => "登录窗口进程异常退出。".into(),
+        "login capture returned invalid output" => {
+            "登录窗口脚本启动即失败，没有返回任何结果；可重试一次，若反复出现请重启应用。".into()
+        }
+        "login capture unexpected state" => "登录窗口状态异常，未能确认登录结果。".into(),
+        "login capture could not start" => "登录窗口进程启动失败。".into(),
+        "login capture process tree unavailable" => {
+            "登录窗口进程未能纳入统一回收管理，已中止本次登录。".into()
+        }
+        "login profile unavailable" => "登录环境初始化失败：临时目录创建失败。".into(),
+        "login capture input too large" => "登录请求参数超出大小限制。".into(),
+        "login capture stdin unavailable" => "登录窗口进程无法接收参数。".into(),
+        "login capture stdin failed" => "向登录窗口进程传参失败。".into(),
+        "login capture stdin timed out" => "向登录窗口进程传参超时。".into(),
         _ => "登录流程内部异常。".into(),
     }
 }
@@ -3540,6 +3553,39 @@ yuv420p(tv, bt709), 1080x1920 [SAR 1:1 DAR 9:16], 1014 kb/s, 30 fps";
             sibling_with_suffix(no_ext, "（去水印）").to_string_lossy(),
             r"C:\下载\clip（去水印）"
         );
+    }
+
+    /// 登录捕获的每条稳定错误串都必须有可读归因，不许落「内部异常」兜底。
+    #[test]
+    fn login_capture_failures_all_map_to_actionable_reasons() {
+        let details = [
+            "login capture browser unavailable",
+            "login capture login timeout",
+            "login capture browser closed early",
+            "login capture timed out",
+            "login capture returned no site cookies",
+            "login capture script unavailable",
+            "login capture runtime unavailable",
+            "login capture script error",
+            "login capture input rejected",
+            "login capture process failed",
+            "login capture returned invalid output",
+            "login capture unexpected state",
+            "login capture could not start",
+            "login capture process tree unavailable",
+            "login profile unavailable",
+            "login capture input too large",
+            "login capture stdin unavailable",
+            "login capture stdin failed",
+            "login capture stdin timed out",
+        ];
+        for detail in details {
+            assert_ne!(
+                login_capture_failure_reason(detail),
+                "登录流程内部异常。",
+                "{detail} 应有可读归因"
+            );
+        }
     }
 
     /// Explicitly exercise the service task, browser resolver, yt-dlp, and file

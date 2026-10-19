@@ -565,6 +565,18 @@ fn critical_stamps(root: &Path, manifest: &str) -> Vec<Stamp> {
 
 impl ComponentManager {
     pub fn new(data_dir: PathBuf, resource_dir: PathBuf) -> Self {
+        // 与 AiMediaRuntime 保持一致：tauri dev 的资源目录可能只有旧副本和
+        // .gitkeep 占位目录，开发版直接使用本次构建固定摘要的已准备资源。
+        // 正式安装版仍严格使用安装目录，不回退到开发机或任意外部目录。
+        #[cfg(debug_assertions)]
+        let resource_dir = {
+            let _ = resource_dir;
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources")
+        };
+        Self::from_resources(data_dir, resource_dir)
+    }
+
+    fn from_resources(data_dir: PathBuf, resource_dir: PathBuf) -> Self {
         let catalog = load_catalog(&resource_dir);
         let native = IDS
             .into_iter()
@@ -830,7 +842,9 @@ impl ComponentManager {
                     version: catalog
                         .map(|component| component.version.clone())
                         .unwrap_or_default(),
-                    state: if root.is_some() {
+                    state: if cached.is_none() {
+                        "checking"
+                    } else if root.is_some() {
                         "ready"
                     } else if error.is_some() {
                         "damaged"
@@ -1505,6 +1519,66 @@ fn publish_atomic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_component_verification_is_not_reported_as_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ComponentManager::from_resources(
+            temp.path().join("data"),
+            temp.path().join("resources"),
+        );
+        let gate = manager.inner.verification_gate.lock().unwrap();
+        let status = manager.status();
+        assert!(
+            status
+                .components
+                .iter()
+                .all(|component| component.state == "checking")
+        );
+        drop(gate);
+    }
+
+    #[test]
+    fn development_component_manager_uses_the_prepared_resource_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_resources = temp.path().join("desktop-resources");
+        let manager = ComponentManager::new(temp.path().join("data"), app_resources.clone());
+        let expected = if cfg!(debug_assertions) {
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources")
+        } else {
+            app_resources
+        };
+        assert_eq!(manager.inner.resources, expected);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[ignore = "requires the prepared component catalog and both AI runtimes; validates actual local files"]
+    fn development_component_manager_reports_prepared_ai_components_ready() {
+        let temp = tempfile::tempdir().unwrap();
+        let manager = ComponentManager::new(
+            temp.path().join("data"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("target/debug"),
+        );
+        assert!(manager.inner.catalog.is_ok(), "{:?}", manager.inner.catalog);
+        for id in ["ai-media-runtime", "ai-media-quality-runtime"] {
+            let verified = manager.verify_now(id, true);
+            assert!(verified.root.is_some(), "{id}: {:?}", verified.error);
+        }
+        let status = manager.status();
+        assert!(status.catalog_ready);
+        for id in ["ai-media-runtime", "ai-media-quality-runtime"] {
+            let component = status
+                .components
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap();
+            assert_eq!(component.state, "ready", "{id}");
+            assert_ne!(component.title, id);
+            assert!(component.download_bytes > 0);
+            assert!(component.error.is_none());
+        }
+    }
     fn fixture_catalog(archive_url: &str) -> (ComponentCatalog, CatalogComponent) {
         let sha256 = "a".repeat(64);
         let catalog: ComponentCatalog = serde_json::from_value(serde_json::json!({
@@ -1656,8 +1730,10 @@ mod tests {
         assert!(unchanged(&stamps));
         fs::write(path, b"changed").unwrap();
         assert!(!unchanged(&stamps));
-        let manager =
-            ComponentManager::new(temp.path().join("data"), temp.path().join("resources"));
+        let manager = ComponentManager::from_resources(
+            temp.path().join("data"),
+            temp.path().join("resources"),
+        );
         let status = manager.feature_status("unknown");
         assert!(!status.ready);
         assert!(status.error.is_some());
@@ -1764,7 +1840,8 @@ mod tests {
             fresh_resources.join("component-catalog.json"),
         )
         .unwrap();
-        let manager = ComponentManager::new(temp.path().join("appdata"), fresh_resources);
+        let manager =
+            ComponentManager::from_resources(temp.path().join("appdata"), fresh_resources);
         let catalog = manager
             .inner
             .catalog

@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { useEffect, useId, useState } from "react";
 import {
   ASSET_LIBRARY_CREDENTIAL_REF,
@@ -313,10 +314,13 @@ export function AssetLibraryTokenSettings({
       </div>
 
       {requestError ? (
-        <div className="settings-error asset-token-settings__notice" role="alert">
-          <strong>素材库拉取失败</strong>
-          <pre tabIndex={0}>{requestError}</pre>
-        </div>
+        <>
+          <div className="settings-error asset-token-settings__notice" role="alert">
+            <strong>素材库拉取失败</strong>
+            <pre tabIndex={0}>{requestError}</pre>
+          </div>
+          <ErrorCopyButton text={requestError} />
+        </>
       ) : null}
       {successMessage ? (
         <p className="settings-success asset-token-settings__notice" role="status">

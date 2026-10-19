@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   formatRawBackendError,
@@ -395,10 +396,13 @@ export function ProviderTokenGroupSettings({
       </div>
 
       {requestError ? (
-        <div className="settings-error token-group-settings__notice" role="alert">
-          <strong>令牌分组操作失败</strong>
-          <pre tabIndex={0}>{requestError}</pre>
-        </div>
+        <>
+          <div className="settings-error token-group-settings__notice" role="alert">
+            <strong>令牌分组操作失败</strong>
+            <pre tabIndex={0}>{requestError}</pre>
+          </div>
+          <ErrorCopyButton text={requestError} />
+        </>
       ) : null}
       {successMessage ? (
         <p className="settings-success token-group-settings__notice" role="status">

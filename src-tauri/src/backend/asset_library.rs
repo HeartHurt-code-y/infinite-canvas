@@ -3100,7 +3100,12 @@ enum OverseasReadyConfirmation {
 
 fn require_success(operation: &str, response: &RawProviderResponse) -> BackendResult<()> {
     if (200..300).contains(&response.status) {
-        return Ok(());
+        return super::provider::reject_html_api_response(
+            response.status,
+            &response.headers,
+            &response.body,
+            "",
+        );
     }
     let upstream_message = serde_json::from_str::<Value>(&response.body)
         .ok()
@@ -5860,6 +5865,40 @@ mod tests {
             same_scope.access,
             ResolvedAssetAccess::RemoteReference(ref value) if value == "asset://asset-1"
         ));
+    }
+
+    #[tokio::test]
+    async fn browse_rejects_html_success_without_losing_the_response() {
+        let body = format!(
+            "<!doctype html><html lang=\"zh\"><title>魔芋AI大模型网关</title>{}<div id=\"root\"></div></html>",
+            " ".repeat(600)
+        );
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            RawProviderResponse {
+                status: 200,
+                headers: json!({ "content-type": "text/html; charset=utf-8" }),
+                body: body.clone(),
+            },
+        ]));
+        let library = test_library(adapter.clone(), immediate_poll());
+        let error = library
+            .browse(AssetListCommand {
+                provider_connection_id: "provider-1".into(),
+                page_number: None,
+                page_size: None,
+                name: None,
+                group_id: None,
+                kind: None,
+            })
+            .await
+            .expect_err("a homepage is not an asset list");
+        let payload = error.runtime_record();
+        assert_eq!(payload["kind"], "protocol", "{payload}");
+        assert!(payload["message"].as_str().unwrap().contains("网页"));
+        assert!(payload["message"].as_str().unwrap().contains("API 地址"));
+        assert_eq!(payload["details"]["httpStatus"], 200);
+        assert_eq!(payload["details"]["rawResponse"], body);
+        assert_eq!(adapter.request_paths(), ["/v1/assets/list"]);
     }
 
     #[tokio::test]

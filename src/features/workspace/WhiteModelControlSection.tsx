@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ImeTextarea } from "../../components/ImeTextField";
 import type { PromptContentConnection } from "../../lib/promptContent";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
@@ -143,9 +144,12 @@ export function WhiteModelControlSection({
         {current.enabled ? (
           <>
             {resolved.issue ? (
-              <p className="white-model-control__issue" role="alert">
-                {resolved.issue}
-              </p>
+              <>
+                <p className="white-model-control__issue" role="alert">
+                  {resolved.issue}
+                </p>
+                <ErrorCopyButton text={resolved.issue} />
+              </>
             ) : null}
             <WhiteModelBindingSelect
               label="白模参考视频"

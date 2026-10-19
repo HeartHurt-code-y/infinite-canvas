@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import {
   useCallback,
   useEffect,
@@ -1585,7 +1586,12 @@ function VideoLocalEditDialogContent({
                   }}
                 />
               </label>
-              {!validRange && <p role="alert">结束时间须晚于开始时间，且范围须在视频时长内。</p>}
+              {!validRange && (
+                <>
+                  <p role="alert">结束时间须晚于开始时间，且范围须在视频时长内。</p>
+                  <ErrorCopyButton text="结束时间须晚于开始时间，且范围须在视频时长内。" />
+                </>
+              )}
             </div>
           )}
           <p id={instructionHintId} className="video-local-edit-dialog__hint">
@@ -1601,9 +1607,12 @@ function VideoLocalEditDialogContent({
           </p>
         )}
         {error && (
-          <p className="video-local-edit-dialog__error" role="alert">
-            {error}
-          </p>
+          <>
+            <p className="video-local-edit-dialog__error" role="alert">
+              {error}
+            </p>
+            <ErrorCopyButton text={error} />
+          </>
         )}
         {error && sourceError && needsPreparation && (
           <button type="button" onClick={reloadSource} disabled={busy}>

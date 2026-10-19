@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ImeTextarea } from "../../components/ImeTextField";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -310,10 +311,13 @@ export function RealPersonAssetDialog({
           ) : null}
 
           {error ? (
-            <p className="real-person-dialog__message" data-state="error" role="alert">
-              <Icon name="warning-circle" aria-hidden="true" size="md" />
-              {error}
-            </p>
+            <>
+              <p className="real-person-dialog__message" data-state="error" role="alert">
+                <Icon name="warning-circle" aria-hidden="true" size="md" />
+                {error}
+              </p>
+              <ErrorCopyButton text={error} />
+            </>
           ) : null}
           {notice ? (
             <p className="real-person-dialog__message" data-state="success" role="status">

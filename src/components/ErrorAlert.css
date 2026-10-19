@@ -61,9 +61,17 @@
   padding-inline-start: var(--space-lg);
 }
 
+/* 复制按钮 + 展开详情共用一行：都放在 alert 之外，展开/复制不打断朗读。 */
+.error-alert__actions {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
 /* 原始报错是排查用的，不进 alert live region：展开由用户主动触发。 */
 .error-alert__details {
-  justify-self: start;
+  min-width: 0;
   max-width: 100%;
   color: var(--color-text-3);
   font-size: var(--text-2xs);

@@ -42,7 +42,7 @@ const componentSchema = v.object({
   title: text,
   description: v.string(),
   version: v.string(),
-  state: v.picklist(["ready", "not_installed", "damaged"]),
+  state: v.picklist(["checking", "ready", "not_installed", "damaged"]),
   rootPath: v.nullable(text),
   installedBytes: bytes,
   downloadBytes: bytes,

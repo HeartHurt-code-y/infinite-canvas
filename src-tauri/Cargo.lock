@@ -2196,6 +2196,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "dirs",
+ "dunce",
  "ffmpeg-sidecar",
  "flate2",
  "fs2",

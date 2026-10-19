@@ -935,6 +935,51 @@ function backendErrorMessageOf(error: unknown): string | null {
   return null;
 }
 
+/** Task history and form state can retain the serialized Tauri payload. */
+function serializedBackendError(value: string): Record<string, unknown> | null {
+  if (!value.trimStart().startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed != null && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const payload = parsed as Record<string, unknown>;
+      if (typeof payload["kind"] === "string" && typeof payload["message"] === "string") {
+        return payload;
+      }
+    }
+  } catch {
+    // Plain error messages need no JSON decoding.
+  }
+  return null;
+}
+
+function backendErrorTextMessage(value: string): string | null {
+  const serialized = backendErrorMessageOf(serializedBackendError(value));
+  if (serialized != null) return serialized;
+  // Older histories store the status line and raw HTTP body as one string.
+  const response = /^HTTP[ \t]+(\d{3})[^\r\n]*\r?\n([\s\S]*)$/i.exec(value.trim());
+  if (!response) return null;
+  const status = response[1];
+  const body = response[2] ?? "";
+  if (/^(?:\uFEFF)?\s*(?:<!doctype\s+html\b|<html\b)/i.test(body)) {
+    return `供应商返回了网页而不是接口数据（HTTP ${status}）。请核对 API 地址，并向供应商确认当前接口是否已开通。`;
+  }
+  try {
+    const payload: unknown = JSON.parse(body);
+    const upstream =
+      payload != null && typeof payload === "object"
+        ? (payload as Record<string, unknown>)["error"]
+        : null;
+    const message =
+      backendErrorMessageOf(upstream) ??
+      backendErrorMessageOf(payload) ??
+      (typeof upstream === "string" ? upstream : null);
+    if (message) return `${message}（HTTP ${status}）`;
+  } catch {
+    // The complete malformed body remains available in backendErrorDetails.
+  }
+  return `接口返回的数据无法识别（HTTP ${status}）。请展开完整报错，并向供应商确认接口地址和响应格式。`;
+}
+
 /**
  * 面向用户的报错摘要：从后端错误里取出人能读懂的一句话。
  *
@@ -958,7 +1003,8 @@ export function backendErrorMessage(error: unknown): string {
       : error instanceof Error
         ? error.message
         : backendErrorMessageOf(error);
-  const summary = (candidate ?? "").replace(BACKEND_ERROR_KIND_PREFIX, "").trim();
+  const message = candidate == null ? "" : backendErrorTextMessage(candidate);
+  const summary = (message ?? candidate ?? "").replace(BACKEND_ERROR_KIND_PREFIX, "").trim();
   return summary || "操作失败，请重试。";
 }
 
@@ -970,8 +1016,10 @@ export function backendErrorMessage(error: unknown): string {
  * `kind` / `details` 字段的对象才值得展开排查。
  */
 export function backendErrorDetails(error: unknown): string | null {
-  if (error == null || typeof error === "string") return null;
+  if (error == null) return null;
+  if (typeof error === "string") return backendErrorTextMessage(error) != null ? error : null;
   if (error instanceof Error) {
+    if (backendErrorTextMessage(error.message) != null) return error.message;
     const structured = Object.keys(error).some(
       (key) => key !== "name" && key !== "message" && key !== "stack",
     );

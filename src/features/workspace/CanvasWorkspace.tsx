@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "sonner";
+import { toast } from "../../lib/toast";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { formatRawBackendError, isDesktopRuntime } from "../../lib/backend";
 import {
   registerAppUpdateBeforeInstallFlush,
@@ -386,24 +387,27 @@ export function CanvasWorkspace() {
         ))}
       </div>
       {error ? (
-        <div className="canvas-session-error" role="alert">
-          <span>{error}</span>
-          <button
-            type="button"
-            disabled={busy || loading || deleteTarget !== null}
-            onClick={() => {
-              runMutation(async () => {
-                await flushAll();
-                await loadCatalog();
-              });
-            }}
-          >
-            重试
-          </button>
-          <button type="button" onClick={() => setError(null)} aria-label="关闭画布错误提示">
-            关闭
-          </button>
-        </div>
+        <>
+          <div className="canvas-session-error" role="alert">
+            <span>{error}</span>
+            <button
+              type="button"
+              disabled={busy || loading || deleteTarget !== null}
+              onClick={() => {
+                runMutation(async () => {
+                  await flushAll();
+                  await loadCatalog();
+                });
+              }}
+            >
+              重试
+            </button>
+            <button type="button" onClick={() => setError(null)} aria-label="关闭画布错误提示">
+              关闭
+            </button>
+          </div>
+          <ErrorCopyButton text={error} />
+        </>
       ) : null}
       {deleteTarget ? (
         <CanvasDeleteDialog

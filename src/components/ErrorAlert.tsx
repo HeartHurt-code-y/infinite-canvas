@@ -1,4 +1,6 @@
 import { Icon } from "./Icon";
+import { ErrorCopyButton } from "./ErrorCopyButton";
+import { errorCopyText } from "../lib/clipboard";
 import { backendErrorDetails, backendErrorMessage, formatRawBackendError } from "../lib/backend";
 import { workflowErrorPresentation } from "../lib/workflowErrors";
 import "./ErrorAlert.css";
@@ -14,11 +16,11 @@ import "./ErrorAlert.css";
  * region 让读屏软件整段朗读。报错是产品里用户最需要读懂的一段文字，不能每个
  * 调用点各写一遍。
  *
- * 这里一次性做对的四件事
+ * 这里一次性做对的五件事
  * ---------------------
  *   1. 只显示人能读的摘要：原始 payload / 堆栈交给 `backendErrorMessage` 剥掉，
- *      只留「发生了什么」（详见 `backend.ts`）。模型调用明确使用 `raw` 时按用户要求
- *      直接显示完整原始错误字符串，不提取摘要或折叠。
+ *      只留「发生了什么」（详见 `backend.ts`）。`raw` 仅默认展开诊断详情，
+ *      模型调用同样不能把完整 payload 放入摘要和读屏提示。
  *   2. 不靠颜色单独传达（WCAG 1.4.1）：红色之外同时有警告图标与文字，
  *      色弱用户和灰度打印都还能认出这是错误。
  *   3. 语义与朗读：`role="alert"` 让错误出现时立刻被朗读；控件用
@@ -27,6 +29,9 @@ import "./ErrorAlert.css";
  *      因此「展开完整报错」在 alert 之外——否则用户每次展开都会被强制听一遍原始 JSON。
  *   4. 补救建议是报错的一部分：`hint` 说明「接下来怎么办」。
  *      只说「图片不合格」不说「换什么图」的错误，用户只能靠猜。
+ *   5. 一键复制完整报错：报错是用户拿去求助的第一手材料，摘要旁边
+ *      常驻「复制报错」按钮（见 `ErrorCopyButton`），连展开的原始
+ *      payload 一起进剪贴板；按钮同样放在 alert 之外。
  */
 export interface ErrorAlertProps {
   /** 原始错误：Tauri payload、Error 或已经格式化好的字符串都接受。 */
@@ -37,24 +42,33 @@ export interface ErrorAlertProps {
   readonly hint?: string | undefined;
   /** Workflow usage errors include guidance; marked model failures retain their complete response. */
   readonly workflow?: boolean;
-  /** 模型调用按原始错误直接展示；普通错误仍保留摘要和可展开详情。 */
+  /** 默认展开完整诊断；摘要始终使用可读文案。 */
   readonly raw?: boolean;
+  /** 反馈发送自身的错误不再触发新一轮上报。 */
+  readonly reportable?: boolean;
 }
 
-export function ErrorAlert({ error, id, hint, workflow = false, raw = false }: ErrorAlertProps) {
-  const presentation = workflow && !raw ? workflowErrorPresentation(error) : null;
-  const details = raw ? null : presentation ? presentation.details : backendErrorDetails(error);
-  const summary = raw
-    ? formatRawBackendError(error)
-    : presentation
-      ? presentation.summary
-      : backendErrorMessage(error);
+export function ErrorAlert({
+  error,
+  id,
+  hint,
+  workflow = false,
+  raw = false,
+  reportable = true,
+}: ErrorAlertProps) {
+  const presentation = workflow ? workflowErrorPresentation(error) : null;
+  const details = presentation
+    ? presentation.details
+    : raw
+      ? formatRawBackendError(error)
+      : backendErrorDetails(error);
+  const summary = presentation ? presentation.summary : backendErrorMessage(error);
   return (
     <div className="error-alert">
       <div className="error-alert__summary" id={id} role="alert">
         <Icon name="warning-circle" aria-hidden="true" size="sm" />
         <div className="error-alert__text">
-          <span style={raw ? { whiteSpace: "pre-wrap" } : undefined}>{summary}</span>
+          <span>{summary}</span>
           {presentation?.origin === "workflow" ? (
             <dl className="error-alert__guidance">
               <div>
@@ -86,14 +100,21 @@ export function ErrorAlert({ error, id, hint, workflow = false, raw = false }: E
           ) : null}
         </div>
       </div>
-      {details ? (
-        <details className="error-alert__details" open={presentation?.origin === "model"}>
-          <summary>
-            {presentation?.origin === "model" ? "模型调用完整原始报错" : "展开完整报错"}
-          </summary>
-          <pre className="error-alert__raw">{details}</pre>
-        </details>
-      ) : null}
+      <div className="error-alert__actions">
+        <ErrorCopyButton
+          text={errorCopyText(summary, details)}
+          feedbackError={error}
+          feedback={reportable}
+        />
+        {details ? (
+          <details className="error-alert__details" open={raw || presentation?.origin === "model"}>
+            <summary>
+              {presentation?.origin === "model" ? "模型调用完整原始报错" : "展开完整报错"}
+            </summary>
+            <pre className="error-alert__raw">{details}</pre>
+          </details>
+        ) : null}
+      </div>
     </div>
   );
 }

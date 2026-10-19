@@ -51,7 +51,9 @@ import {
   type ReactNode,
 } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
-import { toast } from "sonner";
+import { toast } from "../../lib/toast";
+import { openFeedback } from "../../lib/errorReporting";
+import { registerDiagnosticCanvas } from "../../lib/collectFeedbackDiagnostics";
 import { useShallow } from "zustand/react/shallow";
 import {
   assetLibraryClient,
@@ -2583,6 +2585,15 @@ export function WorkspaceApp({
       agent: canvasAgent.getState(),
     };
   }, [canvasAgent, promptContents, snapshotV2]);
+
+  useEffect(
+    () =>
+      registerDiagnosticCanvas(canvasId, {
+        read: collectCanvasDocument,
+        isActive: () => activeRef.current,
+      }),
+    [canvasId, collectCanvasDocument],
+  );
 
   const restoreCanvasDocument = useCallback(
     (raw: unknown) => {
@@ -12681,6 +12692,15 @@ export function WorkspaceApp({
                 }}
               >
                 <Icon name="gear-six" aria-hidden="true" size="lg" />
+              </button>
+              <button
+                type="button"
+                className="header-icon"
+                aria-label="反馈问题与错误诊断"
+                data-tooltip="反馈与诊断"
+                onClick={() => openFeedback()}
+              >
+                <Icon name="paper-plane-right" aria-hidden="true" size="lg" />
               </button>
               {isDesktopRuntime() ? (
                 <button

@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import {
   useCallback,
   useEffect,
@@ -968,10 +969,13 @@ export function ProviderSettingsDialog({
           </form>
 
           {rawError ? (
-            <div className="settings-error" role="alert">
-              <strong>完整原始错误</strong>
-              <pre tabIndex={0}>{rawError}</pre>
-            </div>
+            <>
+              <div className="settings-error" role="alert">
+                <strong>完整原始错误</strong>
+                <pre tabIndex={0}>{rawError}</pre>
+              </div>
+              <ErrorCopyButton text={rawError} />
+            </>
           ) : null}
           {successMessage ? (
             <p className="settings-success" role="status">

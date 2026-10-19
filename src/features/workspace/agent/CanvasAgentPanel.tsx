@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Icon } from "../../../components/Icon";
+import { ErrorCopyButton } from "../../../components/ErrorCopyButton";
 import { ImeTextarea } from "../../../components/ImeTextField";
 import type { ProviderCatalogEntry } from "../../../lib/backend";
 import { whiteModelPlanIssue, type WhiteModelScenePlan } from "../../../lib/whiteModelScene";
@@ -555,10 +556,13 @@ export function CanvasAgentPanel({
             </div>
           ) : null}
           {state.error || localError ? (
-            <p className="canvas-agent__error" role="alert">
-              <Icon name="warning-circle" size="sm" />
-              {state.error ?? localError}
-            </p>
+            <>
+              <p className="canvas-agent__error" role="alert">
+                <Icon name="warning-circle" size="sm" />
+                {state.error ?? localError}
+              </p>
+              <ErrorCopyButton text={state.error || localError || ""} />
+            </>
           ) : null}
           <form
             className="canvas-agent__composer"

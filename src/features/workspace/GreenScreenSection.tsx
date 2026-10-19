@@ -1,4 +1,5 @@
 import { useId, useState } from "react";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ImeTextarea } from "../../components/ImeTextField";
 import {
   createGreenScreenConfig,
@@ -410,9 +411,12 @@ export function GreenScreenSection({
               </>
             )}
             {resolved.issue ? (
-              <p className="green-screen__issue" role="alert" id={issueId}>
-                {resolved.issue}
-              </p>
+              <>
+                <p className="green-screen__issue" role="alert" id={issueId}>
+                  {resolved.issue}
+                </p>
+                <ErrorCopyButton text={resolved.issue} />
+              </>
             ) : null}
             {busy ? (
               <p className="green-screen__hint" role="status">

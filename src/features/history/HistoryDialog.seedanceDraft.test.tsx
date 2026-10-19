@@ -132,7 +132,7 @@ describe("Seedance draft review in history", () => {
     expect(client.start).not.toHaveBeenCalled();
   });
 
-  it("directly shows the complete promotion error payload and links it to the submit button", async () => {
+  it("summarizes the promotion error and keeps complete diagnostics outside the submit alert", async () => {
     const error = {
       kind: "validation",
       message: "validation error: 该样片尚未完成，请稍后查询状态。",
@@ -147,17 +147,20 @@ describe("Seedance draft review in history", () => {
     fireEvent.click(button);
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent("该样片尚未完成，请稍后查询状态。");
-    expect(alert).toHaveTextContent("validation error:");
-    expect(alert).toHaveTextContent('"providerStatus": "IN_PROGRESS"');
-    expect(alert).toHaveTextContent('"remoteTaskId": "draft-remote-1"');
-    expect(alert).toHaveTextContent('"kind": "validation"');
+    expect(alert).not.toHaveTextContent("validation error:");
+    expect(alert).not.toHaveTextContent('"providerStatus"');
+    const details = screen.getByText("展开完整报错").closest("details")!;
+    expect(details).toHaveAttribute("open");
+    expect(details.querySelector("pre")).toHaveTextContent(JSON.stringify(error, null, 2), {
+      normalizeWhitespace: false,
+    });
+    expect(details.closest('[role="alert"]')).toBeNull();
     expect(button).toHaveAttribute("aria-describedby", alert.id);
-    expect(screen.queryByText("展开完整报错")).not.toBeInTheDocument();
     expect(promote).toHaveBeenCalledTimes(1);
     expect(client.start).not.toHaveBeenCalled();
   });
 
-  it("preserves a multiline raw promotion error string without summarizing or folding it", async () => {
+  it("summarizes a legacy HTTP error while preserving the complete multiline diagnostic", async () => {
     const error = 'HTTP 429\n{"error":{"message":"provider rate limit","request_id":"req-raw-1"}}';
     const promote = vi.fn<() => Promise<string>>().mockRejectedValue(error);
     render(
@@ -170,11 +173,12 @@ describe("Seedance draft review in history", () => {
     );
     fireEvent.click(await screen.findByRole("button", { name: "样片已审核，生成 1080p 正片" }));
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent("HTTP 429");
-    expect(alert).toHaveTextContent('"request_id":"req-raw-1"');
-    expect(alert.querySelector("span")?.textContent).toBe(error);
-    expect(alert.querySelector("span")).toHaveStyle({ whiteSpace: "pre-wrap" });
-    expect(screen.queryByText("展开完整报错")).not.toBeInTheDocument();
+    expect(alert).toHaveTextContent("provider rate limit（HTTP 429）");
+    expect(alert).not.toHaveTextContent("request_id");
+    const details = screen.getByText("展开完整报错").closest("details")!;
+    expect(details).toHaveAttribute("open");
+    expect(details.querySelector("pre")).toHaveTextContent(error, { normalizeWhitespace: false });
+    expect(details.closest('[role="alert"]')).toBeNull();
     expect(promote).toHaveBeenCalledTimes(1);
   });
 

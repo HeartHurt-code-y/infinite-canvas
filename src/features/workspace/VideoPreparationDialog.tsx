@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
+import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import {
   formatRawBackendError,
   isDesktopRuntime,
@@ -515,9 +516,12 @@ export function VideoPreparationDialog({
               </button>
             </div>
             {rangeError ? (
-              <p className="video-preparation__error" role="alert">
-                {rangeError}
-              </p>
+              <>
+                <p className="video-preparation__error" role="alert">
+                  {rangeError}
+                </p>
+                <ErrorCopyButton text={rangeError} />
+              </>
             ) : (
               <p className="video-preparation__hint">
                 所有操作共用当前选区
@@ -527,9 +531,12 @@ export function VideoPreparationDialog({
               </p>
             )}
             {sourceError ? (
-              <p className="video-preparation__error" role="alert">
-                读取原视频失败：{sourceError}
-              </p>
+              <>
+                <p className="video-preparation__error" role="alert">
+                  读取原视频失败：{sourceError}
+                </p>
+                <ErrorCopyButton text={`读取原视频失败：${sourceError}`} />
+              </>
             ) : null}
             {sourceError || previewError ? (
               <button type="button" onClick={() => setSourceAttempt((attempt) => attempt + 1)}>
@@ -621,9 +628,12 @@ export function VideoPreparationDialog({
               <p className="video-preparation__hint">原视频没有音轨，仍可裁切或导出无声视频。</p>
             ) : null}
             {nameError ? (
-              <p className="video-preparation__error" role="alert">
-                {nameError}
-              </p>
+              <>
+                <p className="video-preparation__error" role="alert">
+                  {nameError}
+                </p>
+                <ErrorCopyButton text={nameError} />
+              </>
             ) : null}
             <button className="video-preparation__primary" type="submit" disabled={!canStart}>
               <Icon name={operation === "extract_audio" ? "waveform" : "film-strip"} size="sm" />
@@ -662,9 +672,12 @@ export function VideoPreparationDialog({
               关闭窗口后任务继续处理，重新打开可恢复查看。重启中断的任务可以继续。
             </p>
             {pollError ? (
-              <p className="video-preparation__error" role="alert">
-                读取任务失败：{pollError}，任务状态未被修改。
-              </p>
+              <>
+                <p className="video-preparation__error" role="alert">
+                  读取任务失败：{pollError}，任务状态未被修改。
+                </p>
+                <ErrorCopyButton text={`读取任务失败：${pollError}，任务状态未被修改。`} />
+              </>
             ) : null}
             {!jobs.length ? (
               <p className="video-preparation__hint">
@@ -733,9 +746,12 @@ export function VideoPreparationDialog({
                   </button>
                 ) : null}
                 {selectedJob.error ? (
-                  <p className="video-preparation__error" role="alert">
-                    {selectedJob.error}
-                  </p>
+                  <>
+                    <p className="video-preparation__error" role="alert">
+                      {selectedJob.error}
+                    </p>
+                    <ErrorCopyButton text={selectedJob.error} />
+                  </>
                 ) : null}
                 {selectedJob.status === "completed" && selectedJob.output ? (
                   <>
@@ -791,9 +807,12 @@ export function VideoPreparationDialog({
             ) : null}
           </section>
           {error ? (
-            <p className="video-preparation__error" role="alert">
-              {error}
-            </p>
+            <>
+              <p className="video-preparation__error" role="alert">
+                {error}
+              </p>
+              <ErrorCopyButton text={error} />
+            </>
           ) : null}
         </div>
       )}
