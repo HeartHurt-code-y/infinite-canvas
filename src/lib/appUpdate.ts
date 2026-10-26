@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 import * as v from "valibot";
-import { formatRawBackendError, frontendLog, isDesktopRuntime } from "./backend";
+import { backendErrorMessage, formatRawBackendError, frontendLog, isDesktopRuntime } from "./backend";
 import { invokeDesktop, invokeDesktopVoid } from "./ipc";
 
 export const SKIPPED_UPDATE_STORAGE_KEY = "infinite-canvas:skipped-app-update-version";
@@ -18,7 +18,7 @@ export type AppUpdateStatus =
   | "restarting"
   | "error";
 
-export interface RuntimeComponentMigrationStatus {
+export interface RuntimeResourceUpdateStatus {
   readonly ready: boolean;
   readonly preparing: boolean;
   readonly error: string | null;
@@ -27,7 +27,6 @@ export interface RuntimeComponentMigrationStatus {
   readonly totalBytes: number;
   readonly completedComponents: number;
   readonly totalComponents: number;
-  /** 仅 `get_runtime_component_update_status`（资源更新版）返回；迁移版没有。 */
   readonly reusedBytes?: number | undefined;
   readonly downloadedBytes?: number | undefined;
 }
@@ -43,7 +42,8 @@ const macDeltaStatusSchema = v.object({
   reusedBytes: v.number(),
 });
 
-const migrationStatusSchema = v.object({
+// `RuntimeResourceUpdateStatus`（Rust resource_update.rs）：资源补丁的准备进度。
+const resourceUpdateStatusSchema = v.object({
   ready: v.boolean(),
   preparing: v.boolean(),
   error: v.nullable(v.string()),
@@ -52,11 +52,6 @@ const migrationStatusSchema = v.object({
   totalComponents: v.number(),
   completedBytes: v.number(),
   totalBytes: v.number(),
-});
-
-// `RuntimeResourceUpdateStatus`（Rust resource_update.rs）：同一形状再加两个字节字段。
-const resourceUpdateStatusSchema = v.object({
-  ...migrationStatusSchema.entries,
   reusedBytes: v.number(),
   downloadedBytes: v.number(),
 });
@@ -73,7 +68,6 @@ export interface AppUpdateCheckResult {
   readonly available: boolean;
   readonly version?: string | undefined;
   readonly notes?: string | null | undefined;
-  readonly requiresRuntimeComponents?: boolean | undefined;
   readonly resourceManifest?: ResourceUpdateManifest | null | undefined;
   readonly download?:
     ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
@@ -103,12 +97,9 @@ export interface PrepareRuntimeResourcesRequest extends ResourceUpdateManifest {
 export interface AppUpdateClient {
   getCurrentVersion(): Promise<string>;
   check(): Promise<AppUpdateCheckResult>;
-  waitForRuntimeComponents?(
-    onProgress: (status: RuntimeComponentMigrationStatus) => void,
-  ): Promise<void>;
-  prepareRuntimeComponents?(
+  prepareRuntimeResources?(
     request: PrepareRuntimeResourcesRequest,
-    onProgress: (status: RuntimeComponentMigrationStatus) => void,
+    onProgress: (status: RuntimeResourceUpdateStatus) => void,
   ): Promise<void>;
   relaunch(): Promise<void>;
   needsManualRelaunch(): Promise<boolean>;
@@ -152,7 +143,6 @@ let downloadGeneration = 0;
 let pendingDownload: AppUpdateCheckResult["downloadAndInstall"];
 let pendingDownloadOnly: AppUpdateCheckResult["download"];
 let pendingInstall: AppUpdateCheckResult["install"];
-let pendingUpdateRequiresRuntimeComponents = false;
 let pendingResourceManifest: PrepareRuntimeResourcesRequest | null = null;
 let checkInFlight: Promise<void> | null = null;
 let automaticallyAttemptedVersion: string | null = null;
@@ -183,37 +173,6 @@ async function flushBeforeInstallingUpdate(): Promise<void> {
 function unblockWorkspaceAfterInstallFailure(): void {
   blockedWorkspace?.removeAttribute("inert");
   blockedWorkspace = null;
-}
-
-/** The slim NSIS package depends on resources copied by a previous full install. */
-export function windowsUpdatePackageKind(
-  rawJson: Record<string, unknown>,
-  target: string,
-): "slim" | "full" {
-  const platforms = rawJson["platforms"];
-  const platform =
-    platforms != null && typeof platforms === "object" && !Array.isArray(platforms)
-      ? (platforms as Record<string, unknown>)[target]
-      : undefined;
-  const url =
-    platform != null && typeof platform === "object" && !Array.isArray(platform)
-      ? (platform as Record<string, unknown>)["url"]
-      : platforms === undefined
-        ? rawJson["url"]
-        : undefined;
-  if (typeof url === "string") {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
-        const filename = decodeURIComponent(parsed.pathname.split("/").pop() ?? "");
-        if (/-slim-setup\.exe$/i.test(filename)) return "slim";
-        if (/-setup\.exe$/i.test(filename)) return "full";
-      }
-    } catch {
-      // A malformed or unrecognized URL must not bypass the slim-package gate.
-    }
-  }
-  throw new Error("无法识别 Windows 更新包类型，已取消安装。请检查更新清单的平台下载地址。");
 }
 
 export function readResourceUpdateManifest(
@@ -281,7 +240,6 @@ export function resetAppUpdateStateForTests(): void {
   pendingDownload = undefined;
   pendingDownloadOnly = undefined;
   pendingInstall = undefined;
-  pendingUpdateRequiresRuntimeComponents = false;
   pendingResourceManifest = null;
   automaticallyAttemptedVersion = null;
   beforeInstallFlush = null;
@@ -297,7 +255,10 @@ export async function loadCurrentAppVersion(): Promise<string> {
     return version;
   } catch (error) {
     const message = describeUpdateError(error);
-    frontendLog("warn", `[app-update] 读取当前版本失败：${message}`);
+    frontendLog(
+      "warn",
+      `[app-update] 读取当前版本失败：${message}；原始报错：${formatRawBackendError(error)}`,
+    );
     patch({ error: state.status === "idle" ? null : message });
     return "";
   }
@@ -335,7 +296,6 @@ async function performAppUpdateCheck(options?: {
       pendingDownload = undefined;
       pendingDownloadOnly = undefined;
       pendingInstall = undefined;
-      pendingUpdateRequiresRuntimeComponents = false;
       pendingResourceManifest = null;
       patch({
         status: "current",
@@ -358,7 +318,6 @@ async function performAppUpdateCheck(options?: {
     pendingDownload = result.downloadAndInstall ?? undefined;
     pendingDownloadOnly = result.download ?? undefined;
     pendingInstall = result.install ?? undefined;
-    pendingUpdateRequiresRuntimeComponents = result.requiresRuntimeComponents === true;
     pendingResourceManifest = result.resourceManifest
       ? { ...result.resourceManifest, version: availableVersion }
       : null;
@@ -379,6 +338,8 @@ async function performAppUpdateCheck(options?: {
   } catch (error) {
     if (generation !== checkGeneration) return;
     const message = describeUpdateError(error);
+    // 原始 payload 只进日志：更新提示里放的是人话摘要。
+    frontendLog("error", `[app-update] 检查更新失败：${formatRawBackendError(error)}`);
     if (quiet) {
       frontendLog("warn", `[app-update] 自动检查更新失败：${message}`);
       return;
@@ -426,7 +387,7 @@ export async function installAvailableAppUpdate(): Promise<void> {
   let combinedInstallStarted = false;
   let combinedInstallSucceeded = false;
   try {
-    if (pendingUpdateRequiresRuntimeComponents) {
+    if (pendingResourceManifest) {
       patch({
         status: "preparing",
         preparedBytes: 0,
@@ -435,7 +396,7 @@ export async function installAvailableAppUpdate(): Promise<void> {
         downloadedResourceBytes: 0,
         error: null,
       });
-      const onProgress = (progress: RuntimeComponentMigrationStatus) => {
+      const onProgress = (progress: RuntimeResourceUpdateStatus) => {
         if (generation !== downloadGeneration) return;
         patch({
           status: "preparing",
@@ -445,17 +406,10 @@ export async function installAvailableAppUpdate(): Promise<void> {
           downloadedResourceBytes: progress.downloadedBytes ?? 0,
         });
       };
-      if (pendingResourceManifest) {
-        if (!client.prepareRuntimeComponents) {
-          throw new Error("当前应用无法准备按文件更新所需的本地资源。");
-        }
-        await client.prepareRuntimeComponents(pendingResourceManifest, onProgress);
-      } else {
-        if (!client.waitForRuntimeComponents) {
-          throw new Error("小型更新包需要本地运行组件校验，当前应用无法完成校验。");
-        }
-        await client.waitForRuntimeComponents(onProgress);
+      if (!client.prepareRuntimeResources) {
+        throw new Error("当前应用无法准备按文件更新所需的本地资源。");
       }
+      await client.prepareRuntimeResources(pendingResourceManifest, onProgress);
       if (generation !== downloadGeneration) return;
     }
     patch({
@@ -514,6 +468,8 @@ export async function installAvailableAppUpdate(): Promise<void> {
   } catch (error) {
     if (generation !== downloadGeneration) return;
     unblockWorkspaceAfterInstallFailure();
+    // 原始 payload 只进日志：安装失败提示里放的是人话摘要。
+    frontendLog("error", `[app-update] 安装更新失败：${formatRawBackendError(error)}`);
     if (combinedInstallSucceeded) {
       pendingDownload = undefined;
       patch({ status: "ready", error: describeUpdateError(error), recoveryAction: "restart-only" });
@@ -673,8 +629,14 @@ export function downloadPercent(downloadedBytes: number, totalBytes: number): nu
   return Math.max(0, Math.min(100, Math.round((downloadedBytes / totalBytes) * 100)));
 }
 
+/**
+ * 把更新流程里的一次失败翻译成给用户看的一句话。
+ *
+ * 摘要走 `backendErrorMessage`：原始 payload 会被摊成一段 JSON，直接印在更新
+ * 提示里用户根本读不懂；完整原文只留在日志里。
+ */
 export function describeUpdateError(error: unknown): string {
-  const raw = error instanceof Error ? error.message : formatRawBackendError(error);
+  const raw = backendErrorMessage(error);
   const text = raw.toLowerCase();
   if (raw.includes("本地运行组件准备失败") || raw.includes("本地运行组件尚未准备好")) {
     return `${raw}。小型更新需要完整的本地组件，请改用该版本的完整安装包修复。`;
@@ -714,18 +676,14 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
       if (!isDesktopRuntime()) {
         throw new Error("NOT_DESKTOP");
       }
-      const [{ check }, { arch, type }] = await Promise.all([
+      const [{ check }, { type }] = await Promise.all([
         import("@tauri-apps/plugin-updater"),
         import("@tauri-apps/plugin-os"),
       ]);
       const update = await check();
       if (update == null) return { available: false };
-      const requiresRuntimeComponents =
-        type() === "windows" &&
-        windowsUpdatePackageKind(update.rawJson, `windows-${arch()}`) === "slim";
-      const resourceManifest = requiresRuntimeComponents
-        ? readResourceUpdateManifest(update.rawJson)
-        : null;
+      // 资源补丁随安装包内置的资源一起更新；清单里带签名清单时才需要先准备。
+      const resourceManifest = readResourceUpdateManifest(update.rawJson);
       const offersMacDelta = type() === "macos" && update.rawJson["macDeltaManifest"] != null;
       let macDeltaPrepared = false;
       let fullDownloaded = false;
@@ -754,7 +712,6 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         available: true,
         version: update.version,
         notes: update.body,
-        requiresRuntimeComponents,
         resourceManifest,
         download: async (onProgress) => {
           if (offersMacDelta) {
@@ -810,7 +767,7 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
               void preparation.catch(() => undefined);
               frontendLog(
                 "warn",
-                `[app-update] macOS 差分不可用，改用完整更新包：${describeUpdateError(error)}`,
+                `[app-update] macOS 差分不可用，改用完整更新包：${describeUpdateError(error)}；原始报错：${formatRawBackendError(error)}`,
               );
               macDeltaPrepared = false;
             }
@@ -827,12 +784,16 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
               });
               return;
             } catch (error) {
-              const raw = error instanceof Error ? error.message : formatRawBackendError(error);
+              // 摘要走 backendErrorMessage：原始 payload 只进日志，不进安装提示。
+              const raw = backendErrorMessage(error);
               // Only an explicit native preflight error is known to be free
               // of install side effects. Unknown IPC or installer failures
               // must never start a second installer.
               if (!raw.startsWith("MAC_DELTA_PREINSTALL:")) throw error;
-              frontendLog("warn", `[app-update] macOS 差分安装前校验失败，改用完整包：${raw}`);
+              frontendLog(
+                "warn",
+                `[app-update] macOS 差分安装前校验失败，改用完整包：${raw}；原始报错：${formatRawBackendError(error)}`,
+              );
               macDeltaPrepared = false;
             }
           }
@@ -850,21 +811,7 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         },
       };
     },
-    async waitForRuntimeComponents(onProgress) {
-      if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
-      for (;;) {
-        const status = await invokeDesktop(
-          "get_runtime_component_migration_status",
-          migrationStatusSchema,
-        );
-        onProgress(status);
-        if (status.ready) return;
-        if (status.error) throw new Error(`本地运行组件准备失败：${status.error}`);
-        if (!status.preparing) throw new Error("本地运行组件尚未准备好，请重启应用后重试更新。");
-        await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
-      }
-    },
-    async prepareRuntimeComponents(request, onProgress) {
+    async prepareRuntimeResources(request, onProgress) {
       if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
       let settled = false;
       const preparation = invokeDesktopVoid("prepare_runtime_components_for_update", {

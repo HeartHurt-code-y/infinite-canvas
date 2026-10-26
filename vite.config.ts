@@ -41,12 +41,8 @@ const vendorGroups = [
     test: /[\\/]node_modules[\\/]three[\\/]/,
   },
   {
-    name: "mediapipe-vendor",
-    test: /[\\/]node_modules[\\/]@mediapipe[\\/]/,
-  },
-  {
     name: "other-vendor",
-    test: /[\\/]node_modules[\\/](?!@phosphor-icons[\\/]|@xyflow[\\/]|d3-|delaunator[\\/]|internmap[\\/]|robust-predicates[\\/]|@tiptap[\\/]|prosemirror-|react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/]|use-sync-external-store[\\/]|zustand[\\/]|react-markdown|remark-|unified[\\/]|micromark|mdast-util-|hast-util-|unist-util-|vfile|character-entities|decode-named-character-reference|comma-separated-tokens|space-separated-tokens|ccount[\\/]|escape-string-regexp[\\/]|trim-lines[\\/]|zwitch[\\/]|bail[\\/]|trough[\\/]|is-plain-obj[\\/]|is-buffer[\\/]|property-information|stringify-entities|parse-entities|devlop[\\/]|extend[\\/]|emoji-regex[\\/]|html-void-elements[\\/]|web-namespaces[\\/]|diff[\\/]|valibot[\\/]|sonner[\\/]|react-hotkeys-hook[\\/]|zundo[\\/]|@tauri-apps[\\/]|three[\\/]|@mediapipe[\\/])/,
+    test: /[\\/]node_modules[\\/](?!@phosphor-icons[\\/]|@xyflow[\\/]|d3-|delaunator[\\/]|internmap[\\/]|robust-predicates[\\/]|@tiptap[\\/]|prosemirror-|react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/]|use-sync-external-store[\\/]|zustand[\\/]|react-markdown|remark-|unified[\\/]|micromark|mdast-util-|hast-util-|unist-util-|vfile|character-entities|decode-named-character-reference|comma-separated-tokens|space-separated-tokens|ccount[\\/]|escape-string-regexp[\\/]|trim-lines[\\/]|zwitch[\\/]|bail[\\/]|trough[\\/]|is-plain-obj[\\/]|is-buffer[\\/]|property-information|stringify-entities|parse-entities|devlop[\\/]|extend[\\/]|emoji-regex[\\/]|html-void-elements[\\/]|web-namespaces[\\/]|diff[\\/]|valibot[\\/]|sonner[\\/]|react-hotkeys-hook[\\/]|zundo[\\/]|@tauri-apps[\\/]|three[\\/])/,
   },
 ];
 
@@ -114,16 +110,7 @@ export default defineConfig(() => ({
       //    同时忽略「原子写」临时产物：不少编辑器与工具保存文件时先写
       //    `.<名称>.<pid>.<uuid>.tmpdir/<名称>.tmp` 再改名。Vite 会在这些临时
       //    文件被改名或删除的瞬间拿到 EBUSY，并让整个 dev server 退出。
-      ignored: [
-        "**/src-tauri/**",
-        "**/.cache/**",
-        "**/tools/remotion-runtime/.remotion/**",
-        "**/tools/remotion-runtime/.smoke/**",
-        "**/tools/remotion-runtime/.build-node/**",
-        "**/*.tmpdir/**",
-        "**/*.tmp",
-        "**/.*.tmp*",
-      ],
+      ignored: ["**/src-tauri/**", "**/.cache/**", "**/*.tmpdir/**", "**/*.tmp", "**/.*.tmp*"],
     },
     // 注意：不要加 server.warmup。本仓库实测（2026-10-08）：warmup 会在页面
     // 加载前爬取全部源码，一是拖慢/饿死真实页面请求（单线程事件循环被占满，

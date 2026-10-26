@@ -28,33 +28,29 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 
 ## 常用命令
 
-| 命令                         | 用途                                                                        |
-| ---------------------------- | --------------------------------------------------------------------------- |
-| `pnpm dev`                   | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）               |
-| `pnpm dev:daemon`            | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）           |
-| `pnpm tauri:dev`             | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）                    |
-| `pnpm build`                 | 类型检查并构建前端                                                          |
-| `pnpm tauri:build`           | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物           |
-| `pnpm tauri:build:online`    | 构建 Windows / macOS 原生架构轻量联网版，按需安装功能组件，使用独立更新频道 |
-| `pnpm update:publish:online` | 校验轻量版构建凭证、签名与七种组件，上传并逐字节验证后发布独立更新频道      |
-| `pnpm tauri:build:offline`   | 构建 Windows 完整离线套件：安装包内置五种组件，两种 AI 组件随附 ZIP         |
-| `pnpm components:pack`       | 校验运行资源并生成压缩组件包、固定摘要目录及离线导入用 ZIP                  |
-| `pnpm tauri:bundle:slim`     | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线         |
-| `pnpm update:manifest`       | 根据指定版本的 updater 产物生成 `latest.json`                               |
-| `pnpm test`                  | 运行前端测试                                                                |
-| `pnpm lint`                  | 执行类型感知 ESLint 检查                                                    |
-| `pnpm format`                | 使用 Prettier 格式化工程文件                                                |
-| `pnpm check`                 | 执行前端、Rust 格式化及 Clippy 全量检查                                     |
-| `pnpm ffmpeg:prepare`        | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`                  |
-| `pnpm remotion:prepare`      | 准备内置动画渲染运行时                                                      |
-| `pnpm blender:prepare`       | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码                   |
-| `pnpm macos:verify-bundle`   | 校验 macOS 产物签名与内置可执行文件签名                                     |
+| 命令                         | 用途                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------- |
+| `pnpm dev`                   | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）                   |
+| `pnpm dev:daemon`            | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）               |
+| `pnpm tauri:dev`             | 启动完整桌面应用（自动预置 FFmpeg 引擎）                                        |
+| `pnpm build`                 | 类型检查并构建前端                                                              |
+| `pnpm tauri:build`           | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物               |
+| `pnpm tauri:build:online`    | 构建 Windows / macOS 原生架构轻量联网版，媒体处理引擎随包内置，使用独立更新频道 |
+| `pnpm update:publish:online` | 校验轻量版构建凭证与签名，上传并逐字节验证后发布独立更新频道                    |
+| `pnpm tauri:build:offline`   | 构建 Windows 完整离线套件：安装包内置 FFmpeg 引擎                               |
+| `pnpm update:manifest`       | 根据指定版本的 updater 产物生成 `latest.json`                                   |
+| `pnpm lint`                  | 执行类型感知 ESLint 检查                                                        |
+| `pnpm format`                | 使用 Prettier 格式化工程文件                                                    |
+| `pnpm check`                 | 执行前端、Rust 格式化及 Clippy 全量检查                                         |
+| `pnpm codegen`               | 重新生成 Rust ↔ TypeScript 的类型绑定（`src/lib/bindings/`）                    |
+| `pnpm ffmpeg:prepare`        | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`                      |
+| `pnpm macos:verify-bundle`   | 校验 macOS 产物签名与内置可执行文件签名                                         |
 
-Windows x64 与 macOS Apple Silicon 提供轻量联网版。轻量版保留日常媒体处理所需的 FFmpeg，Blender、动画和网页解析、动捕、图片风格库及 AI 媒体运行时通过顶部「功能组件」安装；对应功能首次使用时会打开所需组件列表。支持中断续传、修复及离线 ZIP 导入，安装后返回原功能主动继续操作，保留草稿与已有任务。构建机仍须预先准备并校验全部七种组件，生成本版本程序信任的目录、摘要和各原生架构的压缩包。显式选择外部 Blender 继续作为高级可选设置。
+Windows x64 与 macOS Apple Silicon 提供轻量联网版。应用不再有按需下载的功能组件：日常媒体处理所需的 FFmpeg 随安装包内置，构建机仍须预先准备并校验 FFmpeg 并写入安装包资源。
 
-Windows 完整离线套件的安装包内置 Blender、Remotion、FFmpeg、动捕和风格库五种组件，两种 AI 组件以 ZIP 随套件提供；安装应用后在「功能组件」分别导入随附 ZIP，即可离线准备全部七种组件，无需下载。交付时须保留安装包、签名、两种 AI ZIP 与离线组件收据的完整套件，单独安装 EXE 不会同时安装两种 AI 组件。macOS 联网版首次安装交付内置安装脚本的 PKG 和 DMG：PKG 可用一条系统安装命令完成，DMG 内置 `install-macos.command` 安装入口；更新交付签名的 `.app.tar.gz`，使用独立 `darwin-aarch64-online/latest.json` 频道。目前仅构建 Apple Silicon。macOS 完整版继续使用原构建入口。分发与校验流程见 [功能组件与轻量版](docs/integrations/runtime-components.md) 和 [Blender 桥接](tools/blender/README.md)。
+Windows 完整离线套件的安装包内置 FFmpeg 引擎，无需联网即可完成全部媒体处理能力。macOS 联网版首次安装交付内置安装脚本的 PKG 和 DMG：PKG 可用一条系统安装命令完成，DMG 内置 `install-macos.command` 安装入口；更新交付签名的 `.app.tar.gz`，使用独立 `darwin-aarch64-online/latest.json` 频道。目前仅构建 Apple Silicon。macOS 完整版继续使用原构建入口。分发与校验流程见 `docs/integrations/macos-online-release.md`。
 
-发行资源准备会精简运行时不需要的开发内容：Windows Blender 排除 PDB 调试符号；Remotion 按实际依赖关系合并可兼容的重复副本，并排除旧的 `.ignored_*` 依赖目录；独立 AI 组件排除指定开发静态链接库与 C/C++ 头文件。引擎动态库、Python/Node、浏览器、模型、参考原图、许可证与对应源码继续保留。完整性清单在精简后重新生成，程序须根据这些清单重新构建；不能手动删除资源后继续复用旧程序或旧签名清单。
+发行资源准备会精简运行时不需要的开发内容：引擎动态库与对应源码、许可证继续保留。完整性清单在精简后重新生成，程序须根据这些清单重新构建；不能手动删除资源后继续复用旧程序或旧签名清单。
 
 ## 凭据存储：默认明文文件
 
@@ -157,7 +153,7 @@ macOS 完整版更新继续使用 `codemagic.yaml` 的 `macos-package` 工作流
 - 自己开发用：把包留在本机即可，**不需要任何证书**。
 - 方案 B 打包后自检：`pnpm macos:verify-bundle "src-tauri/target/release/bundle/macos/无限画布.app"`。
   它会跑 `spctl -a -t exec`（Finder 双击时 Gatekeeper 走的同一判定）与 `stapler validate`，
-  所以**它就是「所有人能不能打开」的答案**；同时检查内置 FFmpeg / Blender 的签名。
+  所以**它就是「所有人能不能打开」的答案**；同时检查内置 FFmpeg 的签名。
 - 方案 A 的脚本语法自检：`bash -n scripts/unlock-installed-macos-app.sh`；构建流水线还会核对 `.app` 和 DMG 中的脚本内容及应用签名。
 - 当前 Codemagic 构建机为 `mac_mini_m2`；产物要求 macOS 11.0+（见 `tauri.conf.json` 的 `minimumSystemVersion`）。
 
@@ -172,13 +168,13 @@ macOS 完整版更新继续使用 `codemagic.yaml` 的 `macos-package` 工作流
 
 应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本后自动准备资源、下载安装并重启应用；画布保存失败时停止安装并显示错误。设置页「应用升级」也可手动检查。
 
-Windows `0.1.10` 完整过渡版把内置引擎与风格图片安全转存到用户数据目录；完成桥接的客户端可通过 `0.1.11` 平台频道下载小型程序安装包和变化的资源文件。Tauri 的 Windows updater 仍下载所选安装包，并非二进制差分。`0.1.11` 发版在本地构建完整 NSIS 以校验小包，默认不上传完整离线包。`0.1.8`、`0.1.9` 等尚未完成桥接的客户端需先手动安装 `0.1.10` 完整过渡版；旧共享频道客户端在旧清单删除后也需手动过渡。详细发版顺序和验证边界见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
+Windows 小型更新（slim/瘦包）机制已整体下线：它依赖「不把 FFmpeg 打进安装包、改由运行时下载功能组件」，而按需下载组件的功能已移除。现在所有 Windows 安装包都内置 FFmpeg 引擎，发版走常规完整安装包 + Tauri 签名更新。历史版本的过渡桥接记录见 `docs/integrations/windows-small-updates.md` 顶部说明。
 
 当前已装的 `0.1.0` **还没有更新器**，需要装一次 `0.1.1`。从 `0.1.1` 起就可以在应用里直接升。
 
 ### 发版时开发者要做的
 
-每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。Mac Codemagic 工作流通过产物校验后只发布 macOS 平台清单，触发前须确认源码提交。Windows 小包发布前仍须在本地构建、验签同版完整 NSIS，但默认只上传小包和变化的资源文件。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
+每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。Mac Codemagic 工作流通过产物校验后只发布 macOS 平台清单，触发前须确认源码提交。Windows 发布前须在本地构建并验签同版完整 NSIS；轻量联网版的完整命令、平台通道和回滚要求见 [Windows 发版与轻量联网版](docs/integrations/windows-small-updates.md)。
 
 ## 系统访问能力
 

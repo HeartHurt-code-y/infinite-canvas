@@ -9,10 +9,8 @@ import {
   COMPONENT_REPO_ROOT,
   COMPONENT_PLATFORM,
   componentPlatform,
-  componentBytesSha256,
   componentFileSha256,
-  RUNTIME_COMPONENTS,
-} from "./runtime-component-catalog.mjs";
+} from "./runtime-resources.mjs";
 import { buildLatestManifest } from "./write-latest-json.mjs";
 import { tosUpdatesPublicBaseUrl, tosUpdatesObjectKey } from "./tos-updates-config.mjs";
 import {
@@ -320,18 +318,6 @@ export async function archiveEditionBundles(
         sha256: await componentFileSha256(helper),
       });
     }
-    const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
-    const catalogSha256 = await componentFileSha256(catalogPath);
-    if (plan.edition === "offline")
-      artifacts.push(
-        ...(await stageOfflineComponents({
-          output,
-          root,
-          applicationVersion,
-          catalogSha256,
-          platform: plan.platform,
-        })),
-      );
     await writeFile(
       path.join(output, "distribution.json"),
       JSON.stringify(
@@ -340,7 +326,6 @@ export async function archiveEditionBundles(
           applicationVersion,
           edition: plan.edition,
           platform: plan.platform,
-          catalogSha256,
           artifacts,
         },
         null,
@@ -350,9 +335,7 @@ export async function archiveEditionBundles(
     if (plan.edition === "online")
       await writeOnlineEditionReleasePlan({
         output,
-        root,
         applicationVersion,
-        catalogSha256,
         artifacts,
         platform: plan.platform,
       });
@@ -398,112 +381,9 @@ export async function archiveEditionBundles(
   return artifacts;
 }
 
-export async function stageOfflineComponents({
-  output,
-  root = COMPONENT_REPO_ROOT,
-  applicationVersion,
-  catalogSha256,
-  platform = "windows-x86_64",
-}) {
-  const catalogPath = path.join(root, "src-tauri/resources/component-catalog.json");
-  if ((await componentFileSha256(catalogPath)) !== catalogSha256)
-    throw new Error("Offline suite catalog changed before staging");
-  const catalog = JSON.parse(await readFile(catalogPath, "utf8"));
-  if (
-    catalog.schemaVersion !== 1 ||
-    catalog.applicationVersion !== applicationVersion ||
-    catalog.platform !== platform
-  )
-    throw new Error("Offline suite catalog identity does not match this edition");
-  await mkdir(path.join(output, "components"), { recursive: true });
-  await assertComponentRoot(path.join(output, "components"), root);
-  const components = [];
-  const artifacts = [];
-  for (const id of ["ai-media-runtime", "ai-media-quality-runtime"]) {
-    const definition = RUNTIME_COMPONENTS.find((component) => component.id === id);
-    const matches = catalog.components.filter((component) => component.id === id);
-    if (matches.length !== 1 || !/^[a-f0-9]{64}$/.test(matches[0].archive?.sha256))
-      throw new Error(`Offline suite needs exactly one trusted archive: ${id}`);
-    const component = matches[0];
-    const source = path.join(
-      root,
-      ".cache/runtime-components/packages",
-      `${component.archive.sha256}.zip`,
-    );
-    await assertComponentRoot(path.dirname(source), root);
-    const sourceInfo = await lstat(source);
-    if (
-      !sourceInfo.isFile() ||
-      sourceInfo.isSymbolicLink() ||
-      sourceInfo.size !== component.archive.size ||
-      (await componentFileSha256(source)) !== component.archive.sha256
-    )
-      throw new Error(`Offline suite archive checksum mismatch: ${id}`);
-    const nativePath = path.join(root, definition.sourcePath, definition.manifestPath);
-    await assertComponentRoot(path.dirname(nativePath), root);
-    if (!(await lstat(nativePath)).isFile() || (await lstat(nativePath)).isSymbolicLink())
-      throw new Error(`Offline suite native manifest is not a regular file: ${id}`);
-    const nativeBytes = await readFile(nativePath);
-    if (componentBytesSha256(nativeBytes) !== component.manifestSha256)
-      throw new Error(`Offline suite native manifest checksum mismatch: ${id}`);
-    const relative = `components/${id}-${component.archive.sha256}.zip`;
-    const destination = path.join(output, relative);
-    try {
-      const info = await lstat(destination);
-      if (!info.isFile() || info.isSymbolicLink())
-        throw new Error("Offline suite ZIP destination must be a regular file");
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    await copyFile(source, destination);
-    if ((await componentFileSha256(destination)) !== component.archive.sha256)
-      throw new Error(`Offline suite staged archive checksum mismatch: ${id}`);
-    artifacts.push({
-      path: relative,
-      size: component.archive.size,
-      sha256: component.archive.sha256,
-    });
-    components.push({
-      id,
-      path: relative,
-      size: component.archive.size,
-      sha256: component.archive.sha256,
-      manifestPath: component.manifestPath,
-      manifestSha256: component.manifestSha256,
-      nativeManifestBase64: nativeBytes.toString("base64"),
-    });
-  }
-  const receiptPath = path.join(output, "offline-components.json");
-  try {
-    const info = await lstat(receiptPath);
-    if (!info.isFile() || info.isSymbolicLink())
-      throw new Error("Offline suite receipt must be a regular file");
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-  }
-  await writeFile(
-    receiptPath,
-    JSON.stringify(
-      {
-        schemaVersion: 1,
-        applicationVersion,
-        edition: "offline",
-        platform,
-        catalogSha256,
-        components,
-      },
-      null,
-      2,
-    ) + "\n",
-  );
-  return artifacts;
-}
-
 export async function writeOnlineEditionReleasePlan({
   output,
-  root = COMPONENT_REPO_ROOT,
   applicationVersion,
-  catalogSha256,
   artifacts,
   platform = COMPONENT_PLATFORM,
 }) {
@@ -527,7 +407,7 @@ export async function writeOnlineEditionReleasePlan({
     const latest = buildLatestManifest({
       version: applicationVersion,
       notes:
-        "轻量联网版：需要时可安装对应功能组件，也支持离线组件包。" +
+        "轻量联网版：内置完整媒体处理引擎，更新走独立联网频道。" +
         (isMac
           ? " macOS 包未经 Apple 公证，首次安装可能被 Gatekeeper 拦截，请按随附 install-macos.sh 指引安装。"
           : ""),
@@ -546,9 +426,6 @@ export async function writeOnlineEditionReleasePlan({
       url: `${baseUrl}/latest.json`,
     };
   }
-  const catalog = JSON.parse(
-    await readFile(path.join(root, "src-tauri/resources/component-catalog.json"), "utf8"),
-  );
   await writeFile(
     path.join(output, "publish-manifest.json"),
     JSON.stringify(
@@ -558,7 +435,6 @@ export async function writeOnlineEditionReleasePlan({
         applicationVersion,
         platform,
         channel,
-        catalogSha256,
         feed,
         artifacts: artifacts.map((artifact) => {
           const publicName =
@@ -572,15 +448,6 @@ export async function writeOnlineEditionReleasePlan({
             url: `${baseUrl}/${encodeURIComponent(publicName)}`,
           };
         }),
-        componentArchives: catalog.components.map((component) => ({
-          id: component.id,
-          localPath: path.join(
-            root,
-            ".cache/runtime-components/packages",
-            `${component.archive.sha256}.zip`,
-          ),
-          ...component.archive,
-        })),
       },
       null,
       2,

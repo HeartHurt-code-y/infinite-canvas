@@ -22,17 +22,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use regex::Regex;
 
-use super::browser_login::{self, LoginSite, login_prompt_text};
-use super::browser_media::{self, SiteResolver};
 use super::composer::VideoCompositionService;
 use super::error::{BackendError, BackendResult};
 use super::process_tree::ProcessTree;
-use super::remotion_renderer::RemotionRenderService;
 
 /// 内置引擎锁定的 yt-dlp 版本（官方 latest release，含 DouyinIE 提取器）。
 pub const YT_DLP_VERSION: &str = "2026.08.19";
@@ -118,7 +115,6 @@ enum VideoCookieSource {
     Auto,
     Browser(VideoCookieBrowser),
     ManualFile(PathBuf),
-    SiteSession,
     None,
 }
 
@@ -148,6 +144,9 @@ impl VideoCookieBrowser {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
+/// 凭据来源（前端展示用）。`site_session` 保留是为了与既有 TS 绑定保持一致，
+/// 可见浏览器的会话捕获能力已下线，后端不会再产出该来源。
+#[allow(dead_code)]
 pub enum VideoDownloadCredentialSource {
     Chrome,
     Edge,
@@ -172,7 +171,6 @@ impl VideoCookieSource {
             Self::Browser(VideoCookieBrowser::Brave) => Some(VideoDownloadCredentialSource::Brave),
             Self::Browser(VideoCookieBrowser::Auto) => None,
             Self::ManualFile(_) => Some(VideoDownloadCredentialSource::Manual),
-            Self::SiteSession => Some(VideoDownloadCredentialSource::SiteSession),
             Self::None => Some(VideoDownloadCredentialSource::None),
         }
     }
@@ -257,15 +255,11 @@ struct Inner {
     cookie_browser: std::sync::Mutex<Option<VideoCookieBrowser>>,
     /// 串行化引擎安装/更新，避免并发重复下载二进制。
     engine_lock: AsyncMutex<()>,
-    /// 可见登录浏览器同一时间只弹一个：多个任务串行等待捕获完成。
-    login_capture_lock: AsyncMutex<()>,
-    site_resolver_slots: Semaphore,
     downloads_dir: PathBuf,
     engine_dir: PathBuf,
     /// 共享的视频合成服务：B 站等平台的音视频为分离 DASH 流，下载后必须用
     /// ffmpeg 合并成片。PATH 上没有 ffmpeg 时复用合成服务自带的 ffmpeg 引擎。
     composer: VideoCompositionService,
-    browser_runtime: Option<RemotionRenderService>,
     client: reqwest::Client,
 }
 
@@ -276,20 +270,10 @@ pub struct VideoDownloadService {
 }
 
 impl VideoDownloadService {
-    #[cfg(test)]
     pub fn new(
         downloads_dir: PathBuf,
         engine_dir: PathBuf,
         composer: VideoCompositionService,
-    ) -> BackendResult<Self> {
-        Self::new_with_browser_runtime(downloads_dir, engine_dir, composer, None)
-    }
-
-    pub(crate) fn new_with_browser_runtime(
-        downloads_dir: PathBuf,
-        engine_dir: PathBuf,
-        composer: VideoCompositionService,
-        browser_runtime: Option<RemotionRenderService>,
     ) -> BackendResult<Self> {
         let client = reqwest::Client::builder()
             .user_agent(DOWNLOAD_USER_AGENT)
@@ -303,12 +287,9 @@ impl VideoDownloadService {
                 engine: std::sync::Mutex::new(EngineRuntime::default()),
                 cookie_browser: std::sync::Mutex::new(cookie_browser),
                 engine_lock: AsyncMutex::new(()),
-                login_capture_lock: AsyncMutex::new(()),
-                site_resolver_slots: Semaphore::new(2),
                 downloads_dir,
                 engine_dir,
                 composer,
-                browser_runtime,
                 client,
             }),
         })
@@ -429,7 +410,30 @@ impl VideoDownloadService {
         {
             let mut runtime = self.inner.engine.lock().expect("engine runtime poisoned");
             if runtime.installing {
-                return self.engine_status();
+                // 已有其他调用方正在安装：直接基于当前持有的锁构造状态返回，
+                // 禁止调用 engine_status()——它会再次 lock 同一把 std Mutex，
+                // 而 std Mutex 不可重入，重入会导致死锁。
+                //
+                // 触发条件不是理论上的：每个下载任务都会自动 ensure_engine()，
+                // 且「更新引擎」是独立命令——两个下载任务并发、或下载进行中点
+                // 「更新引擎」，都会命中这个 installing 窗口。命中后线程永久
+                // 阻塞并永久持有 engine 锁；而 get_video_downloader_engine 是
+                // 同步命令（跑在主线程）→ 整个应用冻结，只能杀进程。
+                // 与 composer.rs 的同名分支保持一致（那里已有同样注释与修法）。
+                let binary_exists = self.binary_path().is_file();
+                return VideoDownloaderEngineStatus {
+                    state: VideoDownloaderEngineState::Installing,
+                    version: binary_exists.then(|| {
+                        self.installed_version()
+                            .unwrap_or_else(|| YT_DLP_VERSION.to_string())
+                    }),
+                    binary_path: binary_exists
+                        .then(|| self.binary_path().to_string_lossy().into_owned()),
+                    cookies_installed: self.cookies_path().is_file(),
+                    bilibili_logged_in: cookies_have_bilibili_login(&self.cookies_path()),
+                    cookie_browser: self.cookie_browser(),
+                    last_error: runtime.last_error.clone(),
+                };
             }
             runtime.installing = true;
             runtime.last_error = None;
@@ -752,35 +756,8 @@ impl VideoDownloadService {
     }
 
     async fn run_download(&self, job_id: String, url: String, cookie_source: VideoCookieSource) {
-        // 之前登录捕获得到的站点会话直接复用：Auto/无凭据时不再从头撞风控。
-        let mut cookie_source = if matches!(
-            cookie_source,
-            VideoCookieSource::None | VideoCookieSource::Auto
-        ) {
-            self.site_session_source(&url).unwrap_or(cookie_source)
-        } else {
-            cookie_source
-        };
-        // 登录捕获每份任务至多一次：重试仍失败时给出手动导入指引而非再弹窗。
-        let mut login_used = false;
-        loop {
-            let mut login_captured = None;
-            self.run_download_pipeline(
-                job_id.clone(),
-                url.clone(),
-                cookie_source.clone(),
-                login_used,
-                &mut login_captured,
-            )
-            .await;
-            match login_captured.filter(|_| !login_used) {
-                Some(path) => {
-                    cookie_source = VideoCookieSource::ManualFile(path);
-                    login_used = true;
-                }
-                None => return,
-            }
-        }
+        // 可见浏览器登录捕获已下线：直接用给定凭据跑一次下载流水线。
+        self.run_download_pipeline(job_id, url, cookie_source).await;
     }
 
     async fn run_download_pipeline(
@@ -788,8 +765,6 @@ impl VideoDownloadService {
         job_id: String,
         url: String,
         cookie_source: VideoCookieSource,
-        login_used: bool,
-        login_captured: &mut Option<PathBuf>,
     ) {
         // 1. 确保引擎就绪（缺失时自动下载锁定版本）。
         let binary = match self.ensure_engine().await {
@@ -811,198 +786,35 @@ impl VideoDownloadService {
         if self.is_cancelled(&job_id) {
             return;
         }
-        // Both sites can return an empty extractor result while their official
-        // browser page still exposes the exact video's stream. A user-imported
-        // site cookie file may authorize a private page; otherwise the browser
-        // uses an isolated public session. CDN URLs are validated separately.
-        let mut rednote_video = None;
-        let mut douyin_video = None;
-        let mut resolved_with_imported_cookies = false;
-        let mut auth_private_cookie = None;
-        if let Some(runtime) = &self.inner.browser_runtime {
-            let site = if super::xiaohongshu::supports_rednote_fallback(&url) {
-                Some(SiteResolver::Rednote)
-            } else if is_douyin_url(&url) {
-                Some(SiteResolver::Douyin)
-            } else {
-                None
-            };
-            if let Some(site) = site {
-                let imported_path = match &cookie_source {
-                    VideoCookieSource::ManualFile(path) => Some(path.clone()),
-                    VideoCookieSource::Auto => {
-                        self.cookies_path().is_file().then(|| self.cookies_path())
-                    }
-                    _ => None,
-                };
-                auth_private_cookie =
-                    imported_path.as_ref().and_then(
-                        |path| match browser_media::scoped_cookie_copy(path, site) {
-                            Ok(private) => Some(private),
-                            Err(detail) => {
-                                tauri_plugin_log::log::warn!(
-                                    "[downloader] 已导入 Cookies 无法创建本次隔离副本: {detail}"
-                                );
-                                None
-                            }
-                        },
-                    );
-                let imported_cookies = auth_private_cookie.as_ref().and_then(|private| {
-                    match browser_media::site_cookies_from_file(private.as_ref(), site) {
-                        Ok(cookies) if !cookies.is_empty() => Some(cookies),
-                        Ok(_) => None,
-                        Err(detail) => {
-                            tauri_plugin_log::log::warn!(
-                                "[downloader] 目标站点 Cookies 无法用于隔离浏览器: {detail}"
-                            );
-                            None
-                        }
-                    }
-                });
-                let cancelled = self.cancel_flag(&job_id);
-                let permit = tokio::select! {
-                    permit = self.inner.site_resolver_slots.acquire() => permit.ok(),
-                    _ = wait_for_cancel(cancelled.clone()) => return,
-                };
-                let Some(permit) = permit else {
-                    self.fail_job(&job_id, "本地站点视频解析队列不可用。".into());
-                    return;
-                };
-                let attempts = if imported_cookies.is_some() { 2 } else { 1 };
-                for attempt in 0..attempts {
-                    if self.is_cancelled(&job_id) {
-                        return;
-                    }
-                    let cookies = if attempt == 0 {
-                        imported_cookies.as_deref()
-                    } else {
-                        None
-                    };
-                    self.update_record(&job_id, |record| {
-                        record.probe_status = Some(match (site, cookies.is_some()) {
-                            (SiteResolver::Rednote, true) => {
-                                "正在用已导入 Cookies 检查小红书官方视频流".into()
-                            }
-                            (SiteResolver::Douyin, true) => {
-                                "正在用已导入 Cookies 检查抖音官方视频流".into()
-                            }
-                            (SiteResolver::Rednote, false) => {
-                                "正在检查小红书未使用 Cookies 的官方视频流".into()
-                            }
-                            (SiteResolver::Douyin, false) => {
-                                "正在检查抖音未使用 Cookies 的官方视频流".into()
-                            }
-                        });
-                    });
-                    let output =
-                        browser_media::resolve(runtime, site, &url, cookies, cancelled.as_ref())
-                            .await;
-                    match output {
-                        Ok(stdout) => match site {
-                            SiteResolver::Rednote => {
-                                let cdn_cookie_file: Option<&Path> = if cookies.is_some() {
-                                    auth_private_cookie.as_ref().map(|file| file.as_ref())
-                                } else {
-                                    None
-                                };
-                                let result = tokio::select! {
-                                    result = super::xiaohongshu::verify_browser_output(&url, &stdout, cdn_cookie_file) => Some(result),
-                                    _ = wait_for_cancel(cancelled.clone()) => None,
-                                };
-                                match result {
-                                    Some(Ok(video)) => rednote_video = video,
-                                    Some(Err(detail)) => tauri_plugin_log::log::warn!(
-                                        "[downloader] 小红书官方视频流校验失败: {detail}"
-                                    ),
-                                    None => return,
-                                }
-                            }
-                            SiteResolver::Douyin => {
-                                douyin_video = parse_douyin_browser_output(&url, &stdout);
-                            }
-                        },
-                        Err(detail) if !self.is_cancelled(&job_id) => {
-                            tauri_plugin_log::log::warn!(
-                                "[downloader] 站点视频流预检不可用: {detail}"
-                            );
-                        }
-                        Err(_) => return,
-                    }
-                    if rednote_video.is_some() || douyin_video.is_some() {
-                        resolved_with_imported_cookies = cookies.is_some();
-                        break;
-                    }
-                }
-                drop(permit);
-            }
-        }
-        if self.is_cancelled(&job_id) {
-            return;
-        }
-        let requested_cookie_source = cookie_source.clone();
-        let (cookie_source, _private_cookie) = if resolved_with_imported_cookies {
-            let Some(private) = auth_private_cookie.take() else {
-                self.fail_job(&job_id, "已导入的站点 Cookies 不可用。".into());
-                return;
-            };
-            (
-                VideoCookieSource::ManualFile(private.to_path_buf()),
-                Some(private),
-            )
-        } else if rednote_video.is_some() {
-            (VideoCookieSource::None, auth_private_cookie.take())
-        } else if douyin_video.is_some() {
-            (VideoCookieSource::SiteSession, auth_private_cookie.take())
-        } else {
-            drop(auth_private_cookie.take());
-            match cookie_source {
-                VideoCookieSource::Auto => {
-                    match self
-                        .select_auto_cookie_source(&job_id, &binary, &url, &ffmpeg)
-                        .await
-                    {
-                        Ok(Some(selection)) => (selection.source, selection.private_cookie),
-                        Ok(None) => return,
-                        Err(message) => {
-                            if self.is_cancelled(&job_id) {
-                                return;
-                            }
-                            // 预检全失败的常见原因是站点风控；先尝试弹窗登录再定去留。
-                            let capture_hint = self
-                                .try_login_capture(
-                                    &job_id,
-                                    &url,
-                                    &message,
-                                    login_used,
-                                    login_captured,
-                                )
-                                .await;
-                            if login_captured.is_some() {
-                                return;
-                            }
-                            let message = match capture_hint {
-                                Some(hint) => format!("{message}\n{hint}"),
-                                None => message,
-                            };
-                            if !self.is_cancelled(&job_id) {
-                                self.fail_job(&job_id, message);
-                            }
+        // 浏览器站点解析已下线：凭据来源只保留用户导入的 cookies.txt 与自动探测。
+        let (cookie_source, _private_cookie) = match cookie_source {
+            VideoCookieSource::Auto => {
+                match self
+                    .select_auto_cookie_source(&job_id, &binary, &url, &ffmpeg)
+                    .await
+                {
+                    Ok(Some(selection)) => (selection.source, selection.private_cookie),
+                    Ok(None) => return,
+                    Err(message) => {
+                        if self.is_cancelled(&job_id) {
                             return;
                         }
-                    }
-                }
-                VideoCookieSource::ManualFile(original) => match private_cookie_copy(&original) {
-                    Ok(private) => (
-                        VideoCookieSource::ManualFile(private.to_path_buf()),
-                        Some(private),
-                    ),
-                    Err(error) => {
-                        self.fail_job(&job_id, format!("手动 Cookies 临时副本创建失败：{error}"));
+                        self.fail_job(&job_id, message);
                         return;
                     }
-                },
-                source => (source, None),
+                }
             }
+            VideoCookieSource::ManualFile(original) => match private_cookie_copy(&original) {
+                Ok(private) => (
+                    VideoCookieSource::ManualFile(private.to_path_buf()),
+                    Some(private),
+                ),
+                Err(error) => {
+                    self.fail_job(&job_id, format!("手动 Cookies 临时副本创建失败：{error}"));
+                    return;
+                }
+            },
+            source => (source, None),
         };
         if self.is_cancelled(&job_id) {
             return;
@@ -1034,27 +846,9 @@ impl VideoDownloadService {
             self.fail_job(&job_id, format!("下载目录创建失败：{error}"));
             return;
         }
-        let mut media_candidates: Vec<String> = if let Some(video) = &rednote_video {
-            video
-                .media_candidates
-                .iter()
-                .map(|candidate| candidate.media_url.clone())
-                .collect()
-        } else if let Some(video) = &douyin_video {
-            video.media_urls.clone()
-        } else {
-            vec![url.clone()]
-        };
-        let site_candidate_count = if rednote_video.is_some() || douyin_video.is_some() {
-            let count = media_candidates.len();
-            // Official CDN candidates remain first. If all fail, retry the
-            // original page once with the user's selected credential source.
-            media_candidates.push(url.clone());
-            count
-        } else {
-            0
-        };
-        let mut fallback_credentials: Option<AutoSourceSelection> = None;
+        // 浏览器直链解析已下线：只下载原站链接。
+        let media_candidates: Vec<String> = vec![url.clone()];
+        let site_candidate_count = 0usize;
         for (candidate_index, media_url) in media_candidates.iter().enumerate() {
             if self.is_cancelled(&job_id) {
                 return;
@@ -1062,126 +856,14 @@ impl VideoDownloadService {
             let original_fallback =
                 site_candidate_count > 0 && candidate_index == site_candidate_count;
             let can_retry = candidate_index + 1 < media_candidates.len();
-            if original_fallback {
-                let selection = if resolved_with_imported_cookies {
-                    AutoSourceSelection {
-                        source: cookie_source.clone(),
-                        private_cookie: None,
-                    }
-                } else {
-                    match &requested_cookie_source {
-                        VideoCookieSource::Auto
-                        | VideoCookieSource::Browser(VideoCookieBrowser::Auto) => {
-                            match self
-                                .select_auto_cookie_source(&job_id, &binary, &url, &ffmpeg)
-                                .await
-                            {
-                                Ok(Some(selection)) => selection,
-                                Ok(None) => return,
-                                Err(message) => {
-                                    if !self.is_cancelled(&job_id) {
-                                        self.fail_job(&job_id, format!(
-                                            "站点视频流均下载失败；原站链接预检也未通过：{message}"
-                                        ));
-                                    }
-                                    return;
-                                }
-                            }
-                        }
-                        VideoCookieSource::ManualFile(original) => {
-                            if let Some(private) = _private_cookie.as_ref() {
-                                AutoSourceSelection {
-                                    source: VideoCookieSource::ManualFile(private.to_path_buf()),
-                                    private_cookie: None,
-                                }
-                            } else {
-                                let site = if rednote_video.is_some() {
-                                    SiteResolver::Rednote
-                                } else {
-                                    SiteResolver::Douyin
-                                };
-                                let private = match browser_media::scoped_cookie_copy(
-                                    original, site,
-                                ) {
-                                    Ok(private) => private,
-                                    Err(detail) => {
-                                        self.fail_job(&job_id, format!(
-                                            "站点视频流均下载失败；原站链接无法使用已导入 Cookies：{detail}"
-                                        ));
-                                        return;
-                                    }
-                                };
-                                AutoSourceSelection {
-                                    source: VideoCookieSource::ManualFile(private.to_path_buf()),
-                                    private_cookie: Some(private),
-                                }
-                            }
-                        }
-                        source => AutoSourceSelection {
-                            source: source.clone(),
-                            private_cookie: None,
-                        },
-                    }
-                };
-                if self.is_cancelled(&job_id) {
-                    return;
-                }
-                let credential_source = selection.source.credential_source();
-                fallback_credentials = Some(selection);
-                self.update_record(&job_id, |record| {
-                    record.progress = None;
-                    record.credential_source = credential_source;
-                    record.probe_status =
-                        Some("站点视频流均未通过下载验收，正在重试原站链接".into());
-                });
-            } else if candidate_index > 0 {
-                self.update_record(&job_id, |record| {
-                    record.progress = None;
-                    record.probe_status = Some(format!(
-                        "正在尝试{}视频流 {}/{}",
-                        if rednote_video.is_some() {
-                            "小红书"
-                        } else {
-                            "抖音"
-                        },
-                        candidate_index + 1,
-                        site_candidate_count
-                    ));
-                });
-            }
-            let active_cookie_source = fallback_credentials
-                .as_ref()
-                .map_or(&cookie_source, |selection| &selection.source);
+            let active_cookie_source = &cookie_source;
+
             let attempt_id = if candidate_index == 0 {
                 job_id.clone()
             } else {
                 format!("{job_id}-{}", candidate_index + 1)
             };
-            let output_template = if original_fallback {
-                if let Some(video) = &rednote_video {
-                    directory.join(format!(
-                        "小红书视频 [{}] [{}]（原站）.%(ext)s",
-                        video.note_id, attempt_id
-                    ))
-                } else if let Some(video) = &douyin_video {
-                    directory.join(format!(
-                        "抖音视频 [{}] [{}]（原站）.%(ext)s",
-                        video.video_id, attempt_id
-                    ))
-                } else {
-                    unreachable!("original fallback requires site media")
-                }
-            } else if let Some(video) = &rednote_video {
-                directory.join(format!(
-                    "小红书视频 [{}] [{}].%(ext)s",
-                    video.note_id, attempt_id
-                ))
-            } else if let Some(video) = &douyin_video {
-                directory.join(format!(
-                    "抖音视频 [{}] [{}].%(ext)s",
-                    video.video_id, attempt_id
-                ))
-            } else if super::xiaohongshu::supports_rednote_fallback(&url) {
+            let output_template = if super::xiaohongshu::supports_rednote_fallback(&url) {
                 directory.join(format!("小红书视频 [{attempt_id}].%(ext)s"))
             } else if is_douyin_url(&url) {
                 directory.join(format!("抖音视频 [{attempt_id}].%(ext)s"))
@@ -1201,12 +883,6 @@ impl VideoDownloadService {
                     original_fallback_failure(original_fallback, error.to_string()),
                 );
                 return;
-            }
-            if douyin_video.is_some() && !original_fallback {
-                args.extend([
-                    "--add-header".into(),
-                    "Referer: https://www.douyin.com/".into(),
-                ]);
             }
             // Both CDN URLs and original site links can carry bearer-like
             // query tokens; neither belongs in the process argument list.
@@ -1361,86 +1037,6 @@ impl VideoDownloadService {
                                     }
                                 }
                             }
-                            if let Some(video) =
-                                rednote_video.as_ref().filter(|_| !original_fallback)
-                            {
-                                let actual_size =
-                                    std::fs::metadata(&path).map(|metadata| metadata.len());
-                                if actual_size.ok()
-                                    != video
-                                        .media_candidates
-                                        .get(candidate_index)
-                                        .map(|candidate| candidate.expected_size)
-                                    || !has_mp4_ftyp(Path::new(&path))
-                                {
-                                    if can_retry {
-                                        continue;
-                                    }
-                                    self.fail_job(
-                                        &job_id,
-                                        "小红书视频下载不完整，文件与官方 MP4 视频流不符。".into(),
-                                    );
-                                    return;
-                                }
-                                if let Some(ffmpeg_path) =
-                                    resolve_ffmpeg_binary(&self.inner.composer).await
-                                {
-                                    if probe_video_dimensions(&ffmpeg_path, Path::new(&path))
-                                        .await
-                                        .is_none()
-                                    {
-                                        if can_retry {
-                                            continue;
-                                        }
-                                        self.fail_job(
-                                            &job_id,
-                                            "小红书下载文件缺少可解码的视频画面。".into(),
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                            if let Some(video) =
-                                douyin_video.as_ref().filter(|_| !original_fallback)
-                            {
-                                if std::fs::metadata(&path)
-                                    .map_or(true, |metadata| metadata.len() == 0)
-                                    || !has_mp4_ftyp(Path::new(&path))
-                                {
-                                    if can_retry {
-                                        continue;
-                                    }
-                                    self.fail_job(
-                                        &job_id,
-                                        "抖音视频下载不完整，文件不是有效 MP4。".into(),
-                                    );
-                                    return;
-                                }
-                                if let Some(ffmpeg_path) =
-                                    resolve_ffmpeg_binary(&self.inner.composer).await
-                                {
-                                    let dimensions =
-                                        probe_video_dimensions(&ffmpeg_path, Path::new(&path))
-                                            .await;
-                                    let duration =
-                                        probe_video_duration_ms(&ffmpeg_path, Path::new(&path))
-                                            .await;
-                                    if dimensions.is_none()
-                                        || duration.is_none_or(|actual| {
-                                            actual.abs_diff(video.duration_ms) > 3000
-                                        })
-                                    {
-                                        if can_retry {
-                                            continue;
-                                        }
-                                        self.fail_job(
-                                            &job_id,
-                                            "抖音下载文件的视频流或时长与官方视频信息不符。".into(),
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
                             // B 站成片右上角通常带「UP 主名 + bilibili」静态水印，
                             // 下载成功后自动用 delogo 去除并输出「（去水印）」副片；
                             // 后处理失败（如 ffmpeg 不可用）时保留原片，不阻断任务。
@@ -1518,7 +1114,7 @@ impl VideoDownloadService {
                     if can_retry {
                         continue;
                     }
-                    let mut message = original_fallback_failure(
+                    let message = original_fallback_failure(
                         original_fallback,
                         failure_message(
                             &stderr_tail,
@@ -1528,30 +1124,8 @@ impl VideoDownloadService {
                         ),
                     );
                     if !self.is_cancelled(&job_id) {
-                        // 最后一个候选仍失败：符合登录/验证签名时弹浏览器捕获会话，
-                        // 由外层用新会话整链重试一次。
-                        let diagnostics: String =
-                            stderr_tail.iter().fold(String::new(), |mut acc, line| {
-                                acc.push_str(line);
-                                acc
-                            });
-                        if let Some(hint) = self
-                            .try_login_capture(
-                                &job_id,
-                                &url,
-                                &diagnostics,
-                                login_used,
-                                login_captured,
-                            )
-                            .await
-                        {
-                            message.push('\n');
-                            message.push_str(&hint);
-                        } else if login_captured.is_some() {
-                            return;
-                        }
+                        self.fail_job(&job_id, message);
                     }
-                    self.fail_job(&job_id, message);
                 }
                 Err(error) => {
                     if can_retry {
@@ -1567,72 +1141,6 @@ impl VideoDownloadService {
                 }
             }
             return;
-        }
-    }
-
-    fn site_session_path(&self, site: LoginSite) -> PathBuf {
-        self.inner.engine_dir.join(site.session_file_name())
-    }
-
-    /// 已捕获的站点登录会话（如存在）作为手动 Cookies 文件复用。
-    fn site_session_source(&self, url: &str) -> Option<VideoCookieSource> {
-        let path = self.site_session_path(LoginSite::for_url(url)?);
-        path.is_file()
-            .then_some(VideoCookieSource::ManualFile(path))
-    }
-
-    /// 失败疑似登录/站点验证墙时，弹可见浏览器让用户登录并自动收集 Cookies。
-    /// - `Some(提示)`：不适配或捕获失败，提示应追加进失败文案；
-    /// - `None` 且 `login_captured` 被置位：会话文件已写好，外层应重试；
-    /// - `None` 且未置位：与登录无关，按原样失败。
-    async fn try_login_capture(
-        &self,
-        job_id: &str,
-        url: &str,
-        diagnostics: &str,
-        login_used: bool,
-        login_captured: &mut Option<PathBuf>,
-    ) -> Option<String> {
-        let site = browser_login::login_capture_required(url, diagnostics)?;
-        if login_used {
-            return Some(
-                "已尝试过自动登录，站点仍然拦截。请从浏览器导出 cookies.txt 手动导入后重试。"
-                    .into(),
-            );
-        }
-        let Some(renderer) = self.inner.browser_runtime.as_ref() else {
-            // 浏览器组件未就绪：保持原有失败文案，不打扰用户。
-            return None;
-        };
-        let _guard = self.inner.login_capture_lock.lock().await;
-        if self.is_cancelled(job_id) {
-            return None;
-        }
-        self.update_record(job_id, |record| {
-            record.progress = None;
-            record.probe_status = Some(login_prompt_text(site));
-        });
-        let cancelled = self.cancel_flag(job_id);
-        match browser_login::capture(renderer, site, url, &cancelled).await {
-            Ok(session_text) => {
-                let path = self.site_session_path(site);
-                match super::credentials::write_private_file(&path, &session_text) {
-                    Ok(()) => {
-                        self.update_record(job_id, |record| {
-                            record.probe_status =
-                                Some("已获取站点登录 Cookies，正在用新会话重试下载".into());
-                        });
-                        *login_captured = Some(path);
-                        None
-                    }
-                    Err(error) => Some(format!("登录 Cookies 保存失败：{error}。")),
-                }
-            }
-            Err("cancelled") => None,
-            Err(detail) => Some(format!(
-                "自动登录未完成：{}可稍后重试下载，或从浏览器导出 cookies.txt 手动导入。",
-                login_capture_failure_reason(detail)
-            )),
         }
     }
 
@@ -1853,76 +1361,6 @@ fn append_url_input_args(args: &mut Vec<String>, url: &str, force_stdin: bool) -
     }
 }
 
-/// Browser output is treated as untrusted page data. Only the fixed official
-/// video CDN, a matching ID, and bounded fields may enter the download path.
-struct ResolvedDouyinVideo {
-    video_id: String,
-    duration_ms: u64,
-    media_urls: Vec<String>,
-}
-
-fn parse_douyin_browser_output(input_url: &str, stdout: &[u8]) -> Option<ResolvedDouyinVideo> {
-    if !is_douyin_url(input_url) || stdout.len() > 16 * 1024 {
-        return None;
-    }
-    let result: Value = serde_json::from_slice(stdout).ok()?;
-    if !result.get("ok")?.as_bool()? {
-        return None;
-    }
-    let video_id = result.get("videoId")?.as_str()?;
-    if !(12..=22).contains(&video_id.len()) || !video_id.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    let input = url::Url::parse(input_url).ok()?;
-    if let Some(input_id) = input
-        .path_segments()
-        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
-        .filter(|segment| segment.len() >= 12 && segment.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        if input_id != video_id {
-            return None;
-        }
-    }
-    let duration_ms = result.get("durationMs")?.as_u64()?;
-    if !(1..=24 * 60 * 60 * 1000).contains(&duration_ms) {
-        return None;
-    }
-    let candidates = result.get("mediaUrls")?.as_array()?;
-    if candidates.is_empty() || candidates.len() > 4 {
-        return None;
-    }
-    let media_urls: Vec<String> = candidates
-        .iter()
-        .filter_map(Value::as_str)
-        .filter(|url| valid_douyin_media_url(url))
-        .map(str::to_string)
-        .collect();
-    if media_urls.is_empty() {
-        return None;
-    }
-    Some(ResolvedDouyinVideo {
-        video_id: video_id.to_string(),
-        duration_ms,
-        media_urls,
-    })
-}
-
-fn valid_douyin_media_url(value: &str) -> bool {
-    if value.len() > 4096 || value.chars().any(char::is_control) {
-        return false;
-    }
-    let Ok(url) = url::Url::parse(value) else {
-        return false;
-    };
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    url.scheme() == "https"
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.fragment().is_none()
-        && url.port().is_none_or(|port| port == 443)
-        && (host == "douyinvod.com" || host.ends_with(".douyinvod.com"))
-}
-
 /// 已导入的 cookies.txt 是否包含 B 站登录态。B 站以 SESSDATA 作为登录凭据，
 /// 只有匿名访客 Cookie（buvid3 / b_nut 等）不视为已登录。
 fn cookies_have_bilibili_login(cookies_path: &Path) -> bool {
@@ -1965,7 +1403,7 @@ fn append_cookie_args(args: &mut Vec<String>, source: &VideoCookieSource) -> Bac
         VideoCookieSource::ManualFile(path) => {
             args.extend(["--cookies".into(), path.to_string_lossy().into_owned()])
         }
-        VideoCookieSource::SiteSession | VideoCookieSource::None => {}
+        VideoCookieSource::None => {}
     }
     Ok(())
 }
@@ -2083,7 +1521,6 @@ fn cookie_source_label(source: &VideoCookieSource) -> &'static str {
         VideoCookieSource::Browser(VideoCookieBrowser::Firefox) => "Firefox",
         VideoCookieSource::Browser(VideoCookieBrowser::Brave) => "Brave",
         VideoCookieSource::ManualFile(_) => "已导入文件",
-        VideoCookieSource::SiteSession => "站点会话",
         VideoCookieSource::None => "无 Cookies",
     }
 }
@@ -2443,37 +1880,6 @@ async fn probe_video_dimensions(ffmpeg: &Path, source: &Path) -> Option<(u32, u3
     parse_video_dimensions(&String::from_utf8_lossy(&output.stderr))
 }
 
-fn parse_video_duration_ms(text: &str) -> Option<u64> {
-    let captures = Regex::new(r"Duration: (\d+):(\d{2}):(\d{2})(?:\.(\d+))?")
-        .ok()?
-        .captures(text)?;
-    let hours: u64 = captures.get(1)?.as_str().parse().ok()?;
-    let minutes: u64 = captures.get(2)?.as_str().parse().ok()?;
-    let seconds: u64 = captures.get(3)?.as_str().parse().ok()?;
-    if minutes >= 60 || seconds >= 60 {
-        return None;
-    }
-    let fraction = captures.get(4).map_or("", |part| part.as_str());
-    let millis: u64 = format!("{:<03}", fraction.chars().take(3).collect::<String>())
-        .replace(' ', "0")
-        .parse()
-        .ok()?;
-    hours
-        .checked_mul(3_600_000)?
-        .checked_add(minutes * 60_000)?
-        .checked_add(seconds * 1000)?
-        .checked_add(millis)
-}
-
-async fn probe_video_duration_ms(ffmpeg: &Path, source: &Path) -> Option<u64> {
-    let mut command = tokio::process::Command::new(ffmpeg);
-    command.arg("-i").arg(source).stdin(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().await.ok()?;
-    parse_video_duration_ms(&String::from_utf8_lossy(&output.stderr))
-}
-
 /// 解析本次后处理可用的 ffmpeg 可执行文件：
 /// - 系统 ffmpeg（PATH 或平台兜底目录）可用 → 直接使用其路径；
 /// - 否则复用视频合成服务自带的 ffmpeg 引擎（缺则按需下载）返回二进制路径；
@@ -2606,43 +2012,6 @@ fn resolve_final_path(
         }
     }
     None
-}
-
-/// 登录捕获的稳定错误串 → 用户可读的原因；未识别的串按内部异常兜底，
-/// 不把英文内部代号直接亮给用户。
-fn login_capture_failure_reason(detail: &str) -> String {
-    match detail {
-        "login capture browser unavailable" => {
-            "没有找到可用的浏览器，自动登录需要 Edge、Chrome、Brave 或 Chromium。".into()
-        }
-        "login capture login timeout" => {
-            "等待约 5 分钟仍未检测到站点 Cookie；若窗口里已完成登录但下载仍失败，可再重试一次。"
-                .into()
-        }
-        "login capture browser closed early" => "浏览器窗口在拿到站点 Cookie 前被关闭。".into(),
-        "login capture timed out" => "登录窗口长时间未退出，已强制结束。".into(),
-        "login capture returned no site cookies" => "未收集到该站点的 Cookie。".into(),
-        "login capture script unavailable" | "login capture runtime unavailable" => {
-            "登录组件未就绪。".into()
-        }
-        "login capture script error" => "登录窗口脚本运行出错。".into(),
-        "login capture input rejected" => "登录请求参数未通过脚本校验。".into(),
-        "login capture process failed" => "登录窗口进程异常退出。".into(),
-        "login capture returned invalid output" => {
-            "登录窗口脚本启动即失败，没有返回任何结果；可重试一次，若反复出现请重启应用。".into()
-        }
-        "login capture unexpected state" => "登录窗口状态异常，未能确认登录结果。".into(),
-        "login capture could not start" => "登录窗口进程启动失败。".into(),
-        "login capture process tree unavailable" => {
-            "登录窗口进程未能纳入统一回收管理，已中止本次登录。".into()
-        }
-        "login profile unavailable" => "登录环境初始化失败：临时目录创建失败。".into(),
-        "login capture input too large" => "登录请求参数超出大小限制。".into(),
-        "login capture stdin unavailable" => "登录窗口进程无法接收参数。".into(),
-        "login capture stdin failed" => "向登录窗口进程传参失败。".into(),
-        "login capture stdin timed out" => "向登录窗口进程传参超时。".into(),
-        _ => "登录流程内部异常。".into(),
-    }
 }
 
 fn original_fallback_failure(is_original_fallback: bool, detail: String) -> String {
@@ -2780,896 +2149,4 @@ fn checksum_line_for(content: &str, artifact: &str) -> Option<String> {
                 checksum.len() == 64 && checksum.chars().all(|c| c.is_ascii_hexdigit())
             })
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn download_format_uses_merge_when_ffmpeg_is_on_path_without_a_location() {
-        let ffmpeg = FfmpegForDownload {
-            available: true,
-            location: None,
-        };
-        let mut args = Vec::new();
-        append_download_format_args(&mut args, false, &ffmpeg);
-        assert_eq!(
-            args,
-            vec![
-                "-f".to_string(),
-                "bv*+ba/b".to_string(),
-                "--merge-output-format".to_string(),
-                "mp4".to_string(),
-            ]
-        );
-
-        let mut capped = Vec::new();
-        append_download_format_args(&mut capped, true, &ffmpeg);
-        assert!(
-            capped
-                .windows(2)
-                .any(|pair| pair == ["-f", "bv*[height<=480]+ba/b[height<=480]/b"])
-        );
-        assert!(!capped.iter().any(|arg| arg == "--ffmpeg-location"));
-    }
-
-    #[test]
-    fn download_format_passes_ffmpeg_location_only_when_it_is_explicit() {
-        let ffmpeg = FfmpegForDownload {
-            available: true,
-            location: Some(PathBuf::from("/opt/homebrew/bin")),
-        };
-        let mut args = Vec::new();
-        append_download_format_args(&mut args, false, &ffmpeg);
-        assert_eq!(
-            args.iter().position(|arg| arg == "--ffmpeg-location"),
-            Some(4)
-        );
-        assert_eq!(args[5], "/opt/homebrew/bin");
-    }
-
-    #[test]
-    fn download_format_falls_back_to_single_file_without_ffmpeg() {
-        let ffmpeg = FfmpegForDownload {
-            available: false,
-            location: None,
-        };
-        let mut args = Vec::new();
-        append_download_format_args(&mut args, false, &ffmpeg);
-        assert_eq!(args, vec!["-f".to_string(), "b".to_string()]);
-        let mut capped = Vec::new();
-        append_download_format_args(&mut capped, true, &ffmpeg);
-        assert_eq!(
-            capped,
-            vec!["-f".to_string(), "b[height<=480]/b".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_progress_percent_extracts_download_percentage() {
-        assert_eq!(
-            parse_progress_percent("[download]   4.6% of    5.83MiB at  821.53KiB/s ETA 00:07"),
-            Some(4.6)
-        );
-        assert_eq!(
-            parse_progress_percent("[download] 100.0% of 1.00MiB"),
-            Some(100.0)
-        );
-        assert_eq!(
-            parse_progress_percent("[download] Destination: a.mp4"),
-            None
-        );
-        assert_eq!(parse_progress_percent("[Merger] Merging formats"), None);
-    }
-
-    #[test]
-    fn extract_first_url_picks_url_inside_share_text() {
-        let share =
-            "8.15 Kfx:/ 复制打开抖音看看【某作者】的作品 https://v.douyin.com/iAbCdEf/ 太搞笑了";
-        assert_eq!(
-            extract_first_url(share).as_deref(),
-            Some("https://v.douyin.com/iAbCdEf/")
-        );
-        assert_eq!(extract_first_url("纯文本没有链接"), None);
-        assert_eq!(
-            extract_first_url("http://a.com/x https://b.com/y").as_deref(),
-            Some("http://a.com/x")
-        );
-    }
-
-    #[test]
-    fn extract_already_downloaded_parses_existing_file() {
-        assert_eq!(
-            extract_already_downloaded(
-                r"[download] C:\下载\无限画布\标题 [123].mp4 has already been downloaded"
-            )
-            .as_deref(),
-            Some(r"C:\下载\无限画布\标题 [123].mp4")
-        );
-        assert_eq!(extract_already_downloaded("[download] 50% of 1MiB"), None);
-    }
-
-    #[test]
-    fn extract_merger_path_parses_quoted_target() {
-        assert_eq!(
-            extract_merger_path(r#"[Merger] Merging formats into "无限画布/标题 [42].mp4""#)
-                .as_deref(),
-            Some("无限画布/标题 [42].mp4")
-        );
-    }
-
-    #[test]
-    fn checksum_line_for_matches_platform_artifact() {
-        let content = "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a  yt-dlp.exe\n\
-                       58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a  yt-dlp_linux\n";
-        assert_eq!(
-            checksum_line_for(content, "yt-dlp.exe").as_deref(),
-            Some("66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a")
-        );
-        assert_eq!(checksum_line_for(content, "yt-dlp_macos"), None);
-    }
-
-    #[test]
-    fn normalize_download_url_trims_and_extracts() {
-        assert_eq!(
-            normalize_download_url("  https://v.douyin.com/iAbCdEf/  ").unwrap(),
-            "https://v.douyin.com/iAbCdEf/"
-        );
-        assert!(normalize_download_url("看一看").is_err());
-        assert!(normalize_download_url("   ").is_err());
-    }
-
-    #[test]
-    fn is_bilibili_url_detects_host_and_short_link() {
-        assert!(is_bilibili_url(
-            "https://www.bilibili.com/video/BV155j96nE27/"
-        ));
-        assert!(is_bilibili_url("https://b23.tv/AbCdEf"));
-        assert!(is_bilibili_url("https://BILIBILI.COM/video/BV1/"));
-        assert!(!is_bilibili_url("https://v.douyin.com/iAbCdEf/"));
-        assert!(!is_bilibili_url("https://www.youtube.com/watch?v=x"));
-        assert!(!is_bilibili_url(
-            "https://bilibili.com.attacker.example/video/BV1/"
-        ));
-        assert!(!is_bilibili_url(
-            "https://attacker.example/watch?next=bilibili.com"
-        ));
-    }
-
-    #[test]
-    fn is_douyin_url_matches_only_douyin_hosts() {
-        assert!(is_douyin_url("https://www.douyin.com/video/123"));
-        assert!(is_douyin_url("https://v.douyin.com/abc/"));
-        assert!(is_douyin_url("https://www.iesdouyin.com/share/video/123"));
-        assert!(!is_douyin_url(
-            "https://douyin.com.attacker.example/video/123"
-        ));
-        assert!(!is_douyin_url("https://example.com/watch?next=douyin.com"));
-    }
-
-    #[test]
-    fn cookies_have_bilibili_login_requires_sessdata() {
-        let dir = std::env::temp_dir().join(format!("dl-cookie-test-{}", now_ms()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("cookies.txt");
-        std::fs::write(
-            &path,
-            "# Netscape HTTP Cookie File\n\
-             .bilibili.com\tTRUE\t/\tFALSE\t0\tbuvid3\tAE6A2407-abc\n\
-             #HttpOnly_.bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tabc123\n",
-        )
-        .unwrap();
-        assert!(cookies_have_bilibili_login(&path));
-        // 只有匿名访客 Cookie 不算已登录。
-        std::fs::write(
-            &path,
-            ".bilibili.com\tTRUE\t/\tFALSE\t0\tbuvid3\tAE6A2407-abc\n",
-        )
-        .unwrap();
-        assert!(!cookies_have_bilibili_login(&path));
-        std::fs::write(
-            &path,
-            ".bilibili.com.evil.test\tTRUE\t/\tFALSE\t0\tSESSDATA\tabc123\n",
-        )
-        .unwrap();
-        assert!(!cookies_have_bilibili_login(&path));
-        // 缺失文件视为未登录。
-        assert!(!cookies_have_bilibili_login(&dir.join("missing.txt")));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn resolve_download_quality_routes_bilibili_by_login() {
-        let dir = std::env::temp_dir().join(format!("dl-quality-test-{}", now_ms()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let logged_in = dir.join("cookies.txt");
-        std::fs::write(
-            &logged_in,
-            ".bilibili.com\tTRUE\t/\tFALSE\t0\tSESSDATA\tabc\n",
-        )
-        .unwrap();
-
-        // B 站未登录 → 480P。
-        let guest = resolve_download_quality(
-            "https://www.bilibili.com/video/BV1YE6gBHEoN/",
-            &VideoCookieSource::None,
-        )
-        .unwrap();
-        assert_eq!(guest.mode, VideoDownloadQualityMode::Sd480);
-        assert!(guest.hint.contains("480P"));
-
-        // B 站已登录 → 最高画质。
-        let logged = resolve_download_quality(
-            "https://www.bilibili.com/video/BV1YE6gBHEoN/",
-            &VideoCookieSource::ManualFile(logged_in.clone()),
-        )
-        .unwrap();
-        assert_eq!(logged.mode, VideoDownloadQualityMode::Best);
-
-        let browser = resolve_download_quality(
-            "https://www.bilibili.com/video/BV1YE6gBHEoN/",
-            &VideoCookieSource::Browser(VideoCookieBrowser::Edge),
-        )
-        .unwrap();
-        assert_eq!(browser.mode, VideoDownloadQualityMode::Best);
-        assert!(browser.hint.contains("以实际下载结果为准"));
-        assert!(!browser.hint.contains("已登录 B 站"));
-
-        // 非 B 站 → 无路由。
-        assert!(
-            resolve_download_quality("https://v.douyin.com/iAbCdEf/", &VideoCookieSource::None)
-                .is_none()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cookie_sources_pass_only_one_yt_dlp_option() {
-        let mut browser_args = base_download_args(Path::new("out.mp4"));
-        append_cookie_args(
-            &mut browser_args,
-            &VideoCookieSource::Browser(VideoCookieBrowser::Chrome),
-        )
-        .unwrap();
-        assert_eq!(browser_args[0], "--ignore-config");
-        assert_eq!(
-            browser_args
-                .iter()
-                .filter(|arg| *arg == "--cookies-from-browser")
-                .count(),
-            1
-        );
-        assert!(!browser_args.iter().any(|arg| arg == "--cookies"));
-        assert_eq!(browser_args.last().map(String::as_str), Some("chrome"));
-
-        let mut manual_args = base_download_args(Path::new("out.mp4"));
-        append_cookie_args(
-            &mut manual_args,
-            &VideoCookieSource::ManualFile(PathBuf::from("cookies.txt")),
-        )
-        .unwrap();
-        assert_eq!(manual_args[0], "--ignore-config");
-        assert_eq!(
-            manual_args.iter().filter(|arg| *arg == "--cookies").count(),
-            1
-        );
-        assert!(
-            !manual_args
-                .iter()
-                .any(|arg| arg == "--cookies-from-browser")
-        );
-        assert_eq!(manual_args.last().map(String::as_str), Some("cookies.txt"));
-
-        let mut no_cookie_args = Vec::new();
-        append_cookie_args(&mut no_cookie_args, &VideoCookieSource::None).unwrap();
-        assert!(no_cookie_args.is_empty());
-        assert!(append_cookie_args(&mut Vec::new(), &VideoCookieSource::Auto).is_err());
-    }
-
-    #[test]
-    fn browser_cookie_failure_stays_visible_without_anonymous_fallback() {
-        let source = VideoCookieSource::Browser(VideoCookieBrowser::Edge);
-        let tail = VecDeque::from(["ERROR: Could not decrypt cookies".to_string()]);
-        let message = failure_message(
-            &tail,
-            "exit status: 1",
-            "https://www.bilibili.com/video/BV1/",
-            &source,
-        );
-        assert!(message.contains("Could not decrypt cookies"));
-        assert!(message.contains("不会无凭据重试"));
-        assert!(message.contains("不能据此判断登录态是否过期"));
-
-        let copy_tail =
-            VecDeque::from(["ERROR: Could not copy Chrome cookie database".to_string()]);
-        let copy_message = failure_message(
-            &copy_tail,
-            "exit status: 1",
-            "https://www.douyin.com/video/123",
-            &VideoCookieSource::Browser(VideoCookieBrowser::Chrome),
-        );
-        assert!(copy_message.contains("未能读取所选浏览器的 Cookie 数据库"));
-        assert!(!copy_message.contains("抖音详情接口未返回视频"));
-
-        let format_tail = VecDeque::from(["ERROR: Requested format is not available".to_string()]);
-        let format_message = failure_message(
-            &format_tail,
-            "exit status: 1",
-            "https://www.bilibili.com/video/BV1/",
-            &source,
-        );
-        assert!(format_message.contains("浏览器可能未登录"));
-    }
-
-    #[test]
-    fn douyin_empty_detail_does_not_assert_cookies_are_expired() {
-        let tail = VecDeque::from([
-            "Reading URLs from STDIN - EOF (Ctrl+Z) to end:".to_string(),
-            "WARNING: [Douyin] Failed to parse JSON: Expecting value in ''".to_string(),
-            "ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed".to_string(),
-        ]);
-        let message = failure_message(
-            &tail,
-            "exit status: 1",
-            "https://www.douyin.com/video/123",
-            &VideoCookieSource::ManualFile(PathBuf::from("cookies.txt")),
-        );
-        assert!(message.contains("有效 Cookies 也可能"));
-        assert!(message.contains("提取器限制"));
-        assert!(!message.contains("请导入浏览器导出的 cookies.txt"));
-        // stdin 提示横幅是每次读取链接的固定输出，不能进入用户失败文案。
-        assert!(!message.contains("Reading URLs from STDIN"));
-
-        let auto_message = auto_failure_message(
-            "https://v.douyin.com/example/",
-            &[
-                "Chrome：Could not copy Chrome cookie database".into(),
-                "已导入文件：ERROR: Fresh cookies (not necessarily logged in) are needed".into(),
-            ],
-        );
-        assert!(auto_message.contains("有效 Cookies 也可能"));
-        assert!(auto_message.contains("Could not copy Chrome cookie database"));
-        assert!(auto_message.contains("尚未开始下载"));
-    }
-
-    #[test]
-    fn xiaohongshu_failure_hint_reaches_download_and_auto_errors() {
-        let tail = VecDeque::from(["ERROR: [XiaoHongShu] No video formats found!".to_string()]);
-        let message = failure_message(
-            &tail,
-            "exit status: 1",
-            "https://www.xiaohongshu.com/explore/123?xsec_token=private-token",
-            &VideoCookieSource::None,
-        );
-        assert!(message.contains("没有可供提取的视频流"));
-        assert!(!message.contains("private-token"));
-
-        let auto_message = auto_failure_message(
-            "https://www.xiaohongshu.com/explore/123?xsec_token=private-token",
-            &["无 Cookies：ERROR: No video formats found!".into()],
-        );
-        assert!(auto_message.contains("没有可供提取的视频流"));
-        assert!(!auto_message.contains("private-token"));
-    }
-
-    #[test]
-    fn cookie_browser_setting_persists_and_job_source_is_a_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let downloads = dir.path().join("downloads");
-        let composer = VideoCompositionService::new(
-            downloads.clone(),
-            dir.path().join("ffmpeg"),
-            dir.path().join("resources"),
-        )
-        .unwrap();
-        let engine = dir.path().join("yt-dlp");
-        let service =
-            VideoDownloadService::new(downloads.clone(), engine.clone(), composer.clone()).unwrap();
-        service
-            .set_cookie_browser(Some(VideoCookieBrowser::Edge))
-            .unwrap();
-        let queued_source = service.cookie_source();
-        assert_eq!(
-            queued_source,
-            VideoCookieSource::Browser(VideoCookieBrowser::Edge)
-        );
-
-        let restarted = VideoDownloadService::new(downloads, engine, composer).unwrap();
-        assert_eq!(
-            restarted.engine_status().cookie_browser,
-            Some(VideoCookieBrowser::Edge)
-        );
-        let file = dir.path().join("cookies.txt");
-        std::fs::write(&file, "# Netscape HTTP Cookie File\n").unwrap();
-        restarted.import_cookies(&file).unwrap();
-        assert_eq!(restarted.engine_status().cookie_browser, None);
-        assert!(matches!(
-            restarted.cookie_source(),
-            VideoCookieSource::ManualFile(_)
-        ));
-        assert_eq!(
-            queued_source,
-            VideoCookieSource::Browser(VideoCookieBrowser::Edge)
-        );
-
-        restarted
-            .set_cookie_browser(Some(VideoCookieBrowser::Auto))
-            .unwrap();
-        restarted.import_cookies(&file).unwrap();
-        assert_eq!(
-            restarted.engine_status().cookie_browser,
-            Some(VideoCookieBrowser::Auto)
-        );
-        assert_eq!(restarted.cookie_source(), VideoCookieSource::Auto);
-    }
-
-    #[test]
-    fn auto_source_order_and_bilibili_quality_choice() {
-        let dir = tempfile::tempdir().unwrap();
-        let manual_path = dir.path().join("cookies.txt");
-        let without_manual = auto_cookie_candidates(&manual_path);
-        assert_eq!(
-            without_manual,
-            vec![
-                VideoCookieSource::Browser(VideoCookieBrowser::Chrome),
-                VideoCookieSource::Browser(VideoCookieBrowser::Edge),
-                VideoCookieSource::Browser(VideoCookieBrowser::Firefox),
-                VideoCookieSource::None,
-            ]
-        );
-        std::fs::write(&manual_path, "# Netscape HTTP Cookie File\n").unwrap();
-        let with_manual = auto_cookie_candidates(&manual_path);
-        assert_eq!(with_manual[3], VideoCookieSource::ManualFile(manual_path));
-        assert_eq!(with_manual[4], VideoCookieSource::None);
-
-        let successes = vec![
-            AutoProbeSuccess {
-                source: VideoCookieSource::Browser(VideoCookieBrowser::Chrome),
-                height: 360,
-            },
-            AutoProbeSuccess {
-                source: VideoCookieSource::Browser(VideoCookieBrowser::Edge),
-                height: 1080,
-            },
-            AutoProbeSuccess {
-                source: VideoCookieSource::Browser(VideoCookieBrowser::Firefox),
-                height: 1080,
-            },
-            AutoProbeSuccess {
-                source: VideoCookieSource::None,
-                height: 480,
-            },
-        ];
-        assert_eq!(
-            choose_auto_cookie_source("https://www.bilibili.com/video/BV1/", &successes),
-            Some(VideoCookieSource::Browser(VideoCookieBrowser::Edge))
-        );
-        assert_eq!(
-            choose_auto_cookie_source("https://v.douyin.com/example/", &successes),
-            Some(VideoCookieSource::Browser(VideoCookieBrowser::Chrome))
-        );
-        assert_eq!(
-            choose_auto_cookie_source("https://www.xiaohongshu.com/explore/a", &successes),
-            Some(VideoCookieSource::Browser(VideoCookieBrowser::Chrome))
-        );
-    }
-
-    #[test]
-    fn auto_probe_uses_isolated_config_and_only_one_cookie_source() {
-        let ffmpeg = FfmpegForDownload {
-            available: true,
-            location: None,
-        };
-        let url = "https://www.bilibili.com/video/BV1/";
-        let browser = auto_probe_args(
-            url,
-            &VideoCookieSource::Browser(VideoCookieBrowser::Edge),
-            &ffmpeg,
-        )
-        .unwrap();
-        assert_eq!(browser[0], "--ignore-config");
-        assert!(browser.contains(&"--simulate".to_string()));
-        assert!(browser.contains(&"--check-formats".to_string()));
-        assert!(browser.contains(&"--no-playlist".to_string()));
-        assert!(browser.contains(&"--cookies-from-browser".to_string()));
-        assert!(!browser.contains(&"--cookies".to_string()));
-        assert!(browser.windows(2).any(|item| item == ["-f", "bv*+ba/b"]));
-
-        let manual = auto_probe_args(
-            url,
-            &VideoCookieSource::ManualFile(PathBuf::from("private.txt")),
-            &ffmpeg,
-        )
-        .unwrap();
-        assert!(manual.contains(&"--cookies".to_string()));
-        assert!(!manual.contains(&"--cookies-from-browser".to_string()));
-        assert_eq!(manual.last().map(String::as_str), Some(url));
-
-        let guest = auto_probe_args(url, &VideoCookieSource::None, &ffmpeg).unwrap();
-        assert!(!guest.contains(&"--cookies".to_string()));
-        assert!(!guest.contains(&"--cookies-from-browser".to_string()));
-        assert!(
-            guest
-                .windows(2)
-                .any(|item| item == ["-f", "bv*[height<=480]+ba/b[height<=480]/b"])
-        );
-        assert!(auto_probe_args(url, &VideoCookieSource::Auto, &ffmpeg).is_err());
-
-        let signed_site_url =
-            "https://www.xiaohongshu.com/explore/6aab4a3f000000000d02574a?xsec_token=private-token";
-        let site_probe =
-            auto_probe_args(signed_site_url, &VideoCookieSource::None, &ffmpeg).unwrap();
-        assert!(
-            site_probe
-                .windows(2)
-                .any(|item| item == ["--batch-file", "-"])
-        );
-        assert!(!site_probe.iter().any(|arg| arg.contains("private-token")));
-        let mut direct_args = Vec::new();
-        assert!(append_url_input_args(
-            &mut direct_args,
-            signed_site_url,
-            false
-        ));
-        assert_eq!(
-            direct_args,
-            vec!["--batch-file".to_string(), "-".to_string()]
-        );
-        let mut cdn_args = Vec::new();
-        assert!(append_url_input_args(
-            &mut cdn_args,
-            "https://sns-v11.rednotecdn.com/clip.mp4?sig=private-token",
-            true,
-        ));
-        assert_eq!(cdn_args, vec!["--batch-file".to_string(), "-".to_string()]);
-    }
-
-    #[test]
-    fn manual_cookie_copy_never_changes_original_and_is_removed() {
-        let dir = tempfile::tempdir().unwrap();
-        let original = dir.path().join("cookies.txt");
-        std::fs::write(
-            &original,
-            "# Netscape HTTP Cookie File\nsite\tTRUE\t/\tFALSE\t0\ta\tb\n",
-        )
-        .unwrap();
-        let original_mtime = std::fs::metadata(&original).unwrap().modified().unwrap();
-        let private = private_cookie_copy(&original).unwrap();
-        let private_path = private.to_path_buf();
-        assert_ne!(private_path, original);
-        // TempPath 存活期间也须允许 yt-dlp 进程用另一文件句柄打开。
-        use std::io::Read as _;
-        let mut second_handle = std::fs::File::open(&private_path).unwrap();
-        let mut copied = String::new();
-        second_handle.read_to_string(&mut copied).unwrap();
-        assert!(copied.contains("site\tTRUE"));
-        drop(second_handle);
-        std::fs::write(&private_path, "yt-dlp rewrote this copy").unwrap();
-        assert!(
-            std::fs::read_to_string(&original)
-                .unwrap()
-                .contains("site\tTRUE")
-        );
-        assert_eq!(
-            std::fs::metadata(&original).unwrap().modified().unwrap(),
-            original_mtime
-        );
-        drop(private);
-        assert!(!private_path.exists());
-    }
-
-    #[test]
-    fn auto_probe_height_and_failures_are_sanitized() {
-        assert_eq!(parse_probe_height(b"[Bili] extracting\n360\n"), 360);
-        assert_eq!(parse_probe_height(b"NA\n"), 0);
-        let summary = probe_error_summary(
-            "https://example.com/watch",
-            b"WARNING: retry\nERROR: HTTP 403 https://example.com/watch?token=secret\n",
-            "fallback",
-        );
-        assert!(summary.contains("[链接已隐藏]"));
-        assert!(!summary.contains("secret"));
-        let xhs_summary = probe_error_summary(
-            "http://xhslink.com/o/example",
-            b"ERROR: Unsupported URL: https://www.xiaohongshu.com/404?source=/404/sec_private-token\n",
-            "fallback",
-        );
-        assert!(xhs_summary.contains("/404/sec_"));
-        assert!(!xhs_summary.contains("private-token"));
-        let xhs_auto_message = auto_failure_message(
-            "http://xhslink.com/o/example",
-            &[format!("无 Cookies：{xhs_summary}")],
-        );
-        assert!(xhs_auto_message.contains("安全拦截页"));
-        assert!(!xhs_auto_message.contains("private-token"));
-        assert_eq!(VideoCookieSource::Auto.credential_source(), None);
-        assert_eq!(
-            VideoCookieSource::None.credential_source(),
-            Some(VideoDownloadCredentialSource::None)
-        );
-    }
-
-    #[test]
-    fn download_diagnostic_redacts_signed_urls_and_auth_headers() {
-        assert_eq!(
-            sanitize_download_diagnostic("ERROR https://example.com/a?token=secret denied"),
-            "ERROR [链接已隐藏] denied"
-        );
-        assert_eq!(
-            sanitize_download_diagnostic("Cookie: SESSDATA=secret"),
-            "[认证请求头已隐藏]"
-        );
-        assert_eq!(
-            sanitize_download_diagnostic("ERROR xsec_token=private-token denied"),
-            "ERROR [凭据已隐藏] denied"
-        );
-        assert!(original_fallback_failure(true, "原站错误".into()).contains("原站链接重试也失败"));
-    }
-
-    #[test]
-    fn douyin_browser_output_requires_exact_video_and_official_cdn() {
-        let input = "https://www.douyin.com/video/7672064275116162235";
-        let output = serde_json::json!({
-            "ok": true,
-            "videoId": "7672064275116162235",
-            "durationMs": 70636,
-            "mediaUrls": [
-                "https://v1.douyinvod.com/clip.mp4?sig=private",
-                "https://douyinvod.com.evil.example/clip.mp4",
-                "http://v2.douyinvod.com/clip.mp4",
-            ],
-        });
-        let video = parse_douyin_browser_output(input, output.to_string().as_bytes()).unwrap();
-        assert_eq!(video.video_id, "7672064275116162235");
-        assert_eq!(video.duration_ms, 70636);
-        assert_eq!(video.media_urls.len(), 1);
-        assert!(video.media_urls[0].starts_with("https://v1.douyinvod.com/"));
-        let wrong_id = serde_json::json!({
-            "ok": true,
-            "videoId": "7672064275116162236",
-            "durationMs": 70636,
-            "mediaUrls": ["https://v1.douyinvod.com/clip.mp4"],
-        });
-        assert!(parse_douyin_browser_output(input, wrong_id.to_string().as_bytes()).is_none());
-        assert_eq!(
-            VideoCookieSource::SiteSession.credential_source(),
-            Some(VideoDownloadCredentialSource::SiteSession)
-        );
-    }
-
-    #[test]
-    fn ffmpeg_duration_parser_reads_milliseconds() {
-        assert_eq!(
-            parse_video_duration_ms("Duration: 00:01:10.635, start: 0.000000"),
-            Some(70_635)
-        );
-        assert_eq!(parse_video_duration_ms("Duration: 00:00:01.5"), Some(1500));
-        assert_eq!(parse_video_duration_ms("Duration: N/A"), None);
-    }
-
-    #[test]
-    fn downloaded_site_file_must_start_with_mp4_ftyp() {
-        let file = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(file.path(), b"\0\0\0\x18ftypisom").unwrap();
-        assert!(has_mp4_ftyp(file.path()));
-        std::fs::write(file.path(), b"<html>access denied</html>").unwrap();
-        assert!(!has_mp4_ftyp(file.path()));
-    }
-
-    #[test]
-    fn cancelling_during_file_validation_keeps_cancelled_status() {
-        let dir = tempfile::tempdir().unwrap();
-        let composer = VideoCompositionService::new(
-            dir.path().join("downloads"),
-            dir.path().join("ffmpeg"),
-            dir.path().join("resources"),
-        )
-        .unwrap();
-        let service = VideoDownloadService::new(
-            dir.path().join("downloads"),
-            dir.path().join("engine"),
-            composer,
-        )
-        .unwrap();
-        let job_id = "download-test".to_string();
-        service.inner.jobs.lock().unwrap().insert(
-            job_id.clone(),
-            JobEntry {
-                record: VideoDownloadJobRecord {
-                    job_id: job_id.clone(),
-                    url: "https://www.douyin.com/video/7672064275116162235".into(),
-                    status: VideoDownloadStatus::Downloading,
-                    progress: None,
-                    final_path: None,
-                    file_name: None,
-                    credential_source: Some(VideoDownloadCredentialSource::SiteSession),
-                    probe_status: None,
-                    quality_mode: None,
-                    quality_hint: None,
-                    watermark_removed: false,
-                    error: None,
-                    created_at: now_ms(),
-                    updated_at: now_ms(),
-                },
-                cancelled: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        service.cancel_job(&job_id).unwrap();
-        service.fail_job(&job_id, "late validation failure".into());
-        service.update_record(&job_id, |record| {
-            record.status = VideoDownloadStatus::Completed
-        });
-        let record = service.get_job(&job_id).unwrap();
-        assert_eq!(record.status, VideoDownloadStatus::Cancelled);
-        assert!(record.error.is_none());
-    }
-
-    #[test]
-    fn bilibili_delogo_box_scales_by_resolution() {
-        // 1080×1920 竖屏实测基准：x=700, y=20, w=370, h=95。
-        assert_eq!(bilibili_delogo_box(1080, 1920), (700, 20, 370, 95));
-        // 横屏按比例换算，区域仍落在画面内。
-        let (x, y, w, h) = bilibili_delogo_box(1920, 1080);
-        assert!(x + w <= 1920);
-        assert!(y + h <= 1080);
-        // 极小分辨率下至少保留 1px 区域，不越界。
-        let (x, y, w, h) = bilibili_delogo_box(100, 100);
-        assert!(w >= 1 && h >= 1);
-        assert!(x + w <= 100 && y + h <= 100);
-    }
-
-    #[test]
-    fn parse_video_dimensions_reads_ffmpeg_stream_line() {
-        let sample = "\
-ffmpeg version n7.1 Copyright (c) 2000-2025 the FFmpeg developers
-  Stream #0:0[0x1](und): Video: av1 (libaom-av1) (Main) (av01 / 0x31307661), \
-yuv420p(tv, bt709), 1080x1920 [SAR 1:1 DAR 9:16], 1014 kb/s, 30 fps";
-        assert_eq!(parse_video_dimensions(sample), Some((1080, 1920)));
-        assert_eq!(
-            parse_video_dimensions("Stream #0:0: Video: h264, yuv420p, 1920x1080, 60 fps"),
-            Some((1920, 1080))
-        );
-        // 编码标签里的 0x 十六进制串不应被误当成分辨率。
-        assert_eq!(
-            parse_video_dimensions("Video: hevc (hevc / 0x31637661), 3840x2160"),
-            Some((3840, 2160))
-        );
-        // 无视频流信息 → None。
-        assert_eq!(parse_video_dimensions("no stream information here"), None);
-    }
-
-    #[test]
-    fn sibling_with_suffix_keeps_directory_and_extension() {
-        let path = Path::new(r"C:\下载\无限画布\标题 [BV1abc].mp4");
-        let clean = sibling_with_suffix(path, "（去水印）");
-        assert_eq!(
-            clean.to_string_lossy(),
-            r"C:\下载\无限画布\标题 [BV1abc]（去水印）.mp4"
-        );
-        // 无扩展名时后缀直接拼接。
-        let no_ext = Path::new(r"C:\下载\clip");
-        assert_eq!(
-            sibling_with_suffix(no_ext, "（去水印）").to_string_lossy(),
-            r"C:\下载\clip（去水印）"
-        );
-    }
-
-    /// 登录捕获的每条稳定错误串都必须有可读归因，不许落「内部异常」兜底。
-    #[test]
-    fn login_capture_failures_all_map_to_actionable_reasons() {
-        let details = [
-            "login capture browser unavailable",
-            "login capture login timeout",
-            "login capture browser closed early",
-            "login capture timed out",
-            "login capture returned no site cookies",
-            "login capture script unavailable",
-            "login capture runtime unavailable",
-            "login capture script error",
-            "login capture input rejected",
-            "login capture process failed",
-            "login capture returned invalid output",
-            "login capture unexpected state",
-            "login capture could not start",
-            "login capture process tree unavailable",
-            "login profile unavailable",
-            "login capture input too large",
-            "login capture stdin unavailable",
-            "login capture stdin failed",
-            "login capture stdin timed out",
-        ];
-        for detail in details {
-            assert_ne!(
-                login_capture_failure_reason(detail),
-                "登录流程内部异常。",
-                "{detail} 应有可读归因"
-            );
-        }
-    }
-
-    /// Explicitly exercise the service task, browser resolver, yt-dlp, and file
-    /// acceptance together against public examples. Kept ignored because it
-    /// downloads remote media and requires a local verified yt-dlp binary.
-    #[tokio::test]
-    #[ignore = "requires YT_DLP_TEST_BINARY and live public video pages"]
-    async fn official_site_fallback_live_downloads_complete_files() {
-        let binary = std::env::var("YT_DLP_TEST_BINARY").expect("set YT_DLP_TEST_BINARY");
-        let directory = tempfile::tempdir().unwrap();
-        let downloads = directory.path().join("downloads");
-        let engine = directory.path().join("engine");
-        std::fs::create_dir_all(&engine).unwrap();
-        std::fs::copy(binary, engine.join(engine_binary_file_name())).unwrap();
-        let resources = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources");
-        let composer = VideoCompositionService::new(
-            downloads.clone(),
-            directory.path().join("ffmpeg"),
-            resources.clone(),
-        )
-        .unwrap();
-        let renderer = RemotionRenderService::new(downloads.clone(), resources);
-        assert!(renderer.preflight().ready);
-        let service = VideoDownloadService::new_with_browser_runtime(
-            downloads,
-            engine,
-            composer,
-            Some(renderer),
-        )
-        .unwrap();
-        service
-            .set_cookie_browser(Some(VideoCookieBrowser::Auto))
-            .unwrap();
-        for (url, expected_source, fake_site_cookie) in [
-            (
-                "https://www.douyin.com/video/7672064275116162235",
-                VideoDownloadCredentialSource::SiteSession,
-                false,
-            ),
-            (
-                "http://xhslink.com/o/5R8D9WCH5SX",
-                VideoDownloadCredentialSource::None,
-                false,
-            ),
-            (
-                "https://www.douyin.com/video/7672064275116162235",
-                VideoDownloadCredentialSource::Manual,
-                true,
-            ),
-        ] {
-            if fake_site_cookie {
-                // Synthetic, non-authenticating cookie for an unused official
-                // subdomain: exercise imported file -> Rust scoping -> browser
-                // stdin -> yt-dlp without using any real account credential.
-                let fake = directory.path().join("public-flow-fake-cookies.txt");
-                std::fs::write(
-                    &fake,
-                    "# Netscape HTTP Cookie File\n.codex-auth-test.douyin.com\tTRUE\t/\tTRUE\t0\tpublic_flow_probe\tnot-a-login\n",
-                )
-                .unwrap();
-                service.import_cookies(&fake).unwrap();
-            }
-            let started = service.start_download(url).unwrap();
-            let mut finished = None;
-            for _ in 0..600 {
-                let record = service.get_job(&started.job_id).unwrap();
-                if record.status != VideoDownloadStatus::PreparingEngine
-                    && record.status != VideoDownloadStatus::Downloading
-                {
-                    finished = Some(record);
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-            let record = finished.expect("live download did not finish in 150 seconds");
-            assert_eq!(
-                record.status,
-                VideoDownloadStatus::Completed,
-                "{:?}",
-                record.error
-            );
-            assert_eq!(record.credential_source, Some(expected_source));
-            let path = Path::new(record.final_path.as_deref().unwrap());
-            assert!(path.is_file() && has_mp4_ftyp(path));
-        }
-    }
 }

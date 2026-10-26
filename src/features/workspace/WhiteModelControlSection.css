@@ -50,7 +50,7 @@
   color: var(--color-text-2);
 }
 
-.white-model-control .white-model-control__field :is(input, select, textarea),
+.white-model-control .white-model-control__field :is(input, textarea),
 .white-model-control .white-model-control__preview-text {
   box-sizing: border-box;
   width: 100%;
@@ -134,22 +134,9 @@
   background: var(--color-surface-3);
 }
 
-.white-model-control :is(input, select, textarea, button, summary):focus-visible {
+.white-model-control :is(input, textarea, button, summary):focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--space-3xs);
-}
-
-.white-model-control__issue {
-  margin: 0;
-  padding: var(--space-xs);
-  border-inline-start: var(--rule-active) solid var(--color-warning);
-  color: var(--color-warning);
-  background: var(--color-warning-soft);
-  overflow-wrap: anywhere;
-}
-
-.white-model-control .white-model-control__field select[aria-invalid="true"] {
-  border-color: var(--color-warning);
 }
 
 .white-model-control__preview {

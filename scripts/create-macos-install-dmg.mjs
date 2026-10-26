@@ -3,7 +3,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { chmod, copyFile, lstat, mkdtemp, readFile, rename, rm, symlink } from "node:fs/promises";
 import path from "node:path";
-import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-component-catalog.mjs";
+import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-resources.mjs";
 import { assertMacAppInventories, inventoryMacApp } from "./verify-macos-edition.mjs";
 
 const executeFile = promisify(execFile);

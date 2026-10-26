@@ -1,5 +1,5 @@
 /* 画布节点内的下拉选择（CanvasSelect）：按钮触发 + portal 菜单。
-   样式对齐工作流卡片既有控件：paper-2 底、rule-2 描边、control 圆角。 */
+   样式对齐节点卡片既有控件：paper-2 底、rule-2 描边、control 圆角。 */
 
 .canvas-select {
   display: flex;

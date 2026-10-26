@@ -1,5 +1,5 @@
 // Build provenance covers editable compilation inputs. Prepared runtime payloads
-// stay bound by the executable's catalogue/manifest pins and release verifier.
+// stay bound by the release verifier's runtime-resource inventory.
 import { lstat, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -7,7 +7,7 @@ import {
   COMPONENT_REPO_ROOT,
   componentBytesSha256,
   componentPathIsValid,
-} from "./runtime-component-catalog.mjs";
+} from "./runtime-resources.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;

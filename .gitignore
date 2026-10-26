@@ -51,12 +51,6 @@ __pycache__/
 docs/
 CONTEXT.md
 
-# Generated, bundled local animation engine (rebuilt by remotion:prepare)
-src-tauri/resources/remotion-runtime/
-tools/remotion-runtime/.remotion/
-tools/remotion-runtime/.smoke/
-tools/remotion-runtime/.build-node/
-
 # Generated, bundled FFmpeg engine (rebuilt by ffmpeg:prepare)
 src-tauri/resources/ffmpeg/
 
@@ -65,30 +59,23 @@ src-tauri/.updater-key
 src-tauri/.updater-key.pub
 .tos-updates.env
 
-# Generated Blender distribution, verified and bundled by blender:prepare
-src-tauri/resources/blender/
-
-# MediaPipe pose runtime + model for the white-model motion capture (rebuilt by pose:prepare)
-public/pose/
-src-tauri/resources/pose-runtime/
-src-tauri/resources/.pose-*/
-src-tauri/resources/component-catalog.json
-
-# Optional, verified local AI inference pack (rebuilt by ai-media:prepare)
-.cache/ai-media/
-src-tauri/resources/.ai-media-*/
-src-tauri/resources/ai-media-runtime/
-src-tauri/resources/ai-media-quality-runtime/
 # 一次性排查与格式化中间产物，任何提交都不应包含
 .tmp/
+# 移除测试资产期间的临时排查脚本与测试补丁留档：都是一次性中间产物，
+# 留在仓库根会被 `git add -A` 扫回来。
+/.tmp-app-test.diff
+/check-eol.mjs
+# 已下线工作流的 skill 包曾落在仓库根目录（未跟踪、未 ignore），
+# `git add -A` 会把它们扫回仓库。根目录的 skills/ 不是 skill 包该放的位置
+# （正式位置是 src-tauri/skills/），一律忽略。
+/skills/
 # Qoder Canvas 会话余量产物：每次会话都会重排 report.json 与新的 .canvas.tsx，
 # 且不在 tsconfig 内（此前只能靠 eslint/prettier 各自的忽略规则绕过）。
 .qoder-credits/
 
 # 误落在仓库根的生成产物副本：真身在下面这些已忽略的位置，根目录这几份只是本地
-# 打包/构建留下的重复文件（catalog 与 src-tauri/resources/ 版逐字节一致）。
+# 打包/构建留下的重复文件（与 src-tauri/resources/ 版逐字节一致）。
 # 忽略它们是为了让 git status 保持干净，而不是承认它们是源码。
-/component-catalog.json
 /ffmpeg/
 /infinite-canvas.exe
 /uninstall.exe

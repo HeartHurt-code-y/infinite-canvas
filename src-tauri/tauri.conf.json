@@ -4,9 +4,9 @@
   "version": "0.2.8",
   "identifier": "com.infinitecanvas.desktop",
   "build": {
-    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm pose:prepare && pnpm dev",
+    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm pose:prepare && pnpm ai-media:prepare && pnpm ai-media:prepare:quality && pnpm build",
+    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -29,13 +29,7 @@
     "publisher": "infinitecanvas",
     "copyright": "Copyright © 2026 infinitecanvas",
     "resources": {
-      "resources/remotion-runtime/": "remotion-runtime/",
-      "resources/ffmpeg/": "ffmpeg/",
-      "resources/blender/": "blender/",
-      "resources/pose-runtime/": "pose-runtime/",
-      "skills/anime-drama-v23/": "skills/anime-drama-v23/",
-      "skills/music-video-workflow/": "skills/music-video-workflow/",
-      "skills/gpt-image-2-style-library/": "skills/gpt-image-2-style-library/"
+      "resources/ffmpeg/": "ffmpeg/"
     },
     "windows": {
       "nsis": {

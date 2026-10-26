@@ -1,23 +1,15 @@
 // Read-only verification of the native edition hand-off. No credentials or network are used.
 import { lstat, readFile, readdir } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertComponentRoot,
-  COMPONENT_CATALOG_RESOURCE,
-  COMPONENT_FEATURES,
   COMPONENT_PLATFORM,
   COMPONENT_REPO_ROOT,
   componentFileSha256,
-  componentBytesSha256,
   componentPathIsValid,
-  componentSymlinkTargetIsValid,
   inventoryComponentFiles,
-  RUNTIME_COMPONENTS,
-  runtimeComponentArchiveUrl,
-} from "./runtime-component-catalog.mjs";
+} from "./runtime-resources.mjs";
 import {
   assertWindowsInstallerProductVersion,
   readWindowsInstallerProductVersion,
@@ -36,9 +28,6 @@ import {
 const SHA256 = /^[a-f0-9]{64}$/;
 const VERSION = /^\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/;
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
-const COMPILED_PINS_PREFIX = "IC_COMPONENT_CATALOG_PINS_V1 ";
-const executeFile = promisify(execFile);
-const OFFLINE_ARCHIVE_IDS = ["ai-media-runtime", "ai-media-quality-runtime"];
 
 function requireValue(condition, message) {
   if (!condition) throw new Error(message);
@@ -68,176 +57,6 @@ async function readJson(filename, root) {
   return JSON.parse(await readFile(filename, "utf8"));
 }
 
-export function parseCompiledEditionPinsOutput(output) {
-  requireValue(
-    typeof output === "string" && Buffer.byteLength(output) <= 64 * 1024,
-    "Invalid compiled edition pins output",
-  );
-  const records = output.split(/\r?\n/).filter((line) => line.startsWith(COMPILED_PINS_PREFIX));
-  requireValue(
-    records.length === 1,
-    "Executable must emit exactly one IC_COMPONENT_CATALOG_PINS_V1 record",
-  );
-  return JSON.parse(records[0].slice(COMPILED_PINS_PREFIX.length));
-}
-
-export async function readWindowsCompiledEditionPins(filename) {
-  const { stdout } = await executeFile(filename, ["--print-component-catalog-pins"], {
-    encoding: "utf8",
-    windowsHide: true,
-    timeout: 15_000,
-    maxBuffer: 64 * 1024,
-  });
-  return parseCompiledEditionPinsOutput(stdout);
-}
-
-export function assertCompiledEditionPins(
-  pins,
-  { catalog, catalogSha256, edition, applicationVersion },
-) {
-  exactKeys(
-    pins,
-    ["schemaVersion", "applicationVersion", "edition", "catalogSha256", "manifestPins"],
-    "Compiled edition pins",
-  );
-  requireValue(
-    pins.schemaVersion === 1 &&
-      pins.applicationVersion === applicationVersion &&
-      pins.edition === edition &&
-      pins.catalogSha256 === catalogSha256,
-    "Executable edition/version/catalog SHA does not match this distribution",
-  );
-  exactKeys(
-    pins.manifestPins,
-    RUNTIME_COMPONENTS.map(({ id }) => id),
-    "Compiled manifest pins",
-  );
-  for (const component of catalog.components)
-    requireValue(
-      SHA256.test(pins.manifestPins[component.id]) &&
-        pins.manifestPins[component.id] === component.manifestSha256,
-      `Executable manifest pin is stale or mismatched: ${component.id}`,
-    );
-}
-
-export function assertEditionCatalog(catalog, applicationVersion, platform = COMPONENT_PLATFORM) {
-  exactKeys(
-    catalog,
-    ["schemaVersion", "applicationVersion", "platform", "components", "features"],
-    "Component catalog",
-  );
-  requireValue(
-    catalog.schemaVersion === 1 &&
-      catalog.applicationVersion === applicationVersion &&
-      catalog.platform === platform,
-    "Component catalog identity does not match this release",
-  );
-  requireValue(
-    Array.isArray(catalog.components) && catalog.components.length === RUNTIME_COMPONENTS.length,
-    "Component catalog must contain exactly seven components",
-  );
-  const ids = new Set();
-  for (const component of catalog.components) {
-    exactKeys(
-      component,
-      [
-        "id",
-        "title",
-        "description",
-        "version",
-        "manifestPath",
-        "manifestSha256",
-        "bundlePath",
-        "dependencies",
-        "files",
-        "archive",
-      ],
-      "Catalog component",
-    );
-    const definition = RUNTIME_COMPONENTS.find(({ id }) => id === component.id);
-    requireValue(definition && !ids.has(component.id), "Unknown or duplicate component identity");
-    ids.add(component.id);
-    requireValue(
-      component.title === definition.title &&
-        component.description === definition.description &&
-        typeof component.version === "string" &&
-        component.version.length > 0 &&
-        component.manifestPath === definition.manifestPath &&
-        component.bundlePath === definition.bundlePath &&
-        sameArray(component.dependencies, definition.dependencies) &&
-        SHA256.test(component.manifestSha256),
-      `Component metadata/dependencies do not match the distribution contract: ${component.id}`,
-    );
-    requireValue(
-      Array.isArray(component.files) &&
-        component.files.length > 0 &&
-        component.files.length <= 100_000,
-      `Invalid component inventory count: ${component.id}`,
-    );
-    const paths = new Set();
-    let payloadBytes = 0;
-    for (const entry of component.files) {
-      exactKeys(
-        entry,
-        entry.type === "symlink"
-          ? ["path", "size", "sha256", "mode", "type", "target"]
-          : entry.mode === undefined
-            ? ["path", "size", "sha256"]
-            : ["path", "size", "sha256", "mode"],
-        "Catalog file",
-      );
-      requireValue(
-        componentPathIsValid(entry.path) &&
-          entry.path !== ".complete.json" &&
-          !paths.has(entry.path.toLowerCase()) &&
-          Number.isSafeInteger(entry.size) &&
-          entry.size >= 0 &&
-          SHA256.test(entry.sha256) &&
-          (entry.type === "symlink"
-            ? platform.startsWith("darwin-") &&
-              componentSymlinkTargetIsValid(entry.path, entry.target) &&
-              entry.size === Buffer.byteLength(entry.target) &&
-              entry.sha256 === componentBytesSha256(Buffer.from(entry.target)) &&
-              entry.mode === 0o755
-            : entry.mode === undefined ||
-              (platform.startsWith("darwin-")
-                ? Number.isInteger(entry.mode) && entry.mode >= 0 && entry.mode <= 0o777
-                : entry.mode === 0o644 || entry.mode === 0o755)),
-        `Invalid or duplicate component file: ${component.id}/${entry.path}`,
-      );
-      paths.add(entry.path.toLowerCase());
-      payloadBytes += entry.size;
-    }
-    requireValue(
-      Number.isSafeInteger(payloadBytes) && payloadBytes <= 16 * 1024 ** 3,
-      `Component uncompressed size exceeds budget: ${component.id}`,
-    );
-    requireValue(
-      component.files.find(({ path: entryPath }) => entryPath === component.manifestPath)
-        ?.sha256 === component.manifestSha256 &&
-        !component.files.find(({ path: entryPath }) => entryPath === component.manifestPath)?.type,
-      `Component manifest is not pinned in its exact inventory: ${component.id}`,
-    );
-    exactKeys(component.archive, ["format", "url", "size", "sha256"], "Component archive");
-    requireValue(
-      component.archive.format === "zip" &&
-        SHA256.test(component.archive.sha256) &&
-        Number.isSafeInteger(component.archive.size) &&
-        component.archive.size > 0 &&
-        component.archive.size <= 8 * 1024 ** 3 &&
-        component.archive.url ===
-          runtimeComponentArchiveUrl(component.id, component.archive.sha256, {
-            platform,
-          }),
-      `Component archive does not use its trusted content-addressed URL: ${component.id}`,
-    );
-  }
-  requireValue(
-    sameArray(catalog.features, COMPONENT_FEATURES),
-    "Feature dependencies do not match the distribution contract",
-  );
-}
-
 async function listRegularFiles(directory, root, prefix = "") {
   const files = [];
   for (const name of (await readdir(directory)).sort()) {
@@ -256,15 +75,31 @@ async function listRegularFiles(directory, root, prefix = "") {
   return files;
 }
 
-async function verifyResourceTable(root, edition, catalog) {
-  const config = await readJson(path.join(root, `src-tauri/tauri.${edition}.conf.json`), root);
+async function assertPreparedRuntimeResources(root, mapped) {
+  const resourcesRoot = path.join(root, "src-tauri", "resources");
+  let prepared = [];
+  try {
+    prepared = (await readdir(resourcesRoot, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => `resources/${entry.name}/`)
+      .sort();
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  requireValue(
+    sameArray([...mapped].sort(), prepared),
+    "Edition resource map does not match the prepared runtime resources",
+  );
+}
+
+/**
+ * The edition resource map only ships prepared runtime resource directories.
+ * The installer must embed exactly those files: no missing payload, no extra.
+ */
+async function editionRuntimeResourceFiles(root, config, platform = process.platform) {
   const expected = [];
+  const mapped = [];
   for (const [source, destination] of Object.entries(config.bundle.resources)) {
-    if (source === "resources/component-catalog.json") {
-      requireValue(destination === "component-catalog.json", "Catalog resource mapping changed");
-      expected.push(destination);
-      continue;
-    }
     requireValue(
       componentPathIsValid(source.replace(/\/$/, "")) &&
         componentPathIsValid(destination.replace(/\/$/, "")) &&
@@ -272,42 +107,27 @@ async function verifyResourceTable(root, edition, catalog) {
         destination.endsWith("/"),
       "Unsafe edition resource mapping",
     );
-    const component = catalog.components.find(({ bundlePath }) => `${bundlePath}/` === destination);
-    if (component) {
-      const definition = RUNTIME_COMPONENTS.find(({ id }) => id === component.id);
-      requireValue(
-        `${definition.sourcePath.replace(/^src-tauri\//, "")}/` === source,
-        "Edition component source mapping changed",
-      );
-      expected.push(...component.files.map((entry) => `${destination}${entry.path}`));
-    } else {
-      requireValue(
-        source === destination &&
-          ["skills/anime-drama-v23/", "skills/music-video-workflow/"].includes(source),
-        `Unexpected edition resource mapping: ${source}`,
-      );
-      const files = await inventoryComponentFiles(path.join(root, "src-tauri", source), {
-        workspaceRoot: root,
-      });
-      expected.push(...files.map((entry) => `${destination}${entry.path}`));
-    }
+    requireValue(
+      source.startsWith("resources/"),
+      `Edition resource mapping must ship a prepared runtime resource: ${source}`,
+    );
+    mapped.push(source);
   }
-  const required =
-    edition === "online"
-      ? ["ffmpeg"]
-      : RUNTIME_COMPONENTS.map(({ id }) => id).filter((id) => !OFFLINE_ARCHIVE_IDS.includes(id));
-  requireValue(
-    sameArray(
-      catalog.components
-        .filter(({ bundlePath }) =>
-          Object.values(config.bundle.resources).includes(`${bundlePath}/`),
-        )
-        .map(({ id }) => id)
-        .sort(),
-      [...required].sort(),
-    ) && Object.keys(config.bundle.resources).length === required.length + 3,
-    "Edition resource map includes missing or unexpected components",
-  );
+  await assertPreparedRuntimeResources(root, mapped);
+  for (const [source, destination] of Object.entries(config.bundle.resources)) {
+    const files = await inventoryComponentFiles(path.join(root, "src-tauri", source), {
+      workspaceRoot: root,
+      platform,
+    });
+    requireValue(files.length > 0, `Edition runtime resource is empty: ${source}`);
+    expected.push(...files.map((entry) => `${destination}${entry.path}`));
+  }
+  return expected;
+}
+
+async function verifyResourceTable(root, edition, { version, platform }) {
+  const config = await readJson(path.join(root, `src-tauri/tauri.${edition}.conf.json`), root);
+  const expected = await editionRuntimeResourceFiles(root, config);
   const targetDirectory = path.join(root, ".cache/tauri-editions", edition, "target");
   const candidates = ["", "x86_64-pc-windows-msvc", "x86_64-pc-windows-gnu"].map((target) =>
     path.join(targetDirectory, target, "release/nsis/x64/installer.nsi"),
@@ -347,9 +167,9 @@ async function verifyResourceTable(root, edition, catalog) {
   );
   requireValue(
     targetMarker.schemaVersion === 1 &&
-      targetMarker.applicationVersion === catalog.applicationVersion &&
+      targetMarker.applicationVersion === version &&
       targetMarker.edition === edition &&
-      targetMarker.platform === catalog.platform,
+      targetMarker.platform === platform,
     "Raw edition target marker does not match this distribution",
   );
   return { count, config, executablePath };
@@ -377,96 +197,21 @@ function verifyOnlineFeed(
   );
 }
 
-export function assertOfflineSuiteReceipt(
-  receipt,
-  { catalog, catalogSha256, artifacts, applicationVersion },
+async function verifyMacEditionResources(
+  root,
+  edition,
+  tauriConfig,
+  verifyMacApp,
+  { version, platform },
 ) {
-  exactKeys(
-    receipt,
-    ["schemaVersion", "applicationVersion", "edition", "platform", "catalogSha256", "components"],
-    "Offline component receipt",
-  );
-  requireValue(
-    receipt.schemaVersion === 1 &&
-      receipt.applicationVersion === applicationVersion &&
-      receipt.edition === "offline" &&
-      receipt.platform === catalog.platform &&
-      receipt.catalogSha256 === catalogSha256,
-    "Offline receipt catalog/version identity mismatch",
-  );
-  const zips = artifacts.filter(({ path: filename }) => filename.endsWith(".zip"));
-  requireValue(
-    zips.length === 2 && Array.isArray(receipt.components) && receipt.components.length === 2,
-    "Offline suite must include exactly the two AI component archives",
-  );
-  for (const [index, id] of OFFLINE_ARCHIVE_IDS.entries()) {
-    const expected = catalog.components.find((component) => component.id === id);
-    const entry = receipt.components[index];
-    exactKeys(
-      entry,
-      ["id", "path", "size", "sha256", "manifestPath", "manifestSha256", "nativeManifestBase64"],
-      "Offline component receipt entry",
-    );
-    const expectedPath = `components/${id}-${expected.archive.sha256}.zip`;
-    const artifact = zips.find(({ path: filename }) => filename === expectedPath);
-    requireValue(
-      artifact &&
-        artifact.size === expected.archive.size &&
-        artifact.sha256 === expected.archive.sha256 &&
-        entry.id === id &&
-        entry.path === expectedPath &&
-        entry.size === expected.archive.size &&
-        entry.sha256 === expected.archive.sha256 &&
-        entry.manifestPath === expected.manifestPath &&
-        entry.manifestSha256 === expected.manifestSha256,
-      `Offline archive identity does not match the compiled catalog: ${id}`,
-    );
-    requireValue(
-      typeof entry.nativeManifestBase64 === "string" &&
-        entry.nativeManifestBase64.length > 0 &&
-        entry.nativeManifestBase64.length <= 4 * 1024 * 1024,
-      `Offline native manifest encoding is invalid: ${id}`,
-    );
-    const nativeBytes = Buffer.from(entry.nativeManifestBase64, "base64");
-    requireValue(
-      nativeBytes.toString("base64") === entry.nativeManifestBase64 &&
-        componentBytesSha256(nativeBytes) === expected.manifestSha256 &&
-        nativeBytes.length ===
-          expected.files.find((file) => file.path === expected.manifestPath)?.size,
-      `Offline native manifest hash/encoding mismatch: ${id}`,
-    );
-    const native = JSON.parse(nativeBytes);
-    requireValue(
-      native.schemaVersion === 1 &&
-        native.component === id &&
-        native.inventory?.path === "files-manifest.json" &&
-        native.inventory.sha256 ===
-          expected.files.find((file) => file.path === "files-manifest.json")?.sha256 &&
-        Number.isSafeInteger(native.inventory.count) &&
-        native.inventory.count === expected.files.length - 2,
-      `Offline native manifest inventory does not match the compiled catalog: ${id}`,
-    );
-  }
-}
-
-async function verifyMacEditionResources(root, edition, catalog, tauriConfig, verifyMacApp) {
   requireValue(
     edition === "online",
-    "macOS component editions currently support only online builds",
+    "macOS resource editions currently support only online builds",
   );
   const config = await readJson(path.join(root, "src-tauri/tauri.online.conf.json"), root);
   const expected = [];
+  const mapped = [];
   for (const [source, destination] of Object.entries(config.bundle.resources)) {
-    if (source === "resources/component-catalog.json") {
-      requireValue(destination === "component-catalog.json", "Catalog resource mapping changed");
-      const filename = path.join(root, COMPONENT_CATALOG_RESOURCE);
-      expected.push({
-        path: destination,
-        size: (await regularFile(filename, root)).size,
-        sha256: await componentFileSha256(filename),
-      });
-      continue;
-    }
     requireValue(
       source.endsWith("/") &&
         destination.endsWith("/") &&
@@ -474,31 +219,21 @@ async function verifyMacEditionResources(root, edition, catalog, tauriConfig, ve
         componentPathIsValid(destination.slice(0, -1)),
       "Unsafe macOS edition resource mapping",
     );
-    const component = catalog.components.find(({ bundlePath }) => `${bundlePath}/` === destination);
-    if (component) {
-      requireValue(
-        component.id === "ffmpeg" && source === "resources/ffmpeg/",
-        "macOS online edition embeds an unexpected component",
-      );
-      expected.push(
-        ...component.files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })),
-      );
-    } else {
-      requireValue(
-        source === destination &&
-          ["skills/anime-drama-v23/", "skills/music-video-workflow/"].includes(source),
-        `Unexpected macOS edition resource mapping: ${source}`,
-      );
-      const files = await inventoryComponentFiles(path.join(root, "src-tauri", source), {
-        workspaceRoot: root,
-      });
-      expected.push(...files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })));
-    }
+    mapped.push(source);
+  }
+  await assertPreparedRuntimeResources(root, mapped);
+  for (const [source, destination] of Object.entries(config.bundle.resources)) {
+    const files = await inventoryComponentFiles(path.join(root, "src-tauri", source), {
+      workspaceRoot: root,
+      platform: "darwin",
+    });
+    requireValue(files.length > 0, `macOS edition runtime resource is empty: ${source}`);
+    expected.push(...files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })));
   }
   requireValue(
-    Object.keys(config.bundle.resources).length === 4 &&
+    Object.keys(config.bundle.resources).length === 1 &&
       expected.some(({ path: filename }) => filename.startsWith("ffmpeg/")),
-    "macOS online resource map must contain FFmpeg, two workflow documents and the catalog",
+    "macOS online resource map must contain the bundled FFmpeg runtime",
   );
   const icons = tauriConfig.bundle?.icon?.filter((filename) => filename.endsWith(".icns")) ?? [];
   requireValue(
@@ -524,8 +259,7 @@ async function verifyMacEditionResources(root, edition, catalog, tauriConfig, ve
     sha256: await componentFileSha256(unlock),
   });
   const targetDirectory = path.join(root, ".cache/tauri-editions", edition, "target");
-  const triple =
-    catalog.platform === "darwin-aarch64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const triple = platform === "darwin-aarch64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
   const candidates = ["", triple].map((target) =>
     path.join(targetDirectory, target, "release/bundle/macos", `${tauriConfig.productName}.app`),
   );
@@ -548,14 +282,14 @@ async function verifyMacEditionResources(root, edition, catalog, tauriConfig, ve
   );
   requireValue(
     targetMarker.schemaVersion === 1 &&
-      targetMarker.applicationVersion === catalog.applicationVersion &&
+      targetMarker.applicationVersion === version &&
       targetMarker.edition === edition &&
-      targetMarker.platform === catalog.platform,
+      targetMarker.platform === platform,
     "Raw edition target marker does not match this distribution",
   );
   const native = await verifyMacApp(apps[0], {
-    applicationVersion: catalog.applicationVersion,
-    platform: catalog.platform,
+    applicationVersion: version,
+    platform,
     identifier: tauriConfig.identifier,
     expectedResources: expected,
   });
@@ -577,7 +311,6 @@ export async function verifyEditionRelease({
   platform = COMPONENT_PLATFORM,
   readProductVersion = readWindowsInstallerProductVersion,
   verifySignature = verifyUpdaterSignature,
-  readCompiledPins = readWindowsCompiledEditionPins,
   verifyMacApp = verifyMacNativeApp,
   verifyMacDmg = verifyMacDmgApplication,
   verifyMacPackage = async (...args) =>
@@ -610,23 +343,15 @@ export async function verifyEditionRelease({
   const marker = await readJson(path.join(directory, "distribution.json"), root);
   exactKeys(
     marker,
-    ["schemaVersion", "applicationVersion", "edition", "platform", "catalogSha256", "artifacts"],
+    ["schemaVersion", "applicationVersion", "edition", "platform", "artifacts"],
     "Distribution marker",
   );
   requireValue(
     marker.schemaVersion === 1 &&
       marker.applicationVersion === version &&
       marker.edition === edition &&
-      marker.platform === platform &&
-      SHA256.test(marker.catalogSha256),
+      marker.platform === platform,
     "Distribution marker does not match its edition/version directory",
-  );
-  const catalogPath = path.join(root, COMPONENT_CATALOG_RESOURCE);
-  const catalog = await readJson(catalogPath, root);
-  assertEditionCatalog(catalog, version, platform);
-  requireValue(
-    (await componentFileSha256(catalogPath)) === marker.catalogSha256,
-    "Distribution catalog hash is stale or mismatched",
   );
   requireValue(
     Array.isArray(marker.artifacts) && marker.artifacts.length > 0 && marker.artifacts.length <= 16,
@@ -641,8 +366,7 @@ export async function verifyEditionRelease({
           ? edition === "online" &&
             (/\.(dmg|pkg|app\.tar\.gz)(?:\.sig)?$/.test(artifact.path) ||
               artifact.path === "helper/install-macos.sh")
-          : /\.(exe|msi)(?:\.sig)?$/i.test(artifact.path) ||
-            (edition === "offline" && artifact.path.endsWith(".zip"))) &&
+          : /\.(exe|msi)(?:\.sig)?$/i.test(artifact.path)) &&
         !artifactPaths.has(artifact.path.toLowerCase()) &&
         Number.isSafeInteger(artifact.size) &&
         artifact.size > 0 &&
@@ -660,7 +384,7 @@ export async function verifyEditionRelease({
   const metadataFiles =
     edition === "online"
       ? ["distribution.json", "latest.json", "publish-manifest.json"]
-      : ["distribution.json", "offline-components.json"];
+      : ["distribution.json"];
   const sourceRecordPath = path.join(directory, "build-source.json");
   let hasSourceRecord = false;
   try {
@@ -715,8 +439,11 @@ export async function verifyEditionRelease({
     : await readProductVersion(path.join(directory, installer.path));
   if (!isMac) assertWindowsInstallerProductVersion(productVersion, version);
   const nativeResources = isMac
-    ? await verifyMacEditionResources(root, edition, catalog, tauriConfig, verifyMacApp)
-    : await verifyResourceTable(root, edition, catalog);
+    ? await verifyMacEditionResources(root, edition, tauriConfig, verifyMacApp, {
+        version,
+        platform,
+      })
+    : await verifyResourceTable(root, edition, { version, platform });
   const { config: editionConfig, executablePath } = nativeResources;
   let macDmg = null;
   let macPackage = null;
@@ -788,28 +515,10 @@ export async function verifyEditionRelease({
       ...packageVerification,
     };
   }
-  const compiledPins = await readCompiledPins(executablePath);
-  assertCompiledEditionPins(compiledPins, {
-    catalog,
-    catalogSha256: marker.catalogSha256,
-    edition,
-    applicationVersion: version,
-  });
-  if (edition === "offline")
-    assertOfflineSuiteReceipt(
-      await readJson(path.join(directory, "offline-components.json"), root),
-      {
-        catalog,
-        catalogSha256: marker.catalogSha256,
-        artifacts: marker.artifacts,
-        applicationVersion: version,
-      },
-    );
   const executable = {
     path: path.relative(root, executablePath).replaceAll(path.sep, "/"),
     size: (await regularFile(executablePath, root)).size,
     sha256: await componentFileSha256(executablePath),
-    compiledPinsVerified: true,
   };
   const sourceFreshness = hasSourceRecord
     ? await assertEditionBuildSourceFreshness(await readJson(sourceRecordPath, root), {
@@ -832,21 +541,6 @@ export async function verifyEditionRelease({
     ),
     "Edition updater endpoint does not match its independent channel",
   );
-  let archiveBytes = 0;
-  for (const component of catalog.components) {
-    const filename = path.join(
-      root,
-      ".cache/runtime-components/packages",
-      `${component.archive.sha256}.zip`,
-    );
-    const info = await regularFile(filename, root);
-    requireValue(
-      info.size === component.archive.size &&
-        (await componentFileSha256(filename)) === component.archive.sha256,
-      `Component archive hash/size mismatch: ${component.id}`,
-    );
-    archiveBytes += info.size;
-  }
   if (edition === "online") {
     const signature = (
       await readFile(path.join(directory, `${installer.path}.sig`), "utf8")
@@ -867,10 +561,8 @@ export async function verifyEditionRelease({
         "applicationVersion",
         "platform",
         "channel",
-        "catalogSha256",
         "feed",
         "artifacts",
-        "componentArchives",
       ],
       "Publish manifest",
     );
@@ -879,8 +571,7 @@ export async function verifyEditionRelease({
         publish.edition === edition &&
         publish.applicationVersion === version &&
         publish.platform === platform &&
-        publish.channel === channel &&
-        publish.catalogSha256 === marker.catalogSha256,
+        publish.channel === channel,
       "Publish manifest identity does not match the edition",
     );
     exactKeys(publish.feed, ["localPath", "objectKey", "url"], "Publish feed");
@@ -915,30 +606,6 @@ export async function verifyEditionRelease({
         "Publish artifact identity/path/channel mismatch",
       );
     }
-    requireValue(
-      Array.isArray(publish.componentArchives) &&
-        publish.componentArchives.length === catalog.components.length,
-      "Publish component archive count mismatch",
-    );
-    for (const [index, archive] of publish.componentArchives.entries()) {
-      exactKeys(
-        archive,
-        ["id", "localPath", "format", "url", "size", "sha256"],
-        "Publish component archive",
-      );
-      const expected = catalog.components[index];
-      requireValue(
-        archive.id === expected.id &&
-          archive.localPath ===
-            path.join(
-              root,
-              ".cache/runtime-components/packages",
-              `${expected.archive.sha256}.zip`,
-            ) &&
-          Object.entries(expected.archive).every(([key, value]) => archive[key] === value),
-        "Publish component archive does not match trusted catalog/cache identity",
-      );
-    }
   }
   return {
     schemaVersion: 1,
@@ -947,7 +614,6 @@ export async function verifyEditionRelease({
     applicationVersion: version,
     platform,
     channel,
-    catalogSha256: marker.catalogSha256,
     ...sourceFreshness,
     executable,
     installer: {
@@ -971,11 +637,7 @@ export async function verifyEditionRelease({
           },
         }
       : { nsisResourceCount: nativeResources.count }),
-    componentArchiveCount: catalog.components.length,
-    componentArchiveBytes: archiveBytes,
     publishManifestVerified: edition === "online",
-    offlineSuiteVerified: edition === "offline",
-    offlineArchiveCount: edition === "offline" ? OFFLINE_ARCHIVE_IDS.length : 0,
   };
 }
 

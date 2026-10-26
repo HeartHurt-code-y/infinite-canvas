@@ -4,6 +4,12 @@
  * 只识别火山 TOS 的 `X-Tos-Date` + `X-Tos-Expires`（秒为单位的有效期）；
  * 无法识别的地址返回 `false`（按未过期处理），交给原有自愈路径，
  * 不用猜测其他供应商的签名语义。
+ *
+ * 用途：画布素材节点在**渲染前**先问一次「这个地址是不是已经过期」——
+ * 过期就直接走既有的续签接口（`refreshAssetItemMediaUrl`），
+ * 不让界面先坏成「预览不可用」再靠 onError 自愈。
+ * 调用点在 `features/workspace/MediaNodeViews.tsx`，
+ * 经 `features/workspace/localAssetMedia.ts` 再导出（该模块本来就管素材预览地址）。
  */
 export function signedUrlExpired(url: string | null | undefined, now = Date.now()): boolean {
   if (url == null || url === "") return false;

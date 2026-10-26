@@ -87,11 +87,37 @@ export function appendStyledText<T extends object>(
   items: T[],
   text: string,
   style: PromptTextStyle = {},
+  options?: { readonly mergeWithinBlock?: boolean },
 ): void {
-  if (!text) return;
+  /*
+   * 空文本只有水平线需要保留：canonical 用 { text: "", block: "hr" } 表示分割线
+   * （见 promptTiptap 的 horizontalRule 分支）。空串一律丢弃会让历史文档里的
+   * 分割线在解码后直接消失——而分割线是内容，不是装饰。
+   */
+  if (!text && style.block !== "hr") return;
   const previous = items.at(-1) as ({ kind: "text"; text: string } & PromptTextStyle) | undefined;
-  if (previous?.kind === "text" && samePromptTextStyle(previous, style)) {
-    items[items.length - 1] = { ...previous, text: previous.text + text } as T;
+  /*
+   * 两种合并语义，必须分开：
+   *
+   * 1. 跨条目合并（默认）：canonical 里标题、列表项、引用、代码块各自独立成条。
+   *    若把相邻同 block 的条目合并，两个相邻列表项会被焊成一条——反向转换每条
+   *    只生成一个 listItem，两个列表项于是塌成一个；同级标题并成一段；
+   *    有序列表的编号计数（orderedCounter）少算一项。
+   *    普通段落相反：canonical 用条目内的 \n 表达段落分隔，跨条目合并才是对的。
+   *
+   * 2. 块内合并（mergeWithinBlock）：同一个块（一个列表项 / 一个引用 / 一个标题）
+   *    内部的多个行内片段与软换行必须并成**同一条**。块内片段与「相邻两个块」
+   *    在样式上完全一样（同样 block、同样 marks），只能靠调用上下文区分——
+   *    块内构造用的是该块专属的 sink，跨条目重建用的是扁平数组。
+   *    不区分就会把「列表项里按 Shift+Enter」拆成多条，反向转换时一个列表项
+   *    裂成三个（其中一个只含一个换行），存盘后结构永久损坏。
+   */
+  const mergeable =
+    style.block == null
+      ? previous?.kind === "text" && previous.block == null
+      : options?.mergeWithinBlock === true && previous?.kind === "text";
+  if (mergeable && samePromptTextStyle(previous!, style)) {
+    items[items.length - 1] = { ...previous, text: previous!.text + text } as T;
     return;
   }
   items.push({ ...style, kind: "text", text } as T);

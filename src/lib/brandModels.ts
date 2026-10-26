@@ -197,7 +197,7 @@ export function parseBrandModelSelection(value: unknown): BrandModelSelection {
 }
 
 /** Create a detached identity snapshot. A newer approval never silently
- * changes a workflow already bound to this version. */
+ * changes a project already bound to this version. */
 export function selectBrandModelVersion(
   profile: BrandModelProfile,
   version: BrandModelVersion,

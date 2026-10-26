@@ -152,6 +152,21 @@
     sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
+  /*
+   * 即梦创作台的字体栈（2026-10-22 活体实测）。
+   *
+   * 即梦**不是**用通用无衬线：正文是 CapCut Sans（字节自研），中文回落到
+   * 苹方/雅黑；工具条按钮与下拉里的**数值**用 Montserrat 打头（拉丁数字
+   * 宽度更匀，和即梦截图里的数字观感一致）。
+   *
+   * 创作台整页用这两条；画布工作台仍用 --font-body / --font-display。
+   */
+  --font-jimeng:
+    "CapCut Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial, sans-serif;
+  --font-jimeng-montserrat:
+    Montserrat, "CapCut Sans", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Arial,
+    sans-serif;
+
   /* ── 间距：4pt 主节奏 ────────────────────────────────────────────── */
   --space-3xs: 0.125rem;
   --space-2xs: 0.25rem;
@@ -209,18 +224,31 @@
   --z-raised: 10;
   --z-dropdown: 100;
   --z-sticky: 200;
+  /* 资产库抽屉：高于粘性浮坞，低于模态。 */
+  --z-drawer: 300;
   --z-modal: 400;
   --z-toast: 500;
   --z-tooltip: 600;
 
   /* ── 尺寸 ───────────────────────────────────────────────────────── */
   --size-header: 4.25rem;
+  --size-studio-header: 3.5rem;
+  --size-studio-dock-clearance: 5.5rem;
+  --size-storyboard-list: 21rem;
+  --size-storyboard-detail: 60rem;
+  --size-storyboard-preview-min: 10rem;
+  --size-storyboard-preview-max: 24rem;
+  --size-storyboard-short-preview: 14rem;
+  --size-storyboard-candidate: 14rem;
+  --size-storyboard-asset: 9rem;
+  --size-storyboard-document: 20rem;
+  --size-storyboard-narrow-list: 18rem;
   --size-nodes: 13rem;
   --size-assets: 18.5rem;
   --size-control-small: 2rem;
   --size-brand: 2rem;
   --size-menu: 18.5rem;
-  --size-workflow-menu: 40rem;
+  --size-tool-dialog: 40rem;
   --size-empty-art: 6rem;
   --size-empty-composition: 8rem;
   --size-empty-layout: 32rem;
@@ -229,6 +257,127 @@
   --size-control-touch: 3rem;
   --size-canvas-bottom-clearance: 12rem;
   --size-zoom-collapsed-offset: 4rem;
+  /*
+   * ── 创作台浮坞：即梦式输入坞 ───────────────────────────────────────
+   * 这组值来自即梦创作页的实测计算样式（深色面上的一层「几乎看不见」的
+   * 内描边 + 上下微渐变）。它们是创作台自己的表面语言，不进全局表面阶梯：
+   * 浮坞是浮在内容之上的独立表面，边界要更轻。
+   */
+  --color-dock-outline: rgb(255 255 255 / 0.04);
+  --color-dock-surface-start: rgb(26 26 26 / 0.72);
+  --color-dock-surface-end: rgb(42 42 42 / 0.72);
+  --color-dock-tile: rgb(255 255 255 / 0.08);
+  --color-dock-text: rgb(255 255 255 / 0.35);
+  --color-dock-text-soft: rgb(255 255 255 / 0.6);
+  /* 行内芯片（占位符里的可点片段）：比占位文案本体亮一倍。 */
+  --color-dock-text-bright: rgb(255 255 255 / 0.7);
+  /* 创作类型是这一排里唯一带品牌色的项（对应即梦的 #009EFA）。 */
+  --color-brand-accent: #009efa;
+
+  /*
+   * ── 创作台整页外壳（即梦式）──────────────────────────────────────────
+   * 这组值来自即梦 AI 创作页 2026-10-21 的实测计算样式（暗色主题）。
+   * 它和上面的浮坞令牌是同一套语言，但覆盖的是「整页外壳」：
+   * 侧栏、内容列、记录卡、资产库抽屉。
+   *
+   * 之所以单开一组而不是复用 --color-surface-*：即梦这页的表面阶梯是
+   * 「#0f0f12 页面底 → #171717 侧栏 → #1a1a1a 抽屉 → #262626 浮层」，
+   * 与画布工作台的阶梯不是同一条线，混用会让整页的层次塌掉。
+   */
+  --color-create-canvas: #0f0f12;
+  --color-create-sidebar: #171717;
+  --color-create-drawer: #1a1a1a;
+  --color-create-popover: #262626;
+  --color-create-media: #121212;
+  --color-create-text: #fff;
+  --color-create-text-soft: rgb(255 255 255 / 0.7);
+  --color-create-text-mute: rgb(255 255 255 / 0.6);
+  /*
+   * faint / ghost 是**正文级**的两档，不是「装饰色」。
+   *
+   * 原值 0.45 / 0.35 在创作台页底（#0f0f12）上只有 4.15:1 / 3.20:1 ——
+   * 低于 WCAG 1.4.3 对正文要求的 4.5:1，而它们被大量用在「占位提示」「模型副标题」
+   * 「记录卡类型标签」这类**真正文**上。提到 0.58 / 0.55 后分别是 6.4:1 / 6.1:1。
+   *
+   * 层次仍保留：soft 0.7 > mute 0.6 > faint 0.58 > ghost 0.55 > off 0.2。
+   * off 保持 0.2：它只用于禁用态，WCAG 对禁用控件豁免对比度要求。
+   */
+  --color-create-text-faint: rgb(224 245 255 / 0.58);
+  --color-create-text-ghost: rgb(255 255 255 / 0.55);
+  --color-create-text-off: rgb(255 255 255 / 0.2);
+  --color-create-brand: #009efa;
+  --color-create-stroke: rgb(255 255 255 / 0.08);
+  --color-create-stroke-soft: rgb(255 255 255 / 0.04);
+  --color-create-block: rgb(255 255 255 / 0.08);
+  --color-create-block-hover: rgb(255 255 255 / 0.12);
+  --color-create-block-press: rgb(255 255 255 / 0.15);
+  --color-create-divider: rgb(255 255 255 / 0.2);
+  /* 侧栏与抽屉之间的那道分隔线：即梦用 1px 的白 8%。 */
+  --color-create-edge: rgb(255 255 255 / 0.08);
+  --size-create-sidebar: 15rem;
+  --size-create-drawer: 20rem;
+  --size-create-column: 63.25rem;
+  --size-create-dock: 63.25rem;
+  --size-create-media: 15.75rem;
+  --size-create-media-video-h: 17.75rem;
+  --radius-create-dock: 1.5rem;
+  --radius-create-control: 0.5rem;
+  --radius-create-pill: 0.75rem;
+  /*
+   * 即梦这一页的字号阶与产品全局的差一档：全局的 --text-sm 是 13px，
+   * 而即梦的正文、按钮文案都是 14px。为了「一模一样」，这里单开一档，
+   * 不去动全局的 --text-*（那会把画布与工作台一起改掉）。
+   */
+  --create-text-xs: 0.75rem;
+  --create-text-sm: 0.875rem;
+  --create-text-md: 0.8125rem;
+  --create-text-lg: 1.5rem;
+  --create-leading-tight: 1.4286;
+  --create-leading-body: 1.714;
+  /* 即梦侧栏的纵向间距 32px，落在全局 --space-xl(40) 与 --space-lg(24) 之间。 */
+  --create-space-wide: 2rem;
+  /* 即梦输入坞 hover 时的那层极淡投影（实测 4% / 3% 黑）。 */
+  --shadow-create-input-hover: 0 4px 32px rgb(0 0 0 / 0.04), 0 6px 24px rgb(0 0 0 / 0.03);
+
+  /*
+   * ── Agent 模式（即梦 `?type=agentic`）专属 ──────────────────────────
+   *
+   * Agent 模式与普通创作页共用页面外壳，但浮坞内部是另一套控件：
+   * 技能列表、主体选择器、生成偏好面板。这三块浮层的尺寸、圆角、描边与
+   * 投影都是实测值，与普通创作台的下拉**不是**同一套，因此单开一组。
+   *
+   * 实测（2026-10-22，web_version 7.5.0）：
+   *   - 技能浮层 365×432（内容 360），圆角 12，描边 0.67px rgba(204,221,255,.08)；
+   *   - 主体浮层 240×285，生成偏好浮层 486×303；
+   *   - 三者的投影一致：rgba(0,0,0,.24) 0 8px 56px。
+   */
+  --size-create-agentic-popup-skill: 22.8125rem;
+  --size-create-agentic-popup-subject: 15rem;
+  --size-create-agentic-popup-preferences: 30.375rem;
+  /* 参考上传砖：48×64，悬停放大到 56×70。 */
+  --size-create-agentic-reference: 3rem;
+  --size-create-agentic-reference-h: 4rem;
+  --size-create-agentic-reference-h-hover: 4.375rem;
+  /* 下拉选项左侧的图标（实测 16×16）。 */
+  --size-create-agentic-icon: 1rem;
+  /* 技能「官方」角标：9/12。 */
+  --create-text-agentic-tag: 0.5625rem;
+  --create-leading-agentic-tag: 1.3333;
+  --radius-create-popup: 0.75rem;
+  /*
+   * 生成偏好面板的圆角是 16（实测 `.lv-popover-content` 486×303），
+   * 与下拉浮层的 12 不同：即梦的 popover 与 select 用了两套圆角。
+   */
+  --radius-create-preferences: 1rem;
+  /* 比例组外框圆角 10（实测 `.lv-radio-group`）、开关轨道圆角 12。 */
+  --radius-create-agentic-group: 0.625rem;
+  --radius-create-agentic-switch: 0.75rem;
+  --radius-create-agentic-option: 0.5rem;
+  --radius-create-agentic-reference: 0.125rem;
+  --border-create-popup: 1px solid rgb(204 221 255 / 0.08);
+  --shadow-create-popup: 0 8px 56px rgb(0 0 0 / 0.24);
+  /* 上传砖是斜的：实测 matrix(0.990268, -0.139173, …) ≈ 逆时针 8°。 */
+  --angle-create-agentic-reference: -8deg;
 
   /*
    * ── 图标尺寸 ──────────────────────────────────────────────────────
@@ -253,14 +402,11 @@
   --icon-3xl: 3rem; /* 48px 整页空态 */
 }
 
-/* Light tools / dark canvas: aliases are repeated here so every legacy component
- * resolves its surface locally. Floating workspace dialogs retain the dark set.
+/* Long-form prompt reading surfaces keep their light palette. The workspace
+ * header, material drawer and creation menu share the dark studio palette.
  * 提示词节点的对话、待优化输入和输出是阅读面：客户要在这里选中复制长文，
  * 近黑字段配弱选区会让高亮消失，所以这三块沿用浅色工具令牌。
  */
-.workspace-header,
-.asset-panel,
-.connection-quick-add-menu,
 .canvas-gen-node--prompt .canvas-prompt-node__conversation,
 .canvas-gen-node--prompt .canvas-prompt-node__field textarea,
 .canvas-gen-node--prompt .canvas-prompt-node__output-editor {
@@ -346,4 +492,152 @@
   --shadow-small: 0 2px 6px var(--color-shadow);
   --shadow-raised: 0 8px 24px var(--color-shadow), 0 2px 6px var(--color-shadow);
   --shadow-floating: 0 24px 72px var(--color-shadow-strong), 0 8px 24px var(--color-shadow);
+}
+
+/*
+ * ── LibTV 画布外壳（逆向对齐）───────────────────────────────────────────
+ *
+ * 这组值来自 liblib.tv 画布页的**活体实测计算样式**（2026-10-22，登录态，
+ * DPR=1.5），不是从文档推测。原站是 Tailwind v4 + Mantine 7 混合栈，
+ * 令牌名沿用原站语义名，便于逐项比对：
+ *   原始证据 → docs/integrations/liblib-canvas-re.md
+ *   测量产物 → .tmp/rea-liblib/measurements.json
+ *
+ * 与画布工作台自己的 `--color-*` 阶梯是**两条不同的线**：原站画布底色
+ * (#141414) 比本项目的 #000000 亮，节点卡 (#191e26) 带蓝相。混用会让
+ * 画布层次塌掉，所以这里单开一组，不去改全局阶梯。
+ */
+:root {
+  /* 画布底与节点：原站画布不是纯黑，而是带一点暖灰的 #141414。 */
+  --canvas-bg: #141414;
+  --canvas-node-bg: #191e26;
+
+  /* 画布控件组（底左控件、浮坞、顶栏按钮的公共底色与描边）。 */
+  --canvas-controls-bg: #262626;
+  --canvas-controls-border: #363636;
+  --canvas-controls-text: #ffffff;
+  --canvas-controls-hover: #ffffff1a;
+  --canvas-controls-active: #ffffff26;
+
+  /* 面板底：顶栏与各类浮层的统一底。 */
+  --panel-background: #262626;
+  /* 顶栏按钮描边是 0.5px（DPR=1.5 下回读为 0.667px，落地按 0.5px 写）。 */
+  --topnav-btn-border: #363636;
+  --border-default: #525252;
+  --border-muted: #363636;
+
+  /* 语义文字 / 图标：原站用透明度表达层级，不是三支实色。 */
+  --nt-text-default: #ffffff;
+  --nt-text-secondary: #ffffff99;
+  /*
+   * tertiary 提到 0.4（#ffffff66）：在面板底 #262626 上约 3.55:1，
+   * 达到 WCAG 1.4.3 对**图形**（图标）要求的 3:1；原来的 0.302 只有 2.7:1，
+   * 连图标都看不见。
+   *
+   * 不再往上抬 —— secondary 是 0.6，tertiary 若也到 0.5 以上，两者几乎贴在一起，
+   * 20 多处引用一起变亮，文字层级就塌了。**正文级**的引用（右键菜单提示、
+   * 快捷键文字、节点工具条、空态文案）改指 `--nt-text-secondary`（6.36:1）。
+   */
+  --nt-text-tertiary: #ffffff66;
+  --nt-icon-default: #ffffff;
+  --nt-icon-secondary: #ffffff99;
+  --nt-text-brand: #13d5ff;
+  --nt-icon-brand: #13d5ff;
+  --nt-text-onbrand: #000000;
+
+  /* 覆盖层 / 浮层底。 */
+  --nt-bg-overlay: #ffffff0f;
+  --nt-bg-float: #242424;
+  --nt-bg-tooltip: #242424;
+  --nt-bg-invert: #ffffff;
+  --nt-modal-backdrop: #00000099;
+  --nt-primary-default: #3b82f6;
+  --nt-brand-surface-l1: #13d5ff1f;
+  --nt-brand-surface-l2: #13d5ff3d;
+  --nt-border-neutral-l1: #ffffff14;
+
+  /* 浮层圆角：原站下拉/菜单/浮层统一 12px（rounded-xl），不是 16px。 */
+  --radius-ll-float: 0.75rem;
+  /* 三层投影：远层 24px、中层 8px、近层 1px，实测自原站浮层卡。 */
+  --shadow-ll-float:
+    0 16px 24px -8px rgb(0 0 0 / 0.06), 0 4px 8px -4px rgb(0 0 0 / 0.04),
+    0 1px 1px 0 rgb(0 0 0 / 0.02);
+  --shadow-ll-menu: 0 8px 24px -4px rgb(0 0 0 / 0.32);
+
+  /* 尺寸：控件 28、顶栏按钮 32、抽屉 320、把手 12、AI 抽屉 400。 */
+  --size-ll-control: 1.75rem;
+  --size-ll-topnav-btn: 2rem;
+  --size-ll-drawer: 20rem;
+  --size-ll-drawer-handle: 0.75rem;
+  --size-ll-agent-drawer: 25rem;
+  --size-ll-floating-bar: 1.5rem;
+  /* 画布外壳贴边距离：原站的 bottom-3 / left-3 都是 12px。 */
+  --size-ll-edge: 0.75rem;
+
+  /* 品牌球：原站浮坞右侧的品牌胶囊上那颗青色渐变球。 */
+  --brand-orb: radial-gradient(circle at 32% 28%, #6fe3ff 0%, #13d5ff 42%, #2f7bff 100%);
+
+  /*
+   * 小地图：原站的 --xy-minimap-* 三件套实测值。
+   * 底与画布同色（#141414），遮罩用半透明灰，节点用比底略亮的石墨色。
+   */
+  --minimap-bg: #141414;
+  --minimap-mask: #3c3c3c99;
+  --minimap-node: #2b2b2b;
+
+  /* 画布点阵：原站 --xy-background-pattern-dots-color-default 实测值。 */
+  --canvas-grid-dot: #555555;
+
+  /*
+   * 编辑层（生成节点的浮层面板）实测值，原站 liblib 画布 2026-10-22。
+   * 工具 chips：底色 white/5%、圆角 9999px、高 26、图标 12px、文字 12px。
+   * 提示词正文：text-sm = 14px、行高 1.8、最小高度 80px。
+   */
+  --canvas-chip-bg: rgb(255 255 255 / 0.05);
+  --canvas-chip-hover: rgb(255 255 255 / 0.1);
+  --nt-text-muted: #919191;
+  --text-prompt: 0.875rem;
+  /* 原站模型下拉浮层的实测宽度（365px）。 */
+  --size-ll-popup: 22.8125rem;
+
+  /*
+   * 连线与连接手柄（原站 liblib 画布实测 2026-10-22）：
+   * 连线 2px 实线，所有连线同色（不按来源类型分色）；悬停与选中各一档。
+   * 手柄旋钮：20×20 圆形，深色底 + 半透明白描边，默认隐藏，节点悬停/选中时出现。
+   */
+  --canvas-edge: #86909c;
+  --canvas-edge-hover: #c0c8d0;
+  --canvas-edge-selected: #e0e4e8;
+  --canvas-handle-bg: rgb(30 30 30 / 0.9);
+  --canvas-handle-icon: rgb(255 255 255 / 0.7);
+  /* 连线流动高亮：原站 rgb(100,180,255)。 */
+  --canvas-edge-flow: #64b4ff;
+
+  /*
+   * 节点卡媒体区（原站 liblib 画布实测 2026-10-22）：
+   * 底色 #171717、描边 0.5px #363636、选中态描边换成 #a8a8a8；
+   * 标题条末尾的盾牌徽标是品牌青 #09CAF5；
+   * 媒体右上角动作按钮 24×24，底 black/40 + 背景模糊。
+   */
+  --canvas-node-media-bg: #171717;
+  --canvas-node-border: #363636;
+  --canvas-node-border-selected: #a8a8a8;
+  --canvas-brand-cyan: #09caf5;
+  --canvas-node-action-bg: rgb(0 0 0 / 0.4);
+  --canvas-node-action-bg-hover: rgb(0 0 0 / 0.5);
+
+  /*
+   * 分组配色（原站 liblib 画布实测取样，2026-10-22 用户提供的复杂画布截图）：
+   * 每个组一个颜色，框是「该色的低透明度填充 + 同色斜纹」，标签是该色的实底白字。
+   * 取样值：棕橙 #572804（标签实底）、黑 #000000（标签实底），
+   * 框填充取样：青 #182a2e / 棕 #2f251c / 紫 #24202f / 绛红 #311d26（画布底 #1a1a1a 上叠加）。
+   */
+  --canvas-group-ink-1: #000000;
+  --canvas-group-ink-2: #0f5560;
+  --canvas-group-ink-3: #572804;
+  --canvas-group-ink-4: #3d2f69;
+  --canvas-group-ink-5: #5e2033;
+  --canvas-group-ink-6: #1f4a2c;
+  /* 每个组在运行时写入自己的颜色（内联样式）；这里的默认值是兜底。 */
+  --canvas-group-color: var(--canvas-group-ink-1);
 }

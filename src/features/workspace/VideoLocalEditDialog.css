@@ -433,16 +433,6 @@
   pointer-events: none;
   opacity: 0.5;
 }
-.video-local-edit-dialog__error {
-  margin: 0;
-  padding: var(--space-sm);
-  border-radius: var(--radius-control);
-  color: var(--color-error);
-  background: var(--color-error-soft);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
 .video-local-edit-dialog__footer {
   display: flex;
   align-items: center;

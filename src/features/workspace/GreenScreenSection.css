@@ -79,7 +79,7 @@
   color: var(--color-text-2);
 }
 
-.green-screen .green-screen__field :is(input, select, textarea),
+.green-screen .green-screen__field :is(input, textarea),
 .green-screen .green-screen__preview-text {
   box-sizing: border-box;
   width: 100%;
@@ -141,12 +141,12 @@
   color: var(--color-accent);
 }
 
-.green-screen :is(input, select, textarea, button):disabled {
+.green-screen :is(input, textarea, button):disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
 
-.green-screen :is(input, select, textarea, button, summary, video):focus-visible {
+.green-screen :is(input, textarea, button, summary, video):focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--space-3xs);
 }
@@ -191,19 +191,6 @@
   border-radius: var(--radius-sm);
   background: var(--color-surface-2);
   object-fit: contain;
-}
-
-.green-screen__issue {
-  margin: 0;
-  padding: var(--space-xs);
-  border-inline-start: var(--rule-active) solid var(--color-warning);
-  color: var(--color-warning);
-  background: var(--color-warning-soft);
-  overflow-wrap: anywhere;
-}
-
-.green-screen select[aria-invalid="true"] {
-  border-color: var(--color-warning);
 }
 
 .green-screen__preview {

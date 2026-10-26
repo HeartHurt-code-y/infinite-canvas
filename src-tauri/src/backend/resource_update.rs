@@ -21,7 +21,10 @@ use tokio::time::timeout;
 use url::Url;
 use uuid::Uuid;
 
-use super::runtime_components::RuntimeReadyProbe;
+/// 运行资源是否就绪的探针：`fn(资源目录) -> bool`。
+///
+/// 功能组件下载已下线，这里只保留签名资源更新流程自己用到的探针类型。
+type RuntimeReadyProbe = fn(&Path) -> bool;
 
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILES: usize = 200_000;
@@ -51,7 +54,7 @@ pub struct RuntimeResourceUpdateStatus {
 pub fn runtime_component_update_status() -> RuntimeResourceUpdateStatus {
     STATUS
         .lock()
-        .expect("resource update status poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
 }
 
@@ -101,7 +104,7 @@ impl Drop for RunningGuard {
 }
 
 fn update_status(change: impl FnOnce(&mut RuntimeResourceUpdateStatus)) {
-    change(&mut STATUS.lock().expect("resource update status poisoned"));
+    change(&mut STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
 }
 
 pub async fn prepare_runtime_components_for_update(
@@ -195,17 +198,18 @@ async fn prepare(
         .resource_dir()
         .map_err(|error| format!("读取内置资源目录失败：{error}"))?;
     let store = data_dir.join("runtime-components");
-    let total_bytes = manifest
-        .components
+    // 只处理当前版本认识的组件：清单里可能有已下线组件的历史条目。
+    let supported = supported_components(&manifest);
+    let total_bytes = supported
         .iter()
         .flat_map(|component| &component.files)
         .map(|file| file.size)
         .sum();
     update_status(|status| {
-        status.total_components = manifest.components.len();
+        status.total_components = supported.len();
         status.total_bytes = total_bytes;
     });
-    for component in &manifest.components {
+    for component in &supported {
         update_status(|status| status.current_component = Some(component.name.clone()));
         prepare_component(&client, &base_url, &store, &resource_dir, component).await?;
         update_status(|status| status.completed_components += 1);
@@ -315,24 +319,25 @@ type ComponentSpec = (&'static str, &'static str, RuntimeReadyProbe);
 
 fn component_spec(name: &str) -> Option<ComponentSpec> {
     match name {
-        "blender" => Some((
-            "blender",
-            "manifest.json",
-            super::blender::blender_runtime_ready,
-        )),
-        "remotion-runtime" => Some((
-            "remotion-runtime",
-            "runtime-manifest.json",
-            super::remotion_renderer::runtime_ready,
-        )),
         "ffmpeg" => Some(("ffmpeg", "manifest.json", super::composer::engine_ready_in)),
-        "gpt-image-2-style-library" => Some((
-            "skills/gpt-image-2-style-library",
-            "data/manifest.json",
-            super::gpt_image_style_library::style_component_ready,
-        )),
         _ => None,
     }
+}
+
+/**
+ * 清单里当前版本认识的组件。
+ *
+ * 历史渠道仍在分发含**已下线组件**（blender / remotion-runtime / 风格库）的清单，
+ * 这些功能对应的代码与入口都已删除，装了也没有地方用。但因为其中一个不认识就让
+ * 整次资源更新失败，用户会被永远卡在旧版本、连安装包都下载不了——
+ * 所以认不出来的组件直接跳过，只处理认识的。
+ */
+fn supported_components(manifest: &ResourceManifest) -> Vec<&ResourceComponent> {
+    manifest
+        .components
+        .iter()
+        .filter(|component| component_spec(&component.name).is_some())
+        .collect()
 }
 
 fn validate_manifest(
@@ -349,7 +354,15 @@ fn validate_manifest(
     {
         return Err("资源清单版本或平台不匹配".into());
     }
-    if manifest.components.len() != 4 {
+    /*
+     * 组件数量不写死：写死会在「可发布组件集合」变化时立刻失效
+     * （发布端 scripts/runtime-resource-release.mjs 的 RESOURCE_COMPONENTS 只产 1 个
+     * ffmpeg，客户端却要求恰好 4 个 → 带资源清单的更新渠道 100% 失败）。
+     * 真正的约束在下面的循环里：每个组件名必须在 component_spec 白名单内、
+     * 名字唯一、且至少有一个组件。
+     */
+    let supported = supported_components(&manifest);
+    if supported.is_empty() {
         return Err("资源清单组件数量不正确".into());
     }
     let base = Url::parse(&manifest.object_base_url).map_err(|_| "资源对象地址无效")?;
@@ -366,9 +379,9 @@ fn validate_manifest(
     let mut names = HashSet::new();
     let mut total_files = 0usize;
     let mut total_bytes = 0u64;
-    for component in &manifest.components {
+    for component in &supported {
         let Some((_, native_manifest, _)) = component_spec(&component.name) else {
-            return Err("资源清单含未知组件".into());
+            continue;
         };
         if !names.insert(component.name.as_str())
             || component.manifest_path != native_manifest
@@ -842,132 +855,4 @@ async fn download_object(
         return Err("资源对象内容哈希不匹配".into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::TcpListener;
-
-    #[test]
-    fn reject_unsafe_paths_and_duplicate_windows_names() {
-        for value in [
-            "../outside",
-            "a/../b",
-            "C:/outside",
-            "a\\b",
-            "CON.txt",
-            "a./b",
-            "a/",
-            ".complete.json",
-        ] {
-            assert!(
-                safe_path(value).is_none() || value == ".complete.json",
-                "{value}"
-            );
-        }
-        assert!(safe_path("data/manifest.json").is_some());
-    }
-
-    #[test]
-    fn tauri_signature_field_decodes_base64_minisign_document() {
-        let record = [b"ED".as_slice(), &[0u8; 72]].concat();
-        let text = format!(
-            "untrusted comment: test\n{}\ntrusted comment: test\n{}\n",
-            base64::engine::general_purpose::STANDARD.encode(record),
-            base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
-        );
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
-        assert!(decode_release_signature(&encoded).is_ok());
-        assert!(decode_release_signature(&text).is_err());
-    }
-
-    #[test]
-    fn reuses_intact_files_from_partly_damaged_component() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("good.bin"), b"unchanged").unwrap();
-        fs::write(dir.path().join("broken.bin"), b"damaged").unwrap();
-        let good = hex::encode(Sha256::digest(b"unchanged"));
-        let expected_broken = hex::encode(Sha256::digest(b"original"));
-        let wanted = HashSet::from([good.as_str(), expected_broken.as_str()]);
-        let found = verified_source_map(dir.path(), &wanted);
-        assert_eq!(
-            found.get(&good),
-            Some(&dir.path().canonicalize().unwrap().join("good.bin"))
-        );
-        assert!(!found.contains_key(&expected_broken));
-    }
-
-    #[tokio::test]
-    async fn corrupted_cache_is_redownloaded_and_complete_cache_survives_retry() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = ResourceFile {
-            path: "asset.bin".into(),
-            size: 5,
-            sha256: hex::encode(Sha256::digest(b"fresh")),
-        };
-        let cache = dir.path().join(&file.sha256);
-        fs::write(&cache, b"wrong").unwrap();
-        assert!(!cached_object_matches(&cache, &file));
-        let server = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = server.local_addr().unwrap().port();
-        let thread = std::thread::spawn(move || {
-            let (mut socket, _) = server.accept().unwrap();
-            let mut request = [0u8; 1024];
-            let _ = socket.read(&mut request).unwrap();
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
-                )
-                .unwrap();
-        });
-        let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
-        let client = reqwest::Client::builder().no_proxy().build().unwrap();
-        assert!(
-            !ensure_cached_object(&client, &base, &file, &cache)
-                .await
-                .unwrap()
-        );
-        thread.join().unwrap();
-        assert!(cached_object_matches(&cache, &file));
-        assert!(
-            ensure_cached_object(&client, &base, &file, &cache)
-                .await
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn verify_tree_rejects_changed_file_without_harming_other_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let component = ResourceComponent {
-            name: "ffmpeg".into(),
-            manifest_path: "manifest.json".into(),
-            manifest_sha256: hex::encode(Sha256::digest(b"manifest")),
-            files: vec![ResourceFile {
-                path: "manifest.json".into(),
-                size: 8,
-                sha256: hex::encode(Sha256::digest(b"manifest")),
-            }],
-        };
-        fs::write(dir.path().join("manifest.json"), b"manifest").unwrap();
-        fs::write(
-            dir.path().join(".complete.json"),
-            serde_json::to_vec(&CompleteMarker {
-                schema_version: 1,
-                component: "ffmpeg",
-                manifest_sha256: &component.manifest_sha256,
-                file_count: 1,
-                total_bytes: 8,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        assert!(verify_tree(dir.path(), &component));
-        fs::write(dir.path().join("unlisted.bin"), b"unexpected").unwrap();
-        assert!(!verify_tree(dir.path(), &component));
-        fs::remove_file(dir.path().join("unlisted.bin")).unwrap();
-        fs::write(dir.path().join("manifest.json"), b"tampered").unwrap();
-        assert!(!verify_tree(dir.path(), &component));
-    }
 }

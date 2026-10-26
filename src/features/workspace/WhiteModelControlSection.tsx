@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { CanvasSelect } from "../../components/CanvasSelect";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import type { PromptContentConnection } from "../../lib/promptContent";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
@@ -26,6 +27,9 @@ function choiceValue(input: PromptContentConnection): string {
   return JSON.stringify([input.key, input.target]);
 }
 
+/** 失效绑定（素材已断开/来源变化）在下拉里的占位值；不会命中任何真实素材。 */
+const UNAVAILABLE_VALUE = "unavailable";
+
 function WhiteModelBindingSelect({
   label,
   placeholder,
@@ -41,6 +45,7 @@ function WhiteModelBindingSelect({
   readonly kind: "image" | "video";
   readonly onChange: (binding: WhiteModelBinding | null) => void;
 }) {
+  const invalidId = useId();
   const available = inputs.filter((input) => input.kind === kind && input.target.kind !== "url");
   const selected =
     binding == null ? null : available.find((input) => bindingMatches(binding, input));
@@ -49,32 +54,38 @@ function WhiteModelBindingSelect({
   return (
     <label className="white-model-control__field">
       <span>{label}</span>
-      <select
-        value={missing ? "unavailable" : selected ? choiceValue(selected) : ""}
-        aria-invalid={missing || undefined}
-        onChange={(event) => {
-          if (event.target.value === "") {
+      <CanvasSelect
+        ariaLabel={label}
+        ariaDescribedBy={missing ? invalidId : undefined}
+        value={missing ? UNAVAILABLE_VALUE : selected ? choiceValue(selected) : ""}
+        options={[
+          { value: "", label: placeholder },
+          ...(missing
+            ? [{ value: UNAVAILABLE_VALUE, label: `${binding?.name ?? ""}（已断开/来源已变化）` }]
+            : []),
+          ...available.map((input) => ({
+            value: choiceValue(input),
+            label: `${kind === "video" ? "视频" : "图片"} ${typedInputs.indexOf(input) + 1} · ${input.name}`,
+          })),
+        ]}
+        onChange={(value) => {
+          if (value === "") {
             onChange(null);
             return;
           }
-          const input = available.find(
-            (candidate) => choiceValue(candidate) === event.target.value,
-          );
+          const input = available.find((candidate) => choiceValue(candidate) === value);
+          // 失效绑定那条只用于回显当前状态，选中它不产生新的绑定。
           if (input) onChange({ key: input.key, name: input.name, target: input.target });
         }}
-      >
-        <option value="">{placeholder}</option>
-        {missing ? (
-          <option value="unavailable" disabled>
-            {binding.name}（已断开/来源已变化）
-          </option>
-        ) : null}
-        {available.map((input) => (
-          <option key={input.key} value={choiceValue(input)}>
-            {kind === "video" ? "视频" : "图片"} {typedInputs.indexOf(input) + 1} · {input.name}
-          </option>
-        ))}
-      </select>
+      />
+      {missing ? (
+        <ErrorAlert
+          error="已选素材已断开或来源已变化，请重新选择。"
+          id={invalidId}
+          tone="warning"
+          variant="inline"
+        />
+      ) : null}
     </label>
   );
 }
@@ -85,14 +96,12 @@ export function WhiteModelControlSection({
   modelId,
   taskMode,
   onChange,
-  onOpenStudio,
 }: {
   readonly config?: WhiteModelControlConfig | undefined;
   readonly inputs: readonly PromptContentConnection[];
   readonly modelId: string;
   readonly taskMode: SeedanceTaskMode;
   readonly onChange: (config: WhiteModelControlConfig) => void;
-  readonly onOpenStudio?: (() => void) | undefined;
 }) {
   const current = config ?? createWhiteModelControlConfig();
   const [expanded, setExpanded] = useState(current.enabled);
@@ -119,11 +128,6 @@ export function WhiteModelControlSection({
         </span>
       </summary>
       <div className="white-model-control__body">
-        {onOpenStudio ? (
-          <button type="button" className="white-model-control__button" onClick={onOpenStudio}>
-            打开白模导演台
-          </button>
-        ) : null}
         <label className="white-model-control__check">
           <input
             type="checkbox"
@@ -133,7 +137,7 @@ export function WhiteModelControlSection({
           <span>启用白模控制</span>
         </label>
         <p className="white-model-control__hint" id={guidanceId}>
-          在导演台里实时摆位、取景、运镜，也可一键从视频捕捉动作；渲染后的白模视频在此接入生成。也可导入已有白模视频。
+          选择画布上任意视频节点作为白模参考视频、任意图片节点作为角色参考图，编译后与提示词一起提交；也可导入已有白模视频。
         </p>
         <p className="white-model-control__hint">
           启用后，以下预览与上方提示词一起提交；关闭后保留配置。
@@ -144,12 +148,11 @@ export function WhiteModelControlSection({
         {current.enabled ? (
           <>
             {resolved.issue ? (
-              <>
-                <p className="white-model-control__issue" role="alert">
-                  {resolved.issue}
-                </p>
-                <ErrorCopyButton text={resolved.issue} />
-              </>
+              <ErrorAlert
+                error={resolved.issue}
+                tone="warning"
+                hint="补齐上面缺的一项后即可提交。"
+              />
             ) : null}
             <WhiteModelBindingSelect
               label="白模参考视频"
@@ -161,17 +164,19 @@ export function WhiteModelControlSection({
             />
             <label className="white-model-control__field">
               <span>白模颗粒度</span>
-              <select
+              <CanvasSelect
+                ariaLabel="白模颗粒度"
+                ariaDescribedBy={guidanceId}
                 value={current.granularity}
-                aria-describedby={guidanceId}
-                onChange={(event) => {
-                  const granularity = event.target.value;
-                  if (granularity === "coarse" || granularity === "fine") update({ granularity });
+                options={[
+                  { value: "coarse", label: "粗颗粒度 · 动态骨架" },
+                  { value: "fine", label: "细颗粒度 · 成片渲染" },
+                ]}
+                onChange={(granularity) => {
+                  if (granularity === "coarse" || granularity === "fine")
+                    update({ granularity });
                 }}
-              >
-                <option value="coarse">粗颗粒度 · 动态骨架</option>
-                <option value="fine">细颗粒度 · 成片渲染</option>
-              </select>
+              />
             </label>
             <p className="white-model-control__hint">
               {current.granularity === "coarse"

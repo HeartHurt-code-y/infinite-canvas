@@ -1,0 +1,93 @@
+.canvas-node-preview__document {
+  display: flex;
+  align-items: stretch;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+}
+
+.canvas-node-preview__document-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 0 0 auto;
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+}
+
+.canvas-node-preview__document p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 9;
+}
+
+.canvas-content-editor > :is(.canvas-gen-node--prompt, .canvas-screenplay-node) {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  min-height: 0;
+  max-height: none;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  outline: 0;
+}
+
+.canvas-content-editor .canvas-gen-node__header {
+  padding-right: 64px;
+}
+
+.canvas-content-editor :is(.canvas-prompt-node__body, .canvas-screenplay-node__body) {
+  min-width: 0;
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+
+.canvas-content-editor
+  :is(.canvas-screenplay-node__document-heading, .canvas-screenplay-node__composer-actions) {
+  flex-wrap: wrap;
+}
+
+.canvas-content-editor .canvas-prompt-node__fields {
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+}
+
+.canvas-content-editor
+  :is(
+    textarea,
+    pre,
+    .markdown-view,
+    .canvas-prompt-node__field,
+    .canvas-screenplay-node__document
+  ) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.canvas-content-editor .canvas-prompt-node__output-editor .prompt-mention__input {
+  min-height: 160px;
+  max-height: 320px;
+}
+
+.canvas-node-editor.is-expanded .canvas-content-editor {
+  width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-node-preview *,
+  .canvas-node-editor * {
+    scroll-behavior: auto;
+  }
+}

@@ -1,11 +1,13 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
 import { useEffect, useId, useState } from "react";
 import {
   ASSET_LIBRARY_CREDENTIAL_REF,
   assetLibraryCredentialRef,
   assetLibraryClient,
+  backendErrorMessage,
   formatRawBackendError,
+  frontendLog,
   providerSettingsClient,
   type AssetLibraryClient,
   type CloudAsset,
@@ -71,7 +73,8 @@ export function AssetLibraryTokenSettings({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [fieldError, setFieldError] = useState<string | null>(null);
-  const [requestError, setRequestError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [requestError, setRequestError] = useState<ErrorAlertNotice | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const isArk = provider?.adapterId === "volcengine_ark_v1";
@@ -164,9 +167,10 @@ export function AssetLibraryTokenSettings({
       onAssetsLoaded(provider.id, assets);
       setSuccessMessage(`令牌已保存，并拉取到 ${assets.length} 个素材。`);
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(formatted);
-      onPullFailed(provider.id, formatted);
+      // 原始 payload 只进日志；界面上的摘要交给 ErrorAlert，回调给上层的是人话。
+      frontendLog("error", `[settings] 素材库拉取失败：${formatRawBackendError(error)}`);
+      setRequestError({ label: "素材库拉取失败", error });
+      onPullFailed(provider.id, backendErrorMessage(error));
     } finally {
       setSaving(false);
     }
@@ -314,13 +318,13 @@ export function AssetLibraryTokenSettings({
       </div>
 
       {requestError ? (
-        <>
-          <div className="settings-error asset-token-settings__notice" role="alert">
-            <strong>素材库拉取失败</strong>
-            <pre tabIndex={0}>{requestError}</pre>
-          </div>
-          <ErrorCopyButton text={requestError} />
-        </>
+        <div className="asset-token-settings__notice">
+          <ErrorAlert
+            error={requestError.error}
+            label={requestError.label}
+            hint="请检查素材库令牌与供应商连接后再试一次；展开完整报错可把诊断文本贴给开发者。"
+          />
+        </div>
       ) : null}
       {successMessage ? (
         <p className="settings-success asset-token-settings__notice" role="status">

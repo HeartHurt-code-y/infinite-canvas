@@ -1,10 +1,12 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as v from "valibot";
 import {
+  backendErrorMessage,
   describeConnectivityTest,
   formatRawBackendError,
+  frontendLog,
   tosStagingClient,
   type TosStagingClient,
   type TosStagingConfig,
@@ -75,7 +77,7 @@ export function TosStagingSettings({
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [rawError, setRawError] = useState<string | null>(null);
+  const [rawError, setRawError] = useState<ErrorAlertNotice | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [testNotice, setTestNotice] = useState<{
     readonly ok: boolean;
@@ -109,7 +111,10 @@ export function TosStagingSettings({
         }
       })
       .catch((error: unknown) => {
-        if (active) setRawError(formatRawBackendError(error));
+        if (!active) return;
+        // 原始 payload 只进日志；界面上的摘要交给 ErrorAlert。
+        frontendLog("error", `[settings] 读取对象存储配置失败：${formatRawBackendError(error)}`);
+        setRawError({ label: "读取对象存储配置失败", error });
       })
       .finally(() => {
         if (active) setLoadingConfig(false);
@@ -137,12 +142,12 @@ export function TosStagingSettings({
 
     // AK 与 SK 必须成对提供；两者都留空表示沿用已保存的凭据。
     if (accessKey.length > 0 !== secretKey.length > 0) {
-      setRawError("AccessKey 和 SecretKey 需要成对填写；两者都留空则沿用已保存的凭据。");
+      setRawError({ error: "AccessKey 和 SecretKey 需要成对填写；两者都留空则沿用已保存的凭据。" });
       return;
     }
     // 填了桶名就必须有凭据（本次填写或已保存），否则保存出的配置无法启用。
     if (bucket && !accessKey && !credentialSaved) {
-      setRawError("填写桶名时需要同时填写 AccessKey 和 SecretKey。");
+      setRawError({ error: "填写桶名时需要同时填写 AccessKey 和 SecretKey。" });
       return;
     }
 
@@ -172,7 +177,8 @@ export function TosStagingSettings({
           : "桶名为空，对象存储直连已停用；需要时填写桶名即可启用。",
       );
     } catch (error) {
-      setRawError(formatRawBackendError(error));
+      frontendLog("error", `[settings] 保存对象存储配置失败：${formatRawBackendError(error)}`);
+      setRawError({ label: "保存对象存储配置失败", error });
       return;
     } finally {
       setSaving(false);
@@ -189,9 +195,11 @@ export function TosStagingSettings({
         message: describeConnectivityTest(result, "对象存储"),
       });
     } catch (error) {
+      // 连通性测试失败降级为提示：摘要走 backendErrorMessage，原始 payload 只进日志。
+      frontendLog("error", `[settings] 对象存储连通性测试失败：${formatRawBackendError(error)}`);
       setTestNotice({
         ok: false,
-        message: `对象存储连通性测试失败：${formatRawBackendError(error)}`,
+        message: `对象存储连通性测试失败：${backendErrorMessage(error)}`,
       });
     } finally {
       setTesting(false);
@@ -296,13 +304,11 @@ export function TosStagingSettings({
       ) : null}
 
       {rawError ? (
-        <>
-          <div className="settings-error" role="alert">
-            <strong>完整原始错误</strong>
-            <pre tabIndex={0}>{rawError}</pre>
-          </div>
-          <ErrorCopyButton text={rawError} />
-        </>
+        <ErrorAlert
+          error={rawError.error}
+          label={rawError.label}
+          hint="请检查桶名与 AccessKey/SecretKey 后再试一次；展开完整报错可把诊断文本贴给开发者。"
+        />
       ) : null}
       {successMessage ? (
         <p className="settings-success" role="status">
@@ -311,14 +317,14 @@ export function TosStagingSettings({
         </p>
       ) : null}
       {testNotice ? (
-        <p className={testNotice.ok ? "settings-success" : "settings-error"} role="status">
-          {testNotice.ok ? (
+        testNotice.ok ? (
+          <p className="settings-success" role="status">
             <Icon name="check-circle" aria-hidden="true" size="md" />
-          ) : (
-            <Icon name="warning-circle" aria-hidden="true" size="md" />
-          )}
-          {testNotice.message}
-        </p>
+            {testNotice.message}
+          </p>
+        ) : (
+          <ErrorAlert error={testNotice.message} hint="请按上方配置核对后重试。" />
+        )
       ) : null}
     </section>
   );

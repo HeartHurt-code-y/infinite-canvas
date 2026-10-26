@@ -137,7 +137,7 @@ mod unix_group {
             }
             live_groups()
                 .lock()
-                .expect("process group registry poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(pgid);
             Ok(Self { pgid })
         }
@@ -146,7 +146,7 @@ mod unix_group {
         pub(crate) fn kill_all() {
             let groups: Vec<i32> = live_groups()
                 .lock()
-                .expect("process group registry poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .drain()
                 .collect();
             for pgid in groups {
@@ -163,7 +163,7 @@ mod unix_group {
         fn drop(&mut self) {
             live_groups()
                 .lock()
-                .expect("process group registry poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&self.pgid);
             // SIGKILL 整组：Chrome headless-shell、ffmpeg 等孙进程一并回收。
             // SAFETY: 同 kill_all；组已空时返回 ESRCH。

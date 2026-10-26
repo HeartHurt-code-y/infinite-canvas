@@ -1,6 +1,6 @@
 import { Icon } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ErrorCopyButton } from "../../components/ErrorCopyButton";
-import { errorCopyText } from "../../lib/clipboard";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   formatBytes,
@@ -174,6 +174,8 @@ function AssetCardVideoVisual({
           src={coverSrc}
           alt=""
           loading="lazy"
+          // 一页 100 张卡片时，解码放到后台线程/下一帧，避免与滚动和主线程抢时间片。
+          decoding="async"
           onLoad={(event) => {
             const image = event.currentTarget;
             const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
@@ -471,6 +473,8 @@ function AssetCard({
                     src={imagePreviewSrc}
                     alt=""
                     loading="lazy"
+                    // 一页 100 张卡片时，解码放到后台线程/下一帧，避免与滚动和主线程抢时间片。
+                    decoding="async"
                     onLoad={(event) => {
                       const image = event.currentTarget;
                       const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
@@ -749,18 +753,20 @@ export function AssetUploadRow({
         ) : null}
         {errorExpanded && errorDetail != null ? (
           <span className="asset-upload__error-detail-wrapper">
-            <span className="asset-upload__error asset-upload__error-detail" role="alert">
+            {/*
+             * 展开态是**原始技术详情**（后端返回的完整 JSON），不是人话摘要。
+             * 它绝不能放进 `role="alert"`：读屏软件会把 live region 里的内容
+             * 整段朗读，用户听到的是一坨 JSON 而不是「上传失败」这句话。
+             * 所以这里用 `role="status"`（礼貌播报）并放在 alert 之外 ——
+             * 与 ErrorAlert 把「展开完整报错」放在 alert 之外的同一原则。
+             */}
+            <span className="asset-upload__error asset-upload__error-detail" role="status">
               {errorDetail}
             </span>
             <ErrorCopyButton text={errorDetail} />
           </span>
         ) : errorSummary != null ? (
-          <>
-            <span className="asset-upload__error" role="alert">
-              {errorSummary}
-            </span>
-            <ErrorCopyButton text={errorSummary} />
-          </>
+          <ErrorAlert error={errorSummary} variant="inline" />
         ) : null}
         {showErrorToggle ? (
           <button
@@ -816,24 +822,19 @@ export function AssetPanelError({
 }) {
   const presentation = assetErrorPresentation(error);
   return (
-    <>
-      <div className="asset-panel__error" role="alert">
-        <div className="asset-panel__error-heading">
-          <Icon name="warning-circle" aria-hidden="true" size="lg" />
-          <strong>{title}</strong>
-        </div>
-        <p className="asset-panel__error-summary">{presentation.summary}</p>
-        <details className="asset-panel__error-details">
-          <summary>完整技术详情</summary>
-          <pre tabIndex={0}>{presentation.details}</pre>
-        </details>
-        {actionLabel && onAction ? (
+    <ErrorAlert
+      error={error}
+      label={title}
+      summaryText={presentation.summary}
+      detailsText={presentation.details}
+      raw
+      action={
+        actionLabel && onAction ? (
           <button type="button" onClick={onAction}>
             {actionLabel}
           </button>
-        ) : null}
-      </div>
-      <ErrorCopyButton text={errorCopyText(presentation.summary, presentation.details)} />
-    </>
+        ) : null
+      }
+    />
   );
 }

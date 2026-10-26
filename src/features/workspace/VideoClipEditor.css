@@ -1,0 +1,648 @@
+/*
+ * 「智能剪辑」（video clip）节点卡与合成编辑层的样式。
+ *
+ * 数值全部来自原站 liblib.tv 画布的活体实测（2026-10-23，视口 1707×898、
+ * DPR 1.5、画布缩放 45%）。测量值已换算回 100% 缩放：
+ *   节点卡（空态）   157.6×157.6 ÷ 0.45 → 350×350
+ *   节点卡（连接态） 254.9×157.6 ÷ 0.45 → 566×350
+ *   封面预览区       113.5 ÷ 0.45      → 252 高
+ *   时间刻度行       10.8 ÷ 0.45      → 24 高
+ *   剪刀图标         18 ÷ 0.45        → 40
+ *   模式图标         6.3 ÷ 0.45       → 14
+ *   手柄命中区       36 ÷ 0.45        → 80（与 AGENTS.md 记的原站值一致）
+ *
+ * 编辑层（未缩放，直接量得）：
+ *   面板内容 658.7×190（连上素材后 252.8）
+ *   工具行 30 高；「＋参考」chip 54×26；素材瓦片 48×48
+ *   提示词区 96 高（min-h-20 + p-2）
+ *   底栏 32 高；提交键 32×32
+ *   剪辑模式浮层 229.3×170.1，行高 32.1
+ *   参数浮层 341.3×310，内层 340×308.7，比例格 56.8×62.3，清晰度格 100×32
+ */
+
+/* ── 节点卡 ────────────────────────────────────────────────────────────── */
+
+.video-clip-node {
+  position: relative;
+  width: 350px;
+  min-height: 350px;
+  color: var(--nt-text-default);
+}
+
+.video-clip-node__card {
+  display: flex;
+  width: 100%;
+  min-height: 350px;
+  overflow: hidden;
+  background: var(--canvas-node-bg);
+  border: var(--rule-thin) solid var(--canvas-node-border);
+  border-radius: var(--radius-ll-float);
+}
+
+.video-clip-node.is-selected .video-clip-node__card {
+  border-color: var(--canvas-node-border-selected);
+}
+
+.video-clip-node.is-dragging {
+  opacity: 0.85;
+}
+
+/* 空态：原站是 40px 剪刀 + 一句提示 + 「尝试：」一行四个模式 */
+.video-clip-node__empty {
+  display: flex;
+  width: 100%;
+  min-height: 350px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-2xl);
+  text-align: center;
+}
+
+.video-clip-node__empty-icon {
+  flex-shrink: 0;
+  color: var(--nt-icon-secondary);
+}
+
+.video-clip-node__empty-hint {
+  width: 100%;
+  margin: 0;
+  flex-shrink: 0;
+  color: var(--nt-text-muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+  text-align: center;
+}
+
+.video-clip-node__try {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  align-self: flex-start;
+}
+
+.video-clip-node__try-label {
+  color: var(--nt-text-muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+}
+
+.video-clip-node__try-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) 6px;
+  color: var(--nt-text-default);
+  font-size: var(--text-sm);
+  line-height: 18px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  transition: background-color 120ms ease;
+  cursor: pointer;
+}
+
+.video-clip-node__try-item:hover {
+  background: var(--canvas-chip-hover);
+}
+
+/* 连接态：封面 + 时间刻度 + 两条轨道占位 */
+.video-clip-node__body {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: var(--radius-ll-float);
+  padding: var(--space-2xs);
+}
+
+.video-clip-node__preview {
+  position: relative;
+  height: 252px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--canvas-node-media-bg);
+  border-radius: var(--radius-xl);
+}
+
+.video-clip-node__cover {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+.video-clip-node__preview-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--nt-modal-backdrop);
+  border-top-left-radius: var(--radius-xl);
+  border-top-right-radius: var(--radius-xl);
+}
+
+.video-clip-node__preview-center {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  pointer-events: none;
+  color: var(--nt-text-default);
+}
+
+.video-clip-node__open {
+  pointer-events: auto;
+  display: inline-flex;
+  height: 32px;
+  min-width: 48px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-sm);
+  color: #000000;
+  font-size: var(--text-sm);
+  line-height: 18px;
+  background: #ffffff;
+  border: 0;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.video-clip-node__open:hover {
+  background: #f0f0f0;
+}
+
+.video-clip-node__timeline {
+  height: 82px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-bottom-left-radius: var(--radius-ll-float);
+  border-bottom-right-radius: var(--radius-ll-float);
+}
+
+.video-clip-node__ruler {
+  display: flex;
+  height: 24px;
+  align-items: flex-end;
+  padding: var(--space-2xs) var(--space-2xs) 0;
+}
+
+.video-clip-node__tick {
+  position: relative;
+  display: flex;
+  height: 100%;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.video-clip-node__tick-label {
+  position: absolute;
+  bottom: 6px;
+  color: var(--nt-text-secondary);
+  font-size: 9px;
+  line-height: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.video-clip-node__tick-mark {
+  display: block;
+  width: 1px;
+  height: 4px;
+  border-top-left-radius: 2px;
+  border-top-right-radius: 2px;
+  background: var(--nt-bg-overlay-active);
+}
+
+.video-clip-node__track {
+  padding: var(--space-2xs) var(--space-2xs) 2px;
+  border-top: var(--rule-thin) solid var(--nt-border-neutral-l1);
+}
+
+.video-clip-node__track:last-child {
+  padding-bottom: var(--space-2xs);
+}
+
+.video-clip-node__track-bar {
+  height: 20px;
+  border-radius: var(--radius-xs);
+  background: var(--nt-bg-overlay);
+}
+
+/* ── 编辑层 ────────────────────────────────────────────────────────────── */
+
+.video-clip-editor .video-node-editor__form {
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__prompt-area {
+  min-height: 80px;
+}
+
+/* 素材瓦片：48×48，左上角序号、左下角时长 */
+.video-clip-editor__tile {
+  position: relative;
+  display: inline-flex;
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+  overflow: hidden;
+  background: var(--canvas-node-media-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-sm);
+}
+
+.video-clip-editor__tile-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-clip-editor__tile-placeholder {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--nt-bg-overlay);
+}
+
+.video-clip-editor__tile-index {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  display: inline-flex;
+  width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  font-size: 9px;
+  line-height: 1;
+  background: rgb(0 0 0 / 0.6);
+  border-radius: var(--radius-xs);
+}
+
+.video-clip-editor__tile-duration {
+  position: absolute;
+  bottom: 2px;
+  left: 2px;
+  padding: 0 2px;
+  color: #ffffff;
+  font-size: 9px;
+  line-height: 12px;
+  background: rgb(0 0 0 / 0.6);
+  border-radius: 2px;
+}
+
+.video-clip-editor__tile-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  color: #ffffff;
+  font-size: 11px;
+  line-height: 1;
+  background: rgb(0 0 0 / 0.6);
+  border: 0;
+  border-radius: var(--radius-xs);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.video-clip-editor__tile:hover .video-clip-editor__tile-remove,
+.video-clip-editor__tile-remove:focus-visible {
+  opacity: 1;
+}
+
+/* 底栏 */
+.video-clip-editor__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__footer-left {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__footer-right {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__mode-button,
+.video-clip-editor__params-button {
+  display: inline-flex;
+  height: 32px;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0 var(--space-xs);
+  color: var(--nt-text-default);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  transition: background-color 120ms ease;
+  cursor: pointer;
+}
+
+.video-clip-editor__mode-button:hover,
+.video-clip-editor__params-button:hover {
+  background: var(--canvas-chip-hover);
+}
+
+.video-clip-editor__mode-button:disabled,
+.video-clip-editor__params-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.video-clip-editor__mode-label {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-clip-editor__params-button {
+  justify-content: space-between;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__params-left {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2xs);
+  overflow: hidden;
+}
+
+.video-clip-editor__params-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 比例示意框：原站是一个按比例缩放的空心矩形 */
+.video-clip-editor__ratio-icon {
+  display: inline-flex;
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.video-clip-editor__ratio-box {
+  display: block;
+  flex: none;
+  border: 1.5px solid currentcolor;
+  border-radius: 2px;
+}
+
+.video-clip-editor__submit {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: #000000;
+  background: #ffffff;
+  border: 0;
+  border-radius: var(--radius-ll-float);
+  transition: filter 120ms ease;
+  cursor: pointer;
+}
+
+.video-clip-editor__submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.video-clip-editor__submit:active:not(:disabled) {
+  filter: brightness(0.95);
+}
+
+.video-clip-editor__submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── 剪辑模式浮层 ──────────────────────────────────────────────────────── */
+
+.video-clip-editor__mode-menu {
+  padding: var(--space-2xs);
+  background: rgb(38 38 38 / 0.95);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  backdrop-filter: blur(32px);
+}
+
+.video-clip-editor__mode-list {
+  display: flex;
+  width: 220px;
+  flex-direction: column;
+}
+
+.video-clip-editor__mode-item {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0 var(--space-2xs);
+  color: var(--nt-text-default);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-sm);
+  transition: background-color 120ms ease;
+  cursor: pointer;
+}
+
+.video-clip-editor__mode-item:hover {
+  background: var(--canvas-chip-hover);
+}
+
+.video-clip-editor__mode-name {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-clip-editor__mode-check {
+  flex-shrink: 0;
+  color: var(--nt-text-default);
+}
+
+/* ── 参数浮层 ──────────────────────────────────────────────────────────── */
+
+.video-clip-editor__params-panel {
+  padding: 0;
+  background: rgb(38 38 38 / 0.95);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-ll-float);
+  backdrop-filter: blur(32px);
+}
+
+.video-clip-editor__params-inner {
+  display: flex;
+  width: 340px;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  border-radius: var(--radius-xl);
+}
+
+.video-clip-editor__params-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__params-title {
+  margin: 0;
+  color: var(--nt-text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.video-clip-editor__ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__ratio {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) var(--space-2xs);
+  color: var(--nt-text-muted);
+  background: transparent;
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-sm);
+  transition:
+    color 200ms ease,
+    background-color 200ms ease,
+    border-color 200ms ease;
+  cursor: pointer;
+}
+
+.video-clip-editor__ratio.is-active {
+  color: var(--nt-text-default);
+  background: var(--canvas-chip-hover);
+  border-color: var(--canvas-controls-text);
+}
+
+.video-clip-editor__ratio-label {
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+
+.video-clip-editor__duration-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__duration-slider {
+  height: 8px;
+  flex: 1 1 auto;
+  accent-color: #ffffff;
+  cursor: pointer;
+}
+
+.video-clip-editor__duration-number {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__duration-input {
+  width: 48px;
+  height: 20px;
+  padding: 0 var(--space-2xs);
+  color: var(--nt-text-default);
+  font-size: var(--text-xs);
+  background: rgb(255 255 255 / 0.1);
+  border: 0;
+  border-radius: var(--radius-sm);
+}
+
+.video-clip-editor__duration-input:focus {
+  background: rgb(255 255 255 / 0.15);
+  outline: none;
+}
+
+.video-clip-editor__duration-unit {
+  width: 12px;
+  color: var(--nt-text-muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+
+.video-clip-editor__resolution-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2xs);
+}
+
+.video-clip-editor__resolution {
+  display: flex;
+  min-width: 0;
+  min-height: 32px;
+  flex: 1 1 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-2xs);
+  color: var(--nt-text-muted);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  background: transparent;
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-sm);
+  transition:
+    color 200ms ease,
+    background-color 200ms ease,
+    border-color 200ms ease;
+  cursor: pointer;
+}
+
+.video-clip-editor__resolution.is-active {
+  color: var(--nt-text-default);
+  background: var(--canvas-chip-hover);
+  border-color: var(--canvas-controls-text);
+}

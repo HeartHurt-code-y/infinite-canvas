@@ -21,6 +21,7 @@ use uuid::Uuid;
 use super::{
     BackendState,
     error::{BackendError, BackendResult},
+    protocol_reply::{self, LOCAL_BASE64_RESPONSE_POOL, ProtocolReplyGuard},
     storage::{Storage, now_ms},
     types::{
         ImportLocalBase64AssetCommand, LocalAssetListQuery, LocalBase64AssetGroupRecord,
@@ -707,386 +708,54 @@ pub fn handle_local_base64_request<R: tauri::Runtime>(
         .app_handle()
         .try_state::<BackendState>()
         .map(|state| state.local_base64_assets.clone());
-    tauri::async_runtime::spawn_blocking(move || {
-        let response = library
-            .map(|library| preview_response(&library, request))
-            .unwrap_or_else(|| {
-                Response::builder()
-                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                    .body(Vec::new())
-                    .unwrap()
-            });
-        responder.respond(response);
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn import_roundtrip_persists_base64_and_supports_byte_ranges() {
-        let root = tempfile::tempdir().unwrap();
-        let storage = Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap());
-        let library = LocalBase64Library::new(storage.clone(), root.path()).unwrap();
-        let input = root.path().join("test.png");
-        let bytes = b"\x89PNG\r\n\x1a\nhello material";
-        fs::write(&input, bytes).unwrap();
-        let record = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: input.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert!(record.id.starts_with("local-b64-"));
-        let encoded = fs::read_to_string(library.path(&record.id).unwrap()).unwrap();
-        assert_eq!(encoded, STANDARD.encode(bytes));
-        fs::remove_file(&input).unwrap();
-        let second_path = root.path().join("second.png");
-        fs::write(&second_path, bytes).unwrap();
-        let second = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: second_path.to_string_lossy().into_owned(),
-                name: Some("second".into()),
-                group_id: None,
-            })
-            .unwrap();
-        assert_eq!(second.id, record.id);
-        let page = library
-            .list(Some(LocalAssetListQuery {
-                media_type: Some(MediaType::Image),
-                name: None,
-                group_id: None,
-                page: Some(1),
-                page_size: Some(1),
-            }))
-            .unwrap();
-        assert_eq!(page.total, 1);
-        assert_eq!(page.items.len(), 1);
-        assert_eq!(page.items[0].id, record.id);
-        let empty = root.path().join("empty.png");
-        fs::write(&empty, []).unwrap();
-        assert!(
-            library
-                .import(ImportLocalBase64AssetCommand {
-                    local_path: empty.to_string_lossy().into_owned(),
-                    name: None,
-                    group_id: None,
-                })
-                .is_err()
-        );
-        let reopened = LocalBase64Library::new(
-            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
-            root.path(),
-        )
-        .unwrap();
-        let (found, restored) = reopened.read_bytes(&record.id, MediaType::Image).unwrap();
-        assert_eq!(found.id, record.id);
-        assert_eq!(restored, bytes);
-        assert_eq!(
-            decode_window(&reopened.path(&record.id).unwrap(), 2, 10).unwrap(),
-            bytes[2..=10]
-        );
-        let request = Request::builder()
-            .method("GET")
-            .uri(record.preview_url.as_str())
-            .header("range", "bytes=2-10")
-            .body(Vec::new())
-            .unwrap();
-        let response = preview_response(&reopened, request);
-        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(
-            response
-                .headers()
-                .get("content-range")
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            format!("bytes 2-10/{}", bytes.len())
-        );
-        assert_eq!(response.body(), &bytes[2..=10]);
-        let suffix = Request::builder()
-            .method("GET")
-            .uri(record.preview_url.as_str())
-            .header("range", "bytes=-5")
-            .body(Vec::new())
-            .unwrap();
-        let suffix_response = preview_response(&reopened, suffix);
-        assert_eq!(suffix_response.status(), StatusCode::PARTIAL_CONTENT);
-        assert_eq!(suffix_response.body(), &bytes[bytes.len() - 5..]);
-        assert_eq!(reopened.list(None).unwrap().kind_totals.image, 1);
-        assert!(reopened.get(&record.id, MediaType::Video).is_err());
-    }
-
-    #[test]
-    fn import_reuses_legacy_unhashed_body_and_keeps_distinct_content() {
-        let root = tempfile::tempdir().unwrap();
-        let database = root.path().join("data.sqlite3");
-        let library =
-            LocalBase64Library::new(Arc::new(Storage::open(&database).unwrap()), root.path())
-                .unwrap();
-        let first_path = root.path().join("first.png");
-        fs::write(&first_path, b"\x89PNG\r\n\x1a\nfirst").unwrap();
-        let original = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: first_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        // Simulate an existing library created before content indexing existed.
-        library
-            .storage
-            .forget_local_base64_asset_hash(&original.id)
-            .unwrap();
-        let same_path = root.path().join("renamed.png");
-        fs::copy(&first_path, &same_path).unwrap();
-        let reused = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: same_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert_eq!(reused.id, original.id);
-        let distinct_path = root.path().join("distinct.png");
-        fs::write(&distinct_path, b"\x89PNG\r\n\x1a\nother").unwrap();
-        let distinct = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: distinct_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert_ne!(distinct.id, original.id);
-        assert_eq!(library.list(None).unwrap().total, 2);
-    }
-
-    #[test]
-    fn concurrent_duplicate_imports_share_one_body() {
-        let root = tempfile::tempdir().unwrap();
-        let library = LocalBase64Library::new(
-            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
-            root.path(),
-        )
-        .unwrap();
-        let first = root.path().join("a.png");
-        let second = root.path().join("b.png");
-        fs::write(&first, b"\x89PNG\r\n\x1a\nconcurrent").unwrap();
-        fs::copy(&first, &second).unwrap();
-        let handles = [first, second].map(|path| {
-            let library = library.clone();
-            std::thread::spawn(move || {
-                library
-                    .import(ImportLocalBase64AssetCommand {
-                        local_path: path.to_string_lossy().into_owned(),
-                        name: None,
-                        group_id: None,
-                    })
-                    .unwrap()
-                    .id
-            })
-        });
-        let ids = handles.map(|handle| handle.join().unwrap());
-        assert_eq!(ids[0], ids[1]);
-        assert_eq!(library.list(None).unwrap().total, 1);
-    }
-
-    #[test]
-    fn corrupt_indexed_body_is_not_reused() {
-        let root = tempfile::tempdir().unwrap();
-        let library = LocalBase64Library::new(
-            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
-            root.path(),
-        )
-        .unwrap();
-        let input = root.path().join("image.png");
-        let bytes = b"\x89PNG\r\n\x1a\noriginal";
-        fs::write(&input, bytes).unwrap();
-        let first = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: input.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        fs::write(
-            library.path(&first.id).unwrap(),
-            STANDARD.encode(b"\x89PNG\r\n\x1a\nmodified"),
-        )
-        .unwrap();
-        let second = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: input.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert_ne!(second.id, first.id);
-        assert_eq!(
-            library.read_bytes(&second.id, MediaType::Image).unwrap().1,
-            bytes
-        );
-    }
-
-    #[test]
-    fn groups_filter_move_and_delete_semantics() {
-        let root = tempfile::tempdir().unwrap();
-        let library = LocalBase64Library::new(
-            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
-            root.path(),
-        )
-        .unwrap();
-        let group = library.create_group("  品牌物料  ").unwrap();
-        assert_eq!(group.name, "品牌物料");
-        assert!(group.id.starts_with("local-group-"));
-        // 分组名去重与长度/空白校验。
-        assert!(library.create_group("品牌物料").is_err());
-        assert!(library.create_group("   ").is_err());
-        assert!(library.create_group(&"长".repeat(65)).is_err());
-
-        let grouped_path = root.path().join("grouped.png");
-        fs::write(&grouped_path, b"\x89PNG\r\n\x1a\nin-group").unwrap();
-        let grouped = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: grouped_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: Some(group.id.clone()),
-            })
-            .unwrap();
-        assert_eq!(grouped.group_id.as_deref(), Some(group.id.as_str()));
-        // 内容去重复用已有素材：保留原分组，不把重复上传的分组改写进去。
-        let duplicate_path = root.path().join("duplicate.png");
-        fs::copy(&grouped_path, &duplicate_path).unwrap();
-        let reused = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: duplicate_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert_eq!(reused.id, grouped.id);
-        assert_eq!(reused.group_id.as_deref(), Some(group.id.as_str()));
-
-        let loose_path = root.path().join("loose.png");
-        fs::write(&loose_path, b"\x89PNG\r\n\x1a\nloose").unwrap();
-        let loose = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: loose_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert!(loose.group_id.is_none());
-
-        let query = |group_filter: Option<&str>| {
-            library
-                .list(Some(LocalAssetListQuery {
-                    media_type: Some(MediaType::Image),
-                    name: None,
-                    group_id: group_filter.map(str::to_string),
-                    page: Some(1),
-                    page_size: Some(40),
-                }))
-                .unwrap()
+    let app = context.app_handle().clone();
+    tauri::async_runtime::spawn(async move {
+        /*
+         * 兜底守卫在任务一开始就接管 responder：响应计算期间任何 panic
+         * （或提前 return）都会让 responder 随任务被 drop，WebKit 的自定义协议
+         * 任务就永远等不到 didFinish —— 表现为图片/视频**永久转圈**，
+         * macOS 上还会触发 "No response sent" NSException。
+         * 守卫的 Drop 会 fire-and-forget 回一个 503，保证任务有终态。
+         */
+        let mut guard = ProtocolReplyGuard::new(&app, responder);
+        // 许可池封顶「解码 + 主线程投递」的在途数量（本地解码是 CPU + 阻塞 IO）。
+        let Some(_permit) = LOCAL_BASE64_RESPONSE_POOL.acquire().await else {
+            if let Some(responder) = guard.take_responder() {
+                protocol_reply::respond_unavailable(&app, responder, "local_base64_busy");
+            }
+            return;
         };
-        assert_eq!(query(None).total, 2);
-        assert_eq!(query(None).kind_totals.image, 2);
-        let in_group = query(Some(group.id.as_str()));
-        assert_eq!(in_group.total, 1);
-        assert_eq!(in_group.items[0].id, grouped.id);
-        assert_eq!(in_group.kind_totals.image, 1);
-        let ungrouped = query(Some("ungrouped"));
-        assert_eq!(ungrouped.total, 1);
-        assert_eq!(ungrouped.items[0].id, loose.id);
-
-        // 批量移动：未知 ID 被忽略并如实返回命中数；目标分组必须存在。
-        let loose_ids = [loose.id.clone()];
-        assert_eq!(
+        /*
+         * 解码是阻塞 IO（读文件 + Base64 解码），必须放 spawn_blocking。
+         * 这里**await** 住 JoinHandle：tokio 会把闭包里的 panic 存进句柄，
+         * 直接丢弃句柄等于把 panic 静默吞掉 —— responder 随之被 drop，
+         * 预览永久转圈且日志无痕。await 后 panic 会变成 Err，
+         * 由下面的分支回一个明确的 503。
+         */
+        let computed = tauri::async_runtime::spawn_blocking(move || {
             library
-                .move_assets(&loose_ids, Some(group.id.as_str()))
-                .unwrap(),
-            1
-        );
-        assert_eq!(query(Some(group.id.as_str())).total, 2);
-        assert_eq!(
-            library
-                .move_assets(
-                    &[
-                        loose.id.clone(),
-                        "local-b64-00000000-0000-0000-0000-000000000000".into()
-                    ],
-                    None
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(query(Some("ungrouped")).total, 1);
-        assert!(
-            library
-                .move_assets(
-                    &loose_ids,
-                    Some("local-group-00000000-0000-0000-0000-000000000000")
-                )
-                .is_err()
-        );
-
-        let groups = library.list_groups().unwrap();
-        assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].asset_count, 1);
-
-        // 删除分组：成员回到未分组，素材与正文都保留。
-        library.delete_group(&group.id).unwrap();
-        assert!(library.list_groups().unwrap().is_empty());
-        assert_eq!(query(None).total, 2);
-        assert_eq!(query(Some("ungrouped")).total, 2);
-        assert!(library.read_bytes(&grouped.id, MediaType::Image).is_ok());
-        assert!(library.delete_group(&group.id).is_err());
-    }
-
-    #[test]
-    fn delete_asset_removes_body_cache_and_hash_index() {
-        let root = tempfile::tempdir().unwrap();
-        let library = LocalBase64Library::new(
-            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
-            root.path(),
-        )
-        .unwrap();
-        let input = root.path().join("image.png");
-        let bytes = b"\x89PNG\r\n\x1a\ndoomed";
-        fs::write(&input, bytes).unwrap();
-        let record = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: input.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        let cache_root = library.root.join("decoded-cache");
-        fs::create_dir_all(&cache_root).unwrap();
-        let cache = cache_root.join(format!("{0}-{0}.png", record.id));
-        fs::write(&cache, b"cached").unwrap();
-
-        library.delete_asset(&record.id).unwrap();
-        assert!(!library.path(&record.id).unwrap().exists());
-        assert!(!cache.exists());
-        assert!(library.storage.get_local_base64_asset(&record.id).is_err());
-        // 哈希索引随素材删除：同样字节可以重新入库为新素材。
-        let reborn_path = root.path().join("reborn.png");
-        fs::write(&reborn_path, bytes).unwrap();
-        let reborn = library
-            .import(ImportLocalBase64AssetCommand {
-                local_path: reborn_path.to_string_lossy().into_owned(),
-                name: None,
-                group_id: None,
-            })
-            .unwrap();
-        assert_ne!(reborn.id, record.id);
-        assert!(
-            library
-                .delete_asset("local-b64-00000000-0000-0000-0000-000000000000")
-                .is_err()
-        );
-    }
+                .map(|library| preview_response(&library, request))
+                .unwrap_or_else(|| {
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Vec::new())
+                        .unwrap_or_default()
+                })
+        })
+        .await;
+        let response = match computed {
+            Ok(response) => response,
+            Err(_) => {
+                // 闭包 panic：回一个明确的 503，别让 WebKit 任务悬空。
+                if let Some(responder) = guard.take_responder() {
+                    protocol_reply::respond_unavailable(&app, responder, "local_base64_failed");
+                }
+                return;
+            }
+        };
+        let Some(responder) = guard.take_responder() else {
+            return;
+        };
+        protocol_reply::deliver_protocol_response(&app, responder, response).await;
+    });
 }

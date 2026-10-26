@@ -1,0 +1,56 @@
+/*
+ * 节点浮动工具条：对齐 liblib.tv 的 `.node-floating-ui`。
+ *
+ * 原站实测：绝对定位贴在节点上沿外侧，高 24px，transform-origin 左下，
+ * 进出用 transform/opacity 过渡 150ms（ease-out）。
+ */
+.node-floating-ui {
+  position: absolute;
+  z-index: 10;
+  bottom: 100%;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: var(--size-ll-floating-bar);
+  padding: 0 var(--space-2xs);
+  background: color-mix(in srgb, var(--canvas-controls-bg) 92%, transparent);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-ll-float);
+  backdrop-filter: blur(8px);
+  transform-origin: bottom left;
+  transition:
+    transform var(--dur-short) var(--ease-out),
+    opacity var(--dur-short) var(--ease-out);
+}
+
+.node-floating-ui__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: 1.25rem;
+  padding: 0 var(--space-2xs);
+  color: var(--canvas-controls-text);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  white-space: nowrap;
+  transition: background-color var(--dur-short);
+}
+
+@media (hover: hover) {
+  .node-floating-ui__item:hover {
+    background: var(--canvas-controls-hover);
+  }
+}
+
+.node-floating-ui__label {
+  line-height: var(--leading-body);
+}
+
+.node-floating-ui__caret {
+  color: var(--nt-text-tertiary);
+}

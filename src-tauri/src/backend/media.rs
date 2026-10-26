@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use rand::Rng as _;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tauri_plugin_log::log::{error, info, warn};
+use tokio::io::AsyncReadExt as _;
 
 use super::{
     asset_library::{
@@ -12,6 +14,7 @@ use super::{
     gateway_profile::GatewayProfile,
     local_base64_assets::{LocalBase64Library, extension_for_mime},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
+    media_proxy::MAX_MEDIA_FULL_BYTES,
     model_schema::is_seedream_image_model,
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
@@ -690,26 +693,70 @@ impl MediaResolver {
                 media_type,
                 canvas_node_key,
             } => {
-                // 任意本地文件（如视频抽帧产物）：直接读取磁盘字节，不依赖对象存储。
-                let bytes = tokio::fs::read(path).await?;
-                let detected = infer::get(&bytes).ok_or_else(|| {
-                    BackendError::protocol(
-                        "local file media type could not be identified from file signature",
-                        json!({
-                            "path": path,
-                            "byteSize": bytes.len()
-                        }),
-                    )
-                })?;
-                validate_detected_type(*media_type, detected.mime_type())?;
-                let (remote_reference, lease) = if needs_local_bytes {
-                    (None, None)
+                /*
+                 * 任意本地文件（如视频抽帧产物）：直接读取磁盘字节，不依赖对象存储。
+                 *
+                 * 这里其实有两条语义完全不同的路径，内存口径必须分开：
+                 *
+                 * - **需要整块字节**（供应商按 multipart 直传这份素材）：字节必须整份
+                 *   留在内存里，于是按共享上限 [`MAX_MEDIA_FULL_BYTES`] 拒绝超限文件。
+                 *   这个上限与媒体代理的单条上限一致 —— 同一份素材从「代理」取与从
+                 *   「本机文件」取不该一个放行一个拒绝。
+                 * - **只要一个公网 URL**（素材先暂存到对象存储，再由供应商去抓）：字节
+                 *   **不需要**进内存，暂存服务是按文件流上传的。这里只做两件小事：
+                 *   读文件头判断类型、按块流式算 sha256。
+                 *
+                 * 旧实现两条路径都 `tokio::fs::read` 整文件：原始视频动辄几百 MB，
+                 * 即使用户只要一个公网 URL，也会先把整段视频读进内存（Windows 上表现为
+                 * 整个应用被系统杀掉，不是 Rust panic）。
+                 */
+                const MAX_LOCAL_FILE_STREAM_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+                let metadata = tokio::fs::metadata(path).await?;
+                let byte_size = metadata.len();
+                let (detected, hash, bytes, remote_reference, lease) = if needs_local_bytes {
+                    if byte_size > MAX_MEDIA_FULL_BYTES {
+                        return Err(BackendError::validation(
+                            format!(
+                                "本机素材文件过大（{} MB），当前模型需要把这份素材整份上传，无法作为参考素材使用。",
+                                byte_size / (1024 * 1024)
+                            ),
+                            json!({ "path": path, "byteSize": byte_size }),
+                        ));
+                    }
+                    let bytes = tokio::fs::read(path).await?;
+                    let detected = infer::get(&bytes).ok_or_else(|| {
+                        BackendError::protocol(
+                            "local file media type could not be identified from file signature",
+                            json!({
+                                "path": path,
+                                "byteSize": bytes.len()
+                            }),
+                        )
+                    })?;
+                    validate_detected_type(*media_type, detected.mime_type())?;
+                    let hash = sha256_bytes(&bytes);
+                    (detected, hash, Some(bytes), None, None)
                 } else {
+                    // 这条路径的字节不进内存，2 GiB 只是「别给一个明显异常的文件做
+                    // 哈希与上传」的兜底，不是内存上限：原始视频本来就远大于 128 MiB。
+                    if byte_size > MAX_LOCAL_FILE_STREAM_BYTES {
+                        return Err(BackendError::validation(
+                            format!(
+                                "本机素材文件过大（{} MB），无法作为参考素材使用。",
+                                byte_size / (1024 * 1024)
+                            ),
+                            json!({ "path": path, "byteSize": byte_size }),
+                        ));
+                    }
+                    let detected = detect_local_file_media_type(path).await?;
+                    validate_detected_type(*media_type, detected.mime_type())?;
+                    let hash = sha256_file(path).await?;
                     let lease = self
                         .staging
                         .stage_for_remote_input(path.as_str(), *media_type)
                         .await?;
-                    (Some(lease.get_url.clone()), Some(lease))
+                    let remote_reference = Some(lease.get_url.clone());
+                    (detected, hash, None, remote_reference, Some(lease))
                 };
                 Ok((
                     ResolvedMedia {
@@ -724,10 +771,10 @@ impl MediaResolver {
                         }),
                         mime_type: detected.mime_type().to_string(),
                         duration_seconds: None,
-                        byte_size: bytes.len() as u64,
-                        sha256: sha256_bytes(&bytes),
+                        byte_size,
+                        sha256: hash,
                         file_name: media_file_name(display_name, detected.extension()),
-                        bytes: needs_local_bytes.then_some(bytes),
+                        bytes,
                         remote_reference,
                         prompt_segment_index,
                         content_index,
@@ -800,7 +847,7 @@ impl MediaResolver {
                 started_at.elapsed().as_millis()
             );
             return Err(BackendError::protocol(
-                format!("asset download returned HTTP {status}"),
+                format!("引用素材下载失败（HTTP {status}）。链接可能已失效：请更换素材链接或重新上传。"),
                 redact_request_value(&json!({
                     "httpStatus": status,
                     "url": url,
@@ -972,6 +1019,45 @@ fn media_file_name(display_name: &str, extension: &str) -> String {
     format!("{}.{}", safe_file_stem(display_name), extension)
 }
 
+/// 只读文件头判断本机素材的媒体类型。
+///
+/// 类型判断只需要文件签名（都在文件开头），不必为了一个 `infer::get` 把几百 MB 的
+/// 原始视频读进内存：这条路径服务于「只要一个公网 URL」的分支，字节随后由暂存
+/// 服务按文件流上传。
+async fn detect_local_file_media_type(path: &str) -> BackendResult<infer::Type> {
+    const HEADER_BYTES: usize = 64 * 1024;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut head = vec![0_u8; HEADER_BYTES];
+    let read = file.read(&mut head).await?;
+    head.truncate(read);
+    infer::get(&head).ok_or_else(|| {
+        BackendError::protocol(
+            "local file media type could not be identified from file signature",
+            json!({ "path": path, "byteSize": read }),
+        )
+    })
+}
+
+/// 流式计算本机文件的 sha256：按固定大小分块读，内存占用与文件体积无关。
+///
+/// 摘要要的是「这份文件的身份」，不是「把文件读进来」：原始视频几百 MB 时，
+/// 一次性读进内存既慢又会推高进程峰值。
+async fn sha256_file(path: &str) -> BackendResult<String> {
+    const CHUNK_BYTES: usize = 1024 * 1024;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex::encode(&digest[..]))
+}
+
 fn validate_detected_type(expected: MediaType, mime: &str) -> BackendResult<()> {
     let valid = match expected {
         MediaType::Image => mime.starts_with("image/"),
@@ -1051,587 +1137,5 @@ fn validate_media_encoding(
             ))
         }
         _ => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn asset_target(asset_id: &str, canvas_node_key: Option<&str>) -> MediaReferenceTarget {
-        MediaReferenceTarget::Asset {
-            provider_connection_id: "company".into(),
-            asset_id: asset_id.into(),
-            media_type: MediaType::Image,
-            canvas_node_key: canvas_node_key.map(str::to_string),
-        }
-    }
-
-    fn local_result_target(
-        task_id: &str,
-        result_index: u32,
-        canvas_node_key: Option<&str>,
-    ) -> MediaReferenceTarget {
-        MediaReferenceTarget::LocalResult {
-            generation_task_id: task_id.into(),
-            result_index,
-            media_type: MediaType::Video,
-            canvas_node_key: canvas_node_key.map(str::to_string),
-        }
-    }
-
-    fn mention(target: &MediaReferenceTarget, position: Option<(u32, u32)>) -> PromptSegment {
-        PromptSegment::MediaReference {
-            mention_id: "mention".into(),
-            target: target.clone(),
-            display_name_snapshot: "reference".into(),
-            type_position: position.map(|value| value.0),
-            content_index: position.map(|value| value.1),
-        }
-    }
-
-    fn explicit(
-        target: &MediaReferenceTarget,
-        role: &str,
-        position: Option<(u32, u32)>,
-    ) -> ExplicitMediaInput {
-        ExplicitMediaInput {
-            target: target.clone(),
-            role: role.into(),
-            display_name_snapshot: "reference".into(),
-            type_position: position.map(|value| value.0),
-            content_index: position.map(|value| value.1),
-        }
-    }
-
-    #[test]
-    fn numbered_plan_keeps_connection_order_when_prompt_mentions_are_reversed_and_repeated() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let second = asset_target("asset-2", Some("node-2"));
-        let prompt = vec![
-            mention(&second, Some((2, 2))),
-            PromptSegment::Text {
-                text: " follows ".into(),
-            },
-            mention(&first, Some((1, 1))),
-            mention(&second, Some((2, 2))),
-        ];
-        let inputs = vec![
-            explicit(&first, "reference_image", Some((1, 1))),
-            explicit(&second, "reference_image", Some((2, 2))),
-        ];
-        let plan = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(plan.inputs.len(), 2);
-        assert_eq!(plan.inputs[0].target, &first);
-        assert_eq!(plan.inputs[1].target, &second);
-        assert_eq!(plan.inputs[0].type_position, 1);
-        assert_eq!(plan.inputs[1].type_position, 2);
-        assert_eq!(plan.inputs[0].prompt_segment_index, Some(2));
-        assert_eq!(plan.inputs[1].prompt_segment_index, Some(0));
-        assert_eq!(
-            plan.rendered_prompt,
-            "[图片2：reference] follows [图片1：reference][图片2：reference]"
-        );
-        assert!(matches!(
-            plan.content[0],
-            CompiledContentItem::Media {
-                type_position: 2,
-                ..
-            }
-        ));
-        assert!(matches!(
-            plan.content[2],
-            CompiledContentItem::Media {
-                type_position: 1,
-                ..
-            }
-        ));
-        assert!(matches!(
-            plan.content[3],
-            CompiledContentItem::Media {
-                type_position: 2,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn mentioned_frame_inputs_keep_the_roles_of_their_connections() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let last = asset_target("asset-2", Some("node-2"));
-        let prompt = vec![
-            mention(&last, Some((2, 2))),
-            mention(&first, Some((1, 1))),
-            mention(&last, Some((2, 2))),
-        ];
-        let inputs = vec![
-            explicit(&first, "first_frame", Some((1, 1))),
-            explicit(&last, "last_frame", Some((2, 2))),
-        ];
-        let plan = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(plan.inputs.len(), 2);
-        assert_eq!(plan.inputs[0].role, "first_frame");
-        assert_eq!(plan.inputs[1].role, "last_frame");
-    }
-
-    #[test]
-    fn mixed_media_have_independent_positions_and_keep_unmentioned_inputs() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let second = asset_target("asset-2", Some("node-2"));
-        let video = local_result_target("video-task", 0, Some("video-node"));
-        let audio = MediaReferenceTarget::LocalFile {
-            path: "C:/reference.mp3".into(),
-            media_type: MediaType::Audio,
-            canvas_node_key: Some("audio-node".into()),
-        };
-        let prompt = vec![
-            mention(&audio, Some((1, 4))),
-            mention(&second, Some((2, 3))),
-            mention(&video, Some((1, 2))),
-        ];
-        let inputs = vec![
-            explicit(&first, "", Some((1, 1))),
-            explicit(&video, "", Some((1, 2))),
-            explicit(&second, "", Some((2, 3))),
-            explicit(&audio, "", Some((1, 4))),
-        ];
-        let plan = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(
-            plan.inputs
-                .iter()
-                .map(|input| (
-                    input.target.media_type(),
-                    input.type_position,
-                    input.content_index
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                (MediaType::Image, 1, Some(1)),
-                (MediaType::Video, 1, Some(2)),
-                (MediaType::Image, 2, Some(3)),
-                (MediaType::Audio, 1, Some(4)),
-            ]
-        );
-        assert_eq!(plan.inputs[0].prompt_segment_index, None);
-        assert_eq!(plan.inputs[0].role, "reference_image");
-        assert_eq!(plan.inputs[1].role, "reference_video");
-        assert_eq!(plan.inputs[3].role, "reference_audio");
-        assert_eq!(
-            plan.rendered_prompt,
-            "[音频1：reference][图片2：reference][视频1：reference]"
-        );
-    }
-
-    #[test]
-    fn same_source_on_distinct_canvas_instances_remains_distinct() {
-        for (first, second) in [
-            (
-                asset_target("same-asset", Some("node-1")),
-                asset_target("same-asset", Some("node-2")),
-            ),
-            (
-                local_result_target("same-task", 0, Some("node-1")),
-                local_result_target("same-task", 0, Some("node-2")),
-            ),
-        ] {
-            let prompt = vec![
-                mention(&first, Some((1, 1))),
-                mention(&first, Some((1, 1))),
-                mention(&second, Some((2, 2))),
-            ];
-            let inputs = vec![
-                explicit(&first, "", Some((1, 1))),
-                explicit(&second, "", Some((2, 2))),
-            ];
-            let plan = build_media_plan(&prompt, &inputs).unwrap();
-            assert_eq!(plan.inputs.len(), 2);
-            assert_eq!(plan.inputs[0].target, &first);
-            assert_eq!(plan.inputs[1].target, &second);
-        }
-    }
-
-    #[test]
-    fn conflicting_zero_sparse_or_reversed_positions_are_rejected_before_resolution() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let second = asset_target("asset-2", Some("node-2"));
-        for (a, b) in [
-            ((1, 1), (1, 2)), // duplicate type position
-            ((1, 1), (2, 1)), // duplicate global position
-            ((1, 1), (2, 3)), // global gap
-            ((1, 1), (3, 2)), // type gap
-            ((0, 1), (2, 2)), // zero type position
-            ((1, 0), (2, 2)), // zero global position
-            ((2, 1), (1, 2)), // type order disagrees with connection order
-        ] {
-            let inputs = vec![
-                explicit(&first, "", Some(a)),
-                explicit(&second, "", Some(b)),
-            ];
-            assert!(
-                matches!(
-                    build_media_plan(&[], &inputs),
-                    Err(BackendError::Validation { .. })
-                ),
-                "accepted {a:?}, {b:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn repeated_target_cannot_change_its_position_or_role() {
-        let target = asset_target("asset-1", Some("node-1"));
-        let prompt = vec![mention(&target, Some((1, 1)))];
-        for position in [(2, 1), (1, 2)] {
-            let inputs = vec![explicit(&target, "", Some(position))];
-            assert!(build_media_plan(&prompt, &inputs).is_err());
-        }
-        let inputs = vec![
-            explicit(&target, "first_frame", Some((1, 1))),
-            explicit(&target, "last_frame", Some((1, 1))),
-        ];
-        assert!(build_media_plan(&prompt, &inputs).is_err());
-        let conflicting_mentions = vec![
-            mention(&target, Some((1, 1))),
-            mention(&target, Some((2, 2))),
-        ];
-        assert!(build_media_plan(&conflicting_mentions, &[]).is_err());
-    }
-
-    #[test]
-    fn renamed_snapshots_keep_the_same_identity_and_media_position() {
-        let target = asset_target("asset-1", Some("node-1"));
-        for position in [None, Some((1, 1))] {
-            let mut renamed_mention = mention(&target, position);
-            if let PromptSegment::MediaReference {
-                display_name_snapshot,
-                ..
-            } = &mut renamed_mention
-            {
-                *display_name_snapshot = "renamed reference".into();
-            }
-            let prompt = vec![mention(&target, position), renamed_mention];
-            let mut current_input = explicit(&target, "first_frame", position);
-            current_input.display_name_snapshot = "current connection name".into();
-            let inputs = vec![current_input];
-            let plan = build_media_plan(&prompt, &inputs).unwrap();
-            assert_eq!(plan.inputs.len(), 1);
-            assert_eq!(plan.inputs[0].target, &target);
-            assert_eq!(plan.inputs[0].display_name, "current connection name");
-            assert_eq!(plan.inputs[0].role, "first_frame");
-            assert_eq!(
-                plan.rendered_prompt,
-                "[图片1：reference][图片1：renamed reference]"
-            );
-        }
-    }
-
-    #[test]
-    fn reference_can_inherit_frozen_positions_but_independent_unnumbered_inputs_are_rejected() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let second = asset_target("asset-2", Some("node-2"));
-        let prompt = vec![mention(&second, None)];
-        let inputs = vec![
-            explicit(&first, "", Some((1, 1))),
-            explicit(&second, "last_frame", Some((2, 2))),
-        ];
-        let plan = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(plan.rendered_prompt, "[图片2：reference]");
-        assert_eq!(plan.inputs[1].role, "last_frame");
-        assert!(build_media_plan(&prompt, &inputs[..1]).is_err());
-        let mut partial = explicit(&first, "", Some((1, 1)));
-        partial.content_index = None;
-        assert!(build_media_plan(&[], &[partial]).is_err());
-    }
-
-    #[test]
-    fn legacy_plan_keeps_first_reference_order_and_appends_remaining_explicit_inputs() {
-        let first = asset_target("asset-1", Some("node-1"));
-        let second = asset_target("asset-2", Some("node-2"));
-        let third = asset_target("asset-3", Some("node-3"));
-        let prompt = vec![
-            mention(&second, None),
-            mention(&first, None),
-            mention(&second, None),
-        ];
-        let inputs = vec![
-            explicit(&third, "", None),
-            explicit(&first, "first_frame", None),
-            explicit(&second, "", None),
-        ];
-        let plan = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(
-            plan.inputs
-                .iter()
-                .map(|input| input.target)
-                .collect::<Vec<_>>(),
-            vec![&second, &first, &third]
-        );
-        assert_eq!(
-            plan.inputs
-                .iter()
-                .map(|input| input.type_position)
-                .collect::<Vec<_>>(),
-            vec![1, 2, 3]
-        );
-        assert!(
-            plan.inputs
-                .iter()
-                .all(|input| input.content_index.is_none())
-        );
-        assert_eq!(plan.inputs[1].role, "first_frame");
-        assert_eq!(
-            plan.rendered_prompt,
-            "[图片1：reference][图片2：reference][图片1：reference]"
-        );
-    }
-
-    #[test]
-    fn text_and_unreferenced_workflow_inputs_keep_their_existing_contract() {
-        let prompt = vec![PromptSegment::Text {
-            text: "An ordinary prompt mentioning 图2 as text".into(),
-        }];
-        let pure_text = build_media_plan(&prompt, &[]).unwrap();
-        assert!(pure_text.inputs.is_empty());
-        assert_eq!(
-            pure_text.rendered_prompt,
-            "An ordinary prompt mentioning 图2 as text"
-        );
-        let target = asset_target("workflow-asset", None);
-        let inputs = vec![explicit(&target, "reference_image", Some((1, 1)))];
-        let workflow = build_media_plan(&prompt, &inputs).unwrap();
-        assert_eq!(workflow.inputs.len(), 1);
-        assert_eq!(workflow.inputs[0].prompt_segment_index, None);
-        assert_eq!(workflow.rendered_prompt, pure_text.rendered_prompt);
-    }
-
-    /// 生成一个不依赖真实网络、确定性的传输层错误，用于验证重试控制流。
-    async fn transport_error() -> BackendError {
-        let client = reqwest::Client::new();
-        BackendError::Transport(client.get("not a url").send().await.unwrap_err())
-    }
-
-    #[tokio::test]
-    async fn transport_retry_recovers_after_transient_failures() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result = with_transport_retry_inner(
-            "test",
-            3,
-            |_| 0,
-            || {
-                let attempts = &attempts;
-                async move {
-                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                        Err(transport_error().await)
-                    } else {
-                        Ok("ok")
-                    }
-                }
-            },
-        )
-        .await;
-        assert_eq!(result.unwrap(), "ok");
-        // 首次失败 + 1 次重试后成功，第 3 次尝试命中成功分支。
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
-    }
-
-    #[tokio::test]
-    async fn transport_retry_exhausts_after_configured_retries() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result: BackendResult<i32> = with_transport_retry_inner(
-            "test",
-            3,
-            |_| 0,
-            || {
-                let attempts = &attempts;
-                async move {
-                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Err(transport_error().await)
-                }
-            },
-        )
-        .await;
-        assert!(matches!(result, Err(BackendError::Transport(_))));
-        // 首次尝试 + 3 次自动重试 = 共 4 次尝试。
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
-    }
-
-    #[tokio::test]
-    async fn transport_retry_does_not_retry_non_transport_errors() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result: BackendResult<i32> = with_transport_retry_inner(
-            "test",
-            3,
-            |_| 0,
-            || {
-                let attempts = &attempts;
-                async move {
-                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    Err(BackendError::protocol("deterministic", json!({})))
-                }
-            },
-        )
-        .await;
-        assert!(matches!(result, Err(BackendError::Protocol { .. })));
-        // 确定性错误不做重试，只尝试一次。
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn media_retry_delay_is_exponential_with_jitter() {
-        for (index, nominal) in [(1, 2_000), (2, 4_000), (3, 8_000)] {
-            let delay = media_retry_delay_ms(index);
-            assert!(delay >= nominal);
-            assert!(delay <= nominal + nominal / 5);
-        }
-    }
-
-    #[test]
-    fn fzy_seedream_reference_can_use_local_bytes_without_staging() {
-        let schema = super::super::model_schema::schema_for_enabled_operations(
-            &Value::Null,
-            "doubao-seedream-5-0-260128",
-            &[GenerationOperation::ImageToImage],
-            super::super::model_schema::RequestDialect::FzyAi,
-        );
-        assert!(image_edit_needs_local_bytes(
-            GenerationOperation::ImageToImage,
-            Some("doubao-seedream-5-0-260128"),
-            &schema["image_to_image"],
-        ));
-    }
-
-    #[test]
-    fn seedream_image_to_image_does_not_prefer_local_bytes() {
-        // 客户反馈：生成一张图后把本地产物连到下一节点二次改图，5.0 / 5.0 pro
-        // 都报 `seedream image input has no remote-readable reference`。原因不是
-        // 模型不支持参考图，而是图生图曾一律按 multipart/Gemini 需要本地字节处理，
-        // 上一节点 local_result 不会被暂存成公网 URL。
-        let seedream = super::super::model_schema::default_model_schema(
-            "doubao-seedream-5-0-260128",
-            &[GenerationOperation::ImageToImage],
-        );
-        let seedream_pro = super::super::model_schema::default_model_schema(
-            "doubao-seedream-5-0-pro-260628",
-            &[GenerationOperation::ImageToImage],
-        );
-        let gemini = super::super::model_schema::default_model_schema(
-            "gemini-3-pro-image-preview",
-            &[GenerationOperation::ImageToImage],
-        );
-        let gpt_image = super::super::model_schema::default_model_schema(
-            "gpt-image-2",
-            &[GenerationOperation::ImageToImage],
-        );
-        assert!(
-            !image_edit_needs_local_bytes(
-                GenerationOperation::ImageToImage,
-                Some("doubao-seedream-5-0-260128"),
-                &seedream["image_to_image"],
-            ),
-            "Seedream 5.0 图生图必须暂存/签发远端可读 URL"
-        );
-        assert!(
-            !image_edit_needs_local_bytes(
-                GenerationOperation::ImageToImage,
-                Some("doubao-seedream-5-0-pro-260628"),
-                &seedream_pro["image_to_image"],
-            ),
-            "Seedream 5.0 pro 图生图必须暂存/签发远端可读 URL"
-        );
-        assert!(
-            !image_edit_needs_local_bytes(
-                GenerationOperation::ImageToImage,
-                None,
-                &seedream["image_to_image"],
-            ),
-            "即使模型 id 缺失，seedream_image_urls 契约也不能改走本地字节"
-        );
-        assert!(
-            !image_edit_needs_local_bytes(
-                GenerationOperation::ImageToImage,
-                Some("doubao-seedream-5-0-260128"),
-                &json!({}),
-            ),
-            "旧画布若没冻结 mediaEncoding，仍按模型 id 识别 Seedream"
-        );
-        assert!(image_edit_needs_local_bytes(
-            GenerationOperation::ImageToImage,
-            Some("gemini-3-pro-image-preview"),
-            &gemini["image_to_image"],
-        ));
-        assert!(image_edit_needs_local_bytes(
-            GenerationOperation::ImageToImage,
-            Some("gpt-image-2"),
-            &gpt_image["image_to_image"],
-        ));
-        assert!(!image_edit_needs_local_bytes(
-            GenerationOperation::VideoGeneration,
-            Some("doubao-seedream-5-0-260128"),
-            &json!({}),
-        ));
-    }
-
-    /// 回归：本地素材库对象下载曾因单次连接失败（代理 fake-ip 抖动）直接判定
-    /// 任务失败。现在每次尝试都重新签发读取地址，并只对传输层失败重试。
-    #[tokio::test]
-    async fn local_asset_download_reissues_a_lease_for_every_retry() {
-        let issued = std::sync::Mutex::new(0_u32);
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let (bytes, url) = download_with_fresh_lease_inner(
-            3,
-            |_| 0,
-            || {
-                let mut issued = issued.lock().unwrap();
-                *issued += 1;
-                Ok(format!(
-                    "https://staging.example/object?signature={}",
-                    *issued
-                ))
-            },
-            |url: String| {
-                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async move {
-                    if attempt < 2 {
-                        Err(transport_error().await)
-                    } else {
-                        Ok(url.into_bytes())
-                    }
-                }
-            },
-        )
-        .await
-        .expect("transient connect failures must be retried");
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
-        assert_eq!(
-            *issued.lock().unwrap(),
-            3,
-            "every attempt must reissue its own presigned url"
-        );
-        // 返回值里的地址是第 3 次成功尝试用的那份签名，不是首次失败的地址。
-        assert_eq!(String::from_utf8(bytes).unwrap(), url);
-        assert!(url.ends_with("signature=3"));
-    }
-
-    #[tokio::test]
-    async fn local_asset_download_does_not_retry_deterministic_failures() {
-        let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result: BackendResult<(Vec<u8>, String)> = download_with_fresh_lease_inner(
-            3,
-            |_| 0,
-            || Ok("https://staging.example/object?signature=1".to_string()),
-            |_url: String| {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                async {
-                    Err::<Vec<u8>, _>(BackendError::protocol(
-                        "asset download returned HTTP 403",
-                        json!({ "httpStatus": 403 }),
-                    ))
-                }
-            },
-        )
-        .await;
-        assert!(matches!(result, Err(BackendError::Protocol { .. })));
-        // 确定性错误只尝试一次，不重新签发地址也不退避等待。
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }

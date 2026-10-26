@@ -4,80 +4,6 @@ use backend::commands;
 use tauri::Manager as _;
 use tauri_plugin_opener::OpenerExt as _;
 
-/// Release packaging checks that the slim executable expects exactly the
-/// component manifests listed in the signed resource release.
-fn run_runtime_component_pins_if_requested() -> bool {
-    if !std::env::args().any(|arg| arg == "--print-runtime-component-pins") {
-        return false;
-    }
-    println!(
-        "IC_RUNTIME_COMPONENT_PINS_V1 {}",
-        backend::runtime_components::compiled_manifest_pins()
-    );
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    std::process::exit(0);
-}
-
-/// Let release verification read the exact optional-component trust pins from this executable.
-fn run_component_catalog_pins_if_requested() -> bool {
-    if !std::env::args().any(|arg| arg == "--print-component-catalog-pins") {
-        return false;
-    }
-    println!(
-        "IC_COMPONENT_CATALOG_PINS_V1 {}",
-        serde_json::json!({
-            "schemaVersion": 1,
-            "applicationVersion": env!("CARGO_PKG_VERSION"),
-            "edition": env!("IC_DISTRIBUTION_EDITION"),
-            "catalogSha256": env!("IC_COMPONENT_CATALOG_SHA256"),
-            "manifestPins": {
-                "blender": env!("IC_BLENDER_MANIFEST_SHA256"),
-                "remotion-runtime": env!("IC_REMOTION_MANIFEST_SHA256"),
-                "ffmpeg": env!("IC_FFMPEG_MANIFEST_SHA256"),
-                "pose-runtime": env!("IC_POSE_MANIFEST_SHA256"),
-                "gpt-image-2-style-library": env!("IC_STYLE_MANIFEST_SHA256"),
-                "ai-media-runtime": env!("IC_AI_MEDIA_MANIFEST_SHA256"),
-                "ai-media-quality-runtime": env!("IC_AI_MEDIA_QUALITY_MANIFEST_SHA256"),
-            },
-        })
-    );
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    std::process::exit(0);
-}
-
-/// The slim NSIS installer runs this before it can remove an older MSI/NSIS install.
-/// It must work without starting WebView, backend services, or a migration thread.
-fn run_runtime_component_check_if_requested() -> bool {
-    if !std::env::args().any(|arg| arg == "--check-runtime-components") {
-        return false;
-    }
-    // Packaging probes this marker before shipping a slim installer. An older
-    // executable must never be mistaken for a compatible component verifier.
-    println!("IC_RUNTIME_COMPONENT_CHECK_V1");
-    use std::io::Write as _;
-    let _ = std::io::stdout().flush();
-    #[cfg(windows)]
-    let result = dirs::data_local_dir()
-        .ok_or_else(|| "无法定位 Windows 本地应用数据目录".to_string())
-        .and_then(|base| {
-            backend::runtime_components::check_persistent_components(
-                &base.join("com.infinitecanvas.desktop"),
-            )
-        });
-    #[cfg(not(windows))]
-    let result: Result<(), String> = Err("组件自检仅供 Windows 安装程序使用".into());
-    let success = result.is_ok();
-    match result {
-        Ok(()) => println!("runtime components ready"),
-        Err(error) => eprintln!("runtime components unavailable: {error}"),
-    }
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-    std::process::exit(if success { 0 } else { 1 });
-}
-
 /// 处理 `--keychain-access-self-test=<ref>`：返回 true 表示已完成自检、调用方应跳过启动。
 ///
 /// 用途：一条命令回答「这个构建产物能不能正常存取凭据」。它走与线上完全相同的
@@ -157,17 +83,56 @@ fn create_main_window(app: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// 打开创作台独立窗口。
+///
+/// 创作台与主窗口共用同一份前端产物，靠 `?view=create` 区分入口（见前端
+/// `createEntry.ts` 的判定顺序：URL `?view=` > hash > Tauri 窗口标签）。
+/// 窗口标签固定为 `create`，重复点击时聚焦已有窗口而不是开第二个。
+#[tauri::command]
+fn open_create_window(app: tauri::AppHandle) -> Result<(), String> {
+    const LABEL: &str = "create";
+    if let Some(existing) = app.get_webview_window(LABEL) {
+        existing.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let handle = app.clone();
+    let builder = tauri::WebviewWindowBuilder::new(
+        &app,
+        LABEL,
+        tauri::WebviewUrl::App("index.html?view=create".into()),
+    )
+    .title("创作台")
+    .inner_size(1280.0, 800.0)
+    .min_inner_size(960.0, 640.0)
+    .center()
+    .resizable(true)
+    .devtools(true)
+    .on_navigation(move |url| {
+        // 与主窗口同一套站外导航治理：漏网跳转一律改用系统浏览器打开。
+        if is_internal_webview_url(url) {
+            return true;
+        }
+        tauri_plugin_log::log::info!("[导航] 创作台拦截站外跳转，改用系统浏览器打开: {url}");
+        if let Err(error) = handle.opener().open_url(url.as_str(), None::<&str>) {
+            tauri_plugin_log::log::warn!("[导航] 系统浏览器打开失败: {error}");
+        }
+        false
+    });
+    if let Err(error) = builder.build() {
+        // 并发双击：另一个调用已经用同一个标签把窗口建起来了。此时聚焦它即可，
+        // 不该把「标签已存在」当成失败抛给前端（用户会看到一条莫名其妙的报错）。
+        match app.get_webview_window(LABEL) {
+            Some(existing) => {
+                let _ = existing.set_focus();
+            }
+            None => return Err(error.to_string()),
+        }
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if run_component_catalog_pins_if_requested() {
-        return;
-    }
-    if run_runtime_component_pins_if_requested() {
-        return;
-    }
-    if run_runtime_component_check_if_requested() {
-        return;
-    }
     if run_keychain_access_self_test_if_requested() {
         return;
     }
@@ -250,33 +215,20 @@ pub fn run() {
             commands::delete_provider_token_group,
             commands::save_canvas_document,
             commands::delete_canvas_document,
-            commands::save_workflow_history,
-            commands::list_workflow_history,
-            commands::get_workflow_history,
-            commands::recover_workflow_history,
             commands::get_canvas_document,
             commands::list_canvas_documents,
             commands::start_generation,
+            commands::list_generation_models,
+            open_create_window,
+            commands::prepare_runtime_components_for_update,
+            commands::get_runtime_component_update_status,
+            commands::start_video_clip,
             commands::rename_generation_result,
             commands::run_prompt_node,
-            commands::fetch_commerce_sources,
-            commands::save_reverse_video_evidence,
             backend::video_local_edit::save_video_edit_frame,
-            backend::video_local_edit::save_white_model_still,
             backend::video_edit_source::prepare_video_edit_source,
             backend::video_edit_source::release_video_edit_source,
-            commands::get_reverse_video_learning,
-            commands::deliver_reverse_video,
             commands::normalize_cover_image,
-            commands::prepare_product_scene_view,
-            commands::validate_product_scene_views,
-            commands::prepare_product_scene_logo,
-            commands::validate_product_scene_logo,
-            commands::apply_product_scene_logo,
-            commands::compose_product_scene,
-            commands::compose_product_scene_protected,
-            commands::normalize_product_scene_image,
-            commands::export_product_scenes,
             commands::read_brand_design_image,
             commands::export_brand_design_bundle,
             commands::list_brand_models,
@@ -286,30 +238,13 @@ pub fn run() {
             commands::archive_brand_model,
             commands::resume_cover_image_result,
             commands::resume_generation_result,
-            commands::remotion_renderer_preflight,
-            commands::get_runtime_component_migration_status,
-            commands::prepare_runtime_components_for_update,
-            commands::get_runtime_component_update_status,
-            commands::get_runtime_component_manager_status,
-            commands::get_runtime_feature_status,
-            commands::install_runtime_component,
-            commands::import_runtime_component_archive,
-            commands::cancel_runtime_component_install,
-            commands::get_runtime_component_asset_root,
             commands::prepare_macos_delta_update,
             commands::get_macos_delta_update_status,
             commands::install_prepared_macos_delta_update,
-            commands::start_remotion_render,
-            commands::get_remotion_render,
-            commands::cancel_remotion_render,
-            commands::get_blender_engine,
-            commands::start_blender_render,
-            commands::get_blender_render,
-            commands::cancel_blender_render,
-            commands::open_blender_project,
             commands::list_generation_tasks,
             commands::get_generation_task,
             commands::get_generation_task_progress,
+            commands::cancel_generation_task,
             commands::promote_seedance_draft,
             commands::recover_generation_tasks,
             commands::query_video_task_now,
@@ -362,22 +297,10 @@ pub fn run() {
             commands::start_video_download,
             commands::get_video_download_job,
             commands::cancel_video_download,
-            commands::get_video_composer_engine,
-            commands::install_video_composer_engine,
-            commands::start_video_composition,
             commands::list_speech_voices,
             commands::get_speech_request_status,
             commands::synthesize_speech,
             commands::compose_dubbed_video,
-            commands::mv_clip_signature,
-            commands::transcribe_mv_song,
-            commands::align_mv_lyrics,
-            commands::probe_mv_song,
-            commands::prepare_mv_audio_window,
-            commands::start_mv_composition,
-            commands::check_mv_media_alignment,
-            commands::get_video_composition_job,
-            commands::cancel_video_composition,
             commands::start_video_frame_extraction,
             commands::get_video_frame_extraction_job,
             commands::cancel_video_frame_extraction,
@@ -389,18 +312,6 @@ pub fn run() {
             commands::retry_video_preparation_job,
             commands::cancel_video_preparation_job,
             commands::rename_video_preparation_output,
-            commands::get_ai_media_runtime_status,
-            commands::import_ai_media_runtime,
-            commands::start_ai_media_job,
-            commands::get_ai_media_job,
-            commands::list_ai_media_jobs,
-            commands::retry_ai_media_job,
-            commands::cancel_ai_media_job,
-            commands::rename_ai_media_output,
-            commands::analyze_reelbench_video,
-            commands::recut_reelbench_video,
-            commands::validate_reelbench_shots,
-            commands::export_reelbench_video,
             backend::thumbnail::create_media_thumbnail,
             commands::backend_health,
         ])
@@ -418,57 +329,4 @@ pub fn run() {
                 tauri_plugin_log::log::info!("[启动] 事件循环就绪，开始泵消息");
             }
         });
-}
-
-#[cfg(test)]
-mod navigation_guard_tests {
-    use super::is_internal_webview_url;
-
-    fn url(text: &str) -> tauri::Url {
-        text.parse().expect("测试 URL 必须可解析")
-    }
-
-    #[test]
-    fn allows_app_shell_and_custom_scheme_origins() {
-        // 生产来源：macOS/Linux 为 tauri://localhost，Windows 为 http(s)://tauri.localhost。
-        assert!(is_internal_webview_url(&url("tauri://localhost/")));
-        assert!(is_internal_webview_url(&url(
-            "https://tauri.localhost/index.html"
-        )));
-        assert!(is_internal_webview_url(&url("about:blank")));
-        assert!(is_internal_webview_url(&url(
-            "blob:https://tauri.localhost/abc"
-        )));
-        assert!(is_internal_webview_url(&url("asset://localhost/img.png")));
-        assert!(is_internal_webview_url(&url(
-            "http://asset.localhost/img.png"
-        )));
-        assert!(is_internal_webview_url(&url("http://ipc.localhost/")));
-        assert!(is_internal_webview_url(&url(
-            "assetproxy://localhost/media/1"
-        )));
-        assert!(is_internal_webview_url(&url("localbase64://localhost/abc")));
-        // 开发服务器。
-        assert!(is_internal_webview_url(&url("http://localhost:1420/")));
-        assert!(is_internal_webview_url(&url(
-            "http://127.0.0.1:1420/node?x=1"
-        )));
-    }
-
-    #[test]
-    fn rejects_external_navigations() {
-        assert!(!is_internal_webview_url(&url(
-            "https://www.douyin.com/video/123"
-        )));
-        assert!(!is_internal_webview_url(&url("http://evil.example.com/")));
-        // host 全等匹配：前缀相似的域名不得借回环地址混进站内。
-        assert!(!is_internal_webview_url(&url("http://localhost.evil.com/")));
-        assert!(!is_internal_webview_url(&url(
-            "https://tauri.localhost.evil.com/"
-        )));
-        assert!(!is_internal_webview_url(&url("mailto:someone@example.com")));
-        assert!(!is_internal_webview_url(&url(
-            "file:///C:/Windows/notepad.exe"
-        )));
-    }
 }

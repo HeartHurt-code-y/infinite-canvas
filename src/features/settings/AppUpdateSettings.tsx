@@ -1,5 +1,5 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { useEffect } from "react";
 import { isDesktopRuntime } from "../../lib/backend";
 import {
@@ -77,13 +77,10 @@ export function AppUpdateSettings() {
       <div className="app-update-settings__actions">{actionButtons(snapshot, desktop)}</div>
 
       {snapshot.error ? (
-        <>
-          <p className="settings-error" role="alert">
-            <Icon name="warning-circle" aria-hidden="true" size="md" />
-            {snapshot.error}
-          </p>
-          <ErrorCopyButton text={snapshot.error} />
-        </>
+        <ErrorAlert
+          error={snapshot.error}
+          hint="更新检查失败，可点上方按钮重试；若是网络问题，请检查代理或防火墙设置。"
+        />
       ) : null}
     </section>
   );

@@ -17,6 +17,7 @@ import type {
   GenerationTextDeltaEvent,
   GenerationTaskDetail,
   GenerationTaskProgress,
+  GenerationModelCatalogEntry,
   GenerationTaskPage,
   LocalAssetPage,
   LocalAssetRecord,
@@ -38,8 +39,6 @@ import type {
   StagingStateChangedEvent,
   TosBucketPullSummary,
   TosStagingConfig,
-  VideoComposerEngineStatus,
-  VideoCompositionJobRecord,
   VideoDownloadJobRecord,
   VideoDownloaderEngineStatus,
   VideoFrameExtractionJobRecord,
@@ -126,6 +125,23 @@ export const remoteModelOptionSchema = v.looseObject({
 
 export const remoteModelOptionsSchema = v.array(remoteModelOptionSchema);
 
+/**
+ * 创作台模型目录项：服务端一次性下发的「模型 + 该模型的参数能力表」。
+ *
+ * 形状与 Rust `GenerationModelCatalogEntry` 对齐（见 backend/types.rs）。
+ */
+export const generationModelCatalogEntrySchema = v.looseObject({
+  providerConnectionId: v.string(),
+  providerDisplayName: v.string(),
+  modelDefinitionId: v.string(),
+  remoteModelId: v.string(),
+  displayName: v.string(),
+  operations: v.array(generationOperationSchema),
+  operationSchema: jsonObjectSchema,
+}) satisfies v.GenericSchema<GenerationModelCatalogEntry>;
+
+export const generationModelCatalogSchema = v.array(generationModelCatalogEntrySchema);
+
 export const connectivityTestResultSchema = v.looseObject({
   ok: v.boolean(),
   httpStatus: nullableNumberSchema,
@@ -148,10 +164,25 @@ export const nullableTosStagingConfigSchema = v.nullable(tosStagingConfigSchema)
 export const workspaceUiPrefsSchema = v.looseObject({
   activeAssetProviderId: v.optional(nullableStringSchema),
   assetLibrarySource: v.optional(v.nullable(v.picklist(["cloud", "local"]))),
+  /** 创作台默认创作类型与默认模型（模型定义 ID）。 */
+  creationMode: v.optional(nullableStringSchema),
+  creationModelDefinitionId: v.optional(nullableStringSchema),
 });
 
-// 枚举 picklist 是这些跨语言契约在值层面的单一来源；与 src/lib/bindings/ 下
-// ts-rs 生成的类型由 bindingsParity.test.ts 逐字对账。
+/*
+ * 枚举 picklist 是这些跨语言契约在值层面的单一来源。
+ *
+ * 值域是**三媒体**（图片/视频/音频），与 Rust 的 `MediaType`（四值，含 Context-IR
+ * 的 "text"）不是同一套：Rust 的 `MediaType` 还服务于生成结果记录，那边确实会出现
+ * 文本产物（见 `generationResultMediaTypeSchema`）。但**素材库**这一侧不收文本——
+ * Rust 的 `parse_media_type` 只认 image/video/audio，其余一律 None，
+ * 素材库里不会出现 text 记录。
+ *
+ * 所以这里保持三变体：picklist 是硬失败校验，放宽到四值会让运行时接受一个
+ * UI 与类型系统都不认识的 kind（素材类型 Tab 只有三格），把问题往后拖。
+ * 将来真的要让素材库支持文本时，两端一起改：Rust 生产端放开 + 这里加值 +
+ * 素材类型 Tab 加一格。
+ */
 export const mediaTypeSchema = v.picklist(["image", "video", "audio"]);
 
 /** 生成结果记录的类型：媒体产物之外，Context-IR 等任务产出文本（"text"）。 */
@@ -382,6 +413,10 @@ export const generationTaskStatusSchema = v.picklist([
   "failed",
   "unknown",
   "interrupted",
+  // 生成任务可被显式取消（cancel_generation_task）或随画布删除而收敛。
+  // 这是严格 picklist：少这一条，任务列表、任务详情、进度查询与状态变更事件
+  // 的 Zod 校验会整体失败。
+  "cancelled",
 ]);
 
 export const queryHealthSchema = v.picklist(["healthy", "retry_wait", "degraded"]);
@@ -603,6 +638,18 @@ export const generationRetryExhaustedEventSchema = v.looseObject({
   reason: v.unknown(),
 });
 
+/**
+ * 自动查询已停止（PixVerse 达 10 分钟上限）。
+ *
+ * 后端停止轮询但**任务状态仍是 running**（`ChangeQueryHealth` 只改 query_health），
+ * 所以前端若不订阅这个事件，卡片会永远转圈、用户等不到结果也看不出该去手动查询。
+ */
+export const generationPollingStoppedEventSchema = v.looseObject({
+  taskId: v.string(),
+  reason: v.unknown(),
+  queryOnly: v.boolean(),
+});
+
 export const videoDownloadStatusSchema = v.picklist([
   "preparing_engine",
   "downloading",
@@ -658,42 +705,6 @@ export const videoDownloaderEngineStatusSchema = v.looseObject({
   bilibiliLoggedIn: v.boolean(),
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoDownloaderEngineStatus>;
-
-export const videoCompositionStatusSchema = v.picklist([
-  "preparing_engine",
-  "processing",
-  "completed",
-  "failed",
-  "cancelled",
-]);
-
-export const videoComposerEngineStateSchema = v.picklist([
-  "not_installed",
-  "installing",
-  "ready",
-  "failed",
-]);
-
-export const videoCompositionJobRecordSchema = v.looseObject({
-  jobId: v.string(),
-  status: videoCompositionStatusSchema,
-  progress: nullableNumberSchema,
-  finalPath: nullableStringSchema,
-  fileName: nullableStringSchema,
-  width: nullableNumberSchema,
-  height: nullableNumberSchema,
-  durationSeconds: nullableNumberSchema,
-  error: nullableStringSchema,
-  createdAt: v.number(),
-  updatedAt: v.number(),
-}) satisfies v.GenericSchema<VideoCompositionJobRecord>;
-
-export const videoComposerEngineStatusSchema = v.looseObject({
-  state: v.picklist(["not_installed", "installing", "ready", "failed"]),
-  version: nullableStringSchema,
-  binaryPath: nullableStringSchema,
-  lastError: nullableStringSchema,
-}) satisfies v.GenericSchema<VideoComposerEngineStatus>;
 
 export const mediaThumbnailSchema = v.looseObject({
   path: v.string(),

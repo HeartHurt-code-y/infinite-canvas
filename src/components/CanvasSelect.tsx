@@ -8,10 +8,10 @@ import {
   type KeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { placeFloatingLayer } from "./floatingLayer";
 import { Icon } from "./Icon";
 import "./CanvasSelect.css";
 
-const VIEWPORT_MARGIN = 8;
 const VIEWPORT_SELECTOR = ".react-flow__viewport";
 
 export interface CanvasSelectOption {
@@ -19,34 +19,10 @@ export interface CanvasSelectOption {
   readonly label: string;
 }
 
-interface Placement {
-  readonly top: number;
-  readonly left: number;
-  readonly width: number;
-  readonly maxHeight: number;
-}
-
-function placeMenu(anchor: HTMLElement): Placement {
-  const rect = anchor.getBoundingClientRect();
-  const width = Math.max(rect.width, 200);
-  const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
-  const spaceAbove = rect.top - VIEWPORT_MARGIN;
-  const placeAbove = spaceBelow < 160 && spaceAbove > spaceBelow;
-  const maxHeight = Math.max(140, Math.min(320, placeAbove ? spaceAbove : spaceBelow));
-  const left = Math.min(
-    Math.max(VIEWPORT_MARGIN, rect.left),
-    Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN),
-  );
-  const top = placeAbove
-    ? Math.max(VIEWPORT_MARGIN, rect.top - maxHeight - 6)
-    : Math.min(rect.bottom + 6, window.innerHeight - VIEWPORT_MARGIN);
-  return { top, left, width, maxHeight };
-}
-
 /**
- * 画布节点内的下拉选择：按钮 + portal 菜单，替代工作流卡片里的原生 `<select>`。
+ * 画布节点内的下拉选择：按钮 + portal 菜单，替代节点卡片里的原生 `<select>`。
  *
- * 为什么不用原生 select：工作流卡片的参数区是用户切换最频繁的控件，而原生
+ * 为什么不用原生 select：节点卡片的参数区是用户切换最频繁的控件，而原生
  * 弹层由浏览器画在 React Flow 的缩放层之外，在 WebView2 / WKWebView 的非整数
  * 缩放下点击经常落空——用户要点好几次（甚至切不动）。自绘菜单与画布共用
  * 同一套事件与坐标，所见即所得；对话框、素材库面板等不在画布节点里的
@@ -65,21 +41,33 @@ export function CanvasSelect({
   required = false,
   id,
   className,
+  title,
+  ariaDescribedBy,
 }: {
   readonly ariaLabel: string;
   readonly value: string;
   readonly options: readonly CanvasSelectOption[];
   readonly onChange: (value: string) => void;
-  readonly disabled?: boolean;
-  readonly required?: boolean;
-  readonly id?: string;
-  readonly className?: string;
+  readonly disabled?: boolean | undefined;
+  readonly required?: boolean | undefined;
+  readonly id?: string | undefined;
+  readonly className?: string | undefined;
+  /** 触发按钮的悬浮说明（原生 select 的 title）。 */
+  readonly title?: string | undefined;
+  /** 指向错误说明的 id：让读屏与视觉提示都能拿到「下一步怎么办」。 */
+  readonly ariaDescribedBy?: string | undefined;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  /*
+   * 菜单的实际高度。CSS 的 `top` 锚定的是**顶边**，拿高度上限当高度算，
+   * 菜单会整体上浮「上限 − 实际高度」px，与触发器之间裂开一条缝。
+   * 这里量菜单自己的高度，量到后再定位。
+   */
+  const [measuredHeight, setMeasuredHeight] = useState<number | null>(null);
   const selectedIndex = Math.max(
     0,
     options.findIndex((option) => option.value === value),
@@ -104,25 +92,43 @@ export function CanvasSelect({
 
   useLayoutEffect(() => {
     if (!open) return;
-    const trigger = triggerRef.current;
-    const list = listRef.current;
-    if (trigger != null && list != null) {
-      const box = placeMenu(trigger);
-      list.style.top = `${box.top}px`;
-      list.style.left = `${box.left}px`;
-      list.style.width = `${box.width}px`;
-      list.style.maxHeight = `${box.maxHeight}px`;
-      list.focus();
-    }
-    const apply = () => {
-      if (trigger == null || listRef.current == null) return;
-      const box = placeMenu(trigger);
+    const layer = listRef.current;
+    if (layer == null) return;
+    const measure = (): void => {
+      const height = layer.getBoundingClientRect().height;
+      setMeasuredHeight((current) =>
+        current === null || Math.abs(current - height) > 0.5 ? height : current,
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(layer);
+    return () => observer.disconnect();
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const apply = (): void => {
       const menu = listRef.current;
+      const trigger = triggerRef.current;
+      if (menu == null || trigger == null) return;
+      const box = placeFloatingLayer(trigger, {
+        minWidth: 200,
+        maxHeight: 320,
+        /*
+         * 画布节点的菜单**自动**选方向：下方够就朝下（贴着节点卡片），
+         * 不够才朝上。创作台的浮坞贴底，才需要强制向上。
+         */
+        preferAbove: false,
+        measuredHeight,
+      });
       menu.style.top = `${box.top}px`;
       menu.style.left = `${box.left}px`;
       menu.style.width = `${box.width}px`;
       menu.style.maxHeight = `${box.maxHeight}px`;
     };
+    apply();
+    listRef.current?.focus();
     window.addEventListener("resize", apply);
     // capture：卡片容器内部滚动也要跟随，否则菜单会停在旧位置。
     window.addEventListener("scroll", apply, true);
@@ -152,7 +158,7 @@ export function CanvasSelect({
       window.removeEventListener("mousedown", handleMousedown, true);
       observer?.disconnect();
     };
-  }, [open]);
+  }, [open, measuredHeight]);
 
   useEffect(() => {
     if (!open) return;
@@ -233,6 +239,11 @@ export function CanvasSelect({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-controls={open ? listId : undefined}
+        aria-describedby={ariaDescribedBy}
+        title={title}
+        // 当前值原样挂在 DOM 上：原生 select 的 value 语义在自绘按钮上没有对应物，
+        // 测试与调试都需要它来确认「现在选的是哪个」。
+        data-value={value}
         className={`canvas-select${className ? ` ${className}` : ""}`}
         disabled={disabled}
         onClick={() => {
@@ -265,6 +276,8 @@ export function CanvasSelect({
                     role="option"
                     id={optionId(index)}
                     aria-selected={option.value === value}
+                    // 选项值原样挂在 DOM 上：测试按值选项，不必把值翻译成展示文案。
+                    data-value={option.value}
                     className={`canvas-select__option${index === active ? " is-active" : ""}${option.value === value ? " is-selected" : ""}`}
                     onMouseEnter={() => setActive(index)}
                     onClick={() => commit(index)}

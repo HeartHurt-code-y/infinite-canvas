@@ -1,0 +1,173 @@
+/*
+ * 顶栏「筛选」浮层的样式。
+ *
+ * 即梦实测（2026-10-22，`div.lv-popover-content.lv-popover-content-bl`）：
+ *   - 280×621（max-width 350）；
+ *   - 底 #262626、圆角 12px、描边 1px rgba(204,221,255,.08)；
+ *   - 投影 rgba(0,0,0,.24) 0 8px 56px；
+ *   - 字 12/16、色 rgba(246,247,255,.7)、字重 400（内层
+ *     `.lv-popover-content-inner` 是 500）；
+ *   - 分组标题 12/12、色 rgba(255,255,255,.35)、内边距 12px 12px 8px。
+ *
+ * 浮层挂在 document.body 上并按视口定位（见 useFloatingLayerAnchor.ts），
+ * 因此不会被顶栏或内容列的 overflow 裁掉；宽度与最大高度由锚定 hook 以
+ * 内联样式写回，这里的 280 只负责首帧的兜底。
+ */
+
+/* 浮层本体。 */
+.create-topbar__filter-popover {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  /* 即梦实测 280 宽（max-width 350）。 */
+  width: 17.5rem;
+  padding: var(--space-2xs) 0 0;
+  background: var(--color-create-popover);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  box-shadow: var(--shadow-create-popup);
+  color: var(--color-create-text-soft);
+  /* 即梦实测 12/16。 */
+  font-size: var(--create-text-xs);
+  line-height: 16px;
+  overflow: hidden auto;
+}
+
+/* 分组：即梦的四组（日期 / 创作 / 分类 / 编辑）。 */
+.create-topbar__filter-section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* 分组标题：实测 12/12、色 rgba(255,255,255,.35)、内边距 12px 12px 8px。 */
+.create-topbar__filter-title {
+  padding: var(--space-sm) var(--space-sm) var(--space-xs);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  font-weight: 400;
+  line-height: 12px;
+}
+
+/*
+ * 一行：复选项与单选项共用。
+ *
+ * 类名不叫 `__filter-item`：那个名字在 CreateSurface.css 里还留着上一版
+ * 右对齐三项列表的样式（固定 2rem 高、4px 内边距），而 CreateSurface.css
+ * 在打包顺序上排在本文件之后，同权重下会盖掉这里的排版。换个不撞名的类名，
+ * 两边互不干扰。
+ */
+.create-topbar__filter-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: var(--space-2xs) var(--space-sm);
+  border: 0;
+  background: none;
+  color: var(--color-create-text-soft);
+  font: inherit;
+  font-size: var(--create-text-xs);
+  line-height: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-topbar__filter-option:hover:not(:disabled) {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+/* 未接入后端的项：置灰但仍要说清原因，不做静默空项。 */
+.create-topbar__filter-option:disabled {
+  color: var(--color-create-text-faint);
+  cursor: not-allowed;
+}
+
+.create-topbar__filter-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「后端暂未接入」标注：贴在行尾。 */
+.create-topbar__filter-note {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+}
+
+/*
+ * 勾选框：即梦实测没取到这一颗的尺寸，按 12/16 的字号阶取 14px。
+ * 单选（日期区间）用同一颗框改成圆形。
+ */
+.create-topbar__filter-box {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--color-create-divider);
+  border-radius: var(--radius-xs);
+  color: var(--color-create-text);
+}
+
+.create-topbar__filter-box--radio {
+  border-radius: 50%;
+}
+
+.create-topbar__filter-option[data-checked="true"] .create-topbar__filter-box {
+  border-color: var(--color-create-text-soft);
+}
+
+/* 日期组的「开始日期 - 结束日期」。 */
+.create-topbar__filter-range {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0 var(--space-sm) var(--space-2xs);
+}
+
+.create-topbar__filter-field {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: var(--space-3xs) var(--space-2xs);
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  text-align: center;
+}
+
+.create-topbar__filter-range-sep {
+  flex: 0 0 auto;
+  color: var(--color-create-text-ghost);
+}
+
+/* 页脚：清空全部。 */
+.create-topbar__filter-footer {
+  margin-top: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-sm);
+  border-top: 1px solid var(--color-create-stroke);
+}
+
+.create-topbar__filter-clear {
+  border: 0;
+  background: none;
+  color: var(--color-create-text-soft);
+  font: inherit;
+  font-size: var(--create-text-xs);
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.create-topbar__filter-clear:hover:not([aria-disabled="true"]) {
+  color: var(--color-create-text);
+}
+
+/* 没有选中任何条件时是禁用态（即梦实测就是禁用态）。 */
+.create-topbar__filter-clear[aria-disabled="true"] {
+  color: var(--color-create-text-off);
+  cursor: not-allowed;
+}

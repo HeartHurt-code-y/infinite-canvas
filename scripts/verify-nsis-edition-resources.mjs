@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { COMPONENT_REPO_ROOT, inventoryComponentFiles } from "./runtime-component-catalog.mjs";
+import { COMPONENT_REPO_ROOT, inventoryComponentFiles } from "./runtime-resources.mjs";
 
 export function verifyNsisEditionResourceTable(script, expected, edition) {
   const actual = [...script.matchAll(/File \/a "\/oname=([^"]+)"/g)].map((match) =>

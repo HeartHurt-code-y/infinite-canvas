@@ -1,0 +1,122 @@
+/*
+ * 画布新手引导的样式。
+ *
+ * 原站 liblib 的引导是底部居中的一张浮层卡片：面板底色 #262626、
+ * 1px 描边 #363636、圆角 12、三层投影；正文 13px、标题 12px 灰字，
+ * 底部一排进度条与「跳过 / 上一步 / 下一步（末步是「知道了」）」。
+ */
+
+.canvas-onboarding {
+  position: absolute;
+  z-index: var(--z-modal);
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: var(--size-studio-dock-clearance);
+  pointer-events: none;
+}
+
+.canvas-onboarding__card {
+  display: flex;
+  width: min(24rem, calc(100% - 2rem));
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm);
+  color: var(--color-text);
+  background: var(--panel-background);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  pointer-events: auto;
+}
+
+.canvas-onboarding__title {
+  margin: 0;
+  color: var(--nt-text-muted);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.canvas-onboarding__description {
+  margin: 0;
+  color: var(--nt-text-default);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.canvas-onboarding__progress {
+  display: flex;
+  gap: var(--space-3xs);
+}
+
+.canvas-onboarding__segment {
+  height: 3px;
+  flex: 1 1 auto;
+  background: var(--canvas-controls-border);
+  border-radius: 9999px;
+}
+
+.canvas-onboarding__segment.is-done {
+  background: var(--nt-text-brand);
+}
+
+.canvas-onboarding__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+
+.canvas-onboarding__steps {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.canvas-onboarding__skip,
+.canvas-onboarding__secondary,
+.canvas-onboarding__primary {
+  display: inline-flex;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--space-sm);
+  font-size: var(--text-sm);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  transition: background-color var(--dur-short);
+}
+
+.canvas-onboarding__skip {
+  padding-inline: 0;
+  color: var(--nt-text-muted);
+}
+
+.canvas-onboarding__secondary {
+  color: var(--nt-text-default);
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-onboarding__secondary:disabled {
+  color: var(--nt-text-tertiary);
+  background: transparent;
+}
+
+.canvas-onboarding__primary {
+  color: var(--nt-text-onbrand);
+  background: var(--nt-bg-invert);
+}
+
+@media (hover: hover) {
+  .canvas-onboarding__skip:hover,
+  .canvas-onboarding__secondary:hover:not(:disabled) {
+    background: var(--canvas-controls-hover);
+    color: var(--nt-text-default);
+  }
+
+  .canvas-onboarding__primary:hover {
+    filter: brightness(1.1);
+  }
+}

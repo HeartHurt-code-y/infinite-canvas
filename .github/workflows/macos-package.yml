@@ -30,7 +30,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      # macos-14 只有 14 GB 盘，内置 Blender ~882 MiB 再加 Rust target 很容易写满。
+      # macos-14 只有 14 GB 盘，内置引擎再加 Rust target 很容易写满。
       - name: Free disk space
         run: |
           df -h /

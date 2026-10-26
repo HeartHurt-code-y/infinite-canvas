@@ -1,16 +1,7 @@
-pub mod ai_media;
-pub mod ai_media_runtime;
 pub mod asset_library;
-pub mod blender;
 pub mod brand_design;
 pub mod brand_models;
-mod browser_login;
-mod browser_media;
 pub mod commands;
-pub mod commerce_sources;
-pub mod component_archive;
-pub mod component_download;
-pub mod component_manager;
 pub mod composer;
 pub mod cover_images;
 pub mod credentials;
@@ -18,7 +9,6 @@ pub mod downloader;
 pub mod error;
 pub mod frame_extractor;
 pub(crate) mod gateway_profile;
-mod gpt_image_style_library;
 pub mod image_normalize;
 pub mod local_base64_assets;
 pub mod local_results;
@@ -27,21 +17,16 @@ pub mod material_transfer;
 pub mod media;
 pub mod media_cache;
 pub mod media_proxy;
+pub(crate) mod media_source;
 pub mod model_schema;
-pub mod mv_audio;
-pub mod mv_media;
-pub(crate) mod process_tree;
-pub mod product_scene_images;
+pub mod process_tree;
 pub mod prompt_optimize;
+pub(crate) mod protocol_reply;
 pub mod provider;
 pub mod provider_adapter;
-pub mod reelbench;
 pub mod remote_video_tasks;
-pub mod remotion_renderer;
 pub mod resource_update;
 pub mod result_transfer;
-pub mod reverse_video;
-pub mod runtime_components;
 mod seedance_draft;
 pub mod speech;
 pub mod staging;
@@ -51,6 +36,7 @@ pub mod tasks;
 pub mod thumbnail;
 pub mod tos_sign;
 pub mod types;
+pub mod video_clip;
 pub mod video_edit_source;
 pub mod video_local_edit;
 pub mod video_preparation;
@@ -59,11 +45,8 @@ mod xiaohongshu;
 
 use std::sync::Arc;
 
-use ai_media::AiMediaService;
 use asset_library::AssetLibrary;
-use blender::BlenderRenderService;
 use brand_models::BrandModelLibrary;
-use component_manager::ComponentManager;
 use composer::VideoCompositionService;
 use cover_images::CoverImageService;
 use credentials::CredentialStore;
@@ -73,21 +56,16 @@ use frame_extractor::VideoFrameExtractionService;
 use local_base64_assets::LocalBase64Library;
 use local_results::LocalResultService;
 use media::MediaResolver;
-use product_scene_images::ProductSceneImageService;
 use provider::ProviderRuntime;
-use remotion_renderer::RemotionRenderService;
-use reverse_video::ReverseVideoService;
-use runtime_components::{ComponentPlan, RuntimeComponent, RuntimeComponentMigration};
 use staging::StagingService;
 use storage::{GenerationTaskLifecycle, Storage};
 use tasks::GenerationTaskService;
 use tauri::{AppHandle, Manager as _};
+use video_clip::VideoClipService;
 use video_edit_source::VideoEditSourceService;
 use video_preparation::VideoPreparationService;
 
 pub struct BackendState {
-    pub runtime_migration: Arc<RuntimeComponentMigration>,
-    pub component_manager: ComponentManager,
     pub storage: Arc<Storage>,
     pub lifecycle: GenerationTaskLifecycle,
     pub credentials: CredentialStore,
@@ -102,14 +80,11 @@ pub struct BackendState {
     pub downloader: VideoDownloadService,
     pub composer: VideoCompositionService,
     pub cover_images: CoverImageService,
-    pub product_scene_images: ProductSceneImageService,
     pub frame_extractor: VideoFrameExtractionService,
-    pub remotion_renderer: RemotionRenderService,
-    pub blender: BlenderRenderService,
-    pub reverse_video: ReverseVideoService,
     pub video_edit_sources: VideoEditSourceService,
     pub video_preparation: VideoPreparationService,
-    pub ai_media: AiMediaService,
+    /// 智能剪辑（video clip）：模式目录校验 + 合成载荷组装，复用生成任务管线。
+    pub video_clip: VideoClipService,
 }
 
 impl BackendState {
@@ -128,9 +103,6 @@ impl BackendState {
         }
         let data_directory = app.path().app_local_data_dir()?;
         let resource_directory = app.path().resource_dir()?;
-        let runtime_store = data_directory.join("runtime-components");
-        let component_manager =
-            ComponentManager::new(data_directory.clone(), resource_directory.clone());
         let database_path = data_directory.join("infinite-canvas.sqlite3");
         let downloads_directory = app.path().download_dir()?;
         let sqlite_existed = database_path.exists();
@@ -180,14 +152,13 @@ impl BackendState {
         material_transfer::cleanup_orphan_sources(&material_transfer_root, &storage)?;
         log_startup_stage!("Provider/本地库/孤儿清理");
         // FFmpeg 合成引擎：安装包内置构建（resources/ffmpeg）优先，缺失时
-        // 回退到应用数据目录并自动下载。合成产物与下载产物同目录。
+        // 回退到应用数据目录并自动下载。视频合成任务已下线，这里只提供引擎，
+        // 供合成/抽帧/下载转码共用。
         // 需在 StagingService 之前创建：素材导入遇到不支持格式（如 avif）时
         // 复用同一套 FFmpeg 引擎做本地转码。
-        let composer = VideoCompositionService::new_with_runtime_store(
-            downloads_directory.clone(),
+        let composer = VideoCompositionService::new(
             data_directory.join("ffmpeg-engine"),
             resource_directory.clone(),
-            runtime_store.clone(),
         )?;
         let staging = StagingService::new(
             Arc::clone(&storage),
@@ -219,6 +190,9 @@ impl BackendState {
             local_results.clone(),
             staging.clone(),
         );
+        // 智能剪辑复用同一套生成任务管线：任务服务整体是 Clone（内部都是 Arc），
+        // 这里克隆一份给智能剪辑服务，产物与历史沿用同一条链路。
+        let video_clip = VideoClipService::new(tasks.clone());
         log_startup_stage!("媒体解析/视频剪辑源/生成任务服务");
         // 视频抽帧复用同一套 FFmpeg 引擎；产物落在下载目录「无限画布/抽帧」。
         let frame_extractor = VideoFrameExtractionService::new_with_storage(
@@ -232,133 +206,18 @@ impl BackendState {
             video_edit_sources.clone(),
             Arc::clone(&storage),
         )?;
-        let ai_media = AiMediaService::new(
-            downloads_directory.clone(),
-            data_directory.clone(),
-            resource_directory.clone(),
-            composer.clone(),
-            video_edit_sources.clone(),
-            Arc::clone(&storage),
-        )?;
         let cover_images = CoverImageService::new(downloads_directory.clone(), composer.clone());
-        let product_scene_images = ProductSceneImageService::new(downloads_directory.clone());
-        let reverse_video =
-            ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
-        log_startup_stage!("抽帧/视频预备/AI 媒体/封面服务");
-        let blender_component = RuntimeComponent::new(
-            runtime_store.clone(),
-            resource_directory.join("blender"),
-            "blender",
-            "manifest.json",
-        );
-        let remotion_component = RuntimeComponent::new(
-            runtime_store.clone(),
-            resource_directory.join("remotion-runtime"),
-            "remotion-runtime",
-            "runtime-manifest.json",
-        );
-        let blender = BlenderRenderService::new_with_runtime_store(
-            downloads_directory.clone(),
-            composer.clone(),
-            Some(resource_directory.join("blender")),
-            Some(blender_component.clone()),
-        );
-        let remotion_renderer = RemotionRenderService::new_with_runtime_store(
-            downloads_directory.clone(),
-            resource_directory.clone(),
-            Some(remotion_component.clone()),
-        );
-        // Share the already bundled local Chromium with official-site fallback
-        // resolvers. Download outputs still use the yt-dlp engine and directory.
-        let downloader = VideoDownloadService::new_with_browser_runtime(
+        log_startup_stage!("抽帧/视频预备/封面服务");
+        // 下载服务只用内置 yt-dlp 引擎与 FFmpeg 合成能力；浏览器运行时（登录抓取）
+        // 已随「网络爆款视频下载」下线。
+        let downloader = VideoDownloadService::new(
             downloads_directory,
             app.path().app_local_data_dir()?.join("yt-dlp-engine"),
             composer.clone(),
-            Some(remotion_renderer.clone()),
         )?;
-        log_startup_stage!("Blender/Remotion/下载服务");
-        let mut migration_plans = vec![
-            ComponentPlan {
-                component: blender_component,
-                ready: blender::blender_runtime_ready,
-            },
-            ComponentPlan {
-                component: remotion_component,
-                ready: remotion_renderer::runtime_ready,
-            },
-            ComponentPlan {
-                component: RuntimeComponent::new(
-                    runtime_store.clone(),
-                    resource_directory.join("ffmpeg"),
-                    "ffmpeg",
-                    "manifest.json",
-                ),
-                ready: composer::engine_ready_in,
-            },
-            ComponentPlan {
-                component: RuntimeComponent::new(
-                    runtime_store.clone(),
-                    resource_directory.join("skills/gpt-image-2-style-library"),
-                    "gpt-image-2-style-library",
-                    "data/manifest.json",
-                ),
-                ready: gpt_image_style_library::style_component_ready,
-            },
-        ];
-        // Optional AI resources are migrated only when this build includes a
-        // pinned, complete pack; media prep stays available without the pack.
-        if ai_media_runtime::runtime_ready(&resource_directory.join("ai-media-runtime")) {
-            migration_plans.push(ComponentPlan {
-                component: RuntimeComponent::new(
-                    runtime_store.clone(),
-                    resource_directory.join("ai-media-runtime"),
-                    "ai-media-runtime",
-                    "runtime-manifest.json",
-                ),
-                ready: ai_media_runtime::runtime_ready,
-            });
-        }
-        if ai_media_runtime::quality_runtime_ready(
-            &resource_directory.join("ai-media-quality-runtime"),
-        ) {
-            migration_plans.push(ComponentPlan {
-                component: RuntimeComponent::new(
-                    runtime_store.clone(),
-                    resource_directory.join("ai-media-quality-runtime"),
-                    "ai-media-quality-runtime",
-                    "runtime-manifest.json",
-                ),
-                ready: ai_media_runtime::quality_runtime_ready,
-            });
-        }
-        if component_manager::pose_runtime_ready(&resource_directory.join("pose-runtime")) {
-            migration_plans.push(ComponentPlan {
-                component: RuntimeComponent::new(
-                    runtime_store,
-                    resource_directory.join("pose-runtime"),
-                    "pose-runtime",
-                    "runtime-manifest.json",
-                ),
-                ready: component_manager::pose_runtime_ready,
-            });
-        }
-        // Optional resources absent from an online installer do not gate core startup.
-        // 注意：组件就绪过滤（resolve → critical_files_ready）会触碰关键文件的
-        // 校验逻辑，绝不能在主线程 setup 里执行，否则一次慢磁盘/杀软扫描就会把
-        // 窗口冻成白屏“未响应”。release 下的过滤已挪进 RuntimeComponentMigration
-        // 的后台线程；dev 下迁移计划为空表，不发生任何探测。
-        log_startup_stage!("组件迁移计划组装");
-        // `tauri dev` uses build-tree resources directly. Copying ~1.7 GB is only
-        // needed by packaged bridge releases before they can offer slim updates.
-        let runtime_migration = RuntimeComponentMigration::start(if cfg!(debug_assertions) {
-            Vec::new()
-        } else {
-            migration_plans
-        });
+        log_startup_stage!("下载服务");
 
         Ok(Self {
-            runtime_migration,
-            component_manager,
             storage,
             lifecycle,
             credentials,
@@ -373,14 +232,10 @@ impl BackendState {
             downloader,
             composer,
             cover_images,
-            product_scene_images,
             frame_extractor,
-            remotion_renderer,
-            blender,
-            reverse_video,
             video_edit_sources,
             video_preparation,
-            ai_media,
+            video_clip,
         })
     }
 }

@@ -6,7 +6,7 @@
 #   1. 未签名的 bundle 在别的 Mac 上会被 Gatekeeper 拦下，用户得手动点「仍要打开」
 #      或清隔离位；macOS 15 起右键「打开」也不再是有效绕过方式。
 #   2. Tauri 只签 Contents/MacOS，**不签 Contents/Resources**；而 Apple Silicon 上
-#      没有有效签名的 arm64 Mach-O 会被内核直接杀掉，表现为内置 FFmpeg / Blender
+#      没有有效签名的 arm64 Mach-O 会被内核直接杀掉，表现为内置 FFmpeg
 #      「引擎不可用」。上游发行包通常已自行签名并公证，所以这里只报不拦。
 #
 # 注意：**本脚本不再检查钥匙串**。应用凭据已改为默认存放于应用数据目录下的明文

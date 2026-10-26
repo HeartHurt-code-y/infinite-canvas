@@ -13,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
-import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-component-catalog.mjs";
+import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-resources.mjs";
 import {
   assertMacAppInventories,
   inventoryMacApp,

@@ -16,11 +16,18 @@ export function isGenerationMediaConsumer(
 }
 
 /**
- * 能给生成节点贡献直连媒体的来源才占槽位。提示词/剧本/分镜只送文本或中转，
+ * 能给生成节点贡献直连媒体的来源才占槽位。提示词/剧本/智能剪辑只送文本或中转，
  * 让它们占槽会在参考清单里凭空多出空位，也会打乱图片编号。
+ *
+ * 智能剪辑节点尤其要排除：它本身**不是素材来源**（产物落在它右侧的输出节点上），
+ * 也没有素材身份，占槽只会给生成节点凭空添一个永远填不满的空位。
  */
 export function generationSourceOccupiesInputSlot(source: CanvasNodeEntry): boolean {
-  return source.type !== "gen" && source.type !== "screenplay" && source.type !== "storyboard";
+  return (
+    source.type !== "gen" &&
+    source.type !== "screenplay" &&
+    source.type !== "videoClip"
+  );
 }
 
 /** 进入目标的直连媒体来源，按连线数组先后去重。 */

@@ -1,15 +1,16 @@
 import { useCallback, useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
 import {
+  backendErrorMessage,
   formatRawBackendError,
+  frontendLog,
   isDesktopRuntime,
   toMediaSrc,
   type MediaReferenceTarget,
 } from "../../lib/backend";
 import { sameMediaSourceIdentity } from "../../lib/promptReferenceTarget";
-import type { AiMediaJob, AiMediaOutput } from "../../lib/aiMedia";
 import { prepareVideoEditSource, type PreparedVideoEditSource } from "../../lib/videoLocalEdit";
 import {
   isVideoPreparationActive,
@@ -22,7 +23,6 @@ import {
   type VideoPreparationProbe,
 } from "../../lib/videoPreparation";
 import { artifactFileName, validateArtifactName } from "./artifactNames";
-import { AiMediaPanel } from "./AiMediaPanel";
 import { exportArtifactToDesktop } from "./desktopActions";
 import "./VideoPreparationDialog.css";
 import {
@@ -43,7 +43,6 @@ interface VideoPreparationDialogProps {
     output: VideoPreparationOutput,
     job: VideoPreparationJob,
   ) => void | Promise<void>;
-  readonly onUseAiOutput?: (output: AiMediaOutput, job: AiMediaJob) => void | Promise<void>;
 }
 
 const OPERATION_LABELS: Record<VideoPreparationOperation, string> = {
@@ -92,7 +91,6 @@ export function VideoPreparationDialog({
   source,
   onClose,
   onUseOutput,
-  onUseAiOutput,
 }: VideoPreparationDialogProps) {
   const headingId = useId();
   const desktop = isDesktopRuntime();
@@ -106,7 +104,9 @@ export function VideoPreparationDialog({
   } | null>(null);
   const probe = measured?.sourceKey === sourceKey ? measured.info : null;
   const [preview, setPreview] = useState<{ sourceKey: string; src: string } | null>(null);
-  const [sourceError, setSourceError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [sourceError, setSourceError] = useState<ErrorAlertNotice | null>(null);
+  // 预览不可用是状态提示而不是报错：保持一句人话即可。
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [sourceAttempt, setSourceAttempt] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
@@ -125,8 +125,8 @@ export function VideoPreparationDialog({
   const [jobs, setJobs] = useState<VideoPreparationJob[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pollError, setPollError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorAlertNotice | null>(null);
+  const [pollError, setPollError] = useState<ErrorAlertNotice | null>(null);
   const [listLoaded, setListLoaded] = useState(false);
   const [usedIds, setUsedIds] = useState<ReadonlySet<string>>(() => new Set());
   const [exportedPath, setExportedPath] = useState<string | null>(null);
@@ -136,6 +136,17 @@ export function VideoPreparationDialog({
     (job: VideoPreparationJob) => setJobs((items) => mergeJob(items, job)),
     [],
   );
+
+  /**
+   * 记录一次失败：原始 payload 只进日志，界面上交给 ErrorAlert 出人话摘要。
+   *
+   * 以前这里直接把 `formatRawBackendError` 的结果塞进 state，用户看到的是一坨
+   * `{"details":null,"kind":"validation",…}`；现在调用点只负责递原始错误对象。
+   */
+  const showFailure = useCallback((reason: unknown, label: string) => {
+    frontendLog("error", `[video-preparation] ${label}：${formatRawBackendError(reason)}`);
+    setError({ label, error: reason });
+  }, []);
   useEffect(
     () =>
       subscribeArtifactNameChanges((change) => {
@@ -187,7 +198,9 @@ export function VideoPreparationDialog({
         setSourceError(null);
       },
       (reason: unknown) => {
-        if (!disposed) setSourceError(formatRawBackendError(reason));
+        if (disposed) return;
+        frontendLog("error", `[video-preparation] 读取原视频失败：${formatRawBackendError(reason)}`);
+        setSourceError({ label: "读取原视频失败", error: reason });
       },
     );
     return () => {
@@ -211,7 +224,10 @@ export function VideoPreparationDialog({
         setPreviewError(null);
       },
       (reason: unknown) => {
-        if (!disposed) setPreviewError(formatRawBackendError(reason));
+        if (disposed) return;
+        // 预览不可用是状态提示：给一句人话，原始 payload 只进日志。
+        frontendLog("error", `[video-preparation] 预览不可用：${formatRawBackendError(reason)}`);
+        setPreviewError(backendErrorMessage(reason));
       },
     );
     return () => {
@@ -245,7 +261,9 @@ export function VideoPreparationDialog({
         if (matching) setSelectedId((previous) => previous ?? matching.jobId);
       },
       (reason: unknown) => {
-        if (!disposed) setPollError(formatRawBackendError(reason));
+        if (disposed) return;
+        frontendLog("error", `[video-preparation] 读取任务失败：${formatRawBackendError(reason)}`);
+        setPollError({ label: "读取任务失败", error: reason });
       },
     );
     return () => {
@@ -266,7 +284,17 @@ export function VideoPreparationDialog({
         if (result.status === "fulfilled") updateJob(result.value);
         else failed = result.reason;
       }
-      setPollError(failed == null ? null : formatRawBackendError(failed));
+      setPollError(
+        failed == null
+          ? null
+          : {
+              label: "读取任务失败",
+              error: failed,
+            },
+      );
+      if (failed != null) {
+        frontendLog("error", `[video-preparation] 读取任务失败：${formatRawBackendError(failed)}`);
+      }
       timer = setTimeout(() => {
         void poll();
       }, 1500);
@@ -319,7 +347,7 @@ export function VideoPreparationDialog({
       updateJob(job);
       setSelectedId(job.jobId);
     } catch (reason) {
-      setError(formatRawBackendError(reason));
+      showFailure(reason, "创建任务失败");
     } finally {
       setBusy(null);
     }
@@ -332,7 +360,7 @@ export function VideoPreparationDialog({
     try {
       updateJob(await videoPreparationClient[action](job.jobId));
     } catch (reason) {
-      setError(formatRawBackendError(reason));
+      showFailure(reason, action === "retry" ? "重试任务失败" : "取消任务失败");
     } finally {
       setBusy(null);
     }
@@ -346,7 +374,7 @@ export function VideoPreparationDialog({
       await onUseOutput(job.output, job);
       setUsedIds((previous) => new Set([...previous, job.jobId]));
     } catch (reason) {
-      setError(formatRawBackendError(reason));
+      showFailure(reason, "把结果加入画布失败");
     } finally {
       setBusy(null);
     }
@@ -365,7 +393,7 @@ export function VideoPreparationDialog({
         ),
       );
     } catch (reason) {
-      setError(formatRawBackendError(reason));
+      showFailure(reason, "导出到桌面失败");
     } finally {
       setBusy(null);
     }
@@ -432,7 +460,14 @@ export function VideoPreparationDialog({
                   else
                     void video
                       .play()
-                      .catch((reason: unknown) => setPreviewError(formatRawBackendError(reason)));
+                      .catch((reason: unknown) => {
+                        // 预览不可用是状态提示：给一句人话，原始 payload 只进日志。
+                        frontendLog(
+                          "error",
+                          `[video-preparation] 播放原视频失败：${formatRawBackendError(reason)}`,
+                        );
+                        setPreviewError(backendErrorMessage(reason));
+                      });
                 }}
                 aria-label={playing ? "暂停原视频" : "播放原视频"}
               >
@@ -516,12 +551,7 @@ export function VideoPreparationDialog({
               </button>
             </div>
             {rangeError ? (
-              <>
-                <p className="video-preparation__error" role="alert">
-                  {rangeError}
-                </p>
-                <ErrorCopyButton text={rangeError} />
-              </>
+              <ErrorAlert error={rangeError} hint="请调整选区后重试。" />
             ) : (
               <p className="video-preparation__hint">
                 所有操作共用当前选区
@@ -531,12 +561,11 @@ export function VideoPreparationDialog({
               </p>
             )}
             {sourceError ? (
-              <>
-                <p className="video-preparation__error" role="alert">
-                  读取原视频失败：{sourceError}
-                </p>
-                <ErrorCopyButton text={`读取原视频失败：${sourceError}`} />
-              </>
+              <ErrorAlert
+                error={sourceError.error}
+                label={sourceError.label}
+                hint="请确认原视频文件仍在本机且可读，然后点「重试读取视频」。"
+              />
             ) : null}
             {sourceError || previewError ? (
               <button type="button" onClick={() => setSourceAttempt((attempt) => attempt + 1)}>
@@ -627,31 +656,12 @@ export function VideoPreparationDialog({
             {probe?.audioStreams.length === 0 ? (
               <p className="video-preparation__hint">原视频没有音轨，仍可裁切或导出无声视频。</p>
             ) : null}
-            {nameError ? (
-              <>
-                <p className="video-preparation__error" role="alert">
-                  {nameError}
-                </p>
-                <ErrorCopyButton text={nameError} />
-              </>
-            ) : null}
+            {nameError ? <ErrorAlert error={nameError} hint="请换一个输出名称后重试。" /> : null}
             <button className="video-preparation__primary" type="submit" disabled={!canStart}>
               <Icon name={operation === "extract_audio" ? "waveform" : "film-strip"} size="sm" />
               {busy === "start" ? "正在创建任务…" : OPERATION_LABELS[operation]}
             </button>
           </form>
-          {onUseAiOutput ? (
-            <AiMediaPanel
-              source={source}
-              startSeconds={startSeconds}
-              endSeconds={endSeconds}
-              {...(audioStreamIndex == null ? {} : { audioStreamIndex })}
-              {...(probe == null || rangeError != null
-                ? {}
-                : { sourceIdentity: probe.sourceIdentity, audioStreams: probe.audioStreams })}
-              onUseOutput={onUseAiOutput}
-            />
-          ) : null}
           <section className="video-preparation__jobs" aria-label="视频准备任务">
             <div className="video-preparation__section-heading">
               <h3>本机任务与结果</h3>
@@ -659,9 +669,13 @@ export function VideoPreparationDialog({
                 type="button"
                 disabled={busy != null}
                 onClick={() => {
-                  void refreshJobs().catch((reason: unknown) =>
-                    setPollError(formatRawBackendError(reason)),
-                  );
+                  void refreshJobs().catch((reason: unknown) => {
+                    frontendLog(
+                      "error",
+                      `[video-preparation] 刷新任务失败：${formatRawBackendError(reason)}`,
+                    );
+                    setPollError({ label: "读取任务失败", error: reason });
+                  });
                 }}
               >
                 <Icon name="arrow-clockwise" size="xs" />
@@ -672,12 +686,11 @@ export function VideoPreparationDialog({
               关闭窗口后任务继续处理，重新打开可恢复查看。重启中断的任务可以继续。
             </p>
             {pollError ? (
-              <>
-                <p className="video-preparation__error" role="alert">
-                  读取任务失败：{pollError}，任务状态未被修改。
-                </p>
-                <ErrorCopyButton text={`读取任务失败：${pollError}，任务状态未被修改。`} />
-              </>
+              <ErrorAlert
+                error={pollError.error}
+                label={pollError.label}
+                hint="任务状态未被修改；可稍后点「刷新」重新读取任务。"
+              />
             ) : null}
             {!jobs.length ? (
               <p className="video-preparation__hint">
@@ -746,12 +759,11 @@ export function VideoPreparationDialog({
                   </button>
                 ) : null}
                 {selectedJob.error ? (
-                  <>
-                    <p className="video-preparation__error" role="alert">
-                      {selectedJob.error}
-                    </p>
-                    <ErrorCopyButton text={selectedJob.error} />
-                  </>
+                  <ErrorAlert
+                    error={selectedJob.error}
+                    label="任务失败"
+                    hint="可点「重试任务」重新执行，或检查原视频后重试。"
+                  />
                 ) : null}
                 {selectedJob.status === "completed" && selectedJob.output ? (
                   <>
@@ -807,12 +819,11 @@ export function VideoPreparationDialog({
             ) : null}
           </section>
           {error ? (
-            <>
-              <p className="video-preparation__error" role="alert">
-                {error}
-              </p>
-              <ErrorCopyButton text={error} />
-            </>
+            <ErrorAlert
+              error={error.error}
+              label={error.label}
+              hint="展开完整报错可把诊断文本贴给开发者。"
+            />
           ) : null}
         </div>
       )}

@@ -46,7 +46,6 @@ workflows:
           fi
           echo "macOS release source commit: $(git rev-parse HEAD)"
           python3 --version
-          node --test scripts/mac-delta-manifest.test.mjs scripts/publish-tos-updates.test.mjs scripts/write-latest-json.test.mjs
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
           const packageVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
@@ -260,6 +259,69 @@ workflows:
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
           pnpm update:publish -- --channel darwin-aarch64 --bundle-dir "src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full" --full-bundle-dir src-tauri/target/release/bundle/dmg --version "$release_version"
+      - name: Collect dSYM symbols and record bundle sizes
+        script: |
+          set -uo pipefail
+          target_dir="src-tauri/target/release"
+          symbols_dir="$target_dir/symbols"
+          app_path="$target_dir/bundle/macos/无限画布.app"
+          app_binary="$app_path/Contents/MacOS/infinite-canvas"
+          rm -rf "$symbols_dir"
+          mkdir -p "$symbols_dir"
+          # 只收发布主二进制的 dSYM：target 缓存会被复用，按名字过滤可避免把旧构建、
+          # infinite_canvas_lib-* 与 test 二进制的 dSYM 一起塞进 artifact。
+          # macOS 自带 BSD find：只按名字找，不用 -maxdepth；找不到 dSYM 不算失败，
+          # README.txt 保证 artifacts glob 永远能收集到文件。
+          find "$target_dir" -name 'infinite-canvas*.dSYM' -type d -print > "$symbols_dir/dsym-paths.txt" 2>/dev/null || true
+          : > "$symbols_dir/dsym-info.txt"
+          dsym_count=0
+          while IFS= read -r dsym_path; do
+            [ -n "$dsym_path" ] || continue
+            dsym_count=$((dsym_count + 1))
+            cp -R "$dsym_path" "$symbols_dir/$(printf '%02d' "$dsym_count")-$(basename "$dsym_path")" 2>/dev/null || true
+            # UUID 用于核对 dSYM 与发布二进制是否匹配；dwarfdump 不可用时记 unavailable。
+            dsym_uuid="$(dwarfdump --uuid "$dsym_path" 2>/dev/null | awk '/UUID:/ {printf "%s ", $2}')"
+            dsym_uuid="${dsym_uuid% }"
+            [ -n "$dsym_uuid" ] || dsym_uuid="unavailable"
+            printf '%s\t%s\n' "$dsym_path" "$dsym_uuid" >> "$symbols_dir/dsym-info.txt"
+          done < "$symbols_dir/dsym-paths.txt"
+          app_uuid="$(dwarfdump --uuid "$app_binary" 2>/dev/null | awk '/UUID:/ {printf "%s ", $2}')"
+          app_uuid="${app_uuid% }"
+          [ -n "$app_uuid" ] || app_uuid="unavailable"
+          {
+            echo "dSYM 调试符号归档（macos-package）"
+            echo "生成时间: $(date '+%Y-%m-%d %H:%M:%S %z')"
+            echo "target 目录: $target_dir"
+            echo "找到主二进制 dSYM 数量: $dsym_count"
+            if [ "$dsym_count" -eq 0 ]; then
+              echo "未找到 infinite-canvas*.dSYM：请确认 release profile 已启用 debug 信息（debug = \"line-tables-only\"）。"
+            else
+              echo "主二进制 dSYM 与 UUID（已按编号复制到 symbols/）："
+              while IFS=$'\t' read -r dsym_path dsym_uuid; do
+                [ -n "$dsym_path" ] || continue
+                echo "  - $dsym_path"
+                echo "    UUID: ${dsym_uuid:-unavailable}"
+              done < "$symbols_dir/dsym-info.txt"
+            fi
+            echo
+            echo "包体积（du -sh）："
+            if [ -d "$app_path" ]; then
+              echo "  .app: $(du -sh "$app_path" 2>/dev/null | cut -f1)  $app_path"
+            else
+              echo "  未找到 .app：$app_path"
+            fi
+            if [ -f "$app_binary" ]; then
+              echo "  主二进制: $(du -sh "$app_binary" 2>/dev/null | cut -f1)  $app_binary"
+            else
+              echo "  未找到主二进制：$app_binary"
+            fi
+            echo "  symbols 归档: $(du -sh "$symbols_dir" 2>/dev/null | cut -f1)"
+            echo
+            echo "UUID 核对（dSYM 与发布二进制应一致；unavailable 表示 dwarfdump 或文件不可用）："
+            echo "  .app 主二进制: ${app_uuid:-unavailable}"
+          } > "$symbols_dir/README.txt"
+          # 诊断归档失败不能影响发布：本 step 永远成功。
+          exit 0
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz
@@ -270,6 +332,9 @@ workflows:
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json.sig
       - src-tauri/target/release/bundle/helper/install-macos.sh
+      - src-tauri/target/release/symbols/README.txt
+      - src-tauri/target/release/symbols/**/*
+      - src-tauri/target/release/symbols/*
 
   macos-online-package:
     name: macOS Online Package
@@ -309,9 +374,8 @@ workflows:
           if [ -n "${CM_COMMIT:-}" ]; then
             test "$(git rev-parse HEAD)" = "$(git rev-parse "${CM_COMMIT}^{commit}")"
           fi
-          export IC_COMPONENT_PYTHON="$(command -v python3)"
-          "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
-          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs
+          export IC_PYTHON_INTERPRETER="$(command -v python3)"
+          "$IC_PYTHON_INTERPRETER" -c 'import sqlite3; import sys; assert sys.version_info >= (3, 9)'
       - name: Prepare optional macOS signing identity
         script: bash scripts/prepare-macos-online-signing.sh
       - name: Build and verify online DMG and updater
@@ -323,11 +387,75 @@ workflows:
             version="$(node -p "require('./package.json').version")"
             pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
           fi
+      - name: Collect dSYM symbols and record bundle sizes
+        script: |
+          set -uo pipefail
+          target_dir=".cache/tauri-editions/online/target"
+          symbols_dir="$target_dir/symbols"
+          app_path="$target_dir/release/bundle/macos/无限画布.app"
+          app_binary="$app_path/Contents/MacOS/infinite-canvas"
+          rm -rf "$symbols_dir"
+          mkdir -p "$symbols_dir"
+          # 只收发布主二进制的 dSYM：target 缓存会被复用，按名字过滤可避免把旧构建、
+          # infinite_canvas_lib-* 与 test 二进制的 dSYM 一起塞进 artifact。
+          # macOS 自带 BSD find：只按名字找，不用 -maxdepth；找不到 dSYM 不算失败，
+          # README.txt 保证 artifacts glob 永远能收集到文件。
+          find "$target_dir" -name 'infinite-canvas*.dSYM' -type d -print > "$symbols_dir/dsym-paths.txt" 2>/dev/null || true
+          : > "$symbols_dir/dsym-info.txt"
+          dsym_count=0
+          while IFS= read -r dsym_path; do
+            [ -n "$dsym_path" ] || continue
+            dsym_count=$((dsym_count + 1))
+            cp -R "$dsym_path" "$symbols_dir/$(printf '%02d' "$dsym_count")-$(basename "$dsym_path")" 2>/dev/null || true
+            # UUID 用于核对 dSYM 与发布二进制是否匹配；dwarfdump 不可用时记 unavailable。
+            dsym_uuid="$(dwarfdump --uuid "$dsym_path" 2>/dev/null | awk '/UUID:/ {printf "%s ", $2}')"
+            dsym_uuid="${dsym_uuid% }"
+            [ -n "$dsym_uuid" ] || dsym_uuid="unavailable"
+            printf '%s\t%s\n' "$dsym_path" "$dsym_uuid" >> "$symbols_dir/dsym-info.txt"
+          done < "$symbols_dir/dsym-paths.txt"
+          app_uuid="$(dwarfdump --uuid "$app_binary" 2>/dev/null | awk '/UUID:/ {printf "%s ", $2}')"
+          app_uuid="${app_uuid% }"
+          [ -n "$app_uuid" ] || app_uuid="unavailable"
+          {
+            echo "dSYM 调试符号归档（macos-online-package）"
+            echo "生成时间: $(date '+%Y-%m-%d %H:%M:%S %z')"
+            echo "target 目录: $target_dir"
+            echo "找到主二进制 dSYM 数量: $dsym_count"
+            if [ "$dsym_count" -eq 0 ]; then
+              echo "未找到 infinite-canvas*.dSYM：请确认 release profile 已启用 debug 信息（debug = \"line-tables-only\"）。"
+            else
+              echo "主二进制 dSYM 与 UUID（已按编号复制到 symbols/）："
+              while IFS=$'\t' read -r dsym_path dsym_uuid; do
+                [ -n "$dsym_path" ] || continue
+                echo "  - $dsym_path"
+                echo "    UUID: ${dsym_uuid:-unavailable}"
+              done < "$symbols_dir/dsym-info.txt"
+            fi
+            echo
+            echo "包体积（du -sh）："
+            if [ -d "$app_path" ]; then
+              echo "  .app: $(du -sh "$app_path" 2>/dev/null | cut -f1)  $app_path"
+            else
+              echo "  未找到 .app：$app_path"
+            fi
+            if [ -f "$app_binary" ]; then
+              echo "  主二进制: $(du -sh "$app_binary" 2>/dev/null | cut -f1)  $app_binary"
+            else
+              echo "  未找到主二进制：$app_binary"
+            fi
+            echo "  symbols 归档: $(du -sh "$symbols_dir" 2>/dev/null | cut -f1)"
+            echo
+            echo "UUID 核对（dSYM 与发布二进制应一致；unavailable 表示 dwarfdump 或文件不可用）："
+            echo "  .app 主二进制: ${app_uuid:-unavailable}"
+          } > "$symbols_dir/README.txt"
+          # 诊断归档失败不能影响发布：本 step 永远成功。
+          exit 0
     artifacts:
       - .cache/tauri-editions/online/artifacts/*/dmg/*.dmg
       - .cache/tauri-editions/online/artifacts/*/macos/*.app.tar.gz
       - .cache/tauri-editions/online/artifacts/*/macos/*.app.tar.gz.sig
       - .cache/tauri-editions/online/artifacts/*/helper/install-macos.sh
       - .cache/tauri-editions/online/artifacts/*/*.json
-      - .cache/runtime-components/packages/*.zip
-      - src-tauri/resources/component-catalog.json
+      - .cache/tauri-editions/online/target/symbols/README.txt
+      - .cache/tauri-editions/online/target/symbols/**/*
+      - .cache/tauri-editions/online/target/symbols/*

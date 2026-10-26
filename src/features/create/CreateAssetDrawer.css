@@ -1,0 +1,160 @@
+/*
+ * 资产库抽屉里由本文件负责的那部分外观。
+ *
+ * 抽屉的其余样式（宽度 320px、底色、分类页签、来源页签、4 列网格）都在
+ * CreateSurface.css 里，不在本文件重复一遍——同一批选择器写两处必然漂移。
+ *
+ * 这里只负责头部那枚「全部资产」筛选胶囊：
+ * 即梦实测为高 36px、圆角 8px、底色 rgba(255,255,255,.08)、13px/22 字重 500、
+ * 内边距 0 10px。它在即梦里是一枚**筛选控件**而不是装饰，所以本项目里点它
+ * 会把分类切回「全部」。
+ */
+
+.create-assets__filter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.25rem; /* 36px，即梦实测 */
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--radius-create-control); /* 8px */
+  background: var(--color-create-block); /* rgba(255,255,255,.08) */
+  color: var(--color-create-text);
+  font-size: var(--create-text-md); /* 13px */
+  font-weight: 500;
+  line-height: 1.375rem; /* 22px */
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.create-assets__filter:hover {
+  background: var(--color-create-block-hover);
+}
+
+.create-assets__filter:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-create-input-hover);
+}
+
+/*
+ * 当前分类不是「全部」时，这枚筛选按钮处于未选中态——用户一眼能看出
+ * 列表正被下面的分类页签收窄。
+ */
+.create-assets__filter[data-active="false"] {
+  background: var(--color-create-stroke-soft);
+  color: var(--color-create-text-mute);
+}
+
+.create-assets__filter[data-active="false"]:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+/*
+ * 素材格外层。
+ *
+ * 素材格本身是 `<button>`（点它就是挑中），「⋯」不能塞进去——按钮里再套按钮
+ * 是非法 HTML。所以网格项改成这一层 div，按钮仍然是素材格，宽度撑满。
+ */
+.create-assets__tile-wrap {
+  position: relative;
+  min-width: 0;
+}
+
+.create-assets__tile-wrap .create-assets__tile {
+  width: 100%;
+}
+
+/*
+ * 素材格右上角的「⋯」。
+ *
+ * 即梦资产页的素材菜单是**右键**触发的；这里额外给一枚可见的「⋯」，
+ * 否则用户根本不知道可以右键。默认不显形，hover 素材格才出现。
+ */
+.create-assets__tile-menu {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: rgb(24 25 29 / 0.9);
+  color: #f5fbff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.create-assets__tile-wrap:hover .create-assets__tile-menu,
+.create-assets__tile-menu:focus-visible,
+.create-assets__tile-menu[aria-expanded="true"] {
+  opacity: 1;
+}
+
+.create-assets__tile-menu:hover {
+  background: rgb(24 25 29 / 0.98);
+}
+
+/*
+ * 素材更多菜单（即梦资产页实测 2026-10-22）。
+ *
+ * 七项：下载 / 收藏 / 用作参考视频 / 创建主体 / 发布 / 删除 / 举报。
+ * 菜单项 36px 高、内边距 9px 12px、圆角 8px、左侧 1em 图标、文字 13px/24。
+ * 浮层外观沿用创作台统一口径：底色 --color-create-popover、圆角
+ * --radius-create-popup、描边 --border-create-popup、投影 --shadow-create-popup。
+ */
+.create-assets-menu {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 12.25rem;
+  max-height: 22.5rem;
+  overflow-y: auto;
+  padding: var(--space-3xs);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  color: var(--color-create-text);
+  overscroll-behavior: contain;
+}
+
+.create-assets-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: var(--radius-create-control);
+  background: none;
+  color: var(--color-create-text);
+  font-size: 13px;
+  line-height: 24px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-assets-menu__item:hover:not(:disabled),
+.create-assets-menu__item:focus-visible {
+  background: var(--color-create-block-hover);
+  outline: none;
+}
+
+.create-assets-menu__item:disabled {
+  color: var(--color-create-text-ghost);
+  cursor: not-allowed;
+}
+
+.create-assets-menu__label {
+  flex: 1 1 auto;
+  min-width: 0;
+}

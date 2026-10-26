@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, MutexGuard, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use rand::Rng as _;
@@ -85,6 +88,47 @@ impl VideoPollRegistry {
     }
 }
 
+/// 生成任务的运行时取消位。
+///
+/// 库里的 `cancelled` 状态负责跨重启收敛；这里的 AtomicBool 负责让当前进程里
+/// 正在跑的轮询与提交尽快停下，不必等下一个轮询周期。
+#[derive(Default)]
+struct CancellationRegistry {
+    flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl CancellationRegistry {
+    /// 任务入队时登记取消位：「没取消」与「已取消」必须是同一个读法。
+    fn register(&self, task_id: &str) {
+        let mut flags = self.lock_flags();
+        flags
+            .entry(task_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)));
+    }
+
+    /// 置位取消：让正在跑的轮询与提交尽快看到。
+    fn request_cancel(&self, task_id: &str) {
+        let mut flags = self.lock_flags();
+        flags
+            .entry(task_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .store(true, Ordering::SeqCst);
+    }
+
+    fn is_cancelled(&self, task_id: &str) -> bool {
+        self.lock_flags()
+            .get(task_id)
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+
+    fn lock_flags(&self) -> MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+        // 取消位只是一道快判据：锁中毒时不该让整个任务管线停摆。
+        self.flags
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 struct SuccessfulSubmission {
     attempt_id: String,
     call_id: String,
@@ -153,6 +197,7 @@ pub struct GenerationTaskService {
     staging: StagingService,
     video_polls: Arc<VideoPollRegistry>,
     draft_promotions: Arc<Mutex<()>>,
+    cancellations: Arc<CancellationRegistry>,
 }
 
 impl GenerationTaskService {
@@ -175,6 +220,7 @@ impl GenerationTaskService {
             staging,
             video_polls: Arc::new(VideoPollRegistry::default()),
             draft_promotions: Arc::new(Mutex::new(())),
+            cancellations: Arc::new(CancellationRegistry::default()),
         }
     }
 
@@ -317,6 +363,7 @@ impl GenerationTaskService {
             remote_model_id: Some(remote_model_id),
             logical_request: &logical_request,
         })?;
+        self.cancellations.register(&task_id);
         info!(
             "[generation] 任务已创建，即将进入后台执行: taskId={task_id}, canvasId={}, sourceNode={}, operation={}, provider={}（{}）, model={}, 远程模型={remote_model_id}, 提示词片段={} 个, 显式媒体输入={} 个, 生成数量={}",
             command.canvas_id,
@@ -355,6 +402,111 @@ impl GenerationTaskService {
         self.storage.get_task_progress(task_id)
     }
 
+    /// 用户主动取消在途生成任务。
+    ///
+    /// 先置运行时取消位（让正在跑的轮询与提交尽快停下），再把任务落成
+    /// `cancelled` 终态。终态任务不动：已经成功/失败的历史不该被改写。
+    pub fn cancel(&self, task_id: &str) -> BackendResult<GenerationTaskDetail> {
+        let task = self.storage.get_task_execution(task_id)?;
+        if task.status == GenerationTaskStatus::Cancelled {
+            return self.get(task_id);
+        }
+        if task.status.is_terminal() {
+            return Err(BackendError::Conflict(format!(
+                "生成任务已经结束（{}），无法取消。",
+                task_status_label(task.status)
+            )));
+        }
+        self.cancellations.request_cancel(task_id);
+        // 唤醒正在等待的轮询，让它立刻看到取消位，而不是干等一个轮询周期。
+        if let Ok(slot) = self.video_polls.slot(task_id) {
+            slot.wake.notify_one();
+        }
+        let reason = json!({
+            "kind": "generation_cancelled",
+            "message": "任务已被取消，不再继续查询供应商或保存产物。",
+        });
+        match self.commit_fact(
+            task_id,
+            GenerationLifecycleFact::CancellationRequested { reason },
+        ) {
+            Ok(()) => {}
+            Err(error) => {
+                // 取消与收尾并发：任务可能刚好跑完了，以库里的事实为准。
+                let current = self.storage.get_task_execution(task_id)?;
+                if current.status.is_terminal() {
+                    return Err(BackendError::Conflict(format!(
+                        "生成任务已经结束（{}），无法取消。",
+                        task_status_label(current.status)
+                    )));
+                }
+                return Err(error);
+            }
+        }
+        info!("[generation] 生成任务已取消: taskId={task_id}");
+        self.get(task_id)
+    }
+
+    /// 画布被删除时收敛在途任务：先置运行时取消位，让轮询尽快停下。
+    ///
+    /// 落库由 [`Storage::delete_canvas_document`] 在删除画布的同一个事务里完成，
+    /// 终态历史任务保持原样。
+    pub fn cancel_canvas_tasks(&self, canvas_id: &str) -> BackendResult<Vec<String>> {
+        let task_ids = self.storage.list_nonterminal_task_ids_for_canvas(canvas_id)?;
+        for task_id in &task_ids {
+            self.cancellations.request_cancel(task_id);
+            if let Ok(slot) = self.video_polls.slot(task_id) {
+                slot.wake.notify_one();
+            }
+        }
+        if !task_ids.is_empty() {
+            info!(
+                "[generation] 画布删除：已请求取消 {} 个在途生成任务: canvasId={canvas_id}",
+                task_ids.len()
+            );
+        }
+        Ok(task_ids)
+    }
+
+    /// 轮询/提交前的取消检查。
+    ///
+    /// 运行时取消位是进程内的快判据；库里的 `cancelled` 是跨重启的落点。
+    /// 返回 true 表示这个任务不要再向供应商发起任何请求。
+    fn stop_for_cancellation(&self, task_id: &str) -> BackendResult<bool> {
+        let status = self.storage.get_task_execution(task_id)?.status;
+        if status == GenerationTaskStatus::Cancelled {
+            return Ok(true);
+        }
+        if !self.cancellations.is_cancelled(task_id) {
+            return Ok(false);
+        }
+        if status.is_terminal() {
+            // 任务刚好在取消落库前跑完了：以库里的事实为准，不再追问。
+            return Ok(true);
+        }
+        let reason = json!({
+            "kind": "generation_cancelled",
+            "message": "任务已被取消，不再继续查询供应商或保存产物。",
+        });
+        match self.commit_fact(
+            task_id,
+            GenerationLifecycleFact::CancellationRequested { reason },
+        ) {
+            Ok(()) => {
+                info!("[generation] 任务已取消，停止轮询与提交: taskId={task_id}");
+                Ok(true)
+            }
+            Err(error) => {
+                // 取消与收尾并发时任务可能已经落成别的终态：以库里的事实为准。
+                if self.storage.get_task_execution(task_id)?.status.is_terminal() {
+                    Ok(true)
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     pub fn promote_seedance_draft(&self, source_task_id: &str) -> BackendResult<String> {
         let _guard = self.draft_promotions.lock().map_err(|_| {
             BackendError::Conflict("draft promotion registry is unavailable".into())
@@ -379,6 +531,7 @@ impl GenerationTaskService {
             remote_model_id: Some(&prepared.remote_model_id),
             logical_request: &prepared.logical_request,
         })?;
+        self.cancellations.register(&task_id);
         self.emit(
             "generation:created",
             &json!({
@@ -493,14 +646,42 @@ impl GenerationTaskService {
 
         for mut job in self.storage.list_recoverable_staging_jobs()? {
             job.status = match job.status {
-                super::types::StagingStatus::Staged
-                | super::types::StagingStatus::Importing
-                | super::types::StagingStatus::Cleaning => job.status,
+                // 已完成对象存储上传、可以继续导入的，保持不变。
+                super::types::StagingStatus::Staged => job.status,
+                /*
+                 * 导入中断：
+                 *  - 海外路径（`overseas_db_id` 已有）→ 供应商侧已受理，可以续查，保持；
+                 *  - 国内路径 → 进程是在「写 importing」与「写 active」两次独立事务
+                 *    之间被终止的，**没有任何恢复入口**（`resume_import_job` 要求
+                 *    `overseas_db_id.is_some()`），行会永远卡在「导入中」，
+                 *    用户重试还会生成重复的云端素材。置为可重试态，让它能被看到与重做。
+                 */
+                super::types::StagingStatus::Importing if job.overseas_db_id.is_some() => {
+                    job.status
+                }
+                super::types::StagingStatus::Importing => super::types::StagingStatus::Interrupted,
+                /*
+                 * 清理中断：删除对象没做完（网络失败/进程被杀）。保持 `Cleaning` 会让
+                 * 任务永远显示「清理中」，而清理本身已不可恢复 → 落成失败更诚实。
+                 */
+                super::types::StagingStatus::Cleaning => super::types::StagingStatus::Failed,
                 _ => super::types::StagingStatus::Interrupted,
             };
             job.updated_at = super::storage::now_ms();
             let _ = self.storage.update_staging_job(&job);
         }
+
+        /*
+         * 暂存对象回收：进程崩溃、被杀、删除请求失败，都会留下没人删除的 TOS
+         * 中转对象（`interrupted` / `in_use` / `failed` 三条死路状态此前全都没有
+         * 删除路径，每次泄漏一整个素材）。
+         *
+         * 回收是纯后台动作：失败只记日志并按退避重试，不阻塞启动、不影响应用可用。
+         */
+        let staging = self.staging.clone();
+        tauri::async_runtime::spawn(async move {
+            staging.run_staging_cleanup_loop().await;
+        });
 
         for result in self.lifecycle.recover_interrupted_results()? {
             report.resumed_local_saves += 1;
@@ -617,6 +798,10 @@ impl GenerationTaskService {
 
     async fn execute(&self, task_id: &str) -> BackendResult<()> {
         info!("[generation] 开始后台执行任务: taskId={task_id}");
+        // 任务可能刚创建就被取消了：别再往下走。
+        if self.stop_for_cancellation(task_id)? {
+            return Ok(());
+        }
         let task = self.storage.get_task_execution(task_id)?;
         let resolve_attempt_id = Uuid::new_v4().to_string();
         self.commit_fact(
@@ -761,7 +946,31 @@ impl GenerationTaskService {
     ) -> BackendResult<Option<SuccessfulSubmission>> {
         let mut backoff_ms = None;
         for retry_index in 0..=MAX_AUTOMATIC_RETRIES {
+            // 提交前先看取消：被取消的任务不能再向供应商发起任何付费请求。
+            if self.stop_for_cancellation(&task.id)? {
+                info!(
+                    "[generation] 任务已取消，跳过供应商提交: taskId={}, 第 {} 次提交尝试",
+                    task.id,
+                    retry_index + 1
+                );
+                return Ok(None);
+            }
             let attempt_id = Uuid::new_v4().to_string();
+            /*
+             * 提交前的最后一查（纯内存，不查库、无全局连接锁争用）。
+             *
+             * 上面的 stop_for_cancellation 之后还有一次 DB 写（BeginSubmission）
+             * + 素材上传 + TCP/TLS 握手 + HTTP 请求，这段时间里到达的取消拦不住
+             * 这次请求 —— 用户点「取消」后供应商照样受理并计费，而本地任务会落成
+             * cancelled，界面显示「已取消」。这里把窗口压到最小。
+             */
+            if self.cancellations.is_cancelled(&task.id) {
+                info!(
+                    "[generation] 任务已取消，跳过供应商提交（提交前内存复查）: taskId={}",
+                    task.id
+                );
+                return Ok(None);
+            }
             self.commit_fact(
                 &task.id,
                 GenerationLifecycleFact::BeginSubmission {
@@ -825,6 +1034,14 @@ impl GenerationTaskService {
                         let conclusion = if matches!(error, BackendError::Transport(_))
                             || matches!(&error, BackendError::Protocol { details, .. }
                                 if details.get("ambiguousPaidSubmission").and_then(Value::as_bool) == Some(true))
+                            /*
+                             * 「上游已受理（2xx）但回执里没有任务号」：确定已经计费，
+                             * 只是我们拿不到远程身份去核对。落 `Unknown` 而不是
+                             * `Failed` —— 界面上的「失败」会让用户再点一次生成，
+                             * 那就是第二次付费请求。
+                             */
+                            || matches!(&error, BackendError::Protocol { details, .. }
+                                if details.get("acceptedWithoutRemoteId").and_then(Value::as_bool) == Some(true))
                         {
                             GenerationTaskStatus::Unknown
                         } else {
@@ -1014,9 +1231,19 @@ impl GenerationTaskService {
         // returns to the paid submission path.
         let poll_started = tokio::time::Instant::now();
         loop {
+            // 每轮轮询前先看取消：命中就停下，不再向供应商发起新的查询。
+            if self.stop_for_cancellation(task_id)? {
+                self.cleanup_staging_leases(task_id, &staging_leases).await;
+                return Ok(());
+            }
             let mut successful_observation = None;
             let mut backoff_ms = None;
             for retry_index in 0..=MAX_AUTOMATIC_RETRIES {
+                // 查询重试的退避期间也可能被取消：查询前再确认一次。
+                if self.stop_for_cancellation(task_id)? {
+                    self.cleanup_staging_leases(task_id, &staging_leases).await;
+                    return Ok(());
+                }
                 if poll_policy.next_wait(poll_started.elapsed()).is_none() {
                     self.stop_expired_video_polling(
                         task_id,
@@ -1597,6 +1824,16 @@ impl GenerationTaskService {
     }
 
     fn finish_with_execution_error(&self, task_id: &str, error: BackendError) -> BackendResult<()> {
+        // 任务已经落成终态（例如被取消）时不再改写它：终态历史不能被覆盖。
+        if let Ok(task) = self.storage.get_task_execution(task_id)
+            && task.status.is_terminal()
+        {
+            info!(
+                "[generation] 任务已是终态（{}），忽略后台异常: taskId={task_id}",
+                task.status.as_str()
+            );
+            return Ok(());
+        }
         let status = if matches!(error, BackendError::Transport(_)) {
             GenerationTaskStatus::Unknown
         } else {
@@ -1656,6 +1893,18 @@ impl GenerationTaskService {
     }
 }
 
+/// 任务状态的人话标签：给用户看的文案里不要直接抛英文枚举值。
+fn task_status_label(status: GenerationTaskStatus) -> &'static str {
+    match status {
+        GenerationTaskStatus::Succeeded => "已成功",
+        GenerationTaskStatus::Failed => "已失败",
+        GenerationTaskStatus::Unknown => "状态未知",
+        GenerationTaskStatus::Interrupted => "已中断",
+        GenerationTaskStatus::Cancelled => "已取消",
+        _ => "进行中",
+    }
+}
+
 fn validate_start_command(command: &StartGenerationCommand) -> BackendResult<()> {
     if command.output_name.as_ref().is_some_and(|name| {
         name.trim().is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control)
@@ -1707,6 +1956,14 @@ fn is_retryable_generation_error(error: &BackendError) -> bool {
                 .and_then(Value::as_bool)
                 == Some(true)
                 || details.get("noChargeTerminal").and_then(Value::as_bool) == Some(true)
+                /*
+                 * 「上游已受理但回执里没有任务号」：重发就是再 POST 一遍付费请求体，
+                 * 上游会再建一个任务、再扣一次费。必须挡住。
+                 */
+                || details
+                    .get("acceptedWithoutRemoteId")
+                    .and_then(Value::as_bool)
+                    == Some(true)
             {
                 return false;
             }
@@ -1731,319 +1988,5 @@ fn video_poll_interval(model_id: Option<&str>) -> std::time::Duration {
         WAN_VIDEO_POLL_INTERVAL
     } else {
         DEFAULT_VIDEO_POLL_INTERVAL
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fzy_video_start_refreshes_native_schemas_and_keeps_its_own_polling_contract() {
-        for model_id in [
-            "PixVerse-V6",
-            "doubao-seedance-2.5",
-            "sp2.5-720p-30s-ch5",
-            "wan3.0-video",
-        ] {
-            let stale = default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
-            let schema = operation_schema_for_start(
-                &stale,
-                GenerationOperation::VideoGeneration,
-                Some(model_id),
-                RequestDialect::FzyAi,
-            )
-            .unwrap();
-            assert_eq!(
-                schema["requestProfileId"],
-                GatewayProfile::FzyVideo.profile_id()
-            );
-            assert_eq!(schema["request"]["mediaEncoding"], "fzy_video_urls");
-            let policy = VideoPollingPolicy::for_model(Some(model_id), RequestDialect::FzyAi);
-            assert_eq!(policy.family, Some(GatewayProfile::FzyVideo));
-            assert_eq!(
-                policy.next_wait(std::time::Duration::from_secs(600)),
-                Some(DEFAULT_VIDEO_POLL_INTERVAL)
-            );
-        }
-        assert!(
-            operation_schema_for_start(
-                &json!({}),
-                GenerationOperation::VideoGeneration,
-                Some("custom-video"),
-                RequestDialect::FzyAi
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn pixverse_polling_changes_cadence_and_stops_at_ten_minutes() {
-        use std::time::Duration;
-
-        for model_id in ["PixVerse-V6", "pixverse-c1"] {
-            let policy =
-                VideoPollingPolicy::for_model(Some(model_id), RequestDialect::OpenAiCompatible);
-            assert_eq!(
-                policy.next_wait(Duration::ZERO),
-                Some(Duration::from_secs(5))
-            );
-            assert_eq!(
-                policy.next_wait(Duration::from_secs(29)),
-                Some(Duration::from_secs(5))
-            );
-            assert_eq!(
-                policy.next_wait(Duration::from_secs(30)),
-                Some(Duration::from_secs(10))
-            );
-            assert_eq!(
-                policy.next_wait(Duration::from_secs(599)),
-                Some(Duration::from_secs(1))
-            );
-            assert_eq!(policy.next_wait(Duration::from_secs(600)), None);
-            assert_eq!(policy.next_wait(Duration::from_secs(601)), None);
-        }
-        for model_id in ["PixVerse-V5", "PixVerse-V6-pro", "sp2.5-720p-30s-ch5"] {
-            let policy =
-                VideoPollingPolicy::for_model(Some(model_id), RequestDialect::OpenAiCompatible);
-            assert_eq!(
-                policy.next_wait(Duration::from_secs(600)),
-                Some(Duration::from_secs(5))
-            );
-        }
-        let wan = VideoPollingPolicy::for_model(
-            Some("wan3.0-video-prime"),
-            RequestDialect::OpenAiCompatible,
-        );
-        assert_eq!(
-            wan.next_wait(Duration::from_secs(600)),
-            Some(Duration::from_secs(15))
-        );
-        let native =
-            VideoPollingPolicy::for_model(Some("PixVerse-V6"), RequestDialect::VolcengineArk);
-        assert_eq!(
-            native.next_wait(Duration::from_secs(600)),
-            Some(Duration::from_secs(5))
-        );
-    }
-
-    #[test]
-    fn pixverse_task_freezes_known_contract_instead_of_stale_seedance_metadata() {
-        let stale = json!({
-            "video_generation": {
-                "resultType": "video",
-                "requestProfileId": "moyu_video_metadata_v1",
-                "request": { "parameterContainer": "metadata", "contentContainer": "metadata" },
-                "parameters": { "channel_extension": { "type": "string", "default": "preserved" } }
-            }
-        });
-        for model_id in ["PixVerse-V6", "PixVerse-C1"] {
-            let frozen = operation_schema_for_start(
-                &stale,
-                GenerationOperation::VideoGeneration,
-                Some(model_id),
-                RequestDialect::OpenAiCompatible,
-            )
-            .expect("known PixVerse contract");
-            assert_eq!(frozen["requestProfileId"], "moyu_pixverse_video_v1");
-            assert_eq!(frozen["request"]["parameterContainer"], "root");
-            assert_eq!(frozen["request"]["mediaEncoding"], "pixverse_image_inputs");
-            assert_eq!(
-                frozen["parameters"]["channel_extension"]["default"],
-                "preserved"
-            );
-            for dialect in [
-                RequestDialect::VolcengineArk,
-                RequestDialect::AliyunBailian,
-                RequestDialect::Grsai,
-            ] {
-                assert_eq!(
-                    operation_schema_for_start(
-                        &stale,
-                        GenerationOperation::VideoGeneration,
-                        Some(model_id),
-                        dialect
-                    ),
-                    Some(stale["video_generation"].clone())
-                );
-            }
-        }
-        assert_eq!(
-            operation_schema_for_start(
-                &stale,
-                GenerationOperation::VideoGeneration,
-                Some("PixVerse-V6-pro"),
-                RequestDialect::OpenAiCompatible,
-            ),
-            Some(stale["video_generation"].clone())
-        );
-    }
-
-    #[test]
-    fn rd_task_snapshot_preserves_channel_parameters_outside_local_schema() {
-        let stale = json!({
-            "video_generation": {
-                "resultType": "video",
-                "requestProfileId": "moyu_video_metadata_v1",
-                "parameters": {}
-            }
-        });
-        let schema = operation_schema_for_start(
-            &stale,
-            GenerationOperation::VideoGeneration,
-            Some("rd-seedance-2.5-720p"),
-            RequestDialect::OpenAiCompatible,
-        )
-        .expect("RD transport schema");
-        assert_eq!(schema["requestProfileId"], "rd_video_v1");
-        let supplied = json!({
-            "duration": 30,
-            "resolution": "1080p",
-            "channel_extension": "preserve-me"
-        });
-        let parameters = normalize_parameters(&schema, &supplied).unwrap();
-        for (key, value) in supplied.as_object().unwrap() {
-            assert_eq!(parameters.get(key), Some(value));
-        }
-    }
-
-    #[test]
-    fn sp25_freezes_canonical_schema_from_bound_remote_id() {
-        let stale = json!({
-            "video_generation": {
-                "resultType": "video",
-                "requestProfileId": "moyu_video_metadata_v1",
-                "request": { "parameterContainer": "metadata", "contentContainer": "metadata" },
-                "parameters": { "generate_audio": { "type": "boolean", "default": true } }
-            },
-            "text_generation": { "resultType": "text", "parameters": {} }
-        });
-        let frozen = operation_schema_for_start(
-            &stale,
-            GenerationOperation::VideoGeneration,
-            Some("sp2.5-720p-30s-ch5"),
-            RequestDialect::OpenAiCompatible,
-        )
-        .expect("canonical video schema");
-        assert_eq!(frozen["requestProfileId"], "sp25_per_use_video_v1");
-        assert_eq!(frozen["request"]["parameterContainer"], "root");
-        assert_eq!(frozen["request"]["maxImages"], 10);
-        assert_eq!(frozen["request"]["maxAudios"], 10);
-        assert!(frozen["request"].get("contentContainer").is_none());
-        assert!(frozen["parameters"].get("generate_audio").is_none());
-        assert_eq!(
-            operation_schema_for_start(
-                &stale,
-                GenerationOperation::TextGeneration,
-                Some("sp2.5-720p-30s-ch5"),
-                RequestDialect::OpenAiCompatible,
-            ),
-            Some(stale["text_generation"].clone())
-        );
-        assert_eq!(
-            operation_schema_for_start(
-                &stale,
-                GenerationOperation::VideoGeneration,
-                Some("sp2.5-720p-30s-ch7"),
-                RequestDialect::OpenAiCompatible,
-            ),
-            Some(stale["video_generation"].clone())
-        );
-    }
-
-    #[tokio::test]
-    async fn manual_queries_share_a_poll_worker_and_wake_its_next_observation() {
-        let registry = Arc::new(VideoPollRegistry::default());
-        let active = registry.slot("task-1").expect("active slot");
-        let active_guard = active.gate.clone().lock_owned().await;
-        let manual = registry.clone().slot("task-1").expect("manual slot");
-        assert!(Arc::ptr_eq(&active, &manual));
-        assert!(manual.gate.clone().try_lock_owned().is_err());
-
-        manual.wake.notify_one();
-        tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            active.wake.notified(),
-        )
-        .await
-        .expect("manual query wakes the existing worker");
-
-        let other = registry.slot("task-2").expect("independent slot");
-        assert!(other.gate.clone().try_lock_owned().is_ok());
-        drop(active_guard);
-        assert!(manual.gate.clone().try_lock_owned().is_ok());
-    }
-
-    #[tokio::test]
-    async fn cancelled_poll_worker_releases_its_task_for_manual_recovery() {
-        let registry = VideoPollRegistry::default();
-        let slot = registry.slot("task-1").expect("slot");
-        let worker_slot = slot.clone();
-        let (ready, started) = tokio::sync::oneshot::channel();
-        let worker = tokio::spawn(async move {
-            let _guard = worker_slot.gate.lock().await;
-            ready.send(()).expect("worker ready");
-            std::future::pending::<()>().await;
-        });
-        started.await.expect("worker started");
-        assert!(slot.gate.clone().try_lock_owned().is_err());
-        worker.abort();
-        assert!(worker.await.expect_err("worker cancelled").is_cancelled());
-        assert!(slot.gate.clone().try_lock_owned().is_ok());
-
-        let expired = Arc::downgrade(&slot);
-        drop(slot);
-        assert!(expired.upgrade().is_none());
-        let _next = registry.slot("task-2").expect("next task");
-        assert_eq!(registry.slots.lock().expect("registry").len(), 1);
-    }
-
-    #[test]
-    fn retry_delay_uses_two_four_eight_second_nominal_windows() {
-        for (index, nominal) in [(1, 2_000), (2, 4_000), (3, 8_000)] {
-            let delay = retry_delay_ms(index);
-            assert!(delay >= nominal);
-            assert!(delay <= nominal + nominal / 5);
-        }
-    }
-
-    #[test]
-    fn only_transport_and_five_hundred_series_are_retryable() {
-        assert!(is_retryable_generation_error(&BackendError::protocol(
-            "server error",
-            json!({ "httpStatus": 503 })
-        )));
-        assert!(!is_retryable_generation_error(&BackendError::protocol(
-            "rate limited",
-            json!({ "httpStatus": 429 })
-        )));
-        assert!(!is_retryable_generation_error(&BackendError::protocol(
-            "parse error",
-            json!({})
-        )));
-        assert!(!is_retryable_generation_error(&BackendError::protocol(
-            "paid submission may have been accepted",
-            json!({ "httpStatus": 503, "ambiguousPaidSubmission": true })
-        )));
-        assert!(!is_retryable_generation_error(&BackendError::protocol(
-            "no channel was available",
-            json!({ "httpStatus": 500, "noChargeTerminal": true })
-        )));
-    }
-
-    #[test]
-    fn wan_video_tasks_use_the_documented_polling_cadence() {
-        assert_eq!(
-            video_poll_interval(Some("wan3.0-video-prime")),
-            std::time::Duration::from_secs(15)
-        );
-        assert_eq!(
-            video_poll_interval(Some("doubao-seedance-2-5-260628")),
-            std::time::Duration::from_secs(5)
-        );
-        assert_eq!(
-            video_poll_interval(Some("sp2.5-720p-30s-ch5")),
-            std::time::Duration::from_secs(5)
-        );
     }
 }

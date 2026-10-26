@@ -59,14 +59,11 @@
 }
 
 .connection-quick-add-menu__item--video svg,
-.connection-quick-add-menu__item--video_composer svg,
-.connection-quick-add-menu__item--storyboard svg {
+.connection-quick-add-menu__item--video_clip svg {
   color: var(--color-video-strong);
 }
 
-.connection-quick-add-menu__item--prompt svg,
-.connection-quick-add-menu__item--video_downloader svg,
-.connection-quick-add-menu__item--viral_remix svg {
+.connection-quick-add-menu__item--text svg {
   color: var(--color-accent);
 }
 
@@ -74,8 +71,40 @@
   color: var(--color-warning);
 }
 
-.connection-quick-add-menu__item--frame_extractor svg {
+.connection-quick-add-menu__item--audio svg,
+.connection-quick-add-menu__item--reference svg,
+.connection-quick-add-menu__item--shot_breakdown svg {
   color: var(--color-muted);
+}
+
+/* 原站条目右侧的角标：Beta 是小字，NEW 是青色胶囊，模型版本是灰底小签。 */
+.connection-quick-add-menu__badge {
+  margin-left: auto;
+  padding: 0 var(--space-2xs);
+  color: var(--color-muted);
+  background: var(--color-paper-2);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-2xs);
+  font-style: normal;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.connection-quick-add-menu__item--director .connection-quick-add-menu__badge {
+  color: var(--nt-text-brand);
+  background: var(--nt-brand-surface-l1);
+}
+
+/*
+ * 本项目后端尚未提供的节点类型：条目与文案按原站保留，但明确标出来，
+ * 点击给出「后端暂未接入」的说明，不让人以为点了没反应是 bug。
+ */
+.connection-quick-add-menu__item[data-available="false"] {
+  color: var(--color-muted);
+}
+
+.connection-quick-add-menu__item[data-available="false"]:hover {
+  background: var(--color-paper-2);
 }
 
 .connection-quick-add-menu__item:focus-visible {

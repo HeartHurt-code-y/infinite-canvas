@@ -1,0 +1,530 @@
+/*
+ * 记录流里的两块浮层：「详细信息」参数清单与「更多操作」菜单。
+ *
+ * 外观沿用创作台浮层的统一口径（即梦 `lv-select-popup` 实测 2026-10-22）：
+ * 底色 --color-create-popover、圆角 --radius-create-popup、描边 --border-create-popup、
+ * 投影 --shadow-create-popup。
+ *
+ * 位置不由这里决定：两块浮层都 portal 到 document.body，按视口定位，
+ * 规则统一走 features/create/useFloatingLayerAnchor.ts（创作台口径：相对触发器
+ * 左移 16px、面板底边贴触发器顶边、用实测高度而不是高度上限定位）。
+ * 因此这里只写外观与内部排版。
+ */
+
+/*
+ * 记录卡格子上的悬浮工具组（即梦活体实测 2026-10-22）。
+ *
+ * 即梦在格子右上角浮一组「下载 / 查看更多 / 收藏」，三者共用一块**面板底**：
+ *   · 底色 var(--onmedia-panel) = rgba(24,25,29,.9)；
+ *   · 0.5px 描边 var(--stroke-tertiary) = rgba(204,221,255,.08)；
+ *   · 圆角 8px、内边距 2px、按钮间隙 2px；
+ *   · 按钮 28×28（6px 内边距 + 16px 图标），图标是即梦原生 path。
+ * 整组默认不显形，hover 格子才淡入。
+ */
+.create-record__cell-tools {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 0.5px solid rgb(204 221 255 / 0.08);
+  border-radius: 8px;
+  background: rgb(24 25 29 / 0.9);
+  opacity: 0;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+/*
+ * 两组工具挂在**每个格子**上（即梦就是这样：hover 哪格就在哪格上，
+ * 一条 4 图记录里只有被 hover 的那一格浮出工具组）。
+ */
+.create-record__cell:hover .create-record__cell-tools,
+.create-record__cell:focus-within .create-record__cell-tools {
+  opacity: 1;
+}
+
+.create-record__cell-tool {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #f5fbff;
+  cursor: pointer;
+}
+
+.create-record__cell-tool:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.create-record__cell-tool:disabled {
+  color: rgb(255 255 255 / 0.2);
+  cursor: not-allowed;
+}
+
+/* 工具组里的「查看更多」沿用卡片那枚按钮，但要收成即梦的 28×28 透明底。 */
+.create-record__cell-tools .create-record__action--icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #f5fbff;
+  cursor: pointer;
+}
+
+.create-record__cell-tools .create-record__action--icon:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+/*
+ * 视频格底部的编辑工具组（即梦 `.button-group-bottom-PCvgPa`）。
+ *
+ * 即梦这一组是 9 枚 28×28 按钮、16px 图标、间隙 2px，贴在格子**右下** 8px 处，
+ * 与面板底同款：底色 rgba(24,25,29,.9)、0.5px 描边 rgba(204,221,255,.08)、
+ * 圆角 8px、内边距 2px。
+ */
+.create-record__cell-video-tools {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 0.5px solid rgb(204 221 255 / 0.08);
+  border-radius: 8px;
+  background: rgb(24 25 29 / 0.9);
+  opacity: 0;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.create-record__cell:hover .create-record__cell-video-tools,
+.create-record__cell:focus-within .create-record__cell-video-tools {
+  opacity: 1;
+}
+
+/*
+ * 视频格的播放条（即梦 `.controls-wXY0PO`）。
+ *
+ * 实测：48px 高贴在格子底部；左侧是播放/暂停按钮（命中区 32×32、图标 16×16）
+ * 与 `00:00 │ 00:05`（Montserrat 500 13px/22px，当前行白色、总时长 55% 白，
+ * 中间一道 0.5px 竖线）；右侧是全屏按钮；最底下是 2px 进度条
+ * （轨道 rgba(255,255,255,.2)、已播白色）。整层 hover 才淡入。
+ */
+.create-record__player {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9;
+  height: 48px;
+  color: #fff;
+  opacity: 0;
+  transition: opacity 0.1s linear 0.1s;
+}
+
+.create-record__cell:hover .create-record__player,
+.create-record__cell:focus-within .create-record__player {
+  opacity: 1;
+}
+
+.create-record__player-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-sizing: border-box;
+  height: 48px;
+  padding: 8px;
+}
+
+.create-record__player-left {
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.create-record__player-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 8px;
+  border: none;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.create-record__player-time {
+  display: flex;
+  align-items: center;
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.create-record__player-current,
+.create-record__player-duration {
+  width: 37px;
+  font-family: var(--font-jimeng-montserrat);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.create-record__player-current {
+  color: #fff;
+  text-align: left;
+}
+
+.create-record__player-duration {
+  color: rgb(255 255 255 / 0.55);
+  text-align: right;
+}
+
+/*
+ * 时间之间的分隔符。
+ *
+ * 即梦用的是一枚 **0.5px × 10px 的竖线，但整体 rotate(15deg)**
+ * （`.divider-hGUDCo { min-width:.5px; height:10px; margin:0 4px;
+ *   transform:rotate(15deg) }`），所以它渲染出来是一条**斜杠**。
+ * 照抄成纯竖线就会和原站差一个角度。
+ */
+.create-record__player-divider {
+  width: 0.5px;
+  height: 10px;
+  margin: 0 4px;
+  background: rgb(255 255 255 / 0.55);
+  transform: rotate(15deg);
+}
+
+.create-record__player-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 进度条：2px 轨道，命中区 14px（即梦 `.progress-wrapper`）。 */
+.create-record__player-timeline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  height: 14px;
+  cursor: pointer;
+}
+
+.create-record__player-track {
+  position: relative;
+  width: 100%;
+  height: 2px;
+  border-radius: 100px;
+  background: rgb(255 255 255 / 0.2);
+  transition: height 0.1s linear;
+}
+
+/* hover 时轨道变 4px（即梦 `.progress-wrapper:hover .bg`）。 */
+.create-record__player-timeline:hover .create-record__player-track {
+  height: 4px;
+}
+
+.create-record__player-progress {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+/*
+ * 进度条上的滑块圆点（即梦 `.handler-Ak87bX:after`）。
+ * 默认不可见，hover 进度条才浮出来：8px 白圆点、投影 0 6px 16px rgba(4,4,4,.06)。
+ */
+.create-record__player-handler {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 6px 16px rgb(4 4 4 / 0.06);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
+.create-record__player-timeline:hover .create-record__player-handler {
+  opacity: 1;
+}
+
+/* ── 详细信息 ───────────────────────────────────────────────────────── */
+
+.create-record-detail {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  /* 兜底高度：定位 hook 会用实测值覆盖内联 max-height。 */
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: var(--space-sm);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.25rem;
+  overscroll-behavior: contain;
+}
+
+.create-record-detail__title {
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  font-weight: 600;
+}
+
+.create-record-detail__prompt {
+  margin: 0;
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-sm);
+  line-height: 1.25rem;
+  word-break: break-word;
+}
+
+.create-record-detail__rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  margin: 0;
+}
+
+/*
+ * 一行参数：左标签右取值。
+ * 标签固定宽度感靠 flex 的基准宽度维持，取值右对齐并允许换行——
+ * 任务 ID 这类长值换行后仍然读得出来，不会把标签挤走。
+ */
+.create-record-detail__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.create-record-detail__row dt {
+  flex: 0 0 auto;
+  color: var(--color-create-text-mute);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+}
+
+.create-record-detail__row dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-create-text);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+  text-align: right;
+  word-break: break-word;
+}
+
+.create-record-detail__hint {
+  margin: 0;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+}
+
+/* ── 更多操作菜单 ───────────────────────────────────────────────────── */
+
+.create-record-menu {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  min-width: 11rem;
+  /* 兜底高度：定位 hook 会用实测值覆盖内联 max-height。 */
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: var(--space-3xs);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  overscroll-behavior: contain;
+}
+
+.create-record-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: var(--space-3xs) var(--space-xs);
+  border: none;
+  border-radius: var(--radius-create-control);
+  background: none;
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.5rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-record-menu__item:hover:not(:disabled),
+.create-record-menu__item:focus-visible {
+  background: var(--color-create-block-hover);
+  outline: none;
+}
+
+/*
+ * 禁用项（后端没有对应能力的条目）。
+ * 「后端暂未接入」写在行尾而不是藏在 title 里：用户不该靠悬停才知道为什么点不动。
+ */
+.create-record-menu__item:disabled {
+  color: var(--color-create-text-ghost);
+  cursor: not-allowed;
+}
+
+.create-record-menu__item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
+ * 菜单里的分隔线（即梦 `.operation-menu-divider-QRo0ov`），
+ * 用在「创建主体」与「发布」之间。
+ */
+.create-record-menu__divider {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--color-create-stroke-soft);
+}
+
+/* 「多角度」那枚 New 角标（即梦给新功能打的标）。 */
+.create-record-menu__item-new {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #2b6cf6;
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.create-record-menu__item-hint {
+  flex: 0 0 auto;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1.5rem;
+}
+
+/* ── 产物预览层里的重命名 ─────────────────────────────────────────── */
+
+/*
+ * 即梦的记录菜单里没有「重命名」，重命名发生在产物详情层，
+ * 所以入口放在预览层右上角（对应即梦详情浮层右上角那组操作按钮）。
+ */
+.create-preview__actions {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.create-preview__action {
+  padding: var(--space-3xs) var(--space-sm);
+  border: 0.5px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-control);
+  background: rgb(24 25 29 / 0.9);
+  color: var(--color-create-text);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+
+.create-preview__action:hover:not(:disabled) {
+  background: var(--color-create-block-hover);
+}
+
+.create-preview__action:disabled {
+  color: var(--color-create-text-ghost);
+  cursor: not-allowed;
+}
+
+.create-preview__rename {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-3xs);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+}
+
+.create-preview__rename-label {
+  color: var(--color-create-text-mute);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+}
+
+.create-preview__rename-input {
+  box-sizing: border-box;
+  width: 12rem;
+  padding: var(--space-3xs) var(--space-xs);
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-media);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.5rem;
+}
+
+.create-preview__rename-input:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-create-input-hover);
+}
+
+.create-preview__rename-button {
+  padding: var(--space-3xs) var(--space-sm);
+  border: none;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+
+.create-preview__rename-button:hover:not(:disabled) {
+  background: var(--color-create-block-hover);
+}
+
+.create-preview__rename-button:disabled {
+  color: var(--color-create-text-ghost);
+  cursor: not-allowed;
+}

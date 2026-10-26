@@ -61,7 +61,7 @@ console.log(`打开 ${BASE_URL} …`);
 await page.goto(BASE_URL, { waitUntil: "networkidle" });
 await page.waitForTimeout(1400);
 
-/* 1. 空画布：顶栏、节点仓库、素材库、空状态、缩放控件、底部工作流仓库 */
+/* 1. 空画布：顶栏、节点仓库、素材库、空状态、缩放控件、底部节点入口 */
 await shot("01-empty-canvas");
 
 /* 建立真实节点：单击节点仓库模板会在画布中心创建实例 */

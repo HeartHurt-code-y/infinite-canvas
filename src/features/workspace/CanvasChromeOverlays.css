@@ -1,0 +1,271 @@
+/*
+ * 画布外壳浮层：快捷键面板（CanvasShortcutsDialog）+ 画布右键上下文菜单
+ * （CanvasContextMenu）。
+ *
+ * 规格对齐 liblib.tv 画布，逆向依据见
+ * docs/integrations/liblib-canvas-re.md 第 3.8 节与 .tmp/rea-liblib/survey/09-shortcuts.png。
+ * 原站实测：面板底 #262626、描边 #363636、分组标题品牌青、键帽 28px 高、
+ * 8px 圆角、0.5px 描边；菜单项 13px 文字、32px 行高、8px 圆角、
+ * hover 白 10%、菜单浮层 196px 起步。
+ *
+ * 视觉值一律走 tokens.css 令牌，不写死字面量；唯一例外是媒体查询断点，
+ * 仓库没有对应令牌。
+ */
+
+/* ── 快捷键面板 ─────────────────────────────────────────────────────────── */
+
+.canvas-shortcuts-dialog {
+  position: fixed;
+  inset: 0;
+  /* 模态要盖过画布内的下拉浮层（它们在 --z-modal + 20）。 */
+  z-index: calc(var(--z-modal) + 40);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-lg);
+}
+
+.canvas-shortcuts-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--nt-modal-backdrop);
+  cursor: default;
+}
+
+.canvas-shortcuts-dialog__panel {
+  position: relative;
+  display: flex;
+  /* 原站面板上限 1152px（72rem）；仓库暂无对应尺寸令牌，先按原站写死。 */
+  width: min(72rem, 100%);
+  max-height: calc(100dvh - var(--space-lg) * 2);
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  overflow: auto;
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  color: var(--canvas-controls-text);
+}
+
+.canvas-shortcuts-dialog__close {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  display: grid;
+  width: var(--size-ll-control);
+  height: var(--size-ll-control);
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--canvas-controls-text);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.canvas-shortcuts-dialog__close:hover {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-shortcuts-dialog__close:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+/*
+ * 分组栅格：用 1px 间隙 + 容器描边色当分隔线，等价于原站每列之间的
+ * 1px 竖线（bg-canvas-controls-border w-px self-stretch），但列数变化时
+ * 不需要为「每行第一列」写 nth-child。
+ */
+.canvas-shortcuts-dialog__groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--rule-thin);
+  background: var(--canvas-controls-border);
+}
+
+.canvas-shortcuts-dialog__group {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-sm);
+  background: var(--canvas-controls-bg);
+}
+
+.canvas-shortcuts-dialog__group-title {
+  margin: 0;
+  color: var(--nt-text-brand);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.canvas-shortcuts-dialog__entries {
+  display: flex;
+  margin: 0;
+  padding: 0;
+  flex-direction: column;
+  gap: var(--space-sm);
+  list-style: none;
+}
+
+.canvas-shortcuts-dialog__entry {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.canvas-shortcuts-dialog__entry-label {
+  color: var(--nt-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.canvas-shortcuts-dialog__keys {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3xs);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+}
+
+.canvas-shortcuts-dialog__key {
+  display: inline-flex;
+  min-width: var(--size-ll-control);
+  height: var(--size-ll-control);
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--space-2xs);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.canvas-shortcuts-dialog__key-separator {
+  color: var(--nt-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.canvas-shortcuts-dialog__key-suffix {
+  /* 正文级（快捷键说明文字）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-size: var(--text-xs);
+}
+
+/*
+ * 原站有、本项目尚未接入的快捷键：整条置灰并挂「待接入」角标。
+ * 面板文案照抄原站，但不能让用户以为这些键位现在就能按。
+ */
+.canvas-shortcuts-dialog__entry.is-unavailable {
+  opacity: 0.45;
+}
+
+.canvas-shortcuts-dialog__entry-pending {
+  padding: 0 var(--space-3xs);
+  border-radius: var(--radius-xs);
+  background: var(--nt-text-tertiary);
+  color: var(--panel-background);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+
+/* ── 画布右键上下文菜单 ─────────────────────────────────────────────────── */
+
+/*
+ * 虚拟锚点：右键菜单没有触发元素，把一个零尺寸锚点放到右键坐标上，
+ * 让共享的 placeFloatingLayer 能算出贴边翻转后的位置。
+ */
+.canvas-context-menu__anchor {
+  position: fixed;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.canvas-context-menu {
+  position: fixed;
+  /* 与画布内下拉同一档：必须盖过 React Flow 节点与卡片工具条。 */
+  z-index: calc(var(--z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  min-width: 11rem;
+  max-width: calc(100vw - var(--space-md) * 2);
+  padding: var(--space-xs);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  color: var(--canvas-controls-text);
+}
+
+.canvas-context-menu__item {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3xs);
+  padding: var(--space-2xs) var(--space-xs);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--canvas-controls-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.canvas-context-menu__item:hover,
+.canvas-context-menu__item:focus-visible {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-context-menu__item:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+.canvas-context-menu__item.is-danger {
+  color: var(--color-error);
+}
+
+.canvas-context-menu__item-hint {
+  max-width: 100%;
+  overflow: hidden;
+  /* 正文级（菜单项右侧的快捷键提示）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 断点：分组列数 ─────────────────────────────────────────────────────── */
+
+/* 窄屏单列；中屏两列；宽屏三列（6 个分组刚好排满两行）。 */
+@media (min-width: 40rem) {
+  .canvas-shortcuts-dialog__groups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 64rem) {
+  .canvas-shortcuts-dialog__groups {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

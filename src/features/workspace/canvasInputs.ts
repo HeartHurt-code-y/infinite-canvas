@@ -3,16 +3,12 @@ import {
   adoptMissingGenerationInputSlots,
   occupyingGenerationInputKeys,
 } from "../canvas/generationInputSlots";
-import { toMediaSrc } from "../../lib/backend";
 import { stripMarkdown } from "../../lib/promptContent";
-import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
 import {
   assetGenerationInput,
   outputGenerationInput,
   type AssetEdgeData,
-  type AssetKind,
   type GenerationMediaInput,
-  type KnowledgeVideoWorkflowCheckpoint,
   type OutputNodeData,
 } from "./workspaceModel";
 
@@ -36,20 +32,11 @@ export interface ConnectedCanvasTextInput {
   readonly name: string;
   readonly text: string;
   readonly edgeId: string;
-  /** 已按模式清洗的完整提示词；多方案、正文代码和约束不能只抽取首个代码块。 */
-  readonly preserveFullText?: boolean;
 }
 
 export function connectedCanvasPromptText(sources: readonly ConnectedCanvasTextInput[]): string {
   const combined = sources.map((source) => source.text).join("\n\n");
-  if (!sources.some((source) => source.preserveFullText)) {
-    return stripMarkdown(combined) || combined.trim();
-  }
-  return sources
-    .map((source) =>
-      source.preserveFullText ? source.text : stripMarkdown(source.text) || source.text.trim(),
-    )
-    .join("\n\n");
+  return stripMarkdown(combined) || combined.trim();
 }
 
 export interface ResolvedCanvasInputs {
@@ -83,23 +70,8 @@ export function canvasNodeIndex(entries: readonly CanvasNodeEntry[]): CanvasNode
     screenplay: new Map(
       entries.flatMap((e) => (e.type === "screenplay" ? [[e.data.key, e.data]] : [])),
     ),
-    storyboard: new Map(
-      entries.flatMap((e) => (e.type === "storyboard" ? [[e.data.key, e.data]] : [])),
-    ),
-    knowledgeVideoWorkflow: new Map(
-      entries.flatMap((e) => (e.type === "knowledgeVideoWorkflow" ? [[e.data.key, e.data]] : [])),
-    ),
-    viralRemix: new Map(
-      entries.flatMap((e) => (e.type === "viralRemix" ? [[e.data.key, e.data]] : [])),
-    ),
-    videoComposer: new Map(
-      entries.flatMap((e) => (e.type === "videoComposer" ? [[e.data.key, e.data]] : [])),
-    ),
-    videoDownloader: new Map(
-      entries.flatMap((e) => (e.type === "videoDownloader" ? [[e.data.key, e.data]] : [])),
-    ),
-    frameExtractor: new Map(
-      entries.flatMap((e) => (e.type === "frameExtractor" ? [[e.data.key, e.data]] : [])),
+    videoClip: new Map(
+      entries.flatMap((e) => (e.type === "videoClip" ? [[e.data.key, e.data]] : [])),
     ),
     result: new Map(entries.flatMap((e) => (e.type === "result" ? [[e.data.key, e.data]] : []))),
     output: new Map(entries.flatMap((e) => (e.type === "output" ? [[e.data.key, e.data]] : []))),
@@ -111,14 +83,7 @@ export function canvasNodesByKeyFromDocument(document: CanvasDocument): CanvasNo
     asset: new Map(document.assetNodes.map((n) => [n.key, n])),
     gen: new Map(document.genNodes.map((n) => [n.key, n])),
     screenplay: new Map((document.screenplayNodes ?? []).map((n) => [n.key, n])),
-    storyboard: new Map((document.storyboardNodes ?? []).map((n) => [n.key, n])),
-    knowledgeVideoWorkflow: new Map(
-      (document.knowledgeVideoWorkflowNodes ?? []).map((n) => [n.key, n]),
-    ),
-    viralRemix: new Map((document.viralRemixNodes ?? []).map((n) => [n.key, n])),
-    videoComposer: new Map((document.videoComposerNodes ?? []).map((n) => [n.key, n])),
-    videoDownloader: new Map((document.videoDownloaderNodes ?? []).map((n) => [n.key, n])),
-    frameExtractor: new Map((document.frameExtractorNodes ?? []).map((n) => [n.key, n])),
+    videoClip: new Map((document.videoClipNodes ?? []).map((n) => [n.key, n])),
     result: new Map(document.resultNodes.map((n) => [n.key, n])),
     output: new Map((document.outputNodes ?? []).map((n) => [n.key, n])),
   };
@@ -149,95 +114,6 @@ function outputPayload(output: OutputNodeData): NodePayload {
       : [],
     texts: [],
   };
-}
-
-/** Read current deliverables only; historical revisions never become new request inputs. */
-function workflowPayload(key: string, checkpoint: KnowledgeVideoWorkflowCheckpoint): NodePayload {
-  const media: OwnMedia[] = [];
-  const texts: OwnText[] = [];
-  const paths = new Set<string>();
-  const addFile = (id: string, name: string, kind: AssetKind, path: string | null | undefined) => {
-    if (!path?.trim() || paths.has(path)) return;
-    paths.add(path);
-    const sourceKey = `${key}:${id}`;
-    media.push({
-      key: sourceKey,
-      sourceKey,
-      name,
-      kind,
-      sourceLabel: "产物",
-      target: { kind: "local_file", path, canvasNodeKey: sourceKey, mediaType: kind },
-      previewUrl: toMediaSrc(path),
-      src: toMediaSrc(path),
-      finalPath: path,
-    });
-  };
-  const addText = (id: string, name: string, text: string | null | undefined) => {
-    if (!text?.trim()) return;
-    const sourceKey = `${key}:${id}`;
-    texts.push({ key: sourceKey, sourceKey, name, text });
-  };
-  addText("script", "工作流剧本", checkpoint.script);
-  addText("storyboard", "工作流分镜", checkpoint.storyboard);
-  for (const artifact of checkpoint.film?.artifacts ?? []) {
-    if (!artifact.stale) addText(`film:${artifact.stage}`, artifact.stage, artifact.content);
-  }
-  for (const episode of checkpoint.comicDrama?.episodes ?? []) {
-    for (const [stage, run] of Object.entries(episode.stages)) {
-      addText(`comic:${episode.id}:${stage}`, `${episode.title} · ${stage}`, run.artifact?.content);
-    }
-  }
-  for (const [stage, run] of Object.entries(checkpoint.commerce?.stages ?? {})) {
-    addText(`commerce:${stage}`, `剧情带货 · ${stage}`, run.artifact?.content);
-  }
-  addText("cover-prompt", "封面提示词", checkpoint.xhsCover?.plan?.prompt);
-  if (checkpoint.remotion?.plan)
-    addText("animation-plan", "动画方案", JSON.stringify(checkpoint.remotion.plan, null, 2));
-  if (checkpoint.reverseVideo?.analysis) {
-    addText(
-      "reverse-analysis",
-      "视频反推分析",
-      JSON.stringify(checkpoint.reverseVideo.analysis, null, 2),
-    );
-  }
-  const finalIsImage =
-    checkpoint.xhsCover != null ||
-    (checkpoint.remotion?.renderJob?.gifPath != null &&
-      checkpoint.finalPath === checkpoint.remotion.renderJob.gifPath);
-  addFile(
-    "final",
-    finalIsImage ? "工作流图片" : "工作流成片",
-    finalIsImage ? "image" : "video",
-    checkpoint.finalPath,
-  );
-  addFile(
-    "cover",
-    "工作流封面",
-    "image",
-    checkpoint.xhsCover?.finalPath ?? checkpoint.coverImagePath,
-  );
-  const render = checkpoint.remotion?.renderJob;
-  if (render?.status === "succeeded") {
-    addFile("animation-video", "动画视频", "video", render.videoPath);
-    addFile("animation-gif", "动画 GIF", "image", render.gifPath);
-    addFile("animation-preview", "动画预览", "image", render.previewPath);
-  }
-  const filmAssets = checkpoint.film?.artifacts.some((a) => a.stage === "assets" && a.stale)
-    ? []
-    : (checkpoint.film?.assets ?? []);
-  for (const asset of [
-    ...filmAssets,
-    ...(checkpoint.comicDrama?.sharedAssets ?? []),
-    ...(checkpoint.commerce?.sharedAssets ?? []),
-  ]) {
-    addFile(`asset:${asset.id}`, asset.name, "image", asset.path);
-  }
-  for (const shot of checkpoint.shots) {
-    const run = checkpoint.shotRuns[shot.id];
-    if (!run?.redoRequested) addFile(`shot:${shot.id}`, shot.title, "video", run?.clipPath);
-  }
-  addFile("reverse-video", "反推原视频", "video", checkpoint.reverseVideo?.videoPath);
-  return { media, texts };
 }
 
 export type CanvasInputResolver = (targetKey: string) => ResolvedCanvasInputs;
@@ -415,10 +291,7 @@ function buildInputSnapshot(
     } else if (entry.type === "output") {
       payload = outputPayload(entry.data);
     } else if (entry.type === "gen" && entry.data.kind === "prompt") {
-      const text =
-        entry.data.config.mode === "gpt_image_2_style"
-          ? cleanGptImage2Prompt(entry.data.config.generatedPrompt)
-          : entry.data.config.generatedPrompt.trim();
+      const text = entry.data.config.generatedPrompt.trim();
       payload = {
         media: [],
         texts: text
@@ -428,33 +301,25 @@ function buildInputSnapshot(
                 sourceKey: key,
                 name: "提示词节点",
                 text,
-                ...(entry.data.config.mode === "gpt_image_2_style"
-                  ? { preserveFullText: true }
-                  : {}),
               },
             ]
           : [],
       };
-    } else if (
-      entry.type === "screenplay" ||
-      entry.type === "storyboard" ||
-      entry.type === "viralRemix"
-    ) {
+    } else if (entry.type === "screenplay") {
       const text = entry.data.config.currentDocument.trim();
-      const fallback =
-        entry.type === "screenplay"
-          ? "剧本节点"
-          : entry.type === "storyboard"
-            ? "分镜节点"
-            : "复刻方案";
       payload = {
         media: [],
         texts: text
-          ? [{ key, sourceKey: key, name: text.match(/^#+\s+(.+)$/m)?.[1] ?? fallback, text }]
+          ? [
+              {
+                key,
+                sourceKey: key,
+                name: text.match(/^#+\s+(.+)$/m)?.[1] ?? "剧本节点",
+                text,
+              },
+            ]
           : [],
       };
-    } else if (entry.type === "knowledgeVideoWorkflow") {
-      payload = workflowPayload(key, entry.data.config.checkpoint);
     }
     if (entry.type !== "asset" && entry.type !== "output") {
       const latest =

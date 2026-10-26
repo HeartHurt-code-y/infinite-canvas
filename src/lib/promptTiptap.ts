@@ -638,14 +638,115 @@ export function promptDocumentToTiptapJson(
   // 最近一个可承接行内内容的结构化块（标题/引用/列表项段落）的内容数组。
   // 标题里的引用 chip 在 canonical 里不带块上下文，重建时靠它回到标题内。
   let lastInlineHost: JSONContent[] | null = null;
+  /*
+   * 「块内夹 chip」的还原状态。
+   *
+   * canonical 把 chip 存成独立条目后，一个列表项/标题里写了 @引用会变成
+   * 「文本 → chip → 文本」三条。少了 `lastChipTrailing` 就无法区分：
+   *   - chip **不是**块末尾（trailing 不为 true）→ 它后面的同块文本与它属于
+   *     **同一个**列表项，必须并回同一个 listItem；
+   *   - chip 是块末尾（trailing=true）→ 它后面的同块文本属于**下一个**列表项。
+   * 判错的后果是一个列表项裂成两个、有序列表编号错位（存盘后结构永久损坏）。
+   *
+   * `lastBlockInline` 记着上一个块的行内内容数组与它的块身份，
+   * 合并时把当前文本追加进去（chip 已经通过 lastInlineHost 先进来了）。
+   */
+  let lastBlockInline: {
+    readonly block: string;
+    readonly indent: number;
+    readonly content: JSONContent[];
+  } | null = null;
+  /** 上一个条目是不是 chip，以及它是否为本块末尾；null = 上一个条目不是 chip。 */
+  let lastChipTrailing: boolean | null = null;
 
   const flushParagraph = () => {
+    /*
+     * 注意：即使没有待落位的段落，也必须清掉 `lastInlineHost`。
+     *
+     * `lastInlineHost` 是「最近一个可承接行内内容的结构化块」。它必须**只**指向
+     * 紧邻上一个块：如果代码块 / 分割线 / 列表项之后还留着旧的引用块指针，
+     * 后面出现的纯 chip 就会被塞回那个**更早**的引用块里 ——
+     * 于是「引用块 → 代码块 → 分割线 → @引用」的文档还原后，@引用跑到了
+     * 上方的引用块里，位置被重排。而 canonical 每次落盘都从编辑器 JSON 重新推导，
+     * 这个重排会被**固化进存档**，重开画布就变样了。
+     */
+    lastInlineHost = null;
+    /*
+     * 段落是**块边界**：它把列表序列切断，列表栈必须在这里清空。
+     *
+     * 编辑器（ProseMirror）里被段落隔开的两段列表是**两个独立节点**，还原时
+     * 也必须还原成两个。列表栈若不在边界处清空，后一段同类型同深度的列表会
+     * 命中「复用同一 listNode」的分支，被焊进上一段列表 —— 有序编号连号而不是
+     * 各自从 1 起算，而夹在中间的那段段落会被挪到整个列表**之后**（位置漂移）。
+     * 这两条都是 AGENTS.md 明令禁止的「存盘后结构永久损坏」，而且 canonical
+     * 每次落盘都从编辑器 JSON 重新推导，损坏会被固化进存档。
+     */
+    listStack.length = 0;
     if (paragraphItems.length === 0) return;
     const content = inlineItemsToTiptapContent(paragraphItems, presentation);
     paragraphItems = [];
     if (content.length > 0) blocks.push({ type: "paragraph", content });
-    // 普通段落落位后，尾随 chip 属于这个段落而不是更早的结构化块。
-    lastInlineHost = null;
+  };
+
+  /**
+   * 尝试把当前块级文本**并回上一个块**。
+   *
+   * 成立条件：上一个条目是 chip、且它不是块末尾（trailing 不为 true）——
+   * 说明 chip 后面还有同块文本，而当前这条就是那段文本，两者属于同一个块。
+   * 合并失败返回 false（调用方走「新建块」的路径）。
+   */
+  const tryMergeIntoPreviousBlock = (
+    block: string,
+    indent: number,
+    content: JSONContent[],
+  ): boolean => {
+    if (lastChipTrailing !== false) return false;
+    const previous = lastBlockInline;
+    if (previous == null) return false;
+    if (previous.block !== block || previous.indent !== indent) return false;
+    previous.content.push(...content);
+    lastInlineHost = previous.content;
+    lastChipTrailing = null;
+    return true;
+  };
+
+  /**
+   * 打开（或续用）一个列表块，返回它所属的帧与实际缩进层级。
+   *
+   * 文本条目与**带块上下文的 chip** 都要走这里 —— chip 自己知道属于哪个列表项，
+   * 不必再靠 `trailing` 猜。
+   */
+  const openListFrame = (
+    kind: "bullet" | "ordered",
+    requestedDepth: number,
+  ): { readonly frame: PromptListFrame; readonly depth: number } => {
+    let depth = requestedDepth;
+    // 弹掉更深的层级；同深度但类型不同的列表也闭合（同级切换 bullet↔ordered）。
+    while (listStack.length > 0) {
+      const topFrame = listStack.at(-1)!;
+      if (topFrame.indent > depth || (topFrame.indent === depth && topFrame.kind !== kind))
+        listStack.pop();
+      else break;
+    }
+    const top = listStack.at(-1);
+    if (top != null && top.kind === kind && top.indent === depth) {
+      return { frame: top, depth };
+    }
+    // 新建嵌套层：深度至少比父层深一级，避免存档里的跳级缩进生成悬空层级。
+    if (top != null) depth = Math.max(depth, top.indent + 1);
+    const listNode = {
+      type: kind === "bullet" ? "bulletList" : "orderedList",
+      content: [] as JSONContent[],
+    };
+    if (top == null) {
+      flushParagraph();
+      blocks.push(listNode);
+    } else {
+      top.lastListItem?.content?.push(listNode);
+    }
+    const frame: PromptListFrame = { kind, indent: depth, listNode, lastListItem: null };
+    listStack.push(frame);
+    return { frame, depth };
   };
 
   for (const item of document.items) {
@@ -656,46 +757,46 @@ export function promptDocumentToTiptapJson(
           type: "codeBlock",
           ...(item.text ? { content: [{ type: "text", text: item.text }] } : {}),
         });
+        // 代码块是新的结构化边界：后面出现的纯 chip 不能回流到更早的块里。
+        lastInlineHost = null;
         continue;
       }
       paragraphItems.push(item);
+      /*
+       * 普通段落是**块边界**：它把列表序列切开。
+       *
+       * 编辑器（ProseMirror）里被段落隔开的两段列表是两个独立节点，还原时
+       * 也必须还原成两个。列表栈若不在这里断开，后一段同类型同深度的列表
+       * 会命中「复用同一 listNode」的分支被焊进上一段（有序编号连号而不是
+       * 各自从 1 起算），而夹在中间的那段段落会被挪到整个列表之后（位置漂移）。
+       * 两条都是 AGENTS.md 明令禁止的「存盘后结构永久损坏」，而 canonical 每次
+       * 落盘都从编辑器 JSON 重新推导，损坏会被固化进存档。
+       *
+       * 断开列表栈的同时也要断开「块内 chip 续接」的状态：上一个 chip 若不是
+       * 块末尾（trailing 不为 true），后面的**同块**文本要并回上一个块。
+       * 段落是另一个块，不能并回去 —— 否则后面新出现的列表项会被塞进
+       * 段落之前那个早已结束的列表项里，列表凭空多出一项。
+       */
+      listStack.length = 0;
+      lastChipTrailing = null;
+      lastBlockInline = null;
       continue;
     }
     if (item.kind === "text" && item.block === "hr") {
       flushParagraph();
       blocks.push({ type: "horizontalRule" });
+      // 分割线同理：它是边界，chip 不该越过分割线回到上方块里。
+      lastInlineHost = null;
       continue;
     }
     if (item.kind === "text" && (item.block === "bullet" || item.block === "ordered")) {
-      let depth = item.indent ?? 0;
-      // 弹掉更深的层级；同深度但类型不同的列表也闭合（同级切换 bullet↔ordered）。
-      while (listStack.length > 0) {
-        const topFrame = listStack.at(-1)!;
-        if (topFrame.indent > depth || (topFrame.indent === depth && topFrame.kind !== item.block))
-          listStack.pop();
-        else break;
-      }
-      const top = listStack.at(-1);
-      let frame: PromptListFrame;
-      if (top != null && top.kind === item.block && top.indent === depth) {
-        frame = top;
-      } else {
-        // 新建嵌套层：深度至少比父层深一级，避免存档里的跳级缩进生成悬空层级。
-        if (top != null) depth = Math.max(depth, top.indent + 1);
-        const listNode = {
-          type: item.block === "bullet" ? "bulletList" : "orderedList",
-          content: [] as JSONContent[],
-        };
-        if (top == null) {
-          flushParagraph();
-          blocks.push(listNode);
-        } else {
-          top.lastListItem?.content?.push(listNode);
-        }
-        frame = { kind: item.block, indent: depth, listNode, lastListItem: null };
-        listStack.push(frame);
-      }
+      const { frame, depth } = openListFrame(item.block, item.indent ?? 0);
       const content = inlineItemsToTiptapContent([item], presentation);
+      // 「列表项里夹了一个 @引用」：并回上一个列表项，而不是新建一个。
+      // 合并后 listItem 本身没变（内容追加进它的段落），所以 frame.lastListItem 不动。
+      if (tryMergeIntoPreviousBlock(item.block, depth, content)) {
+        continue;
+      }
       const listItem: JSONContent = {
         type: "listItem",
         content: [{ type: "paragraph", content }],
@@ -703,13 +804,21 @@ export function promptDocumentToTiptapJson(
       frame.listNode.content!.push(listItem);
       frame.lastListItem = listItem;
       lastInlineHost = content;
+      lastBlockInline = { block: item.block, indent: depth, content };
+      lastChipTrailing = null;
       continue;
     }
     if (item.kind === "text" && item.block === "blockquote") {
       flushParagraph();
       const content = inlineItemsToTiptapContent([item], presentation);
+      // 引用块里夹了 @引用：并回上一个引用块，而不是新建一个。
+      if (tryMergeIntoPreviousBlock("blockquote", 0, content)) {
+        continue;
+      }
       blocks.push({ type: "blockquote", content: [{ type: "paragraph", content }] });
       lastInlineHost = content;
+      lastBlockInline = { block: "blockquote", indent: 0, content };
+      lastChipTrailing = null;
       continue;
     }
     if (item.kind === "text") {
@@ -717,18 +826,120 @@ export function promptDocumentToTiptapJson(
       if (level != null) {
         flushParagraph();
         const content = inlineItemsToTiptapContent([item], presentation);
+        // 标题里夹了 @引用：并回上一个标题，而不是新建一个。
+        if (tryMergeIntoPreviousBlock(item.block as string, 0, content)) {
+          continue;
+        }
         blocks.push({ type: "heading", attrs: { level }, content });
         lastInlineHost = content;
+        lastBlockInline = { block: item.block as string, indent: 0, content };
+        lastChipTrailing = null;
         continue;
       }
     }
-    if (paragraphItems.length === 0 && lastInlineHost != null) {
-      // 纯 chip 跟在结构化块后面：回流到那个块里，避免被拆成独立段落。
+    /*
+     * 带块上下文的 chip：按它**自己**的块精确重建。
+     *
+     * chip 自己知道属于哪个列表项 / 引用块 / 标题（正向转换时 `walkInline` 拿得到
+     * 块上下文，已存进 `block` / `indent`）。所以这里不需要再靠 `trailing` 猜
+     * 「它属于哪个块」—— 那正是「两个列表项被焊成一个」的根因：
+     *
+     *   - 上一块末尾的 chip（trailing=true）→ 上一块已结束；
+     *   - 当前 chip 的 `trailing=false` → 它后面还有同块内容。
+     *
+     * 判据是「上一个块是否**未结束**且**同 block 同 indent**」：
+     *   - 上一个条目是 chip 且 trailing=true → 上一块已结束 → 当前 chip **开新块**；
+     *   - 否则若上一个块同 block 同 indent → 当前 chip **并入**它（它在那个块里）。
+     */
+    if (item.kind !== "text" && item.block != null) {
+      const chipBlock = item.block;
+      const chipIndent = item.indent ?? 0;
+      const chipContent = inlineItemsToTiptapContent([item], presentation);
+      const chipTrailing = item.trailing === true;
+      // 上一个块是否还在进行中（没被 trailing=true 的 chip 收尾）。
+      const previousBlockOpen = lastChipTrailing !== true;
+      const mergesIntoPrevious =
+        previousBlockOpen &&
+        lastBlockInline != null &&
+        lastBlockInline.block === chipBlock &&
+        lastBlockInline.indent === chipIndent;
+      if (mergesIntoPrevious && lastBlockInline != null) {
+        lastBlockInline.content.push(...chipContent);
+        lastInlineHost = lastBlockInline.content;
+        lastChipTrailing = chipTrailing;
+        continue;
+      }
+      if (chipBlock === "bullet" || chipBlock === "ordered") {
+        const { frame, depth } = openListFrame(chipBlock, chipIndent);
+        const listItem: JSONContent = {
+          type: "listItem",
+          content: [{ type: "paragraph", content: chipContent }],
+        };
+        frame.listNode.content!.push(listItem);
+        frame.lastListItem = listItem;
+        lastInlineHost = chipContent;
+        lastBlockInline = { block: chipBlock, indent: depth, content: chipContent };
+        lastChipTrailing = chipTrailing;
+        continue;
+      }
+      if (chipBlock === "blockquote") {
+        flushParagraph();
+        blocks.push({ type: "blockquote", content: [{ type: "paragraph", content: chipContent }] });
+        lastInlineHost = chipContent;
+        lastBlockInline = { block: "blockquote", indent: 0, content: chipContent };
+        lastChipTrailing = chipTrailing;
+        continue;
+      }
+      const chipLevel = HEADING_LEVELS[chipBlock as keyof typeof HEADING_LEVELS];
+      if (chipLevel != null) {
+        flushParagraph();
+        blocks.push({ type: "heading", attrs: { level: chipLevel }, content: chipContent });
+        lastInlineHost = chipContent;
+        lastBlockInline = { block: chipBlock, indent: 0, content: chipContent };
+        lastChipTrailing = chipTrailing;
+        continue;
+      }
+      // 块类型不认识（理论上不会发生）：退回段落缓冲，别把内容弄丢。
+    }
+    if (paragraphItems.length === 0 && lastInlineHost != null && lastChipTrailing !== true) {
+      /*
+       * 纯 chip 跟在结构化块后面：回流到那个块里，避免被拆成独立段落。
+       *
+       * **但上一个 chip 若是块末尾，就不能回流** —— 它意味着「这个块到此为止」，
+       * 当前 chip 属于**下一个**块。回流的后果是：下一个块的 chip 被塞进上一个
+       * 块，随后的同块文本又通过 `tryMergeIntoPreviousBlock` 并进同一个列表项 →
+       * **两个列表项被焊成一个**（第二个列表项整条消失），而 canonical 每次落盘
+       * 都从编辑器 JSON 重新推导 → 损坏被固化进存档。
+       *
+       * 「每条列表项都以 @引用开头或结尾」这种极常见的写法就会触发它。
+       *
+       * 不回流时当前 chip 落到段落缓冲：位置不精确（chip 跑到了段落里），但
+       * **列表项不再丢失** —— 丢内容不可逆，位置不精确可以再修。
+       */
       lastInlineHost.push(...inlineItemsToTiptapContent([item], presentation));
+      /*
+       * 记住它是不是本块末尾：块末尾的 chip 说明后面的同块文本属于**下一个**块。
+       *
+       * 四种 chip（media_reference / mark_reference / attachment / pending_reference）
+       * 都要看自己的 `trailing`。早先只认前两种、其余一律当「块中间」→
+       * 列表项末尾的待确认 chip 或附件会把**下一个列表项**并进来（列表项被吞掉）。
+       */
+      lastChipTrailing =
+        item.kind === "media_reference" ||
+        item.kind === "mark_reference" ||
+        item.kind === "attachment" ||
+        item.kind === "pending_reference"
+          ? item.trailing === true
+          : false;
       continue;
     }
     // 引用等行内条目落到当前段落缓冲，与相邻文本同块。
     paragraphItems.push(item);
+    /*
+     * 纯段落文本会切断块序列：上一个 chip 的「块末尾」状态不能跨过它，
+     * 否则后面同 block/indent 的列表文本会与**上一个块**合并（跨块误合并）。
+     */
+    lastChipTrailing = null;
   }
   // 列表帧在创建时已挂进文档；这里只需闭合段落缓冲。
   flushParagraph();
@@ -748,19 +959,37 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
     style: PromptTextStyle,
     sink: PromptContentItem[] = items,
   ) => {
-    for (const node of nodes) {
+    for (const [nodeIndex, node] of nodes.entries()) {
+      /*
+       * 这个节点是不是本块的**最后一个**行内节点。
+       *
+       * chip 存成独立条目后，「列表项里夹了一个 @引用」与「列表项末尾放了个 @引用、
+       * 下一行才是新列表项」在 canonical 里完全同形，反向转换没法判断该不该合并
+       * —— 判错就会把一个列表项裂成两个、有序列表编号错位。
+       * 靠这个标记区分：块内中间的 chip 后面还有同块文本（同一个列表项），
+       * 块末尾的 chip 后面即使还有同块文本，那也是下一个列表项。
+       */
+      const isTrailing = nodeIndex === nodes.length - 1;
       if (node.type === "text") {
         const marks = (node.marks ?? [])
           .map((mark) => promptMarkFromTiptapName(String(mark.type ?? "")))
           .filter((mark): mark is PromptInlineMark => mark != null);
-        appendStyledText(sink, node.text ?? "", {
-          ...style,
-          ...(marks.length > 0 ? { marks } : {}),
-        });
+        appendStyledText(
+          sink,
+          node.text ?? "",
+          {
+            ...style,
+            ...(marks.length > 0 ? { marks } : {}),
+          },
+          // 同一个块内部的行内片段必须并成一条：块内片段与「相邻两个块」在样式上
+          // 完全相同，只能靠「这是块专属 sink」这个上下文区分。不传这个开关，
+          // 「列表项里按 Shift+Enter」会被拆成多条，反向转换时一个列表项裂成三个。
+          { mergeWithinBlock: true },
+        );
         continue;
       }
       if (node.type === "hardBreak") {
-        appendStyledText(sink, "\n", style);
+        appendStyledText(sink, "\n", style, { mergeWithinBlock: true });
         continue;
       }
       if (node.type === PROMPT_TIPTAP_MEDIA_REFERENCE_NODE) {
@@ -792,6 +1021,22 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
           canvasNodeKey,
           target,
           displayNameSnapshot,
+          // **总是显式写** trailing（true / false 都写）。
+          //
+          // 缺省值不能用来表达「块中间」：旧存档里没有这个字段，若把「缺失」当成
+          // 「块中间」，旧存档的 chip 就被并进下一个列表项 → 列表项被吞掉、
+          // 有序编号错位（旧行为是 chip 视为块末尾、不合并）。所以：
+          //   · 新写出的文档：字段总是存在，语义明确；
+          //   · 旧存档（字段缺失）：解码时补 true，复现旧行为。
+          trailing: isTrailing,
+          // 块上下文：chip 属于哪个列表项/标题，由它自己带。
+          //
+          // 不带的话，反向转换只能靠 `trailing` 猜「它属于哪个块」—— 而「上一块
+          // 末尾的 chip」与「下一块开头的 chip」在条目序列上完全同形，猜错就把两个
+          // 列表项焊成一个（第二个列表项整条消失，且每次落盘都从编辑器 JSON 重新
+          // 推导 → 固化进存档）。这里正向已知块上下文，存下来即精确。
+          ...(style.block != null ? { block: style.block } : {}),
+          ...(style.indent != null && style.indent > 0 ? { indent: style.indent } : {}),
           ...(typeof learnedPattern === "string" && learnedPattern
             ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
             : {}),
@@ -827,6 +1072,11 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
           labelSnapshot,
           descriptionSnapshot: typeof descriptionSnapshot === "string" ? descriptionSnapshot : "",
           color: typeof color === "string" ? color : "",
+          // 同 media_reference：总是显式写，语义不靠缺省值表达。
+          trailing: isTrailing,
+          // 同上：块上下文让反向转换能精确知道这个 chip 属于哪个块。
+          ...(style.block != null ? { block: style.block } : {}),
+          ...(style.indent != null && style.indent > 0 ? { indent: style.indent } : {}),
         });
         continue;
       }
@@ -855,6 +1105,11 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
             target: parsedTarget,
             name,
             mediaType,
+            // 同上：总是显式写。
+            trailing: isTrailing,
+            // 同上：块上下文。
+            ...(style.block != null ? { block: style.block } : {}),
+            ...(style.indent != null && style.indent > 0 ? { indent: style.indent } : {}),
           });
         }
         continue;
@@ -873,6 +1128,11 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
               typeof candidateCount === "number" && Number.isFinite(candidateCount)
                 ? Math.max(2, Math.floor(candidateCount))
                 : 2,
+            // 同其它 chip：总是显式写，语义不靠缺省值表达。
+            trailing: isTrailing,
+            // 同上：块上下文。
+            ...(style.block != null ? { block: style.block } : {}),
+            ...(style.indent != null && style.indent > 0 ? { indent: style.indent } : {}),
           });
         }
         continue;

@@ -149,7 +149,7 @@ export function ConnectionQuickAddMenu({
           {connectionMode ? "选择后创建并自动连线" : "选择后在画布创建节点"}
         </span>
       </div>
-      {CANVAS_QUICK_ADD_CHOICES.map(({ kind, label, icon }, index) => (
+      {CANVAS_QUICK_ADD_CHOICES.map(({ kind, label, icon, badge, available }, index) => (
         <button
           key={kind}
           ref={(button) => {
@@ -159,11 +159,17 @@ export function ConnectionQuickAddMenu({
           role="menuitem"
           tabIndex={index === focusedIndex ? 0 : -1}
           className={`connection-quick-add-menu__item connection-quick-add-menu__item--${kind}`}
+          data-available={available === false ? "false" : "true"}
           onFocus={() => setFocusedIndex(index)}
           onClick={() => onSelect(kind)}
         >
           <Icon name={icon} size="xl" />
           <span>{label}</span>
+          {badge ? (
+            <em className="connection-quick-add-menu__badge" aria-hidden="true">
+              {badge}
+            </em>
+          ) : null}
         </button>
       ))}
     </div>,

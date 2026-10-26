@@ -1,8 +1,10 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
+  describeConnectivityTest,
   formatRawBackendError,
+  frontendLog,
   providerSettingsClient,
   type ConnectivityTestResult,
   type ProviderConnection,
@@ -43,8 +45,20 @@ export function ProviderTokenGroupSettings({
   const [newGroupSecret, setNewGroupSecret] = useState("");
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [requestError, setRequestError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [requestError, setRequestError] = useState<ErrorAlertNotice | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  /**
+   * 记录一次失败：原始 payload 只进日志，界面上交给 ErrorAlert 出人话摘要。
+   *
+   * 以前这里直接把 `formatRawBackendError` 的结果塞进 state，用户看到的是一坨
+   * `{"details":null,"kind":"validation",…}`；现在调用点只负责递原始错误对象。
+   */
+  const showFailure = useCallback((error: unknown, label: string) => {
+    frontendLog("error", `[settings] ${label}：${formatRawBackendError(error)}`);
+    setRequestError({ label, error });
+  }, []);
 
   // 父组件可能传入每次渲染都新建的内联回调（例如在回调里 setState 后父组件重新渲染）。
   // 若把该回调直接放进 reload 的依赖，回调引用一变就会重跑 reload，导致「读取中/未配置」
@@ -79,14 +93,13 @@ export function ProviderTokenGroupSettings({
       );
       setSecrets(next);
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(formatted);
+      showFailure(error, "读取令牌分组失败");
       setGroups([]);
       onTokenGroupsChangedRef.current([]);
     } finally {
       setLoading(false);
     }
-  }, [client, credentialClient, provider]);
+  }, [client, credentialClient, provider, showFailure]);
 
   useEffect(() => {
     let active = true;
@@ -125,11 +138,12 @@ export function ProviderTokenGroupSettings({
     if (result.ok) {
       setSuccessMessage(`分组「${name}」连通性正常（${result.elapsedMs}ms）。`);
     } else {
-      setRequestError(
-        `分组「${name}」连通性失败：${result.reason ?? "未知原因"}${
-          result.detail ? `\n${result.detail}` : ""
-        }`,
+      // 摘要统一走 describeConnectivityTest：原始 detail 只进日志。
+      frontendLog(
+        "error",
+        `[settings] 分组「${name}」连通性失败：${result.reason ?? "未知原因"} ${result.detail ?? ""}`,
       );
+      setRequestError({ error: describeConnectivityTest(result, `分组「${name}」`) });
     }
   };
 
@@ -139,7 +153,7 @@ export function ProviderTokenGroupSettings({
     setRequestError(null);
     setSuccessMessage(null);
     if (validationError) {
-      setRequestError(validationError);
+      setRequestError({ error: validationError });
       return;
     }
     setBusyId(group.id);
@@ -153,8 +167,7 @@ export function ProviderTokenGroupSettings({
       setSuccessMessage(`分组「${group.groupName}」已保存。`);
       await reload();
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(formatted);
+      showFailure(error, `保存分组「${group.groupName}」失败`);
     } finally {
       setBusyId(null);
     }
@@ -168,8 +181,7 @@ export function ProviderTokenGroupSettings({
       const result = await client.testConnection(group.providerConnectionId, group.groupName);
       showTestResult(group.groupName, result);
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(`分组「${group.groupName}」连通性测试失败：${formatted}`);
+      showFailure(error, `分组「${group.groupName}」连通性测试失败`);
     } finally {
       setBusyId(null);
     }
@@ -184,8 +196,7 @@ export function ProviderTokenGroupSettings({
       setSuccessMessage(`分组「${group.groupName}」已删除，其绑定的模型将回到默认令牌。`);
       await reload();
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(formatted);
+      showFailure(error, `删除分组「${group.groupName}」失败`);
     } finally {
       setBusyId(null);
     }
@@ -197,7 +208,7 @@ export function ProviderTokenGroupSettings({
     setRequestError(null);
     setSuccessMessage(null);
     if (validationError) {
-      setRequestError(validationError);
+      setRequestError({ error: validationError });
       return;
     }
     setBusyId("new");
@@ -213,8 +224,7 @@ export function ProviderTokenGroupSettings({
       setSuccessMessage(`分组「${newGroupName.trim()}」已添加。`);
       await reload();
     } catch (error: unknown) {
-      const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
-      setRequestError(formatted);
+      showFailure(error, `添加分组「${newGroupName.trim()}」失败`);
     } finally {
       setBusyId(null);
     }
@@ -396,13 +406,13 @@ export function ProviderTokenGroupSettings({
       </div>
 
       {requestError ? (
-        <>
-          <div className="settings-error token-group-settings__notice" role="alert">
-            <strong>令牌分组操作失败</strong>
-            <pre tabIndex={0}>{requestError}</pre>
-          </div>
-          <ErrorCopyButton text={requestError} />
-        </>
+        <div className="token-group-settings__notice">
+          <ErrorAlert
+            error={requestError.error}
+            label={requestError.label}
+            hint="请检查供应商连接与令牌内容后再试一次；展开完整报错可把诊断文本贴给开发者。"
+          />
+        </div>
       ) : null}
       {successMessage ? (
         <p className="settings-success token-group-settings__notice" role="status">

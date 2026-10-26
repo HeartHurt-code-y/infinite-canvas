@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "../../lib/toast";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
-import { formatRawBackendError, isDesktopRuntime } from "../../lib/backend";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
+import {
+  backendErrorMessage,
+  formatRawBackendError,
+  frontendLog,
+  isDesktopRuntime,
+} from "../../lib/backend";
 import {
   registerAppUpdateBeforeInstallFlush,
   startAutomaticAppUpdateChecks,
 } from "../../lib/appUpdate";
-import { workflowHistoryClient } from "../../lib/workflowHistory";
 import {
   canvasDocumentRepository,
   readActiveCanvasId,
@@ -19,6 +23,7 @@ import type {
 } from "../canvas/useCanvasDocumentPersistence";
 import { CanvasTabs } from "./CanvasTabs";
 import { CanvasDeleteDialog } from "./CanvasDeleteDialog";
+import { openCreateStudio } from "../create/openCreateStudio";
 import { WorkspaceApp } from "./WorkspaceApp";
 import { CANVAS_ID, CANVAS_DOCUMENT_TITLE, DEFAULT_ZOOM } from "./workspaceModel";
 import "./CanvasWorkspace.css";
@@ -50,11 +55,24 @@ export function CanvasWorkspace() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const mutation = useRef(false);
-  const [error, setError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [error, setError] = useState<ErrorAlertNotice | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CanvasTab | null>(null);
+  // 删除确认弹窗只接受字符串（CanvasDeleteDialog 不在本轮改动范围内），
+  // 因此这里存人话摘要，原始 payload 走日志。
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const recovery = useRef<Promise<number> | null>(null);
   const focusActivatedTab = useRef(false);
+
+  /**
+   * 记录一次失败：原始 payload 只进日志，界面上交给 ErrorAlert 出人话摘要。
+   *
+   * 以前这里直接把 `formatRawBackendError` 的结果拼进文案，用户看到的是一坨
+   * `{"details":null,"kind":"validation",…}`；现在调用点只负责递原始错误对象。
+   */
+  const showFailure = useCallback((failure: unknown, label?: string) => {
+    frontendLog("error", `[canvas] ${label ?? "操作失败"}：${formatRawBackendError(failure)}`);
+    setError({ label, error: failure });
+  }, []);
 
   useEffect(() => {
     if (
@@ -93,16 +111,6 @@ export function CanvasWorkspace() {
           current.map((canvas) => (canvas.id === id ? { id, name: title } : canvas)),
         );
       },
-      recoverWorkflowHistory: () => {
-        if (!recovery.current) {
-          const pending = workflowHistoryClient.recover();
-          recovery.current = pending;
-          void pending.catch(() => {
-            if (recovery.current === pending) recovery.current = null;
-          });
-        }
-        return recovery.current;
-      },
     }),
     [],
   );
@@ -124,11 +132,11 @@ export function CanvasWorkspace() {
       setCanvases(tabs);
       setError(null);
     } catch (failure) {
-      setError(`读取画布列表失败：${formatRawBackendError(failure)}`);
+      showFailure(failure, "读取画布列表失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showFailure]);
 
   useEffect(() => {
     // The catalog is external storage; results update the tab list after the read completes.
@@ -189,20 +197,20 @@ export function CanvasWorkspace() {
             await appWindow.destroy();
           } catch (failure) {
             closing = false;
-            setError(`画布保存失败，窗口保持打开：${formatRawBackendError(failure)}`);
+            showFailure(failure, "画布保存失败，窗口保持打开");
           }
         });
         if (disposed) stop();
         else unlisten = stop;
       })
       .catch((failure: unknown) => {
-        setError(`注册关闭保存失败：${formatRawBackendError(failure)}`);
+        showFailure(failure, "注册关闭保存失败");
       });
     return () => {
       disposed = true;
       unlisten?.();
     };
-  }, [flushAll]);
+  }, [flushAll, showFailure]);
 
   const activate = (id: string) => {
     focusActivatedTab.current = true;
@@ -212,7 +220,9 @@ export function CanvasWorkspace() {
     try {
       writeActiveCanvasId(id);
     } catch (failure) {
-      toast.error("无法记住当前画布", { description: formatRawBackendError(failure) });
+      // toast 的描述是人话摘要；原始 payload 只进日志。
+      frontendLog("error", `[canvas] 无法记住当前画布：${formatRawBackendError(failure)}`);
+      toast.error("无法记住当前画布", { description: backendErrorMessage(failure) });
     }
   };
 
@@ -223,7 +233,7 @@ export function CanvasWorkspace() {
     setError(null);
     void action()
       .catch((failure: unknown) => {
-        setError(formatRawBackendError(failure));
+        showFailure(failure);
       })
       .finally(() => {
         mutation.current = false;
@@ -318,14 +328,20 @@ export function CanvasWorkspace() {
         activate(next.id);
         setDeleteTarget(null);
       } catch (failure) {
-        const messages = [`删除失败：${formatRawBackendError(failure)}`];
+        // 删除确认弹窗只接受字符串：这里存人话摘要，原始 payload 走日志。
+        frontendLog("error", `[canvas] 删除画布失败：${formatRawBackendError(failure)}`);
+        const messages = [`删除失败：${backendErrorMessage(failure)}`];
         let retainReplacement = false;
         if (preferenceChanged) {
           try {
             writeActiveCanvasId(activeId.current);
           } catch (restoreFailure) {
             retainReplacement = true;
-            messages.push(`恢复当前画布记录失败：${formatRawBackendError(restoreFailure)}`);
+            frontendLog(
+              "error",
+              `[canvas] 恢复当前画布记录失败：${formatRawBackendError(restoreFailure)}`,
+            );
+            messages.push(`恢复当前画布记录失败：${backendErrorMessage(restoreFailure)}`);
           }
         }
         session?.resumeAfterDeleteFailure();
@@ -335,7 +351,11 @@ export function CanvasWorkspace() {
             if (!retainReplacement) await canvasDocumentRepository.delete(replacement.id);
           } catch (cleanupFailure) {
             retainReplacement = true;
-            messages.push(`清理空白画布失败：${formatRawBackendError(cleanupFailure)}`);
+            frontendLog(
+              "error",
+              `[canvas] 清理空白画布失败：${formatRawBackendError(cleanupFailure)}`,
+            );
+            messages.push(`清理空白画布失败：${backendErrorMessage(cleanupFailure)}`);
           }
           if (retainReplacement) {
             const retained = replacement;
@@ -364,6 +384,8 @@ export function CanvasWorkspace() {
               canvasId={id}
               active={id === activeCanvasId}
               services={services}
+              canvasCatalog={canvases}
+              onSelectCanvas={selectCanvas}
               canvasNavigation={
                 id === activeCanvasId ? (
                   <CanvasTabs
@@ -379,6 +401,18 @@ export function CanvasWorkspace() {
                       setDeleteError(null);
                       setDeleteTarget(target);
                     }}
+                    onOpenCreateStudio={() => {
+                      void openCreateStudio().catch((failure: unknown) => {
+                        // toast 的描述是人话摘要；原始 payload 只进日志。
+                        frontendLog(
+                          "error",
+                          `[canvas] 无法打开创作台：${formatRawBackendError(failure)}`,
+                        );
+                        toast.error("无法打开创作台", {
+                          description: backendErrorMessage(failure),
+                        });
+                      });
+                    }}
                   />
                 ) : null
               }
@@ -387,27 +421,39 @@ export function CanvasWorkspace() {
         ))}
       </div>
       {error ? (
-        <>
-          <div className="canvas-session-error" role="alert">
-            <span>{error}</span>
-            <button
-              type="button"
-              disabled={busy || loading || deleteTarget !== null}
-              onClick={() => {
-                runMutation(async () => {
-                  await flushAll();
-                  await loadCatalog();
-                });
-              }}
-            >
-              重试
-            </button>
-            <button type="button" onClick={() => setError(null)} aria-label="关闭画布错误提示">
-              关闭
-            </button>
-          </div>
-          <ErrorCopyButton text={error} />
-        </>
+        <div className="canvas-session-error">
+          <span>
+            <ErrorAlert
+              error={error.error}
+              label={error.label}
+              hint={
+                /*
+                 * 版本冲突的处置与普通失败不同：普通失败重试是安全的（写同样的内容），
+                 * 版本冲突重试会用**本窗口的内容覆盖**画布（另一个窗口的改动会丢）。
+                 * 用户必须知情，否则「重试」这个按钮名会让人以为只是重发一次。
+                 */
+                /版本冲突|已在别处被修改|changed since revision/i.test(String(error.error))
+                  ? "这张画布在另一个窗口被改过了。本窗口的内容仍在本机：点「重试」会以本窗口的内容覆盖画布（另一个窗口的改动会丢失）；想保留对方改动，请关闭本窗口后重新打开画布。"
+                  : "画布内容仍然保留在本机；可点「重试」重新保存，展开完整报错可把诊断文本贴给开发者。"
+              }
+            />
+          </span>
+          <button
+            type="button"
+            disabled={busy || loading || deleteTarget !== null}
+            onClick={() => {
+              runMutation(async () => {
+                await flushAll();
+                await loadCatalog();
+              });
+            }}
+          >
+            重试
+          </button>
+          <button type="button" onClick={() => setError(null)} aria-label="关闭画布错误提示">
+            关闭
+          </button>
+        </div>
       ) : null}
       {deleteTarget ? (
         <CanvasDeleteDialog

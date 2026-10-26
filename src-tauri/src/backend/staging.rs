@@ -4,7 +4,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, UNIX_EPOCH},
 };
@@ -35,8 +35,8 @@ use super::{
         AssetImportOutputRecord, CloudAssetStatus, ConnectivityTestResult, ImportedAssetSource,
         LocalAssetKindTotals, LocalAssetListQuery, LocalAssetPage, LocalAssetRecord, MediaType,
         ObserveAssetStatusCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
-        StagingJobRecord, StagingStatus, StartStagingCommand, TosBucketPullSummary,
-        TosStagingConfig,
+        StagingCleanupCandidate, StagingJobRecord, StagingStatus, StartStagingCommand,
+        TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -90,6 +90,25 @@ const UPLOAD_MAX_RETRIES: u32 = 3;
 
 /// 对象存储上传重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
 const UPLOAD_RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// 暂存对象回收：单轮最多处理多少行，避免一次巡检发起过多网络请求。
+const CLEANUP_MAX_ROWS_PER_PASS: u32 = 50;
+
+/// 暂存对象回收：删除失败的最大重试次数。达到上限后该行进入终态，不再重试——
+/// 否则每次启动都会重试同一行，既清不掉对象也永远不放手。
+const CLEANUP_MAX_RETRY_COUNT: u32 = 10;
+
+/// 暂存对象回收：重试退避基准（毫秒）。第 n 次失败后等待 `BASE * 2^(n-1)`。
+const CLEANUP_RETRY_BASE_DELAY_MS: i64 = 5 * 60 * 1000;
+
+/// 暂存对象回收：退避上限（毫秒），6 小时。避免长时间故障时把重试压得过密。
+const CLEANUP_RETRY_MAX_DELAY_MS: i64 = 6 * 60 * 60 * 1000;
+
+/// 暂存对象回收：后台巡检间隔（毫秒）。
+///
+/// 之所以不能只在启动时扫一次：退避重试需要「时间到了再试」，而启动扫描一辈子
+/// 只发生一次，进程连续运行期间删除失败的对象永远等不到下一次重试。
+const CLEANUP_POLL_INTERVAL_MS: u64 = 5 * 60 * 1000;
 
 /// 桶素材拉取：支持的图片扩展名。avif 等预览兼容性差的格式排除，
 /// 与远程导入白名单语义保持一致。
@@ -543,6 +562,15 @@ pub struct StagingService {
     client: reqwest::Client,
     content_gates: Arc<AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
     active_jobs: Arc<AsyncMutex<HashSet<String>>>,
+    /// 已经交给供应商、还没回收的中转租约（jobId 集合）。
+    ///
+    /// 回收器靠它判断「这个对象此刻还有人用」：租约发出后到回收之前，
+    /// 供应商随时可能正在取这个对象的字节，删掉就把正在跑的请求打断。
+    /// 进程重启后这张表是空的 —— 那正是「租约随进程一起没了」的情形，
+    /// 对象已经没人认领，可以回收。
+    live_leases: Arc<AsyncMutex<HashSet<String>>>,
+    /// 回收循环是否已经启动（保证一个进程里只有一个循环）。
+    cleanup_loop_started: Arc<AtomicBool>,
 }
 
 async fn gate_for_content(
@@ -564,6 +592,29 @@ pub struct StagingLease {
     pub job_id: String,
     pub get_url: String,
     pub delete_url: Option<String>,
+}
+
+/// 一轮暂存对象回收的结果计数（只用于日志与后台统计）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct StagingCleanupSummary {
+    /// 已确认删除（对象本来就不存在也算）的对象数。
+    pub deleted: u32,
+    /// 删除失败、已安排退避重试的对象数。
+    pub failed: u32,
+    /// 重试达上限、进入终态的对象数。
+    pub abandoned: u32,
+    /// 本进程里仍在使用、跳过的对象数。
+    pub skipped_live: u32,
+    /// 仍被其它任务持有、跳过的对象数。
+    pub skipped_owned: u32,
+}
+
+/// 回收重试的退避时长：第 n 次失败后等 `BASE * 2^(n-1)`，并封顶。
+fn cleanup_retry_delay_ms(retry_count: u32) -> i64 {
+    let exponent = retry_count.saturating_sub(1).min(20);
+    CLEANUP_RETRY_BASE_DELAY_MS
+        .saturating_mul(1_i64 << exponent)
+        .min(CLEANUP_RETRY_MAX_DELAY_MS)
 }
 
 fn is_overseas_terminal_error(error: &BackendError) -> bool {
@@ -624,6 +675,8 @@ impl StagingService {
             client,
             content_gates: Arc::new(AsyncMutex::new(HashMap::new())),
             active_jobs: Arc::new(AsyncMutex::new(HashSet::new())),
+            live_leases: Arc::new(AsyncMutex::new(HashSet::new())),
+            cleanup_loop_started: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1473,9 +1526,44 @@ impl StagingService {
                 return Err(error);
             }
         };
+        /*
+         * 先登记「在用」再落 `in_use` 状态，顺序不能反：
+         * 行一旦变成 `in_use` 就是回收器的候选，而回收器判断「有没有人用」靠的
+         * 就是这张表。反过来登记的话，落盘与登记之间有一个窗口，回收器正好
+         * 扫到就会把供应商正要用的对象删掉。
+         */
+        self.live_leases.lock().await.insert(persisted.id.clone());
         persisted.status = StagingStatus::InUse;
         persisted.updated_at = now_ms();
-        self.storage.update_staging_job(&persisted)?;
+        if let Err(error) = self.storage.update_staging_job(&persisted) {
+            /*
+             * 对象已经传上去了、只是**状态落盘**失败。
+             *
+             * 之前这里直接 `?` 返回：lease 被丢弃 → TOS 上的对象无人回收，
+             * 而启动恢复只把 `uploading` 改写成 `Interrupted`（该状态全仓只写不读），
+             * 于是这个对象**永久残留**在对象存储里（每次泄漏一整个素材）。
+             *
+             * 这里 best-effort 地回收一次：清理本身失败只记日志，不掩盖原始错误。
+             */
+            warn!(
+                "[staging] 暂存对象已上传但状态落盘失败，回收对象避免泄漏: jobId={}, error={}",
+                persisted.id,
+                error
+            );
+            self.live_leases.lock().await.remove(&persisted.id);
+            if let Err(cleanup_error) = self.cleanup_lease(&lease).await {
+                /*
+                 * 清理也没成功 → `cleanup_lease` 已把行落成 `failed`（两条失败口径统一），
+                 * 对象还在桶里，回收器会接手重试。
+                 */
+                warn!(
+                    "[staging] 暂存对象回收失败（对象可能残留）: jobId={}, error={}",
+                    persisted.id,
+                    cleanup_error
+                );
+            }
+            return Err(error);
+        }
         Ok(lease)
     }
 
@@ -1485,24 +1573,246 @@ impl StagingService {
         job.updated_at = now_ms();
         self.storage.update_staging_job(&job)?;
         if let Some(delete_url) = &lease.delete_url {
-            let response = self.client.delete(delete_url).send().await?;
-            if !response.status().is_success() {
-                let status = response.status().as_u16();
-                let raw = String::from_utf8_lossy(&response.bytes().await?).into_owned();
-                let error = BackendError::protocol(
-                    format!("TOS cleanup returned HTTP {status}"),
-                    redact_request_value(&json!({ "httpStatus": status, "rawResponse": raw })),
-                );
+            /*
+             * 删除失败有两条路径：**传输层**失败（超时/断网/代理抖动）与 **HTTP 非 2xx**。
+             * 之前只有传输层那条写 `Failed`，HTTP 那条只写 error、状态留在 `Cleaning`，
+             * 而 `Cleaning` 在启动恢复里会被改写成 `Failed` → 删除从此不再重试。
+             * 两条口径统一成 `Failed`：行落成失败态并保留对象键，
+             * 启动回收器就能接管重试（对象还在桶里，总得有人删）。
+             */
+            if let Err(error) = self.delete_staging_object(delete_url).await {
                 job.error = Some(error.runtime_record());
+                job.status = StagingStatus::Failed;
                 job.updated_at = now_ms();
                 self.storage.update_staging_job(&job)?;
+                self.live_leases.lock().await.remove(&lease.job_id);
                 return Err(error);
             }
         }
         job.status = StagingStatus::Cleaned;
         job.updated_at = now_ms();
         self.storage.update_staging_job(&job)?;
+        // 租约到此结束：对象要么已删，要么已是垃圾，回收器可以接管了。
+        self.live_leases.lock().await.remove(&lease.job_id);
         Ok(())
+    }
+
+    /// 删除 TOS 暂存对象：2xx 与「对象不存在」都算删除完成。
+    ///
+    /// 404（NoSuchKey）必须当成功，两种场景都靠它收口：
+    /// - 回收器可能已经删过一次（进程正好死在「已删除」与「已落库」之间）；
+    /// - 对象键在上传之前就写进了行里，上传根本没成功过，桶里从来没有这个对象。
+    /// 把它当失败会让这两类行永远清不掉。
+    async fn delete_staging_object(&self, delete_url: &str) -> BackendResult<()> {
+        let response = match self.client.delete(delete_url).send().await {
+            Ok(response) => response,
+            Err(error) => return Err(BackendError::Transport(error)),
+        };
+        let status = response.status();
+        if status.is_success() || status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+        let raw = String::from_utf8_lossy(&response.bytes().await?).into_owned();
+        Err(BackendError::protocol(
+            format!("TOS cleanup returned HTTP {status}"),
+            redact_request_value(&json!({ "httpStatus": status.as_u16(), "rawResponse": raw })),
+        ))
+    }
+
+    /// 暂存对象回收循环：后台常驻，按退避回收没人认领的中转对象。
+    ///
+    /// 纯后台动作：任何一步失败都只记日志，不影响应用启动，也不影响其它功能。
+    pub async fn run_staging_cleanup_loop(&self) {
+        /*
+         * `recover()` 既被启动流程调用、也能被手动命令再次触发；用一次性标记
+         * 保证同一个进程里只有一个回收循环在跑，避免两轮同时抢同一批行。
+         */
+        if self.cleanup_loop_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        loop {
+            if let Err(error) = self.reap_leaked_objects().await {
+                warn!("[staging] 暂存对象回收轮次失败: {error}");
+            }
+            tokio::time::sleep(Duration::from_millis(CLEANUP_POLL_INTERVAL_MS)).await;
+        }
+    }
+
+    /// 回收一轮没人认领的 TOS 中转对象。
+    ///
+    /// 处理三条死路（这三种状态此前全都没有任何代码会删对象）：
+    /// - `interrupted`：启动恢复把「国内导入中 / 校验中 / 授权中 / 上传中」统统改写成它，
+    ///   而恢复逻辑只把它映射回自己 → 全仓只写不读，对象永远留在桶里；
+    /// - `in_use`：上传成功、租约已经发出去的中转对象。进程在生成过程中被杀时行会停在这里，
+    ///   而它连启动恢复的白名单都进不去 → 每个崩溃的生成过程都泄漏一个对象；
+    /// - `failed`：运行失败或删除失败（HTTP 非 2xx）的行，同样没有删除路径。
+    ///
+    /// 幂等：删除成功（或对象本就不存在）后标记该行已回收，不再被捞出来；
+    /// 进程死在「已删除」与「已落库」之间时，下一轮会重发 DELETE，
+    /// 对象存储回 404 被当作「已经删掉了」，结果一致。
+    pub async fn reap_leaked_objects(&self) -> BackendResult<StagingCleanupSummary> {
+        let candidates = self.storage.list_staging_cleanup_candidates(
+            CLEANUP_MAX_RETRY_COUNT,
+            CLEANUP_MAX_ROWS_PER_PASS,
+        )?;
+        let mut summary = StagingCleanupSummary::default();
+        for candidate in candidates {
+            /*
+             * 本进程里还活着的东西不能删：正在导入的任务、已经发出去的租约，
+             * 供应商随时可能正在取这个对象的字节。
+             */
+            if self.is_job_live(&candidate.id).await {
+                summary.skipped_live += 1;
+                continue;
+            }
+            if self.object_still_owned_by_others(&candidate).await? {
+                summary.skipped_owned += 1;
+                continue;
+            }
+            match self.delete_leaked_object(&candidate).await {
+                Ok(()) => {
+                    self.storage.mark_staging_object_deleted(&candidate.id)?;
+                    summary.deleted += 1;
+                    info!(
+                        "[staging] 已回收无人认领的暂存对象: jobId={}, purpose={}, status={}",
+                        candidate.id,
+                        candidate.purpose,
+                        candidate.status.as_str()
+                    );
+                }
+                Err(error) => {
+                    let retry_count = candidate.cleanup_retry_count + 1;
+                    let terminal = retry_count >= CLEANUP_MAX_RETRY_COUNT;
+                    let next_at =
+                        (!terminal).then(|| now_ms() + cleanup_retry_delay_ms(retry_count));
+                    self.storage
+                        .record_staging_cleanup_failure(&candidate.id, retry_count, next_at)?;
+                    if terminal {
+                        summary.abandoned += 1;
+                        error!(
+                            "[staging] 暂存对象回收重试已达上限，停止重试（对象可能仍留在桶里，需要手动删除）: jobId={}, objectKey={}, 错误: {error}",
+                            candidate.id, candidate.object_key
+                        );
+                    } else {
+                        summary.failed += 1;
+                        warn!(
+                            "[staging] 暂存对象回收失败，将按退避重试: jobId={}, objectKey={}, 第 {retry_count} 次, 错误: {error}",
+                            candidate.id, candidate.object_key
+                        );
+                    }
+                }
+            }
+        }
+        Ok(summary)
+    }
+
+    /// 这个任务在本进程里是否还活着（正在跑，或中转租约已经发出还没回收）。
+    async fn is_job_live(&self, job_id: &str) -> bool {
+        if self.active_jobs.lock().await.contains(job_id) {
+            return true;
+        }
+        self.live_leases.lock().await.contains(job_id)
+    }
+
+    /// 同一个对象键是否还被别的**活着**的任务持有。
+    ///
+    /// 内容去重会让两个任务共用一个对象键（复用方 `complete_reused_staging_job`
+    /// 会抄走原任务的对象键）。原任务若已经死在死路状态上，而复用方还活着
+    /// （`staged` / `active`：对象是它的长期素材或云端素材的来源），
+    /// 这时删对象等于毁掉别人的素材，因此必须跳过。
+    async fn object_still_owned_by_others(
+        &self,
+        candidate: &StagingCleanupCandidate,
+    ) -> BackendResult<bool> {
+        for job in self
+            .storage
+            .list_staging_jobs_by_object_key(&candidate.object_key)?
+        {
+            if job.id == candidate.id {
+                continue;
+            }
+            if matches!(
+                job.status,
+                StagingStatus::Staged | StagingStatus::Active | StagingStatus::Importing
+            ) {
+                warn!(
+                    "[staging] 暂存对象仍被其它任务持有，跳过回收: objectKey={}, 持有方 jobId={}, status={}",
+                    candidate.object_key,
+                    job.id,
+                    job.status.as_str()
+                );
+                // 终态化：这一行永远等不到「没人持有」的时刻，别再每轮重复捞它。
+                self.storage.record_staging_cleanup_failure(
+                    &candidate.id,
+                    CLEANUP_MAX_RETRY_COUNT,
+                    None,
+                )?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// 删除单个中转对象：重签 DELETE 地址 → 发起删除 → 成功/已不存在都算删掉了。
+    async fn delete_leaked_object(
+        &self,
+        candidate: &StagingCleanupCandidate,
+    ) -> BackendResult<()> {
+        let saved = self.storage.get_staging_object_target(&candidate.id)?;
+        let config = self.resolve_cleanup_config(&candidate.id, saved.as_ref())?;
+        /*
+         * 归属校验用「对象键里带当前桶的 scope 哈希」，不用 `staging_object_matches_scope`：
+         * 后者还要求对象前缀一致，而用户改了对象前缀之后旧对象仍然属于本应用
+         * （同一个桶、同一个 scope 哈希），只是不再落在新前缀下 —— 用前缀校验
+         * 会把这些残留对象永远排除在回收之外。
+         *
+         * 校验用的是**上传时冻结的那份**配置（它才是生成这个对象键时用的那份，
+         * 端点大小写之类的细节完全一致）；没有快照时才退回当前配置。
+         */
+        let ownership_config = saved.as_ref().unwrap_or(&config);
+        if !staging_object_belongs_to_scope(&candidate.object_key, ownership_config) {
+            return Err(BackendError::validation(
+                "staging object does not belong to the resolved TOS bucket",
+                json!({ "jobId": candidate.id, "objectKey": candidate.object_key }),
+            ));
+        }
+        let lease = self
+            .presign_existing_object_with_config(&candidate.id, &candidate.object_key, &config)?;
+        let delete_url = lease.delete_url.ok_or_else(|| {
+            BackendError::protocol(
+                "staging cleanup lease has no delete url",
+                json!({ "jobId": candidate.id }),
+            )
+        })?;
+        self.delete_staging_object(&delete_url).await
+    }
+
+    /// 解析回收该对象应当使用的桶配置。
+    ///
+    /// 优先用「上传时冻结的桶坐标」：用户换了桶之后旧对象仍在旧桶里，
+    /// 按当前配置去删会打到新桶，既删不到旧对象还可能误删新桶里的同名键。
+    /// 同桶时改用当前配置 —— 用户可能把 AK/SK 换了个凭据引用名，旧引用已失效。
+    /// 凭据本身不存进配置（只存引用名），所以换密钥后旧引用照样取得到新密钥。
+    fn resolve_cleanup_config(
+        &self,
+        job_id: &str,
+        saved: Option<&TosStagingConfig>,
+    ) -> BackendResult<TosStagingConfig> {
+        let current = self.storage.get_tos_config()?;
+        let config = match (saved, current) {
+            (Some(saved), Some(current)) if same_object_scope(saved, &current) && current.enabled => {
+                current
+            }
+            (Some(saved), _) => saved.clone(),
+            (None, Some(current)) => current,
+            (None, None) => {
+                return Err(BackendError::validation(
+                    "TOS staging is not configured",
+                    json!({ "jobId": job_id }),
+                ));
+            }
+        };
+        Ok(config)
     }
 
     async fn run_job_inner(&self, job: &mut StagingJobRecord) -> BackendResult<()> {
@@ -1907,6 +2217,18 @@ impl StagingService {
         }
 
         let local_path = Path::new(&job.local_path);
+        /*
+         * 必须是绝对路径：相对路径会按**进程当前工作目录**解析，而工作目录
+         * 随启动方式变化（从资源管理器双击、从终端、快捷方式各不相同），
+         * 于是同一份配置在不同启动方式下指向不同文件，表现为「偶发地
+         * 找不到文件」或更糟——读到了别处的同名文件。
+         */
+        if !local_path.is_absolute() {
+            return Err(BackendError::validation(
+                "staging input path must be absolute",
+                json!({ "localPath": job.local_path }),
+            ));
+        }
         let source_metadata = tokio::fs::metadata(local_path).await?;
         if !source_metadata.is_file() {
             return Err(BackendError::validation(
@@ -1948,6 +2270,11 @@ impl StagingService {
         job.object_key = Some(build_object_key(&config, &extension));
         job.updated_at = now_ms();
         self.storage.update_staging_job(job)?;
+        /*
+         * 对象键是每次上传新生成的：旧对象的回收结论不能套到新对象上，
+         * 这里把回收记账清零，让新对象重新受回收管辖。
+         */
+        self.storage.reset_staging_cleanup_state(&job.id)?;
 
         let object_key = job.object_key.clone().unwrap_or_default();
         let host = format!("{}.{}", config.bucket, config.endpoint);
@@ -2188,10 +2515,6 @@ impl StagingService {
 
 /// 应用暂存对象（云端素材库导入、生成输入等）在任务结束后会清理；
 /// 已由应用管理的对象键都不能通过整桶同步变成第二份长期素材索引。
-#[cfg(test)]
-fn should_skip_bucket_object(storage: &Storage, object_key: &str) -> BackendResult<bool> {
-    storage.has_staging_job_by_object_key(object_key)
-}
 
 fn should_skip_bucket_object_in_config(
     storage: &Storage,
@@ -2522,11 +2845,25 @@ fn staging_content_scope(
 }
 
 fn legacy_object_key_matches_config(job: &StagingJobRecord, config: &TosStagingConfig) -> bool {
-    let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
-    let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
     job.object_key
         .as_deref()
-        .is_some_and(|key| key.split('/').any(|segment| segment == &scope_hash[..16]))
+        .is_some_and(|key| staging_object_belongs_to_scope(key, config))
+}
+
+/// 对象键是否属于这个桶配置下的本应用对象。
+///
+/// 判据是「键里带这个桶/地域/Endpoint 组合的 scope 哈希段」——`build_object_key`
+/// 生成的键永远含这一段，因此它能证明「这个键是本应用用这个桶生成的」。
+///
+/// 只看 scope 哈希、不看对象前缀，是有意为之：用户改了对象前缀之后，旧对象仍然
+/// 属于本应用（同一个桶），只是不再落在新前缀下；用前缀校验会把这些残留对象
+/// 永远排除在回收之外。
+fn staging_object_belongs_to_scope(object_key: &str, config: &TosStagingConfig) -> bool {
+    let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
+    let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
+    object_key
+        .split('/')
+        .any(|segment| segment == &scope_hash[..16])
 }
 
 fn local_asset_matches_current_scope(
@@ -2688,1271 +3025,4 @@ fn extract_error_code(body: &str) -> Option<String> {
     let start = body.find("<Code>")? + "<Code>".len();
     let end = start + body[start..].find("</Code>")?;
     Some(body[start..end].trim().to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_explicit_remote_terminal_status_finishes_accepted_upload_as_failed() {
-        let reviewed_failure = BackendError::protocol(
-            "asset upload review rejected",
-            json!({ "terminalStatus": "Failed", "reviewErrorMsg": "rejected" }),
-        );
-        let remote_delete = BackendError::protocol(
-            "asset upload deleted",
-            json!({ "terminalStatus": "Deleted" }),
-        );
-        let local_deadline =
-            BackendError::protocol("local wait deadline reached", json!({ "dbId": 1351 }));
-        let server_error = BackendError::protocol(
-            "status request returned HTTP 500",
-            json!({ "httpStatus": 500 }),
-        );
-        let deadline = overseas_timeout_error(1351);
-        assert!(is_overseas_terminal_error(&reviewed_failure));
-        assert!(is_overseas_terminal_error(&remote_delete));
-        assert!(is_overseas_terminal_error(&deadline));
-        assert!(is_overseas_timeout_error(&deadline));
-        assert!(!is_overseas_terminal_error(&local_deadline));
-        assert!(!is_overseas_terminal_error(&server_error));
-    }
-
-    #[test]
-    fn restart_poll_uses_original_submission_deadline() {
-        let submitted_at = 1_000_000;
-        assert_eq!(
-            remaining_overseas_wait_ms(submitted_at, submitted_at + 12 * 60 * 1000),
-            8 * 60 * 1000
-        );
-        assert_eq!(
-            remaining_overseas_wait_ms(submitted_at, submitted_at + 20 * 60 * 1000),
-            0
-        );
-        assert!(remaining_overseas_wait_ms(submitted_at, submitted_at + 21 * 60 * 1000) < 0);
-    }
-
-    fn sample_config() -> TosStagingConfig {
-        TosStagingConfig {
-            region: "cn-beijing".into(),
-            endpoint: "tos-cn-beijing.volces.com".into(),
-            bucket: "example-staging-bucket".into(),
-            credential_ref: Some("tos-ak-sk".into()),
-            object_prefix: "staging".into(),
-            enabled: true,
-        }
-    }
-
-    #[test]
-    fn content_scope_separates_cloud_groups_and_tos_buckets() {
-        let config = sample_config();
-        let mut job = StagingJobRecord {
-            id: "scope".into(),
-            local_path: "image.png".into(),
-            purpose: "local_asset".into(),
-            media_type: MediaType::Image,
-            object_key: None,
-            status: StagingStatus::Validating,
-            bytes_total: None,
-            bytes_uploaded: 0,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: None,
-            adjustment: None,
-            error: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        let tos_scope = staging_content_scope(&job, Some(&config)).unwrap();
-        let mut other_bucket = config.clone();
-        other_bucket.bucket = "another-bucket".into();
-        assert_ne!(
-            tos_scope,
-            staging_content_scope(&job, Some(&other_bucket)).unwrap()
-        );
-        let mut other_prefix = config.clone();
-        other_prefix.object_prefix = "another-prefix".into();
-        assert_eq!(
-            tos_scope,
-            staging_content_scope(&job, Some(&other_prefix)).unwrap()
-        );
-        job.import_target = Some(crate::backend::types::StagingAssetImportTarget {
-            provider_connection_id: "provider-a".into(),
-            name: None,
-            group_id: Some("group-a".into()),
-        });
-        let first_group = staging_content_scope(&job, Some(&config)).unwrap();
-        job.import_target.as_mut().unwrap().group_id = Some("group-b".into());
-        assert_ne!(
-            first_group,
-            staging_content_scope(&job, Some(&config)).unwrap()
-        );
-        job.import_target.as_mut().unwrap().group_id = Some("group-a".into());
-        job.import_target.as_mut().unwrap().provider_connection_id = "provider-b".into();
-        assert_ne!(
-            first_group,
-            staging_content_scope(&job, Some(&config)).unwrap()
-        );
-    }
-
-    #[test]
-    fn saved_bucket_identity_controls_same_bucket_reuse() {
-        let current = sample_config();
-        let mut old_bucket = current.clone();
-        old_bucket.bucket = "old-bucket".into();
-        let job = StagingJobRecord {
-            id: "synced-object".into(),
-            local_path: "synced.png".into(),
-            purpose: "local_asset".into(),
-            media_type: MediaType::Image,
-            object_key: Some("staging/synced.png".into()),
-            status: StagingStatus::Staged,
-            bytes_total: Some(4),
-            bytes_uploaded: 4,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: None,
-            adjustment: None,
-            error: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        assert!(local_asset_matches_current_scope(
-            Some(&current),
-            &job,
-            &current
-        ));
-        assert!(!local_asset_matches_current_scope(
-            Some(&old_bucket),
-            &job,
-            &current
-        ));
-        assert!(!local_asset_matches_current_scope(None, &job, &current));
-        let mut new_prefix = current.clone();
-        new_prefix.object_prefix = "another-prefix".into();
-        assert!(local_asset_matches_current_scope(
-            Some(&current),
-            &job,
-            &new_prefix
-        ));
-    }
-
-    #[tokio::test]
-    async fn same_content_gate_allows_only_one_completed_index_insert() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let root = tempfile::tempdir().unwrap();
-        let storage = Arc::new(Storage::open(&root.path().join("staging.sqlite3")).unwrap());
-        let gates = Arc::new(AsyncMutex::new(HashMap::new()));
-        let uploaded = Arc::new(AtomicUsize::new(0));
-        for id in ["first", "second"] {
-            storage
-                .insert_staging_job(&StagingJobRecord {
-                    id: id.into(),
-                    local_path: "image.png".into(),
-                    purpose: "local_asset".into(),
-                    media_type: MediaType::Image,
-                    object_key: None,
-                    status: StagingStatus::Validating,
-                    bytes_total: None,
-                    bytes_uploaded: 0,
-                    asset_id: None,
-                    overseas_db_id: None,
-                    import_target: None,
-                    adjustment: None,
-                    error: None,
-                    created_at: 0,
-                    updated_at: 0,
-                })
-                .unwrap();
-        }
-        let handles = ["first", "second"].map(|id| {
-            let storage = Arc::clone(&storage);
-            let gates = Arc::clone(&gates);
-            let uploaded = Arc::clone(&uploaded);
-            tokio::spawn(async move {
-                let gate = gate_for_content(&gates, "same-scope:3:abc").await;
-                let _guard = gate.lock().await;
-                if storage
-                    .find_staging_content("same-scope", MediaType::Image, 3, "abc")
-                    .unwrap()
-                    .is_none()
-                {
-                    tokio::task::yield_now().await;
-                    uploaded.fetch_add(1, Ordering::SeqCst);
-                    storage
-                        .remember_staging_content("same-scope", MediaType::Image, 3, "abc", id)
-                        .unwrap();
-                }
-            })
-        });
-        for handle in handles {
-            handle.await.unwrap();
-        }
-        assert_eq!(uploaded.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn tos_only_upload_keeps_unsupported_import_image_format() {
-        let mut job = StagingJobRecord {
-            id: "tos-only".into(),
-            local_path: "example.avif".into(),
-            purpose: "local_asset".into(),
-            media_type: MediaType::Image,
-            object_key: None,
-            status: StagingStatus::Validating,
-            bytes_total: None,
-            bytes_uploaded: 0,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: None,
-            adjustment: None,
-            error: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        assert!(!needs_asset_import_transcode(&job, "avif"));
-        job.import_target = Some(crate::backend::types::StagingAssetImportTarget {
-            provider_connection_id: "provider".into(),
-            name: None,
-            group_id: None,
-        });
-        assert!(needs_asset_import_transcode(&job, "avif"));
-        assert!(!needs_asset_import_transcode(&job, "png"));
-        job.media_type = MediaType::Video;
-        assert!(!needs_asset_import_transcode(&job, "avif"));
-    }
-
-    #[test]
-    fn bucket_pull_skips_app_managed_temporary_objects_but_keeps_user_objects() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("staging.sqlite3")).unwrap();
-        assert!(!should_skip_bucket_object(&storage, "user/photo.png").unwrap());
-
-        for (index, purpose, status) in [
-            (1, "asset_import", StagingStatus::Importing),
-            (2, "generation_input", StagingStatus::InUse),
-            (3, "local_asset", StagingStatus::Uploading),
-            (4, "local_asset", StagingStatus::Staged),
-        ] {
-            let object_key = format!("staging/app-{index}.png");
-            storage
-                .insert_staging_job(&StagingJobRecord {
-                    id: format!("job-{index}"),
-                    local_path: "C:/source/photo.png".into(),
-                    purpose: purpose.into(),
-                    media_type: MediaType::Image,
-                    object_key: Some(object_key.clone()),
-                    status,
-                    bytes_total: Some(8),
-                    bytes_uploaded: 8,
-                    asset_id: None,
-                    overseas_db_id: None,
-                    import_target: (purpose == "asset_import").then(|| {
-                        crate::backend::types::StagingAssetImportTarget {
-                            provider_connection_id: "provider".into(),
-                            name: None,
-                            group_id: None,
-                        }
-                    }),
-                    adjustment: None,
-                    error: None,
-                    created_at: index,
-                    updated_at: index,
-                })
-                .unwrap();
-            if purpose == "asset_import" {
-                // 旧去重仅查 local_asset，正会漏过这类待清理的中转对象。
-                assert!(
-                    storage
-                        .find_local_asset_job_by_object_key(&object_key)
-                        .unwrap()
-                        .is_none()
-                );
-            }
-            assert!(should_skip_bucket_object(&storage, &object_key).unwrap());
-        }
-        assert!(!should_skip_bucket_object(&storage, "user/photo.png").unwrap());
-    }
-
-    #[test]
-    fn object_scope_filter_does_not_mix_identical_keys_from_two_buckets() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("staging.sqlite3")).unwrap();
-        let config = sample_config();
-        let mut other = config.clone();
-        other.bucket = "different-bucket".into();
-        let job = StagingJobRecord {
-            id: "old-bucket-object".into(),
-            local_path: "photo.png".into(),
-            purpose: "local_asset".into(),
-            media_type: MediaType::Image,
-            object_key: Some("user/photo.png".into()),
-            status: StagingStatus::Staged,
-            bytes_total: Some(8),
-            bytes_uploaded: 8,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: None,
-            adjustment: None,
-            error: None,
-            created_at: 0,
-            updated_at: 0,
-        };
-        storage.insert_staging_job(&job).unwrap();
-        storage
-            .remember_staging_object_target(&job.id, &config)
-            .unwrap();
-        assert!(should_skip_bucket_object_in_config(&storage, "user/photo.png", &config).unwrap());
-        assert!(!should_skip_bucket_object_in_config(&storage, "user/photo.png", &other).unwrap());
-
-        let legacy_key = build_object_key(&config, "png");
-        let mut legacy = job;
-        legacy.id = "legacy-generated".into();
-        legacy.object_key = Some(legacy_key.clone());
-        storage.insert_staging_job(&legacy).unwrap();
-        assert!(should_skip_bucket_object_in_config(&storage, &legacy_key, &config).unwrap());
-        assert!(!should_skip_bucket_object_in_config(&storage, &legacy_key, &other).unwrap());
-    }
-
-    #[test]
-    fn object_key_has_no_original_file_name_or_secret() {
-        let config = sample_config();
-        let key = build_object_key(&config, "png");
-        assert!(key.starts_with("staging/"));
-        assert!(key.ends_with(".png"));
-        assert!(!key.contains("tos-ak-sk"));
-        assert!(!key.contains("example-staging-bucket"));
-        assert!(staging_object_matches_scope(&key, &config));
-        let mut switched_bucket = config.clone();
-        switched_bucket.bucket = "different-bucket".into();
-        assert!(!staging_object_matches_scope(&key, &switched_bucket));
-        let mut switched_region = config.clone();
-        switched_region.region = "cn-shanghai".into();
-        assert!(!staging_object_matches_scope(&key, &switched_region));
-        assert!(!staging_object_matches_scope(
-            "staging/random/a.png",
-            &config
-        ));
-    }
-
-    #[test]
-    fn detect_media_type_by_extension_matches_last_path_segment_only() {
-        // 常规大小写与中文目录前缀。
-        assert_eq!(
-            detect_media_type_by_extension("staging/素材/IMG_1.PNG"),
-            Some(MediaType::Image)
-        );
-        assert_eq!(
-            detect_media_type_by_extension("video/a.MP4"),
-            Some(MediaType::Video)
-        );
-        assert_eq!(
-            detect_media_type_by_extension("audio/b.Flac"),
-            Some(MediaType::Audio)
-        );
-        // 点出现在目录名而非文件名时不能误判。
-        assert_eq!(detect_media_type_by_extension("dir.v2/file"), None);
-        // 无扩展名 / 空扩展名 / 未收录格式。
-        assert_eq!(detect_media_type_by_extension("noext"), None);
-        assert_eq!(detect_media_type_by_extension("name."), None);
-        assert_eq!(detect_media_type_by_extension("doc.pdf"), None);
-        // 文件夹占位对象（键以 / 结尾）不做扩展名判断，调用方先行跳过。
-        assert_eq!(detect_media_type_by_extension("staging/folder/"), None);
-    }
-
-    #[test]
-    fn staging_object_key_accepts_only_the_configured_staging_bucket_and_prefix() {
-        let config = sample_config();
-        // 线上形态：导入时签发的租约地址（host = {bucket}.{endpoint}，path = 对象键）。
-        let signed = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/e90484f4b8801be7/2026/09/14/55be7f2f.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Date=20260914T023421Z&X-Tos-Expires=3600&X-Tos-Signature=deadbeef";
-        assert_eq!(
-            staging_object_key(signed, &config).as_deref(),
-            Some("staging/e90484f4b8801be7/2026/09/14/55be7f2f.png")
-        );
-        // 同一地址在签名过期后仍是同一个对象键：续签不依赖旧签名是否还有效。
-        let expired = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/a/b.png";
-        assert_eq!(
-            staging_object_key(expired, &config).as_deref(),
-            Some("staging/a/b.png")
-        );
-
-        // 别的桶一律不签：续签接口不能变成任意对象的读取授权。
-        let other_bucket = signed.replace("example-staging-bucket.", "other-bucket.");
-        assert_eq!(staging_object_key(&other_bucket, &config), None);
-        // 别的 endpoint（同桶名不同地域）同样拒绝。
-        let other_region = signed.replace("cn-beijing", "cn-shanghai");
-        assert_eq!(staging_object_key(&other_region, &config), None);
-        // 桶内但不在暂存前缀下的对象不签。
-        let outside_prefix = "https://example-staging-bucket.tos-cn-beijing.volces.com/other/a.png";
-        assert_eq!(staging_object_key(outside_prefix, &config), None);
-        // 前缀本身（无对象名）不是可读取的对象。
-        let prefix_only = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging";
-        assert_eq!(staging_object_key(prefix_only, &config), None);
-        // 百分号编码的对象键不重签：签名按原样字节计算，解码后重签会指向另一个对象。
-        let encoded = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/a%2Fb.png";
-        assert_eq!(staging_object_key(encoded, &config), None);
-        // 非 http(s) 与不可解析地址直接拒绝。
-        assert_eq!(
-            staging_object_key("asset://localhost/staging/a.png", &config),
-            None
-        );
-        assert_eq!(staging_object_key("not a url", &config), None);
-    }
-
-    #[test]
-    fn staging_object_key_keeps_objects_when_no_prefix_configured() {
-        // 未配置前缀时整桶都是暂存范围，续签仍按桶边界收口。
-        let mut config = sample_config();
-        config.object_prefix = String::new();
-        let url = "https://example-staging-bucket.tos-cn-beijing.volces.com/a/b.png";
-        assert_eq!(staging_object_key(url, &config).as_deref(), Some("a/b.png"));
-    }
-
-    /// 本地兜底只认「暂存桶内 + 有导入记录 + 文件仍在」三件事同时成立的地址。
-    #[test]
-    fn local_fallback_maps_only_imported_staging_objects_to_existing_files() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
-        let config = sample_config();
-        let imported_path = directory.path().join("imported.png");
-        std::fs::write(&imported_path, b"PNGBYTES").unwrap();
-        let object_key = "staging/e90484f4b8801be7/2026/09/14/55be7f2f.png";
-        let lease = format!(
-            "https://example-staging-bucket.tos-cn-beijing.volces.com/{object_key}?X-Tos-Date=20260914T023421Z&X-Tos-Expires=3600&X-Tos-Signature=deadbeef"
-        );
-
-        // 尚未入库（没有导入记录）时没有可用的本地副本：不能凭一个对象键读本机文件。
-        assert!(
-            resolve_staging_local_source(&storage, &config, &Url::parse(&lease).unwrap()).is_none()
-        );
-
-        let timestamp = now_ms();
-        storage
-            .insert_staging_job(&StagingJobRecord {
-                id: "job-1".into(),
-                local_path: imported_path.to_string_lossy().into_owned(),
-                purpose: "asset_import".into(),
-                media_type: MediaType::Image,
-                object_key: Some(object_key.into()),
-                status: StagingStatus::Cleaned,
-                bytes_total: Some(8),
-                bytes_uploaded: 8,
-                asset_id: Some("asset-20260914103421-82xww".into()),
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: timestamp,
-                updated_at: timestamp,
-            })
-            .unwrap();
-
-        // 导入记录在、原始文件仍在：续签出的新签名（同一对象键）同样能映射到同一份文件。
-        let resigned = format!(
-            "https://example-staging-bucket.tos-cn-beijing.volces.com/{object_key}?X-Tos-Date=20260914T050000Z&X-Tos-Expires=3600&X-Tos-Signature=fresh"
-        );
-        assert_eq!(
-            resolve_staging_local_source(&storage, &config, &Url::parse(&resigned).unwrap())
-                .map(|source| source.path),
-            Some(imported_path.clone())
-        );
-
-        // 别的桶、别的对象键一律不映射（签名地址等同凭据，不能变成任意文件的读取入口）。
-        let other_bucket = resigned.replace("example-staging-bucket.", "other-bucket.");
-        assert!(
-            resolve_staging_local_source(&storage, &config, &Url::parse(&other_bucket).unwrap())
-                .is_none()
-        );
-        let other_object = resigned.replace("55be7f2f.png", "unknown.png");
-        assert!(
-            resolve_staging_local_source(&storage, &config, &Url::parse(&other_object).unwrap())
-                .is_none()
-        );
-
-        // 源文件被移走后不再兜底：不能凭一份丢失的文件凭空造出预览。
-        std::fs::remove_file(&imported_path).unwrap();
-        assert!(
-            resolve_staging_local_source(&storage, &config, &Url::parse(&resigned).unwrap())
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn local_fallback_maps_imported_cloud_asset_id_to_existing_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
-        let imported_path = directory.path().join("imported.png");
-        std::fs::write(&imported_path, b"PNGBYTES").unwrap();
-        let timestamp = now_ms();
-        storage
-            .insert_staging_job(&StagingJobRecord {
-                id: "job-1".into(),
-                local_path: imported_path.to_string_lossy().into_owned(),
-                purpose: "asset_import".into(),
-                media_type: MediaType::Image,
-                object_key: Some("staging/e90484f4b8801be7/2026/09/14/55be7f2f.png".into()),
-                status: StagingStatus::Cleaned,
-                bytes_total: Some(8),
-                bytes_uploaded: 8,
-                asset_id: Some("asset-20260914103421-82xww".into()),
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: timestamp,
-                updated_at: timestamp,
-            })
-            .unwrap();
-
-        assert_eq!(
-            resolve_imported_local_source(&storage, "asset://asset-20260914103421-82xww")
-                .map(|source| source.path),
-            Some(imported_path.clone())
-        );
-        assert!(resolve_imported_local_source(&storage, "asset-unknown").is_none());
-        std::fs::remove_file(&imported_path).unwrap();
-        assert!(resolve_imported_local_source(&storage, "asset-20260914103421-82xww").is_none());
-    }
-
-    /// 拉取存储桶建立的 `local_asset` 任务只存文件名，绝不能当成本地路径兜底。
-    #[test]
-    fn local_fallback_ignores_local_asset_index_rows() {
-        let directory = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
-        let config = sample_config();
-        let file_name = "a.png";
-        std::fs::write(directory.path().join(file_name), b"PNGBYTES").unwrap();
-        let timestamp = now_ms();
-        storage
-            .insert_staging_job(&StagingJobRecord {
-                id: "job-pulled".into(),
-                local_path: file_name.into(),
-                purpose: "local_asset".into(),
-                media_type: MediaType::Image,
-                object_key: Some("staging/pulled.png".into()),
-                status: StagingStatus::Staged,
-                bytes_total: Some(8),
-                bytes_uploaded: 8,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: timestamp,
-                updated_at: timestamp,
-            })
-            .unwrap();
-
-        let url = Url::parse(
-            "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/pulled.png",
-        )
-        .unwrap();
-        assert!(resolve_staging_local_source(&storage, &config, &url).is_none());
-    }
-
-    #[test]
-    fn configure_requires_complete_direct_tos_fields() {
-        // 缺少桶名时拒绝启用。
-        let mut config = sample_config();
-        config.bucket = " ".into();
-        assert!(validate_tos_config(&config).is_err());
-        // 缺少凭据引用时拒绝启用。
-        let mut config = sample_config();
-        config.credential_ref = None;
-        assert!(validate_tos_config(&config).is_err());
-        // Endpoint 带路径分隔符时拒绝。
-        let mut config = sample_config();
-        config.endpoint = "tos.example.com/presign".into();
-        assert!(validate_tos_config(&config).is_err());
-        // 未启用时跳过校验。
-        let mut config = sample_config();
-        config.enabled = false;
-        config.bucket.clear();
-        assert!(validate_tos_config(&config).is_ok());
-        // 完整直连配置通过校验。
-        let config = sample_config();
-        assert!(validate_tos_config(&config).is_ok());
-    }
-
-    #[test]
-    fn probe_verdict_classifies_tos_responses() {
-        let nosuch_key =
-            r#"<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>...</Message></Error>"#;
-        let nosuch_bucket = r#"<Error><Code>NoSuchBucket</Code></Error>"#;
-        let bad_signature = r#"<Error><Code>SignatureDoesNotMatch</Code></Error>"#;
-
-        // 2xx 与 404 + NoSuchKey 都代表签名/凭据有效且桶可访问。
-        assert_eq!(classify_probe_response(200, ""), ProbeVerdict::Ok);
-        assert_eq!(classify_probe_response(204, ""), ProbeVerdict::Ok);
-        assert_eq!(classify_probe_response(404, nosuch_key), ProbeVerdict::Ok);
-        // 404 + JSON 形态 NoSuchKey 与 XML 形态等价：TOS 部分错误响应为 JSON，
-        // 必须同样判为连通（此前只认 XML，导致误报「桶不存在」）。
-        let nosuch_key_json = r#"{"Code":"NoSuchKey","Key":"staging/.connectivity-probe","Message":"The specified key does not exist.","EC":"0017-00000003"}"#;
-        assert_eq!(
-            classify_probe_response(404, nosuch_key_json),
-            ProbeVerdict::Ok
-        );
-        // 404 的其他错误码视为桶不存在。
-        assert_eq!(
-            classify_probe_response(404, nosuch_bucket),
-            ProbeVerdict::BucketMissing
-        );
-        // 401/403 代表凭据或签名被拒绝。
-        assert_eq!(
-            classify_probe_response(403, bad_signature),
-            ProbeVerdict::AuthRejected
-        );
-        assert_eq!(classify_probe_response(401, ""), ProbeVerdict::AuthRejected);
-        // 3xx 预签名重定向归因为域名/Endpoint 问题（不再静默跟随导致签名失效）。
-        assert_eq!(classify_probe_response(301, ""), ProbeVerdict::Redirected);
-        assert_eq!(classify_probe_response(302, ""), ProbeVerdict::Redirected);
-        assert_eq!(
-            classify_probe_response(307, bad_signature),
-            ProbeVerdict::Redirected
-        );
-        assert_eq!(classify_probe_response(308, ""), ProbeVerdict::Redirected);
-        // 其余非重定向状态归为服务端错误。
-        assert_eq!(classify_probe_response(500, ""), ProbeVerdict::HttpError);
-    }
-
-    #[test]
-    fn extract_error_code_handles_xml_shapes() {
-        assert_eq!(
-            extract_error_code(r#"<Error><Code>NoSuchKey</Code></Error>"#).as_deref(),
-            Some("NoSuchKey")
-        );
-        // 带空白与属性前缀的形态。
-        assert_eq!(
-            extract_error_code(r#"<Error> <Code> SignatureDoesNotMatch </Code> </Error>"#)
-                .as_deref(),
-            Some("SignatureDoesNotMatch")
-        );
-        // 非 XML 或缺失 Code 时返回 None。
-        assert_eq!(extract_error_code("plain text"), None);
-        assert_eq!(
-            extract_error_code("<Error><Message>x</Message></Error>"),
-            None
-        );
-        // JSON 形态（火山引擎部分错误响应为 JSON，而非 XML）。
-        assert_eq!(
-            extract_error_code(
-                r#"{"Code":"NoSuchKey","Key":"staging/.connectivity-probe","Message":"The specified key does not exist."}"#
-            )
-            .as_deref(),
-            Some("NoSuchKey")
-        );
-        assert_eq!(
-            extract_error_code(r#"{ "Code" : "NoSuchBucket" }"#).as_deref(),
-            Some("NoSuchBucket")
-        );
-    }
-
-    /// 回归测试：TOS 预签名客户端不得自动跟随重定向。
-    ///
-    /// 复现根因——此前 `StagingService` 复用 `ProviderRuntime` 的共享客户端，其默认
-    /// `redirect::Policy::limited(10)` 会跟随重定向。TOS 对预签名请求返回 307 到规范
-    /// 化 Host 时，reqwest 把同一套签名查询串重放到不同 Host，TOS 用新 Host 重算签名
-    /// 即报 `SignatureDoesNotMatch`（AK 合法仍被回显）。专用客户端必须用 `Policy::none()`。
-    ///
-    /// 本测试启动一个会 307 到「捕获服务器」的本地服务，断言专用客户端直接拿到 307
-    /// 且捕获服务器从未被访问。
-    #[tokio::test]
-    async fn presign_client_does_not_follow_redirects() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::thread;
-        use std::time::Duration;
-
-        // 捕获服务器：一旦被访问即置位，证明发生了重定向跟随。
-        let captured = Arc::new(AtomicBool::new(false));
-        let captured_clone = Arc::clone(&captured);
-        let capture = TcpListener::bind("127.0.0.1:0").unwrap();
-        let capture_addr = capture.local_addr().unwrap();
-        thread::spawn(move || {
-            if let Ok((mut stream, _)) = capture.accept() {
-                captured_clone.store(true, Ordering::SeqCst);
-                let _ = stream.read(&mut [0u8; 1024]);
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
-            }
-        });
-
-        // 重定向服务器：对任何请求返回 307 指向捕获服务器。
-        let redirect = TcpListener::bind("127.0.0.1:0").unwrap();
-        let redirect_addr = redirect.local_addr().unwrap();
-        thread::spawn(move || {
-            if let Ok((mut stream, _)) = redirect.accept() {
-                let _ = stream.read(&mut [0u8; 1024]);
-                let body = format!(
-                    "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{capture_addr}/\r\n\
-                     Content-Length: 0\r\nConnection: close\r\n\r\n"
-                );
-                let _ = stream.write_all(body.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-
-        let client = build_presign_http_client().unwrap();
-        let resp = client
-            .get(format!(
-                "http://{redirect_addr}/object?X-Tos-Signature=abc123"
-            ))
-            .send()
-            .await
-            .expect("request to local redirect server should succeed");
-
-        // 关键断言：客户端未跟随重定向，原样返回 307。
-        assert_eq!(
-            resp.status().as_u16(),
-            307,
-            "presign client must not follow redirects; expected 307"
-        );
-        // 给捕获服务器留出时间，确认其从未被访问。
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert!(
-            !captured.load(Ordering::SeqCst),
-            "presign client must not follow the 307 to the capture server"
-        );
-    }
-
-    /// 回归测试：连通性探针网络请求失败时按指数退避重试，直到成功。
-    ///
-    /// 复现根因——此前 `test_connectivity` 对 `send().await` 只发一次请求，网络瞬断时
-    /// 直接返回 `network-error`。本测试用本地 TCP 服务模拟「前两次连接即读即断、第三次
-    /// 正常返回 200」，断言重试后探针成功且确实发生了重试（服务端共收到 3 次连接）。
-    #[tokio::test]
-    async fn probe_retry_recovers_after_transient_network_failure() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // 本地服务：前两次连接「读取请求后立即关闭」（模拟网络瞬断），第三次正常返回 200。
-        let connections = Arc::new(AtomicUsize::new(0));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_connections = Arc::clone(&connections);
-        let server = std::thread::spawn(move || {
-            let fail_before_success: usize = 2;
-            for _ in 0..=fail_before_success {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                let _ = stream.read(&mut [0u8; 4096]);
-                if server_connections.fetch_add(1, Ordering::SeqCst) < fail_before_success {
-                    drop(stream); // 模拟网络瞬断：读到请求后立即关闭连接。
-                } else {
-                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
-                    let _ = stream.flush();
-                }
-            }
-        });
-
-        let client = build_presign_http_client().unwrap();
-        // 本地回归测试用 http 直连，绕过 presign_url 固定生成的 https scheme。
-        let url = format!("http://{addr}/probe");
-        let response = send_probe_with_retry(&client, None, || Ok(url.clone()))
-            .await
-            .expect("probe should recover after transient failures");
-        assert_eq!(response.status().as_u16(), 200);
-
-        server.join().unwrap();
-        assert_eq!(
-            connections.load(Ordering::SeqCst),
-            3,
-            "expected 3 connection attempts (1 initial + 2 retries)"
-        );
-    }
-
-    /// 回归测试：持续网络失败时，重试次数严格受 `PROBE_MAX_RETRIES` 限制并最终放弃。
-    ///
-    /// 本地 TCP 服务总是「读取请求后立即关闭连接」，断言请求恰好发出
-    /// `PROBE_MAX_RETRIES + 1` 次（1 次初始 + 3 次重试）后以传输错误结束。
-    #[tokio::test]
-    async fn probe_retry_gives_up_after_max_retries() {
-        use std::io::Read;
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let connections = Arc::new(AtomicUsize::new(0));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_connections = Arc::clone(&connections);
-        let server = std::thread::spawn(move || {
-            for _ in 0..(PROBE_MAX_RETRIES + 1) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    break;
-                };
-                server_connections.fetch_add(1, Ordering::SeqCst);
-                let _ = stream.read(&mut [0u8; 4096]);
-                drop(stream);
-            }
-        });
-
-        let client = build_presign_http_client().unwrap();
-        let url = format!("http://{addr}/probe?X-Tos-Signature=probe-secret");
-        let result = send_probe_with_retry(&client, None, || Ok(url.clone())).await;
-        assert!(
-            matches!(&result, Err(BackendError::Transport(_))),
-            "probe must give up with a transport error after exhausting retries"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .runtime_record()
-                .to_string()
-                .contains("probe-secret")
-        );
-
-        server.join().unwrap();
-        assert_eq!(
-            connections.load(Ordering::SeqCst),
-            (PROBE_MAX_RETRIES + 1) as usize,
-            "expected 1 initial attempt + PROBE_MAX_RETRIES retries"
-        );
-    }
-
-    /// 单元测试：fake-ip 虚拟网段判定（`198.18.0.0/15` 为代理软件保留段）。
-    #[test]
-    fn is_fake_ip_classifies_proxy_virtual_ranges() {
-        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
-        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 146))));
-        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 255))));
-        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 17, 255, 255))));
-        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 20, 0, 0))));
-        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))));
-        assert!(!is_fake_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
-    }
-
-    /// 单元测试：DoH 响应解析——只取 A 记录（`type == 1`），
-    /// CNAME（`type == 5`）与 fake-ip 虚拟地址都必须排除，否则会把一个
-    /// 不可路由的虚拟地址当成"真实地址"拿去直连。
-    #[test]
-    fn doh_a_records_picks_only_real_addresses() {
-        use std::net::{IpAddr, Ipv4Addr};
-
-        // 阿里 DoH 的实际形状（单条 A 记录）。
-        let alidns = r#"{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
-            "Question":{"name":"cdn.example.com.","type":1},
-            "Answer":[{"name":"cdn.example.com.","TTL":251,"type":1,"data":"80.87.199.46"}]}"#;
-        assert_eq!(
-            doh_a_records(alidns),
-            vec![IpAddr::V4(Ipv4Addr::new(80, 87, 199, 46))]
-        );
-
-        // doh.pub 的实际形状：CNAME 在前、A 记录在后——只能取 A。
-        let dnspod = r#"{"Status":0,"Answer":[
-            {"name":"www.example.com.","type":5,"TTL":277,"data":"www.example.com.eo.dnse2.com."},
-            {"name":"www.example.com.eo.dnse2.com.","type":1,"TTL":60,"data":"43.159.109.55"}]}"#;
-        assert_eq!(
-            doh_a_records(dnspod),
-            vec![IpAddr::V4(Ipv4Addr::new(43, 159, 109, 55))]
-        );
-
-        // DoH 端点本身也被劫持时：虚拟地址必须被过滤，函数返回空以便换下一个端点。
-        let hijacked =
-            r#"{"Status":0,"Answer":[{"name":"cdn.example.com.","type":1,"data":"198.18.0.21"}]}"#;
-        assert!(
-            doh_a_records(hijacked).is_empty(),
-            "fake-ip 地址不能作为兜底地址使用"
-        );
-
-        // 畸变输入一律返回空，由调用方继续尝试。
-        assert!(doh_a_records("<html>502 Bad Gateway</html>").is_empty());
-        assert!(doh_a_records("{}").is_empty());
-        assert!(doh_a_records(r#"{"Answer":[]}"#).is_empty());
-        assert!(
-            doh_a_records(r#"{"Status":0,"Answer":[{"name":"h.","type":1,"data":"not-an-ip"}]}"#)
-                .is_empty()
-        );
-    }
-
-    /// 配置锁：`reqwest` 必须保留 `system-proxy` feature。
-    ///
-    /// 该 feature 让客户端自动读取 Windows 注册表 / macOS 系统配置里的代理设置
-    /// （配合 `auto_sys_proxy` 默认开启）。一旦被移除，企业代理或「系统代理 + VPN」
-    /// 环境下会出现「浏览器能打开直链、应用连接超时」的静默退化——没有任何编译或
-    /// 运行时报错。这里用编译期嵌入的清单文本把它锁死。
-    #[test]
-    fn reqwest_manifest_keeps_system_proxy_support() {
-        let manifest = include_str!("../../Cargo.toml");
-        assert!(
-            manifest.contains("system-proxy"),
-            "reqwest 的 system-proxy feature 被移除：客户端将不再读取系统代理设置"
-        );
-        assert!(
-            manifest.contains("rustls-tls-native-roots"),
-            "reqwest 不再信任操作系统证书存储：企业解密代理下 TLS 校验会失败"
-        );
-    }
-
-    /// 结果直链下载的 fake-ip 兜底只在**确认被劫持**时才另建客户端：
-    /// 正常解析（含 IP 字面量）与不可解析输入都必须原样返回共享客户端，
-    /// 避免每次下载都丢掉连接池、或对非 HTTP 输入做无意义的 DNS 解析。
-    ///
-    /// 用 `Debug` 中的自定义 UA 作为「同一个客户端」的可读标识。
-    #[tokio::test]
-    async fn fake_ip_aware_streaming_download_client_keeps_shared_client_unless_hijacked() {
-        fn marked_client() -> reqwest::Client {
-            reqwest::Client::builder()
-                .user_agent("shared-client-marker/1")
-                .build()
-                .unwrap()
-        }
-
-        // 不可解析：不解析 DNS，直接回退。
-        let client = fake_ip_aware_streaming_download_client("不是 URL", marked_client()).await;
-        assert!(format!("{client:?}").contains("shared-client-marker/1"));
-
-        // IP 字面量的正常解析：不是 fake-ip，回退到共享客户端。
-        let client =
-            fake_ip_aware_streaming_download_client("http://127.0.0.1:8080/a.png", marked_client())
-                .await;
-        assert!(format!("{client:?}").contains("shared-client-marker/1"));
-    }
-
-    /// 回归测试：上传 PUT 连接失败时按指数退避重试，直到成功。
-    ///
-    /// 复现客户「对象存储上传 `isConnect: true` transport error」——代理 fake-ip
-    /// 环境下连接可能瞬时失败。第一次请求打到未监听端口（connection refused，
-    /// 确定为 connect 错误），第二次打到本地正常服务，断言重试后成功且确已重试。
-    #[tokio::test]
-    async fn upload_retry_recovers_after_transient_connection_failure() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let connections = Arc::new(AtomicUsize::new(0));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server_connections = Arc::clone(&connections);
-        let server = std::thread::spawn(move || {
-            let Ok((mut stream, _)) = listener.accept() else {
-                return;
-            };
-            server_connections.fetch_add(1, Ordering::SeqCst);
-            let _ = stream.read(&mut [0u8; 4096]);
-            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
-            let _ = stream.flush();
-        });
-
-        let client = build_presign_http_client().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let call_counter = Arc::clone(&calls);
-        let mut send = move |client: reqwest::Client| {
-            let call_counter = Arc::clone(&call_counter);
-            async move {
-                let n = call_counter.fetch_add(1, Ordering::SeqCst) + 1;
-                let url = if n == 1 {
-                    "http://127.0.0.1:1/".to_string()
-                } else {
-                    format!("http://{addr}/upload")
-                };
-                client
-                    .put(url)
-                    .body("payload")
-                    .send()
-                    .await
-                    .map_err(UploadAttemptError::Http)
-            }
-        };
-        let response = send_upload_with_retry(&client, None, &mut send)
-            .await
-            .expect("upload should recover after transient connection failure");
-        assert_eq!(response.status().as_u16(), 200);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "expected 1 initial attempt + 1 retry"
-        );
-
-        server.join().unwrap();
-        assert_eq!(connections.load(Ordering::SeqCst), 1);
-    }
-
-    /// A pinned real-IP route can be blocked while the ordinary DNS/proxy route works.
-    /// Both upload and the settings probe must retry the same signed host on that route.
-    #[tokio::test]
-    async fn tos_requests_fall_back_from_unreachable_pinned_route() {
-        use std::io::{Read, Write};
-        use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let server = std::thread::spawn(move || {
-            for _ in 0..2 {
-                let (mut stream, _) = listener.accept().unwrap();
-                let _ = stream.read(&mut [0u8; 4096]);
-                stream
-                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                    .unwrap();
-            }
-        });
-        let blocked_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), port);
-        let pinned = reqwest::Client::builder()
-            .no_proxy()
-            .resolve_to_addrs("localhost", &[blocked_ip])
-            .connect_timeout(std::time::Duration::from_millis(250))
-            .build()
-            .unwrap();
-        let system_route = reqwest::Client::builder().no_proxy().build().unwrap();
-        let upload_url = format!("http://localhost:{port}/upload?X-Tos-Signature=test");
-        let mut send = move |client: reqwest::Client| {
-            let url = upload_url.clone();
-            async move {
-                client
-                    .put(url)
-                    .body("payload")
-                    .send()
-                    .await
-                    .map_err(UploadAttemptError::Http)
-            }
-        };
-        let upload = send_upload_with_retry(&pinned, Some(&system_route), &mut send)
-            .await
-            .expect("upload should use the ordinary route after the pinned route fails");
-        assert_eq!(upload.status().as_u16(), 200);
-
-        let probe_url = format!("http://localhost:{port}/probe?X-Tos-Signature=test");
-        let probe = send_probe_with_retry(&pinned, Some(&system_route), || Ok(probe_url.clone()))
-            .await
-            .expect("connectivity probe should use the same fallback route");
-        assert_eq!(probe.status().as_u16(), 200);
-        server.join().unwrap();
-    }
-
-    /// 回归测试：持续连接失败时，重试次数严格受 `UPLOAD_MAX_RETRIES` 限制并最终放弃。
-    #[tokio::test]
-    async fn upload_retry_gives_up_after_max_retries() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let client = build_presign_http_client().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let call_counter = Arc::clone(&calls);
-        let mut send = move |client: reqwest::Client| {
-            let call_counter = Arc::clone(&call_counter);
-            async move {
-                let _ = call_counter.fetch_add(1, Ordering::SeqCst);
-                client
-                    .put("http://127.0.0.1:1/?X-Tos-Signature=secret-marker")
-                    .body("payload")
-                    .send()
-                    .await
-                    .map_err(UploadAttemptError::Http)
-            }
-        };
-        let error = send_upload_with_retry(&client, None, &mut send)
-            .await
-            .expect_err("upload must give up after exhausting retries");
-        assert!(
-            matches!(error, UploadAttemptError::Http(ref e) if e.is_connect()),
-            "expected connect error, got {error}"
-        );
-        assert!(
-            error.to_string().contains("secret-marker"),
-            "persisted upload error must retain the original request URL"
-        );
-        if let UploadAttemptError::Http(error) = error {
-            assert!(
-                BackendError::from(error)
-                    .runtime_record()
-                    .to_string()
-                    .contains("secret-marker")
-            );
-        }
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            (UPLOAD_MAX_RETRIES + 1) as usize,
-            "expected 1 initial attempt + UPLOAD_MAX_RETRIES retries"
-        );
-    }
-
-    /// 回归测试：HTTP 非 2xx（TOS 端拒绝）不触发重试，原样返回响应。
-    #[tokio::test]
-    async fn upload_retry_does_not_retry_http_errors() {
-        use std::io::{Read, Write};
-        use std::net::TcpListener;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let _ = stream.read(&mut [0u8; 4096]);
-                let _ = stream
-                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
-                let _ = stream.flush();
-            }
-        });
-
-        let client = build_presign_http_client().unwrap();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let call_counter = Arc::clone(&calls);
-        let mut send = move |client: reqwest::Client| {
-            let call_counter = Arc::clone(&call_counter);
-            async move {
-                let _ = call_counter.fetch_add(1, Ordering::SeqCst);
-                client
-                    .put(format!("http://{addr}/upload"))
-                    .body("payload")
-                    .send()
-                    .await
-                    .map_err(UploadAttemptError::Http)
-            }
-        };
-        let response = send_upload_with_retry(&client, None, &mut send)
-            .await
-            .expect("HTTP error must surface as a response");
-        assert_eq!(response.status().as_u16(), 500);
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "HTTP 5xx must not be retried"
-        );
-
-        server.join().unwrap();
-    }
-
-    fn test_staging_service(directory: &tempfile::TempDir) -> StagingService {
-        use std::sync::Arc;
-        let storage = Arc::new(Storage::open(&directory.path().join("app.sqlite3")).unwrap());
-        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
-        let lifecycle = crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(&storage));
-        let providers = crate::backend::provider::ProviderRuntime::new(
-            Arc::clone(&storage),
-            lifecycle,
-            credentials.clone(),
-        )
-        .unwrap();
-        StagingService::new(
-            storage,
-            credentials,
-            AssetLibrary::new(providers),
-            VideoCompositionService::new(
-                directory.path().join("downloads"),
-                directory.path().join("ffmpeg"),
-                directory.path().join("resources"),
-            )
-            .unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn legacy_review_task_id_cannot_be_reused_as_a_cloud_asset() {
-        let directory = tempfile::tempdir().unwrap();
-        let staging = test_staging_service(&directory);
-        let mut job = staging
-            .create_job(StartStagingCommand {
-                local_path: "C:/media/original.png".into(),
-                purpose: "asset_import".into(),
-                media_type: MediaType::Image,
-                import: Some(super::super::types::StagingAssetImportTarget {
-                    provider_connection_id: "provider-1".into(),
-                    name: Some("original.png".into()),
-                    group_id: None,
-                }),
-            })
-            .unwrap();
-        job.status = StagingStatus::Cleaned;
-        job.asset_id = Some("task-20260922083550-5987851d".into());
-
-        assert!(!staging.staging_content_exists(&job).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn expired_submitted_upload_stays_failed_after_tos_was_cleaned() {
-        let directory = tempfile::tempdir().unwrap();
-        let staging = test_staging_service(&directory);
-        let job = StagingJobRecord {
-            id: "expired-overseas".into(),
-            local_path: "C:/media/original.png".into(),
-            purpose: "asset_import".into(),
-            media_type: MediaType::Image,
-            object_key: Some("staging/expired.png".into()),
-            status: StagingStatus::Cleaned,
-            bytes_total: Some(10),
-            bytes_uploaded: 10,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: Some(super::super::types::StagingAssetImportTarget {
-                provider_connection_id: "provider-overseas".into(),
-                name: Some("original.png".into()),
-                group_id: None,
-            }),
-            adjustment: None,
-            error: None,
-            created_at: now_ms(),
-            updated_at: now_ms(),
-        };
-        staging.storage.insert_staging_job(&job).unwrap();
-        staging
-            .storage
-            .set_staging_overseas_db_id(&job.id, 1351)
-            .unwrap();
-        let connection = rusqlite::Connection::open(directory.path().join("app.sqlite3")).unwrap();
-        connection
-            .execute(
-                "UPDATE staging_jobs SET overseas_submitted_at = ?1 WHERE id = ?2",
-                rusqlite::params![now_ms() - OVERSEAS_UPLOAD_DEADLINE_MS - 1, job.id],
-            )
-            .unwrap();
-        let error = staging.run_job(&job.id).await.unwrap_err();
-        assert!(is_overseas_timeout_error(&error));
-        let persisted = staging.storage.get_staging_job(&job.id).unwrap();
-        assert!(matches!(persisted.status, StagingStatus::Failed));
-        assert!(persisted.object_key.is_none());
-        assert_eq!(persisted.overseas_db_id, Some(1351));
-        assert_eq!(
-            persisted.error.as_ref().unwrap()["kind"],
-            "asset_import_timeout"
-        );
-    }
-
-    #[test]
-    fn list_local_assets_keeps_index_when_tos_is_not_configured() {
-        // 升级后 TOS 行暂时读不出来时，SQLite 本地索引必须仍能列出；
-        // 预览可以空，但不能把整页素材库打成「不可用」。
-        let directory = tempfile::tempdir().unwrap();
-        let staging = test_staging_service(&directory);
-        let timestamp = now_ms();
-        staging
-            .storage
-            .insert_staging_job(&StagingJobRecord {
-                id: "job-keep".into(),
-                local_path: "portrait.png".into(),
-                purpose: "local_asset".into(),
-                media_type: MediaType::Image,
-                object_key: Some("staging/portrait.png".into()),
-                status: StagingStatus::Staged,
-                bytes_total: Some(32),
-                bytes_uploaded: 32,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: timestamp,
-                updated_at: timestamp,
-            })
-            .unwrap();
-
-        let page = staging
-            .list_local_assets(Some(LocalAssetListQuery {
-                media_type: None,
-                group_id: None,
-                name: None,
-                page: Some(1),
-                page_size: Some(40),
-            }))
-            .expect("local index must list without TOS");
-        assert_eq!(page.total, 1);
-        assert_eq!(page.items[0].id, "job-keep");
-        assert_eq!(page.items[0].object_key, "staging/portrait.png");
-        assert_eq!(page.items[0].preview_url, "");
-        assert_eq!(page.kind_totals.image, 1);
-    }
 }

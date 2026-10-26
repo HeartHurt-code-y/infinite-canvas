@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as v from "valibot";
-import { captureApplicationError, captureBackendEventFailure } from "./errorReporting";
 
 /**
  * 桌面 IPC 的唯一收口：整个前端只有这个文件直接调用 Tauri 的 `invoke` / `listen`。
@@ -79,7 +78,6 @@ export async function invokeDesktop<TSchema extends v.GenericSchema>(
   command: string,
   schema: TSchema,
   args?: Record<string, unknown>,
-  options?: { readonly reportErrors?: boolean },
 ): Promise<v.InferOutput<TSchema>> {
   if (!isDesktopRuntime()) {
     throw new DesktopInvocationError(command);
@@ -90,7 +88,7 @@ export async function invokeDesktop<TSchema extends v.GenericSchema>(
       args === undefined ? await invoke<unknown>(command) : await invoke<unknown>(command, args);
     return parseBackendPayload(command, schema, payload);
   } catch (error) {
-    if (options?.reportErrors !== false) captureApplicationError(error, "ipc", command, { args });
+    frontendLog("error", `桌面命令失败（${command}）：${formatRawBackendError(error)}`);
     throw error;
   }
 }
@@ -116,11 +114,12 @@ export function subscribeBackendEvent<TSchema extends v.GenericSchema>(
   const unlistenPromise = listen(eventName, (event) => {
     try {
       const payload = parseBackendPayload(`event:${eventName}`, schema, event.payload);
-      captureBackendEventFailure(eventName, payload);
       onPayload(payload);
     } catch (error) {
-      captureApplicationError(error, "ipc", `event:${eventName.replaceAll("-", "_")}`);
-      frontendLog("error", formatRawBackendError(error));
+      frontendLog(
+        "error",
+        `后端事件解析失败（event:${eventName.replaceAll("-", "_")}）：${formatRawBackendError(error)}`,
+      );
     }
   });
   return () => {

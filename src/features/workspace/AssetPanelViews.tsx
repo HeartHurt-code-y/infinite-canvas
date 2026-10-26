@@ -31,11 +31,13 @@ export function AssetPanelHeader({
   onImport,
   multiSelect = false,
   onToggleMultiSelect,
+  onClose,
 }: {
   readonly uploadActionLabel: string;
   readonly onImport: () => void;
   readonly multiSelect?: boolean;
   readonly onToggleMultiSelect?: () => void;
+  readonly onClose?: () => void;
 }) {
   return (
     <div className="panel-title-row">
@@ -63,6 +65,16 @@ export function AssetPanelHeader({
         >
           <Icon name="upload-simple" aria-hidden="true" size="lg" />
         </button>
+        {onClose ? (
+          <button
+            type="button"
+            className="square-action mobile-panel-close--assets"
+            aria-label="关闭素材库"
+            onClick={onClose}
+          >
+            <Icon name="x" aria-hidden="true" size="lg" />
+          </button>
+        ) : null}
       </div>
     </div>
   );
@@ -1026,19 +1038,13 @@ export function AssetPanel({
       id="asset-panel"
       className={`asset-panel${mobileOpen ? " is-mobile-open" : ""}`}
       aria-label="素材库"
+      inert={!mobileOpen}
     >
-      <button
-        type="button"
-        className="mobile-panel-close mobile-panel-close--assets"
-        aria-label="关闭素材库"
-        onClick={onCloseMobilePanel}
-      >
-        <Icon name="x" aria-hidden="true" size="lg" />
-      </button>
       <AssetPanelHeader
         uploadActionLabel={uploadActionLabel}
         multiSelect={multiSelect}
         onToggleMultiSelect={onToggleMultiSelect}
+        onClose={onCloseMobilePanel}
         onImport={() => {
           onImportLocalAssets();
         }}

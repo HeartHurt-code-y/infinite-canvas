@@ -1,5 +1,5 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -7,6 +7,7 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   assetLibraryClient,
   formatRawBackendError,
+  frontendLog,
   refreshMediaUrlWithStagingFallback,
   LOCAL_ASSET_UNGROUPED_GROUP_ID,
   type LocalBase64AssetGroupRecord,
@@ -23,17 +24,12 @@ import {
   ASSET_CLOUD_STATUS_LABELS,
   ASSET_KIND_LABELS,
   assetDetailIdentity,
-  assetErrorPresentation,
 } from "./workspaceModel";
 
 type RealPersonDialogClient = Pick<
   RealPersonAssetLibraryClient,
   "createRealPersonAuthLink" | "listRealPersonGroups"
 >;
-
-function realPersonErrorSummary(error: unknown): string {
-  return assetErrorPresentation(formatRawBackendError(error)).summary;
-}
 
 function formatAuthorizedAt(value: string | null): string {
   if (value == null) return "时间待同步";
@@ -78,7 +74,7 @@ export function RealPersonAssetDialog({
   const [groupsLoading, setGroupsLoading] = useState(true);
   const [linkBusy, setLinkBusy] = useState(false);
   const [uploadingGroupId, setUploadingGroupId] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const secondsRemaining =
     expiresAt == null ? 0 : Math.max(0, Math.ceil((expiresAt - clockNow) / 1000));
@@ -105,7 +101,10 @@ export function RealPersonAssetDialog({
         }
       } catch (refreshError: unknown) {
         if (requestId !== groupRequestRef.current) return;
-        if (showBusy) setError(realPersonErrorSummary(refreshError));
+        if (!showBusy) return;
+        // 原始 payload 只进日志；界面上的摘要交给 ErrorAlert。
+        frontendLog("error", `[asset] 读取真人素材分组失败：${formatRawBackendError(refreshError)}`);
+        setError(refreshError);
       } finally {
         if (requestId === groupRequestRef.current) setGroupsLoading(false);
       }
@@ -172,7 +171,8 @@ export function RealPersonAssetDialog({
       setExpiresAt(now + 120_000);
       setNotice("认证链接已生成，请在 120 秒内让本人用手机完成刷脸认证。");
     } catch (createError: unknown) {
-      setError(realPersonErrorSummary(createError));
+      frontendLog("error", `[asset] 生成真人认证链接失败：${formatRawBackendError(createError)}`);
+      setError(createError);
     } finally {
       setLinkBusy(false);
     }
@@ -287,7 +287,13 @@ export function RealPersonAssetDialog({
                   onClick={() => {
                     void copyLink(authLink.h5Url)
                       .then(() => setNotice("认证链接已复制，可发送给本人在手机上打开。"))
-                      .catch((copyError: unknown) => setError(realPersonErrorSummary(copyError)));
+                      .catch((copyError: unknown) => {
+                        frontendLog(
+                          "error",
+                          `[asset] 复制认证链接失败：${formatRawBackendError(copyError)}`,
+                        );
+                        setError(copyError);
+                      });
                   }}
                 >
                   <Icon name="copy" aria-hidden="true" size="md" />
@@ -297,9 +303,13 @@ export function RealPersonAssetDialog({
                   type="button"
                   disabled={linkExpired}
                   onClick={() => {
-                    void openLink(authLink.h5Url).catch((openError: unknown) =>
-                      setError(realPersonErrorSummary(openError)),
-                    );
+                    void openLink(authLink.h5Url).catch((openError: unknown) => {
+                      frontendLog(
+                        "error",
+                        `[asset] 打开认证链接失败：${formatRawBackendError(openError)}`,
+                      );
+                      setError(openError);
+                    });
                   }}
                 >
                   <Icon name="arrow-square-out" aria-hidden="true" size="md" />
@@ -311,13 +321,10 @@ export function RealPersonAssetDialog({
           ) : null}
 
           {error ? (
-            <>
-              <p className="real-person-dialog__message" data-state="error" role="alert">
-                <Icon name="warning-circle" aria-hidden="true" size="md" />
-                {error}
-              </p>
-              <ErrorCopyButton text={error} />
-            </>
+            <ErrorAlert
+              error={error}
+              hint="请检查素材库令牌与授权状态后再试一次；展开完整报错可把诊断文本贴给开发者。"
+            />
           ) : null}
           {notice ? (
             <p className="real-person-dialog__message" data-state="success" role="status">
@@ -407,9 +414,13 @@ export function RealPersonAssetDialog({
                             );
                           }
                         })
-                        .catch((uploadError: unknown) =>
-                          setError(realPersonErrorSummary(uploadError)),
-                        )
+                        .catch((uploadError: unknown) => {
+                          frontendLog(
+                            "error",
+                            `[asset] 加入真人素材上传队列失败：${formatRawBackendError(uploadError)}`,
+                          );
+                          setError(uploadError);
+                        })
                         .finally(() => setUploadingGroupId(null));
                     }}
                   >

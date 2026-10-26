@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { copyErrorTextToClipboard } from "../lib/clipboard";
 import { toast } from "../lib/toast";
 import { Icon } from "./Icon";
-import { ErrorFeedbackButton } from "./ErrorFeedbackButton";
 import "./ErrorCopyButton.css";
 
 /*
@@ -11,8 +10,8 @@ import "./ErrorCopyButton.css";
  *
  * 报错是用户拿去求助、贴给客服或开发者的第一手排查材料，所以每个报错
  * （ErrorAlert、各面板的手写报错条、错误 toast）都要带这个按钮，复制的是
- * 完整诊断文本而不是界面上被截断的摘要。剪贴板策略与反馈状态都收敛在
- * 这里，调用方只负责给出要复制的文本。
+ * 完整诊断文本而不是界面上被截断的摘要。剪贴板策略收敛在这里，调用方只负责
+ * 给出要复制的文本。
  */
 
 export interface ErrorCopyButtonProps {
@@ -20,16 +19,9 @@ export interface ErrorCopyButtonProps {
   readonly text: string;
   /** 挂到具体控件时用于 aria-describedby。 */
   readonly id?: string;
-  readonly feedbackError?: unknown;
-  readonly feedback?: boolean;
 }
 
-export function ErrorCopyButton({
-  text,
-  id,
-  feedbackError,
-  feedback = true,
-}: ErrorCopyButtonProps) {
+export function ErrorCopyButton({ text, id }: ErrorCopyButtonProps) {
   const [copied, setCopied] = useState(false);
   const copyResetTimerRef = useRef<number | null>(null);
 
@@ -73,7 +65,6 @@ export function ErrorCopyButton({
         <Icon name={copied ? "check" : "copy-simple"} aria-hidden="true" size="xs" />
         {copied ? "已复制" : "复制报错"}
       </button>
-      {feedback ? <ErrorFeedbackButton error={feedbackError ?? text} /> : null}
     </span>
   );
 }

@@ -2,12 +2,6 @@ import type { ReactNode } from "react";
 import { toast as sonnerToast, type ExternalToast } from "sonner";
 
 import { copyErrorTextToClipboard } from "./clipboard";
-import {
-  captureApplicationError,
-  errorDiagnostic,
-  openFeedback,
-  feedbackOccurrence,
-} from "./errorReporting";
 
 /*
  * sonner 的错误通知包装：`toast.error` 一律自带「复制报错」动作。
@@ -61,19 +55,8 @@ function withCopyAction(message: ReactNode, data?: ExternalToast): ExternalToast
 }
 
 function errorToast(message: ReactNode, data?: ExternalToast): string | number {
-  const error = extractToastText(data?.description) || extractToastText(message);
-  captureApplicationError(error, "toast");
   const options = withCopyAction(message, data);
-  return sonnerToast.error(message, {
-    ...options,
-    cancel: data?.cancel ?? {
-      label: "反馈问题",
-      onClick: () => {
-        const occurrence = feedbackOccurrence(error);
-        openFeedback(errorDiagnostic(error, occurrence.operation), occurrence);
-      },
-    },
-  });
+  return sonnerToast.error(message, options);
 }
 
 /** 与 sonner 的 `toast` 同一个 API；只有 `error` 会被注入复制动作。 */

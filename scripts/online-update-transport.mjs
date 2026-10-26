@@ -15,8 +15,8 @@ import {
   assertComponentRoot,
   COMPONENT_PLATFORM,
   COMPONENT_REPO_ROOT,
-} from "./runtime-component-catalog.mjs";
-import { resolveComponentPython } from "./package-runtime-components.mjs";
+} from "./runtime-resources.mjs";
+import { resolvePythonInterpreter } from "./python-interpreter.mjs";
 import {
   TOS_UPDATES_BUCKET,
   TOS_UPDATES_REGION,
@@ -39,8 +39,6 @@ const ONLINE_PLATFORMS = Object.freeze({
   "darwin-x86_64": "x64",
 });
 const VERSION = "[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?";
-const COMPONENT_IDS =
-  "blender|remotion-runtime|ffmpeg|pose-runtime|gpt-image-2-style-library|ai-media-runtime|ai-media-quality-runtime";
 
 function onlinePrefix(platform) {
   if (!Object.hasOwn(ONLINE_PLATFORMS, platform))
@@ -72,16 +70,8 @@ export function assertOnlineObjectKey(key) {
           new RegExp(`^install-macos-${VERSION}\\.sh$`).test(relative)))
     )
       return key;
-    const componentPrefix = `${TOS_UPDATES_PREFIX}/components/${platform}/`;
-    if (
-      key.startsWith(componentPrefix) &&
-      new RegExp(`^(?:${COMPONENT_IDS})-[a-f0-9]{64}\\.zip$`).test(
-        key.slice(componentPrefix.length),
-      )
-    )
-      return key;
   }
-  throw new Error("Object is outside the dedicated online/component release scope");
+  throw new Error("Object is outside the dedicated online release scope");
 }
 
 export function onlineObjectUrl(key) {
@@ -247,7 +237,7 @@ export function loadOnlinePublishConfig({
       throw new Error("Provide TOS_ACCESS_KEY and TOS_SECRET_KEY in the publishing environment");
     try {
       const output = executeFile(
-        resolveComponentPython(root, environment),
+        resolvePythonInterpreter(environment),
         ["-I", "-B", "-c", LOCAL_CONFIG_READER],
         {
           env: environment,

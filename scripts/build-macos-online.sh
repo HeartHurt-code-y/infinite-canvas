@@ -27,8 +27,6 @@ mkdir -p "$online_root"
 test "$(cd "$online_root" && pwd -P)" = "$online_root"
 rm -rf "$online_root/target/release/bundle" "$online_root/artifacts/$release_version"
 pnpm tauri:build:online --bundles app,dmg
-IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib component_
-IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib runtime_components::tests
 IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib product_scene_images
 node scripts/verify-edition-release.mjs --distribution-dir "$online_root/artifacts/$release_version"
 # Exercise the public one-command PKG installation on this disposable runner.
@@ -56,8 +54,7 @@ assertMacAppInventories(await inventoryMacApp(installed), expected, 'First insta
 execFileSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', installed], {stdio: 'inherit'});
 const attributes = execFileSync('/usr/bin/xattr', ['-r', installed], {encoding: 'utf8'});
 if (attributes.includes('com.apple.quarantine')) throw new Error('PKG postinstall left the application quarantined');
-execFileSync(path.join(installed, 'Contents/MacOS/infinite-canvas'), ['--print-component-catalog-pins'], {stdio: 'inherit'});
-console.log('Native one-command PKG installation runs its embedded helper, clears quarantine and preserves signed application and component bytes.');
+console.log('Native one-command PKG installation runs its embedded helper, clears quarantine and preserves signed application and runtime resource bytes.');
 NODE
 echo "Verified macOS $release_version $native_arch online PKG, DMG and updater archive."
 echo 'This package is not Apple notarized. First installation may be blocked by Gatekeeper; the DMG includes install-macos.command and install-macos.sh.'

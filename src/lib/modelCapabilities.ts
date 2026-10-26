@@ -8,6 +8,14 @@ export type ModelParameterValue = string | number | boolean;
 export interface ModelParameterOption {
   readonly value: ModelParameterValue;
   readonly label: string;
+  /**
+   * 即梦给「AI 能力」打的那枚蓝色 ✦ 标记。
+   *
+   * 即梦用它标「新模型 / 新能力」（例：Seedream 5.0 Pro、智能比例 2K）。
+   * 那是它自己的产品配置，我们的模型目录没有这层信息，
+   * 所以只对**语义明确是 AI 能力**的选项打标（例如「智能比例」）。
+   */
+  readonly aiMark?: boolean | undefined;
 }
 
 export interface ModelParameterCapability {
@@ -127,6 +135,18 @@ function optionLabel(value: ModelParameterValue, key: string): string {
   return raw;
 }
 
+/**
+ * 这个选项要不要带即梦那枚蓝色 ✦。
+ *
+ * 只有**语义明确是 AI 能力**的选项才带：画幅里的「智能比例」——
+ * 由后端按图自适应（后端用 `auto` / `intelligent_ratio` 两种写法），
+ * 是即梦标了 ✦ 的那一类能力。其余选项不打。
+ */
+function optionAiMark(key: string, value: ModelParameterValue): boolean {
+  if (key !== "ratio") return false;
+  return value === "auto" || value === "intelligent_ratio";
+}
+
 function parameterLabel(key: string, schema: Record<string, unknown>): string {
   const label = schema["label"];
   if (typeof label === "string" && label.trim()) return label.trim();
@@ -141,7 +161,11 @@ function rawOptions(key: string, schema: Record<string, unknown>): readonly Mode
       : [];
   return values.flatMap((item) => {
     if (isParameterValue(item)) {
-      return [{ value: item, label: optionLabel(item, key) }];
+      const option: ModelParameterOption = { value: item, label: optionLabel(item, key) };
+      /* 只有真带标记的选项才多这个键，别给每个选项都塞 `aiMark: false`
+         ——那会让既有断言的对象形状全变。 */
+      if (optionAiMark(key, item)) return [{ ...option, aiMark: true }];
+      return [option];
     }
     if (!isRecord(item) || !isParameterValue(item["value"])) return [];
     const value = item["value"];
@@ -149,7 +173,9 @@ function rawOptions(key: string, schema: Record<string, unknown>): readonly Mode
       typeof item["label"] === "string" && item["label"].trim()
         ? item["label"].trim()
         : optionLabel(value, key);
-    return [{ value, label }];
+    const option: ModelParameterOption = { value, label };
+    if (optionAiMark(key, value)) return [{ ...option, aiMark: true }];
+    return [option];
   });
 }
 

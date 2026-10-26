@@ -10,18 +10,27 @@ import { useStore } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
-import type { AgentState } from "../workspace/agent/agentTypes";
+import {
+  EMPTY_CANVAS_GROUPS,
+  decodeCanvasGroups,
+  dissolveCanvasGroup,
+  expandCanvasGroupPositionChanges,
+  reconcileCanvasGroups,
+  regroupCanvasNodes,
+  type CanvasGroup,
+  type CanvasGroups,
+} from "./canvasGroups";
 import {
   createCanvasInputResolverCache,
   type CanvasInputResolver,
 } from "../workspace/canvasInputs";
-import {
-  initializeWorkflowVersions,
-  mergeWorkflowVersionHistory,
-  recordWorkflowVersion,
-  workflowVersionContentSignature,
-} from "../workspace/workflowVersionHistory";
 import { decodePromptContentDocument, type PromptContentDocumentV1 } from "../../lib/promptContent";
+
+/** 画布里各提示词节点的 canonical 文档快照（按节点 key 索引）。 */
+export type PromptContentDocumentMap = Readonly<Record<string, PromptContentDocumentV1>>;
+
+/** 空快照：画布还没有任何提示词内容时的初值。 */
+const EMPTY_PROMPT_DOCUMENTS: PromptContentDocumentMap = {};
 import {
   applyNewEdgesToGenerationInputSlots,
   adoptMissingGenerationInputSlots,
@@ -36,16 +45,10 @@ import type {
   AssetEdgeData,
   AssetNodeData,
   GenNodeData,
-  KnowledgeVideoWorkflowConfig,
-  KnowledgeVideoWorkflowNodeData,
   OutputNodeData,
   ResultNodeData,
   ScreenplayNodeData,
-  StoryboardNodeData,
-  VideoComposerNodeData,
-  VideoDownloaderNodeData,
-  VideoFrameExtractorNodeData,
-  ViralRemixNodeData,
+  VideoClipNodeData,
 } from "../workspace/workspaceModel";
 
 export interface CanvasPan {
@@ -65,33 +68,17 @@ export type CanvasStoreNodeChange =
   | { readonly type: "select"; readonly key: string; readonly selected: boolean };
 
 /**
- * 画布九类节点的类型标签，即 nodesById 内每个条目的判别字段。
- * 标签沿用旧版九组平行数组的集合名；gen 一类内部仍以 data.kind 区分图片/视频/提示词。
+ * 画布六类节点的类型标签，即 nodesById 内每个条目的判别字段。
+ * 标签沿用旧版平行数组的集合名；gen 一类内部仍以 data.kind 区分图片/视频/提示词。
  */
-export type CanvasNodeType =
-  | "asset"
-  | "gen"
-  | "screenplay"
-  | "storyboard"
-  | "knowledgeVideoWorkflow"
-  | "viralRemix"
-  | "videoComposer"
-  | "videoDownloader"
-  | "frameExtractor"
-  | "result"
-  | "output";
+export type CanvasNodeType = "asset" | "gen" | "screenplay" | "videoClip" | "result" | "output";
 
 /** 类型标签 → 节点数据类型。 */
 export interface CanvasNodesByType {
   asset: AssetNodeData;
   gen: GenNodeData;
   screenplay: ScreenplayNodeData;
-  storyboard: StoryboardNodeData;
-  knowledgeVideoWorkflow: KnowledgeVideoWorkflowNodeData;
-  viralRemix: ViralRemixNodeData;
-  videoComposer: VideoComposerNodeData;
-  videoDownloader: VideoDownloaderNodeData;
-  frameExtractor: VideoFrameExtractorNodeData;
+  videoClip: VideoClipNodeData;
   result: ResultNodeData;
   output: OutputNodeData;
 }
@@ -104,7 +91,7 @@ export type CanvasNodeEntry = {
   };
 }[CanvasNodeType];
 
-/** 画布全部节点的唯一存储：key → 节点条目。九类节点不再各自持有平行数组。 */
+/** 画布全部节点的唯一存储：key → 节点条目。六类节点不再各自持有平行数组。 */
 export type CanvasNodesById = Readonly<Record<string, CanvasNodeEntry>>;
 
 /** 节点数据的只读联合；按类型操作时经由 CanvasNodesByType 收窄。 */
@@ -116,12 +103,7 @@ export interface CanvasDocumentV1 {
   readonly assetNodes: readonly AssetNodeData[];
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
-  readonly storyboardNodes?: readonly StoryboardNodeData[];
-  readonly knowledgeVideoWorkflowNodes?: readonly KnowledgeVideoWorkflowNodeData[];
-  readonly viralRemixNodes?: readonly ViralRemixNodeData[];
-  readonly videoComposerNodes?: readonly VideoComposerNodeData[];
-  readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
-  readonly frameExtractorNodes?: readonly VideoFrameExtractorNodeData[];
+  readonly videoClipNodes?: readonly VideoClipNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -135,17 +117,11 @@ export interface CanvasDocumentV1 {
 /** V2 不再持久化浏览器 HTML；提示内容使用可验证的 canonical document。 */
 export interface CanvasDocumentV2 {
   readonly version: 2;
-  /** Canvas-scoped assistant history; restored by its own runtime, outside undo history. */
-  readonly agent?: AgentState;
+  readonly groups?: CanvasGroups;
   readonly assetNodes: readonly AssetNodeData[];
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
-  readonly storyboardNodes?: readonly StoryboardNodeData[];
-  readonly knowledgeVideoWorkflowNodes?: readonly KnowledgeVideoWorkflowNodeData[];
-  readonly viralRemixNodes?: readonly ViralRemixNodeData[];
-  readonly videoComposerNodes?: readonly VideoComposerNodeData[];
-  readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
-  readonly frameExtractorNodes?: readonly VideoFrameExtractorNodeData[];
+  readonly videoClipNodes?: readonly VideoClipNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -163,12 +139,7 @@ export interface CanvasNodeLists {
   readonly asset: readonly AssetNodeData[];
   readonly gen: readonly GenNodeData[];
   readonly screenplay: readonly ScreenplayNodeData[];
-  readonly storyboard: readonly StoryboardNodeData[];
-  readonly knowledgeVideoWorkflow: readonly KnowledgeVideoWorkflowNodeData[];
-  readonly viralRemix: readonly ViralRemixNodeData[];
-  readonly videoComposer: readonly VideoComposerNodeData[];
-  readonly videoDownloader: readonly VideoDownloaderNodeData[];
-  readonly frameExtractor: readonly VideoFrameExtractorNodeData[];
+  readonly videoClip: readonly VideoClipNodeData[];
   readonly result: readonly ResultNodeData[];
   readonly output: readonly OutputNodeData[];
 }
@@ -177,12 +148,7 @@ export interface CanvasNodesByKey {
   readonly asset: ReadonlyMap<string, AssetNodeData>;
   readonly gen: ReadonlyMap<string, GenNodeData>;
   readonly screenplay: ReadonlyMap<string, ScreenplayNodeData>;
-  readonly storyboard: ReadonlyMap<string, StoryboardNodeData>;
-  readonly knowledgeVideoWorkflow: ReadonlyMap<string, KnowledgeVideoWorkflowNodeData>;
-  readonly viralRemix: ReadonlyMap<string, ViralRemixNodeData>;
-  readonly videoComposer: ReadonlyMap<string, VideoComposerNodeData>;
-  readonly videoDownloader: ReadonlyMap<string, VideoDownloaderNodeData>;
-  readonly frameExtractor: ReadonlyMap<string, VideoFrameExtractorNodeData>;
+  readonly videoClip: ReadonlyMap<string, VideoClipNodeData>;
   readonly result: ReadonlyMap<string, ResultNodeData>;
   readonly output: ReadonlyMap<string, OutputNodeData>;
 }
@@ -194,6 +160,7 @@ export interface CanvasGraphReadModel {
 }
 
 export interface CanvasReadModel {
+  readonly groups: CanvasGroups;
   readonly resolveInputs: CanvasInputResolver;
   readonly nodes: CanvasNodeLists;
   /** 连线语义索引；布局变化时引用保持稳定，不应用它读取最新 x/y/measured。 */
@@ -239,10 +206,16 @@ export interface CanvasHistorySummary {
 }
 
 export interface CanvasCommands {
+  readonly groupNodes: (keys: readonly string[], groupId: string) => CanvasWriteResult;
+  readonly dissolveGroup: (groupId: string) => CanvasWriteResult;
+  readonly updateGroup: (
+    groupId: string,
+    patch: Partial<Pick<CanvasGroup, "name" | "collapsed">>,
+  ) => CanvasWriteResult;
   readonly insertSubgraph: (
     nodes: readonly CanvasNodeEntry[],
     edges: readonly AssetEdgeData[],
-    options?: { readonly selectNodeKey?: string | null },
+    options?: { readonly selectNodeKey?: string | null; readonly groups?: CanvasGroups },
   ) => CanvasWriteResult;
   readonly addNode: <K extends CanvasNodeType>(
     type: K,
@@ -259,6 +232,16 @@ export interface CanvasCommands {
     type: K,
     key: string,
     update: (node: CanvasNodesByType[K]) => CanvasNodesByType[K],
+    /*
+     * 与这次节点写入**同批**落下的提示词 canonical 快照。
+     *
+     * 为什么必须同批：zundo 在每次 set 时把**变更前**的完整 state 推进历史栈。
+     * 若节点写入与快照写入分成两次 set，第一次 set 之后历史里就已经是「新快照」，
+     * 撤销恢复回来的就是当前内容而不是上一步 —— 撤销等于没撤销。
+     * 同一次 set 里，变更前的 state 同时带着「旧 nodesById」与「旧快照」，
+     * 撤销才拿得到真正的上一步。
+     */
+    promptDocuments?: PromptContentDocumentMap | undefined,
   ) => CanvasWriteResult;
   readonly patchNodes: <K extends CanvasNodeType>(
     type: K,
@@ -284,10 +267,10 @@ export interface CanvasCommands {
     promptContents: Readonly<Record<string, PromptContentDocumentV1>>,
   ) => CanvasDocumentV2;
   readonly restoreDocument: (document: unknown) => CanvasRestoreResult;
-  readonly undo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
-  readonly redo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
+  readonly undo: () => CanvasWriteResult;
+  readonly redo: () => CanvasWriteResult;
   /**
-   * 机器驱动的连续写入（工作流 checkpoint 落卡等）在包裹期间走时间窗折叠：
+   * 机器驱动的连续写入（批量落卡等）在包裹期间走时间窗折叠：
    * 至多每窗口一条补记录，避免撤销栈被后台进度灌满。用户命令不受影响。
    */
   readonly runWithCoalescedHistory: <T>(fn: () => T) => T;
@@ -302,8 +285,41 @@ export interface CanvasStateModule {
 }
 
 export interface CanvasStoreState {
+  readonly groups: CanvasGroups;
+  readonly groupNodes: CanvasCommands["groupNodes"];
+  readonly dissolveGroup: CanvasCommands["dissolveGroup"];
+  readonly updateGroup: CanvasCommands["updateGroup"];
   readonly nodesById: CanvasNodesById;
   readonly assetEdges: readonly AssetEdgeData[];
+  /**
+   * 画布里各提示词节点的 canonical 文档快照（按节点 key 索引）。
+   *
+   * ## 为什么它住在 store 里
+   *
+   * 撤销栈只存 `config.generatedPrompt` 这份**纯文本镜像**，而 canonical 文档
+   * （含块结构、行内 marks、附件、@引用的素材身份）不在历史里 —— 于是撤销只能靠
+   * 纯文本回灌 canonical，块结构与 marks 都不精确回滚。
+   *
+   * 提示词内容住在提示词模块里（不进 store），但**快照**可以进 store：zundo 的
+   * `pastStates` 存的是**完整 state**（`partialize` 只用于 equality 比较），所以
+   * 只要这个字段在 store state 里，撤销/重做时它会**自动**随整个 state 一起恢复。
+   *
+   * ## 为什么不会引发重渲染
+   *
+   * 没有组件订阅顶层 state —— `useCanvasStore()` 返回的是 **store 对象**（引用
+   * 稳定，state 变而对象不变），窄订阅走 `useSyncExternalStore` 自己选字段。
+   * 所以多一个字段的写入不增加任何重渲染。
+   *
+   * ## 写入顺序（重要）
+   *
+   * 必须是「先写 nodesById、再写本字段」：zundo 在每次 set 时把**变更前**的完整
+   * state 推进历史栈。反过来写，历史里存的就是新快照，撤销会恢复到「当前」内容。
+   */
+  readonly promptDocuments: PromptContentDocumentMap;
+  /**
+   * 更新提示词快照。**必须在**对应的 `nodesById` 写入**之后**调用（见上）。
+   */
+  readonly setPromptDocuments: (documents: PromptContentDocumentMap) => void;
   readonly zoom: number;
   readonly pan: CanvasPan;
   readonly selectedNodeKey: string | null;
@@ -311,7 +327,7 @@ export interface CanvasStoreState {
   readonly insertSubgraph: (
     nodes: readonly CanvasNodeEntry[],
     edges: readonly AssetEdgeData[],
-    options?: { readonly selectNodeKey?: string | null },
+    options?: { readonly selectNodeKey?: string | null; readonly groups?: CanvasGroups },
   ) => CanvasWriteResult;
   readonly addNode: <K extends CanvasNodeType>(
     type: K,
@@ -328,6 +344,16 @@ export interface CanvasStoreState {
     type: K,
     key: string,
     update: (node: CanvasNodesByType[K]) => CanvasNodesByType[K],
+    /*
+     * 与这次节点写入**同批**落下的提示词 canonical 快照。
+     *
+     * 为什么必须同批：zundo 在每次 set 时把**变更前**的完整 state 推进历史栈。
+     * 若节点写入与快照写入分成两次 set，第一次 set 之后历史里就已经是「新快照」，
+     * 撤销恢复回来的就是当前内容而不是上一步 —— 撤销等于没撤销。
+     * 同一次 set 里，变更前的 state 同时带着「旧 nodesById」与「旧快照」，
+     * 撤销才拿得到真正的上一步。
+     */
+    promptDocuments?: PromptContentDocumentMap | undefined,
   ) => CanvasWriteResult;
   readonly patchNodes: <K extends CanvasNodeType>(
     type: K,
@@ -359,12 +385,29 @@ export interface CanvasStoreState {
   readonly runWithCoalescedHistory: <T>(fn: () => T) => T;
 }
 
-/** 撤销/重做跟踪的状态切片：仅节点与连线；zoom/pan/选中态属于视图，不参与历史。 */
-type CanvasHistoryState = Pick<CanvasStoreState, "nodesById" | "assetEdges">;
+/**
+ * 撤销/重做跟踪节点、连线、分组与提示词 canonical 快照。
+ *
+ * zoom/pan/选中态属于视图，不参与历史。
+ *
+ * `promptDocuments` 在这里的原因：zundo 的 `pastState` 取的是
+ * `partialize(get())` 的结果 —— `partialize` 决定「历史里存哪些字段」。
+ * 不带它，历史里就没有 canonical，撤销只能靠纯文本镜像回灌（有损）。
+ */
+type CanvasHistoryState = Pick<
+  CanvasStoreState,
+  "nodesById" | "assetEdges" | "groups" | "promptDocuments"
+>;
 
 /** 画布 store：主状态外挂 zundo temporal 历史 store。 */
 export interface CanvasStore extends StoreApi<CanvasStoreState> {
   readonly temporal: StoreApi<TemporalState<CanvasHistoryState>>;
+  /**
+   * 最近一次写入是否来自用户命令。被动测量（尺寸回存、选中同步）与机器批写不算：
+   * 它们继续按防抖窗口落盘；用户命令（成组、改名、折叠、粘贴、撤销、拖动提交）是
+   * 明确的操作，要立刻落盘，不能排在防抖窗口之后。
+   */
+  readonly lastWriteWasUserCommand: () => boolean;
 }
 
 /**
@@ -383,12 +426,7 @@ const CANVAS_NODE_TYPES: readonly CanvasNodeType[] = [
   "asset",
   "gen",
   "screenplay",
-  "storyboard",
-  "knowledgeVideoWorkflow",
-  "viralRemix",
-  "videoComposer",
-  "videoDownloader",
-  "frameExtractor",
+  "videoClip",
   "result",
   "output",
 ];
@@ -447,21 +485,15 @@ function sameConnectionData(
       first.kind === second.kind && first.config === second.config && first.name === second.name
     );
   }
-  if (type === "screenplay" || type === "storyboard" || type === "viralRemix") {
+  if (type === "screenplay") {
     const first = previous as ScreenplayNodeData;
     const second = next as ScreenplayNodeData;
     return first.config.currentDocument === second.config.currentDocument;
   }
-  if (type === "videoComposer") {
-    const first = previous as VideoComposerNodeData;
-    const second = next as VideoComposerNodeData;
-    return first.config.inputOrder === second.config.inputOrder;
-  }
-  if (type === "knowledgeVideoWorkflow") {
-    return (
-      (previous as KnowledgeVideoWorkflowNodeData).config ===
-      (next as KnowledgeVideoWorkflowNodeData).config
-    );
+  if (type === "videoClip") {
+    const first = previous as VideoClipNodeData;
+    const second = next as VideoClipNodeData;
+    return first.config === second.config;
   }
   // 其余节点的自有连线载荷仅取自独立保存的产物。
   return true;
@@ -533,12 +565,7 @@ function canvasNodeLists(nodesById: CanvasNodesById): CanvasNodeLists {
     asset: typeNodes(nodesById, "asset"),
     gen: typeNodes(nodesById, "gen"),
     screenplay: typeNodes(nodesById, "screenplay"),
-    storyboard: typeNodes(nodesById, "storyboard"),
-    knowledgeVideoWorkflow: typeNodes(nodesById, "knowledgeVideoWorkflow"),
-    viralRemix: typeNodes(nodesById, "viralRemix"),
-    videoComposer: typeNodes(nodesById, "videoComposer"),
-    videoDownloader: typeNodes(nodesById, "videoDownloader"),
-    frameExtractor: typeNodes(nodesById, "frameExtractor"),
+    videoClip: typeNodes(nodesById, "videoClip"),
     result: typeNodes(nodesById, "result"),
     output: typeNodes(nodesById, "output"),
   };
@@ -558,12 +585,7 @@ function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
     asset: connectionTypeNodesByKey(nodesById, "asset"),
     gen: connectionTypeNodesByKey(nodesById, "gen"),
     screenplay: connectionTypeNodesByKey(nodesById, "screenplay"),
-    storyboard: connectionTypeNodesByKey(nodesById, "storyboard"),
-    knowledgeVideoWorkflow: connectionTypeNodesByKey(nodesById, "knowledgeVideoWorkflow"),
-    viralRemix: connectionTypeNodesByKey(nodesById, "viralRemix"),
-    videoComposer: connectionTypeNodesByKey(nodesById, "videoComposer"),
-    videoDownloader: connectionTypeNodesByKey(nodesById, "videoDownloader"),
-    frameExtractor: connectionTypeNodesByKey(nodesById, "frameExtractor"),
+    videoClip: connectionTypeNodesByKey(nodesById, "videoClip"),
     result: connectionTypeNodesByKey(nodesById, "result"),
     output: connectionTypeNodesByKey(nodesById, "output"),
   };
@@ -609,6 +631,7 @@ function canvasReadModel(state: CanvasStoreState): CanvasReadModel {
   }
   const nodeByKey = canvasNodesByKey(state.nodesById);
   const model: CanvasReadModel = {
+    groups: state.groups,
     resolveInputs: inputCache(nodeByKey, state.assetEdges),
     nodes: canvasNodeLists(state.nodesById),
     nodeByKey,
@@ -715,12 +738,12 @@ function replaceTypeNodes(
   return next;
 }
 
-/** 九类节点数据均携带 x/y；union 展开会分布到各成员，TS 可直接推出覆写结果。 */
+/** 六类节点数据均携带 x/y；union 展开会分布到各成员，TS 可直接推出覆写结果。 */
 function withNodePosition(data: CanvasNodeData, position: CanvasPan): CanvasNodeData {
   return { ...data, x: position.x, y: position.y };
 }
 
-/** 九类节点数据均携带可选 measured；用于把 React Flow 实测尺寸回存到节点。 */
+/** 六类节点数据均携带可选 measured；用于把 React Flow 实测尺寸回存到节点。 */
 function withNodeMeasured(data: CanvasNodeData, measured: CanvasNodeSize): CanvasNodeData {
   return { ...data, measured: { width: measured.width, height: measured.height } };
 }
@@ -784,15 +807,11 @@ function snapshotCanvasV2(
   const nodes = canvasNodeLists(state.nodesById);
   return {
     version: 2,
+    groups: state.groups,
     assetNodes: nodes.asset,
     genNodes: nodes.gen,
     screenplayNodes: nodes.screenplay,
-    storyboardNodes: nodes.storyboard,
-    knowledgeVideoWorkflowNodes: nodes.knowledgeVideoWorkflow,
-    viralRemixNodes: nodes.viralRemix,
-    videoComposerNodes: nodes.videoComposer,
-    videoDownloaderNodes: nodes.videoDownloader,
-    frameExtractorNodes: nodes.frameExtractor,
+    videoClipNodes: nodes.videoClip,
     resultNodes: nodes.result,
     outputNodes: nodes.output.map(persistedOutputNode),
     assetEdges: state.assetEdges,
@@ -805,37 +824,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value != null && !Array.isArray(value);
 }
 
-const INTERRUPTED_KNOWLEDGE_VIDEO_PHASES = new Set(["planning", "generating", "qc", "composing"]);
-
-/**
- * 运行控制器只存在于当前进程。文档恢复时，持久化为活动态的复合工作流实际已经
- * 中断，因此转为可继续的 paused，同时完整保留检查点中的任务身份和阶段产物。
- */
-function normalizeRestoredKnowledgeVideoWorkflowNode(
-  rawNode: Record<string, unknown>,
-): CanvasNodeData {
-  const config = rawNode["config"];
-  if (!isRecord(config)) return rawNode as unknown as CanvasNodeData;
-  const checkpoint = config["checkpoint"];
-  if (!isRecord(checkpoint)) return rawNode as unknown as CanvasNodeData;
-  const phase = checkpoint["phase"];
-  if (typeof phase !== "string" || !INTERRUPTED_KNOWLEDGE_VIDEO_PHASES.has(phase)) {
-    return rawNode as unknown as CanvasNodeData;
-  }
-  return {
-    ...rawNode,
-    config: {
-      ...config,
-      checkpoint: {
-        ...checkpoint,
-        phase: "paused",
-        lastActivePhase: phase,
-      },
-    },
-  } as unknown as CanvasNodeData;
-}
-
 interface NormalizedCanvasDocument {
+  readonly groups: CanvasGroups;
   readonly nodesById: CanvasNodesById;
   readonly edges: readonly AssetEdgeData[];
   readonly view: CanvasReadModel["view"];
@@ -867,30 +857,13 @@ function normalizeCanvasDocument(
   }
   if (issues.length > 0) return { ok: false, reason: "invalid-document", issues };
 
+  // 已下线的节点类型（爆款复刻 / 视频下载 / 视频抽帧 / 视频拼接与合成）不在这张表里，
+  // 因此旧文档里的这些数组连同指向它们的连线会被整体丢弃，不做兼容读取。
   const nodeGroups: readonly [CanvasNodeType, readonly unknown[]][] = [
     ["asset", value["assetNodes"] as readonly unknown[]],
     ["gen", value["genNodes"] as readonly unknown[]],
     ["screenplay", Array.isArray(value["screenplayNodes"]) ? value["screenplayNodes"] : []],
-    ["storyboard", Array.isArray(value["storyboardNodes"]) ? value["storyboardNodes"] : []],
-    [
-      "knowledgeVideoWorkflow",
-      Array.isArray(value["knowledgeVideoWorkflowNodes"])
-        ? value["knowledgeVideoWorkflowNodes"]
-        : [],
-    ],
-    ["viralRemix", Array.isArray(value["viralRemixNodes"]) ? value["viralRemixNodes"] : []],
-    [
-      "videoComposer",
-      Array.isArray(value["videoComposerNodes"]) ? value["videoComposerNodes"] : [],
-    ],
-    [
-      "videoDownloader",
-      Array.isArray(value["videoDownloaderNodes"]) ? value["videoDownloaderNodes"] : [],
-    ],
-    [
-      "frameExtractor",
-      Array.isArray(value["frameExtractorNodes"]) ? value["frameExtractorNodes"] : [],
-    ],
+    ["videoClip", Array.isArray(value["videoClipNodes"]) ? value["videoClipNodes"] : []],
     ["result", value["resultNodes"] as readonly unknown[]],
     ["output", Array.isArray(value["outputNodes"]) ? value["outputNodes"] : []],
   ];
@@ -910,9 +883,7 @@ function normalizeCanvasDocument(
       const data =
         type === "output"
           ? ({ ...rawNode, previewSrc: null } as unknown as CanvasNodeData)
-          : type === "knowledgeVideoWorkflow"
-            ? normalizeRestoredKnowledgeVideoWorkflowNode(rawNode)
-            : (rawNode as unknown as CanvasNodeData);
+          : (rawNode as unknown as CanvasNodeData);
       nodesById[key] = { type, data } as CanvasNodeEntry;
     }
   }
@@ -976,12 +947,21 @@ function normalizeCanvasDocument(
       }
     }
   }
-  return { ok: true, document: { nodesById, edges, view, promptContents, warnings } };
+  return {
+    ok: true,
+    document: {
+      nodesById,
+      edges,
+      view,
+      promptContents,
+      warnings,
+      groups: decodeCanvasGroups(value["groups"], nodesById),
+    },
+  };
 }
 
-/** Generic nodes accept deferred inputs; product scenes require explicitly prepared originals. */
+/** No node family restricts its incoming edges; only self-connections are rejected. */
 export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
-  if (target.type === "knowledgeVideoWorkflow" && target.data.config.productScene) return false;
   return source.data.key !== target.data.key;
 }
 
@@ -993,71 +973,32 @@ const CANVAS_HISTORY_LIMIT = 200;
  */
 const CANVAS_HISTORY_COALESCING_WINDOW_MS = 500;
 
-/**
- * 工作流运行期的机器进度判定：本次写入只改了 knowledgeVideoWorkflow 节点 config
- * 的运行时字段（断点、任务身份、批次状态、审查进度），authored 内容签名不变。
- * 节点增删、位移、其他族变化、连线变化或任何内容编辑都会使其返回 false，
- * 从而按普通用户操作逐条入栈。签名按对象引用缓存（config 不可变替换），
- * 稳态下每次补丁只对真正变化的新 config 算一次签名。
- */
-function isWorkflowRuntimeProgressOnly(
-  past: Pick<CanvasStoreState, "nodesById" | "assetEdges">,
-  current: Pick<CanvasStoreState, "nodesById" | "assetEdges">,
-): boolean {
-  if (past.assetEdges !== current.assetEdges) return false;
-  const pastNodes = past.nodesById;
-  const nextNodes = current.nodesById;
-  if (pastNodes === nextNodes) return false;
-  const pastKeys = Object.keys(pastNodes);
-  if (pastKeys.length !== Object.keys(nextNodes).length) return false;
-  for (const key of pastKeys) {
-    const pastEntry = pastNodes[key];
-    const nextEntry = nextNodes[key];
-    if (pastEntry === nextEntry) continue;
-    if (pastEntry == null || nextEntry == null || pastEntry.type !== nextEntry.type) return false;
-    if (pastEntry.type !== "knowledgeVideoWorkflow" || nextEntry.type !== "knowledgeVideoWorkflow")
-      return false;
-    const pastData = pastEntry.data;
-    const nextData = nextEntry.data;
-    for (const field of Object.keys(nextData)) {
-      if (field === "config") continue;
-      if (
-        pastData[field as keyof KnowledgeVideoWorkflowNodeData] !==
-        nextData[field as keyof KnowledgeVideoWorkflowNodeData]
-      )
-        return false;
-    }
-    if (
-      workflowVersionContentSignature(pastData.config) !==
-      workflowVersionContentSignature(nextData.config)
-    )
-      return false;
-  }
-  return true;
-}
-
 function createCanvasStore(initialZoom = 100): {
   store: CanvasStore;
   flushPendingHistory: () => void;
   cancelPendingHistory: () => void;
 } {
-  // 同一同步批次内的多次写入（如清空画布会连写九类节点与连线）合并为一条历史，
+  // 同一同步批次内的多次写入（如清空画布会连写六类节点与连线）合并为一条历史，
   // 一次用户操作对应一步撤销；跨 await 的写入天然分批。
   let coalescingHistory = false;
   // RF 的尺寸回存与选中同步是被动测量/视图态，不是用户操作：置位时跳过历史记录。
   let suppressHistory = false;
-  // 工作流运行期的机器进度（断点、任务身份、批次状态）只改运行时字段，authored
-  // 内容签名不变，工作流自身的版本链已独立记录。连续的机器进度折叠为一条撤销
-  // 记录：一次运行占用一步撤销，而不是把撤销栈灌满图片进度。
-  let lastRecordedProgressOnly = false;
   // 时间窗合帧：紧随上一条记录的连续写入（跑批逐行落卡、批量粘贴回存等）不再逐条
   // 入栈，而是按窗口折叠——首条写入立即入栈（保持离散操作一步撤销），窗口内的后续
   // 写入只在窗口收口时补一条「窗口起点」快照。跑批的高频写入因此至多每窗口产生
   // 两条记录，不再把撤销栈灌满中间态、也不再 pin 住大批旧节点对象。
-  let lastHistoryRecordAt = Number.NEGATIVE_INFINITY;
+  /*
+   * 当前折叠窗口的起点时间。
+   *
+   * 窗口的计时基准必须是「**首次包裹写入**的时刻」。之前用的是
+   * 「上一次非包裹写入」的时间：它只在用户命令时更新，而连续打字全在包裹期里，
+   * 于是闲置后第一次打字算出的延时是 `max(0, 过期时间 + 窗口 - 现在) = 0`
+   * → 定时器立刻收口 → **第一击单独成一条撤销记录**，第二次起才折叠。
+   * 结果是「一次撤销退一段」没达成，还多占一条撤销栈。
+   */
+  let pendingHistoryStartedAt: number | null = null;
   let pendingHistoryPast: CanvasHistoryState | null = null;
   let pendingHistoryCurrent: CanvasHistoryState | null = null;
-  let pendingHistoryProgressOnly = false;
   let historyFlushTimer: ReturnType<typeof setTimeout> | null = null;
   let pushHistoryRecord: ((past: CanvasHistoryState) => void) | null = null;
   // >0 表示正处于机器写入包裹期（runWithCoalescedHistory）：写入走时间窗折叠；
@@ -1072,22 +1013,19 @@ function createCanvasStore(initialZoom = 100): {
     }
     const pendingPast = pendingHistoryPast;
     const pendingCurrent = pendingHistoryCurrent;
-    const progressOnlyTail = pendingHistoryProgressOnly;
     pendingHistoryPast = null;
     pendingHistoryCurrent = null;
-    pendingHistoryProgressOnly = false;
+    pendingHistoryStartedAt = null;
     if (pendingPast == null || pushHistoryRecord == null) return;
-    // 折叠状态跟随窗口内最后一条写入：纯进度收口后，后续进度仍继续折叠为同一步。
-    lastRecordedProgressOnly = progressOnlyTail;
     // 窗口内的写入最终把状态改回窗口起点时，补记录只是空步骤，跳过。
     if (
       pendingCurrent != null &&
+      pendingPast.groups === pendingCurrent.groups &&
       pendingPast.nodesById === pendingCurrent.nodesById &&
       pendingPast.assetEdges === pendingCurrent.assetEdges
     ) {
       return;
     }
-    lastHistoryRecordAt = Date.now();
     pushHistoryRecord(pendingPast);
   };
   /** 丢弃未收口的折叠记录：restore/clear 会整体重建历史，旧快照不能迟于清空入栈。 */
@@ -1098,6 +1036,7 @@ function createCanvasStore(initialZoom = 100): {
     }
     pendingHistoryPast = null;
     pendingHistoryCurrent = null;
+    pendingHistoryStartedAt = null;
   };
 
   const canvasStore = createStore<CanvasStoreState>()(
@@ -1107,6 +1046,50 @@ function createCanvasStore(initialZoom = 100): {
       (set, _get, api) => {
         const temporalStore = api.temporal as CanvasStore["temporal"];
         return {
+          groups: EMPTY_CANVAS_GROUPS,
+          promptDocuments: EMPTY_PROMPT_DOCUMENTS,
+          setPromptDocuments: (documents) => {
+            set({ promptDocuments: documents });
+          },
+          groupNodes: (keys, groupId) => {
+            let result: CanvasWriteResult = "unchanged";
+            set((state) => {
+              if (!groupId || state.groups[groupId]) return state;
+              const nodesById = regroupCanvasNodes(state.nodesById, keys, groupId);
+              if (nodesById == null) return state;
+              result = "applied";
+              return { nodesById, groups: reconcileCanvasGroups(state.groups, nodesById) };
+            });
+            return result;
+          },
+          dissolveGroup: (groupId) => {
+            let result: CanvasWriteResult = "unchanged";
+            set((state) => {
+              const nodesById = dissolveCanvasGroup(state.nodesById, groupId);
+              if (nodesById == null) return state;
+              result = "applied";
+              return { nodesById, groups: reconcileCanvasGroups(state.groups, nodesById) };
+            });
+            return result;
+          },
+          updateGroup: (groupId, patch) => {
+            let result: CanvasWriteResult = "missing";
+            set((state) => {
+              const current = state.groups[groupId];
+              if (!current) return state;
+              const requestedName = patch.name?.trim();
+              const next = {
+                ...current,
+                ...patch,
+                name: requestedName ? requestedName : current.name,
+              };
+              result = "unchanged";
+              if (next.name === current.name && next.collapsed === current.collapsed) return state;
+              result = "applied";
+              return { groups: { ...state.groups, [groupId]: next } };
+            });
+            return result;
+          },
           nodesById: {},
           assetEdges: [],
           zoom: initialZoom,
@@ -1170,6 +1153,10 @@ function createCanvasStore(initialZoom = 100): {
               result = "applied";
               return {
                 nodesById: applyNewEdgesToGenerationInputSlots(nodesById, edges),
+                groups: reconcileCanvasGroups(
+                  options?.groups ? { ...state.groups, ...options.groups } : state.groups,
+                  nodesById,
+                ),
                 assetEdges: edges.length === 0 ? state.assetEdges : [...state.assetEdges, ...edges],
                 selectedNodeKey,
               };
@@ -1219,7 +1206,7 @@ function createCanvasStore(initialZoom = 100): {
             });
             return added!;
           },
-          patchNode: (type, key, update) => {
+          patchNode: (type, key, update, promptDocuments) => {
             let result: CanvasWriteResult = "missing";
             set((state) => {
               const entry = state.nodesById[key];
@@ -1237,7 +1224,15 @@ function createCanvasStore(initialZoom = 100): {
               const siblings = typeNodes(state.nodesById, type);
               const nextSiblings = siblings.map((node) => (node.key === key ? next : node));
               result = "applied";
-              return { nodesById: replaceTypeNodes(state.nodesById, type, nextSiblings) };
+              /*
+               * 提示词快照与节点写入**同批**落下：zundo 记录的是 set 之前的完整
+               * state，两者在同一次 set 里更新，历史里才同时带着「旧节点」与
+               * 「旧快照」—— 撤销才拿得到真正的上一步（见类型上的说明）。
+               */
+              return {
+                nodesById: replaceTypeNodes(state.nodesById, type, nextSiblings),
+                ...(promptDocuments != null ? { promptDocuments } : {}),
+              };
             });
             return result;
           },
@@ -1271,6 +1266,25 @@ function createCanvasStore(initialZoom = 100): {
                 entry.type,
                 siblings.filter((node) => node.key !== key),
               );
+              /*
+               * 组解散分支也要标记：末位成员清掉 assetGroupId 是就地改写在
+               * replaceTypeNodes 返回的那个对象上，而那份投影缓存记的仍是组解散前
+               * 的内容。不复制一层的话，节点投影仍带 assetGroupId——组框已经没了，
+               * 成员却继续按组员渲染并被组框成员列表收录，而且没有任何后续写入会自愈。
+               */
+              let groupDissolved = false;
+              if (entry.data.assetGroupId) {
+                const remaining = Object.values(nodesById).filter(
+                  (candidate) => candidate.data.assetGroupId === entry.data.assetGroupId,
+                );
+                if (remaining.length === 1) {
+                  const last = remaining[0]!;
+                  const { assetGroupId, ...data } = last.data;
+                  void assetGroupId;
+                  Object.assign(nodesById, { [data.key]: { ...last, data } as CanvasNodeEntry });
+                  groupDissolved = true;
+                }
+              }
               const removedEdgeIds = new Set(
                 state.assetEdges
                   .filter((edge) => edge.fromKey === key || edge.toKey === key)
@@ -1305,10 +1319,12 @@ function createCanvasStore(initialZoom = 100): {
                  * 新对象，漏掉这一步等于把节点留在图里——表现为「点叉号没反应」，
                  * 只有恰好清到槽位（删的素材被生成节点的 inputSlots 引用）才会生效。
                  *
-                 * 槽位是就地清在新对象上的，那份投影缓存已不代表它的内容，
-                 * 因此清理过时再复制一层，让下游按新对象重算。
+                 * 槽位是就地清在新对象上的，那份投影缓存已不代表它的内容；
+                 * 组解散同样就地改了末位成员（清掉 assetGroupId），缓存也不代表内容。
+                 * 两种情况都要清理过时再复制一层，让下游按新对象重算。
                  */
-                nodesById: slotsPruned ? { ...nodesById } : nodesById,
+                nodesById: slotsPruned || groupDissolved ? { ...nodesById } : nodesById,
+                groups: reconcileCanvasGroups(state.groups, nodesById),
                 assetEdges:
                   removedEdgeIds.size === 0
                     ? state.assetEdges
@@ -1348,7 +1364,7 @@ function createCanvasStore(initialZoom = 100): {
               const edge = { id: edgeId, fromKey, toKey };
               result = { status: "connected", edge, replacedEdgeIds: [] };
               // 生成节点（图片/视频）维护 inputSlots：能贡献媒体的来源填充最小空槽，无空槽则追加。
-              // 只走文本/中转的来源（提示词、剧本、分镜）不占媒体位置——
+              // 只走文本/中转的来源（提示词、剧本）不占媒体位置——
               // 让纯文本连线占一个槽位，会在参考清单里凭空多出一行空位，也会打乱图片编号。
               // 先把已连上却没入账的来源按连线先后补进槽位（拖线建节点的旧文档），再给新线分配。
               if (isGenerationMediaConsumer(target) && generationSourceOccupiesInputSlot(source)) {
@@ -1451,6 +1467,7 @@ function createCanvasStore(initialZoom = 100): {
               removed = Object.values(state.nodesById);
               if (
                 removed.length === 0 &&
+                Object.keys(state.groups).length === 0 &&
                 state.assetEdges.length === 0 &&
                 state.selectedNodeKey == null &&
                 state.selectedEdgeId == null
@@ -1458,6 +1475,7 @@ function createCanvasStore(initialZoom = 100): {
                 return state;
               }
               return {
+                groups: EMPTY_CANVAS_GROUPS,
                 nodesById: {},
                 assetEdges: [],
                 selectedNodeKey: null,
@@ -1473,7 +1491,10 @@ function createCanvasStore(initialZoom = 100): {
             let result: CanvasWriteResult = "unchanged";
             try {
               set((state) => {
-                const next = applyCanvasStoreNodeChanges(state, changes);
+                const next = applyCanvasStoreNodeChanges(
+                  state,
+                  expandCanvasGroupPositionChanges(state.nodesById, changes),
+                );
                 result = next === state ? "unchanged" : "applied";
                 return next;
               });
@@ -1531,6 +1552,7 @@ function createCanvasStore(initialZoom = 100): {
             suppressHistory = true;
             try {
               set({
+                groups: restored.groups,
                 nodesById: restored.nodesById,
                 assetEdges: restored.edges,
                 zoom: restored.view.zoom,
@@ -1541,7 +1563,6 @@ function createCanvasStore(initialZoom = 100): {
             } finally {
               suppressHistory = false;
             }
-            lastRecordedProgressOnly = false;
             // 恢复整体重建历史：丢弃未收口的折叠记录，避免旧快照迟于清空入栈。
             cancelPendingHistory();
             temporalStore.getState().clear();
@@ -1556,14 +1577,12 @@ function createCanvasStore(initialZoom = 100): {
             // 先收口折叠窗口：窗口内的写入也要成为可撤销的一步。
             flushPendingHistory();
             if (temporalStore.getState().pastStates.length === 0) return "unchanged";
-            lastRecordedProgressOnly = false;
             temporalStore.getState().undo();
             return "applied";
           },
           redo: () => {
             flushPendingHistory();
             if (temporalStore.getState().futureStates.length === 0) return "unchanged";
-            lastRecordedProgressOnly = false;
             temporalStore.getState().redo();
             return "applied";
           },
@@ -1579,12 +1598,30 @@ function createCanvasStore(initialZoom = 100): {
       },
       {
         partialize: (state): CanvasHistoryState => ({
+          groups: state.groups,
           nodesById: state.nodesById,
           assetEdges: state.assetEdges,
+          /*
+           * 提示词 canonical 快照必须进历史切片。
+           *
+           * zundo 的 `pastState` 取的是 **`partialize(get())` 的结果**（不是完整
+           * state）—— 也就是说 `partialize` 决定了「历史里存哪些字段」。不加
+           * 这一项，历史里就没有 canonical，撤销只能靠纯文本镜像回灌（有损：
+           * 附件与 @引用会丢，块结构与行内 marks 会被压平）。
+           *
+           * 撤销时 zundo 用 `userSet(nextState)` 把这份切片合并回 store，
+           * 所以 `promptDocuments` 会随撤销一起恢复 ✓。
+           */
+          promptDocuments: state.promptDocuments,
         }),
         // 各动作已保证"无变化返回原引用"，引用相等即可精确判断是否产生历史。
+        // 注意：**不比** promptDocuments —— 快照只是 canonical 的副本，它变了
+        // 不代表画布结构变了；让它参与判定会让「只有快照更新」也占一条历史，
+        // 把撤销栈填满。
         equality: (past, current) =>
-          past.nodesById === current.nodesById && past.assetEdges === current.assetEdges,
+          past.groups === current.groups &&
+          past.nodesById === current.nodesById &&
+          past.assetEdges === current.assetEdges,
         limit: CANVAS_HISTORY_LIMIT,
         handleSet: (handleSet) => {
           // zundo 的无 diff 配置只把 pastState（变更前部分化快照）入栈；
@@ -1598,16 +1635,11 @@ function createCanvasStore(initialZoom = 100): {
             if (coalescingHistory || suppressHistory) return;
             // zundo 的参数类型照抄 setState 首参（含函数分支），运行时这里始终是状态对象。
             const pastState = rawPastState as CanvasStoreState;
-            const progressOnly = isWorkflowRuntimeProgressOnly(pastState, currentState);
-            // 连续机器进度只保留首条撤销记录：整次运行折叠为一步，后续进度直接跳过。
-            if (progressOnly && lastRecordedProgressOnly) return;
-            lastRecordedProgressOnly = progressOnly;
             if (transientHistoryDepth === 0) {
               // 非包裹写入（用户命令等）：立即入栈。守卫保持到微任务边界——
-              // 同一同步批次内的多次写入（如清空画布连写九类节点、批量删除逐个
+              // 同一同步批次内的多次写入（如清空画布连写六类节点、批量删除逐个
               // removeNode）仍合并为一条记录，一次用户操作对应一步撤销。
               cancelPendingHistory();
-              lastHistoryRecordAt = Date.now();
               coalescingHistory = true;
               pushHistoryRecord?.(pastState);
               queueMicrotask(() => {
@@ -1618,20 +1650,31 @@ function createCanvasStore(initialZoom = 100): {
             // 包裹期写入走时间窗：保留最早的「变更前」快照与最新状态，收口时补一条记录。
             pendingHistoryPast ??= pastState;
             pendingHistoryCurrent = currentState;
-            pendingHistoryProgressOnly = progressOnly;
+            // 窗口起点 = 首次包裹写入的时刻（见 pendingHistoryStartedAt 的说明）。
+            pendingHistoryStartedAt ??= Date.now();
             historyFlushTimer ??= setTimeout(
               () => {
                 historyFlushTimer = null;
                 flushPendingHistory();
               },
-              Math.max(0, lastHistoryRecordAt + CANVAS_HISTORY_COALESCING_WINDOW_MS - Date.now()),
+              Math.max(
+                0,
+                (pendingHistoryStartedAt ?? Date.now()) +
+                  CANVAS_HISTORY_COALESCING_WINDOW_MS -
+                  Date.now(),
+              ),
             );
           };
         },
       },
     ),
   );
-  return { store: canvasStore, flushPendingHistory, cancelPendingHistory };
+  // 用户命令与被动写入要能被落盘层区分：suppressHistory 标记被动测量（尺寸回存、
+  // 选中同步），transientHistoryDepth 标记机器批写，两者都继续按防抖窗口落盘。
+  const store: CanvasStore = Object.assign(canvasStore, {
+    lastWriteWasUserCommand: () => !suppressHistory && transientHistoryDepth === 0,
+  });
+  return { store, flushPendingHistory, cancelPendingHistory };
 }
 
 interface CanvasStateImplementation extends CanvasStateModule {
@@ -1647,127 +1690,17 @@ function historySummary(store: CanvasStore): CanvasHistorySummary {
 
 function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplementation {
   const { store, flushPendingHistory } = createCanvasStore(initialZoom);
-  // Canvas structural undo stays in zundo. Each workflow's durable version branches outlive
-  // the older node snapshots stored there, including a delete followed by canvas undo.
-  const workflowVersions = new Map<string, KnowledgeVideoWorkflowConfig>();
-  const versionedNode = <T extends CanvasNodeData>(type: CanvasNodeType, node: T): T => {
-    if (type !== "knowledgeVideoWorkflow") return node;
-    const workflow = node as KnowledgeVideoWorkflowNodeData;
-    const previous = workflowVersions.get(workflow.key);
-    const config = previous
-      ? recordWorkflowVersion(previous, workflow.config)
-      : initializeWorkflowVersions(workflow.config);
-    return config === workflow.config ? node : ({ ...workflow, config } as T);
-  };
-  const rememberWorkflows = () => {
-    for (const node of canvasNodeLists(store.getState().nodesById).knowledgeVideoWorkflow)
-      workflowVersions.set(node.key, node.config);
-  };
-  const protectedWorkflows = (
-    keys?: ReadonlySet<string>,
-  ): ReadonlyMap<string, KnowledgeVideoWorkflowNodeData> =>
-    new Map(
-      canvasNodeLists(store.getState().nodesById)
-        .knowledgeVideoWorkflow.filter(
-          (node) =>
-            keys?.has(node.key) === true ||
-            INTERRUPTED_KNOWLEDGE_VIDEO_PHASES.has(node.config.checkpoint.phase),
-        )
-        .map((node) => [node.key, node] as const),
-    );
-  const reconcileWorkflows = (
-    freshDocument = false,
-    protectedNodes: ReadonlyMap<string, KnowledgeVideoWorkflowNodeData> = new Map(),
-    protectedFrames: ReadonlyMap<string, VideoFrameExtractorNodeData> = new Map(),
-  ) => {
-    if (freshDocument) workflowVersions.clear();
-    const current = store.getState().nodesById;
-    let nodesById = current;
-    for (const entry of Object.values(current)) {
-      if (entry.type !== "knowledgeVideoWorkflow") continue;
-      const previous = workflowVersions.get(entry.data.key);
-      const config =
-        protectedNodes.get(entry.data.key)?.config ??
-        (previous
-          ? mergeWorkflowVersionHistory(previous, entry.data.config)
-          : initializeWorkflowVersions(entry.data.config));
-      workflowVersions.set(entry.data.key, config);
-      if (config === entry.data.config) continue;
-      if (nodesById === current) nodesById = { ...current };
-      (nodesById as Record<string, CanvasNodeEntry>)[entry.data.key] = {
-        type: "knowledgeVideoWorkflow",
-        data: { ...entry.data, config },
-      };
-    }
-    // Undoing the insertion of an active workflow cannot orphan its paid in-flight execution.
-    for (const [key, data] of protectedNodes) {
-      if (nodesById[key]) continue;
-      if (nodesById === current) nodesById = { ...current };
-      (nodesById as Record<string, CanvasNodeEntry>)[key] = {
-        type: "knowledgeVideoWorkflow",
-        data,
-      };
-      workflowVersions.set(key, data.config);
-    }
-    // 媒体任务检查点属于后台执行身份；撤销布局不能丢掉或替换在途批次。
-    for (const [key, data] of protectedFrames) {
-      const entry = nodesById[key];
-      if (entry?.type === "frameExtractor" && entry.data.config === data.config) continue;
-      if (nodesById === current) nodesById = { ...current };
-      (nodesById as Record<string, CanvasNodeEntry>)[key] = {
-        type: "frameExtractor",
-        data: entry?.type === "frameExtractor" ? { ...entry.data, config: data.config } : data,
-      };
-    }
-    if (nodesById !== current) {
-      // Reattaching version metadata must not push another canvas undo or clear its redo stack.
-      store.temporal.getState().pause();
-      try {
-        store.setState({ nodesById });
-      } finally {
-        store.temporal.getState().resume();
-      }
-    }
-  };
   const commands: CanvasCommands = {
-    insertSubgraph: (nodes, edges, options) => {
-      const prepared = nodes.map((entry): CanvasNodeEntry =>
-        entry.type === "knowledgeVideoWorkflow"
-          ? { ...entry, data: versionedNode(entry.type, entry.data) }
-          : entry,
-      );
-      const result = store.getState().insertSubgraph(prepared, edges, options);
-      rememberWorkflows();
-      return result;
-    },
-    addNode: (type, node, options) => {
-      const added = store
-        .getState()
-        .addNode(
-          type,
-          (siblings) => versionedNode(type, typeof node === "function" ? node(siblings) : node),
-          options,
-        );
-      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
-      return added;
-    },
+    groupNodes: (keys, groupId) => store.getState().groupNodes(keys, groupId),
+    dissolveGroup: (groupId) => store.getState().dissolveGroup(groupId),
+    updateGroup: (groupId, patch) => store.getState().updateGroup(groupId, patch),
+    insertSubgraph: (nodes, edges, options) =>
+      store.getState().insertSubgraph(nodes, edges, options),
+    addNode: (type, node, options) => store.getState().addNode(type, node, options),
     addOutput: (node) => store.getState().addOutput(node),
-    patchNode: (type, key, update) => {
-      const result = store.getState().patchNode(type, key, (node) => {
-        const next = update(node);
-        return next === node ? node : versionedNode(type, next);
-      });
-      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
-      return result;
-    },
-    patchNodes: (type, update) => {
-      const result = store.getState().patchNodes(type, (node) => {
-        const next = update(node);
-        return next === node ? node : versionedNode(type, next);
-      });
-      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
-      return result;
-    },
+    patchNode: (type, key, update, promptDocuments) =>
+      store.getState().patchNode(type, key, update, promptDocuments),
+    patchNodes: (type, update) => store.getState().patchNodes(type, update),
     removeNode: (key) => store.getState().removeNode(key),
     connect: (fromKey, toKey) => store.getState().connect(fromKey, toKey),
     disconnect: (edgeId) => store.getState().disconnect(edgeId),
@@ -1779,33 +1712,9 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
     selectEdge: (edgeId) => store.getState().selectEdge(edgeId),
     clear: () => store.getState().clear(),
     snapshotV2: (promptContents) => snapshotCanvasV2(store.getState(), promptContents),
-    restoreDocument: (document) => {
-      const result = store.getState().restoreDocument(document);
-      if (result.ok) reconcileWorkflows(true);
-      return result;
-    },
-    undo: (protectedWorkflowKeys) => {
-      const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
-      const protectedFrames = new Map(
-        canvasNodeLists(store.getState().nodesById)
-          .frameExtractor.filter((node) => node.config.checkpoint != null)
-          .map((node) => [node.key, node] as const),
-      );
-      const result = store.getState().undo();
-      if (result === "applied") reconcileWorkflows(false, protectedNodes, protectedFrames);
-      return result;
-    },
-    redo: (protectedWorkflowKeys) => {
-      const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
-      const protectedFrames = new Map(
-        canvasNodeLists(store.getState().nodesById)
-          .frameExtractor.filter((node) => node.config.checkpoint != null)
-          .map((node) => [node.key, node] as const),
-      );
-      const result = store.getState().redo();
-      if (result === "applied") reconcileWorkflows(false, protectedNodes, protectedFrames);
-      return result;
-    },
+    restoreDocument: (document) => store.getState().restoreDocument(document),
+    undo: () => store.getState().undo(),
+    redo: () => store.getState().redo(),
     runWithCoalescedHistory: (fn) => store.getState().runWithCoalescedHistory(fn),
   };
   return {
@@ -1883,22 +1792,7 @@ export function useCanvasNodeEntry(key: string): CanvasNodeEntry | undefined {
 }
 
 const subscribeNothing = () => () => {};
-const snapshotUndefined = () => undefined;
 const snapshotNull = () => null;
-
-/**
- * 可空的单节点订阅：语义与 useCanvasNodeEntry 一致，但宿主渲染在无画布上下文的
- * 环境（单测、独立预览）时不抛错、不订阅，返回 undefined。创作助手消息里的
- * 节点代号芯片按此粒度解析自身标签，未命中节点的代号降级为纯文本。
- */
-export function useOptionalCanvasNodeEntry(key: string): CanvasNodeEntry | undefined {
-  const canvas = useContext(CanvasStoreContext);
-  return useSyncExternalStore(
-    canvas ? canvas.subscribe : subscribeNothing,
-    canvas ? () => canvas.store.getState().nodesById[key] : snapshotUndefined,
-    snapshotUndefined,
-  );
-}
 
 /**
  * 可空的成员规模订阅：返回当前画布节点总数（无上下文时 null）。总数只在
@@ -1933,6 +1827,26 @@ export function useCanvasNodeKeys(type: CanvasNodeType): readonly string[] {
       (state: CanvasStoreState) =>
         canvasNodeLists(state.nodesById)[type].map((node) => node.key) as readonly string[],
     ),
+  );
+}
+
+/**
+ * 画布里**全部**节点的 key（浅比较订阅）。
+ *
+ * 提示词内容的落盘快照需要知道「哪些节点持有提示词」。此前这靠**手工登记节点类型**
+ * （gen + videoClip），而那份登记表与真正的注册点（`PromptMentionInput` 挂载处）
+ * 没有任何编译期关联 —— 已经因此丢过两次提示词（智能剪辑漏一次、提示词节点漏一次），
+ * 症状都是「排期与落盘都正常，但重开画布就丢」。
+ *
+ * 改成「画布里存在的节点 key」之后，登记表整个不需要了：新增节点类型天然被覆盖，
+ * 也不可能再漏登记。
+ */
+export function useAllCanvasNodeKeys(): readonly string[] {
+  const canvas = useContext(CanvasStoreContext);
+  if (canvas == null) throw new Error("useAllCanvasNodeKeys must be used within CanvasStoreProvider");
+  return useStore(
+    canvas.store,
+    useShallow((state: CanvasStoreState) => Object.keys(state.nodesById)),
   );
 }
 

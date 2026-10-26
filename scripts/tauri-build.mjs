@@ -7,10 +7,6 @@ import { spawn } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  verifyGeneratedNsisRemotionResources,
-  verifyGeneratedNsisStyleResources,
-} from "./verify-nsis-remotion-resources.mjs";
 import { verifyGeneratedNsisEditionResources } from "./verify-nsis-edition-resources.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -182,19 +178,6 @@ async function main() {
     });
     console.log(
       `[tauri-build] ${env.IC_DISTRIBUTION_EDITION} NSIS exact resource table verified: ${count} files`,
-    );
-  }
-  if (
-    process.platform === "win32" &&
-    env.IC_DISTRIBUTION_EDITION !== "online" &&
-    !passthrough.includes("--no-bundle") &&
-    (bundles === "all" || bundles.split(",").includes("nsis"))
-  ) {
-    const verification = { targetDirectory: env.CARGO_TARGET_DIR, target, profile };
-    const remotionCount = verifyGeneratedNsisRemotionResources(REPO_ROOT, verification);
-    const styleCount = verifyGeneratedNsisStyleResources(REPO_ROOT, verification);
-    console.log(
-      `[tauri-build] 完整 NSIS 已包含 ${remotionCount} 个 Remotion 资源文件和 ${styleCount} 个风格库清单文件`,
     );
   }
 }

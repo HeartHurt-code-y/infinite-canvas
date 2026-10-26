@@ -187,6 +187,17 @@
   background: var(--color-surface-3);
 }
 
+/*
+ * 键盘高亮项（aria-activedescendant 指向的那一项）。
+ * 高亮不能只靠背景色差——键盘用户要能一眼看出当前停在哪一项，
+ * 所以加一道左侧强调条。
+ */
+.searchable-multi-select__option.is-active {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  box-shadow: inset var(--rule-active) 0 0 0 var(--color-accent);
+}
+
 .searchable-multi-select__option.is-selected {
   color: var(--color-accent);
   background: var(--color-accent-soft);

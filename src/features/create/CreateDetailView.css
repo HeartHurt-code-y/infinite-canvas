@@ -1,0 +1,578 @@
+/*
+ * 产物详情整页视图的外观（即梦「作品详情」浮层的实测口径）。
+ *
+ * 数值全部来自即梦活体实测（2026-10-22，DPR 1.5），
+ * 类名对应关系见 docs/integrations/jimeng-generate-page-re.md 第七节。
+ */
+
+.create-detail {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-modal) + 40);
+  display: flex;
+  box-sizing: border-box;
+  background: #121212;
+  color: rgb(255 255 255 / 0.698);
+  font-family: var(--font-jimeng);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+/* 左上角返回箭头（即梦 `.back-button-IlGQ4g`：36×36、圆角 8）。 */
+.create-detail__back {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.create-detail__back:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+/* ── 左侧大图区 ─────────────────────────────────────────────────────── */
+
+.create-detail__stage {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  gap: 16px;
+  padding: 56px 24px 24px;
+}
+
+.create-detail__media {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.create-detail__image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 2px;
+}
+
+/* 底部翻页 `‹ n / N ›`。 */
+.create-detail__pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: rgb(32 33 39 / 0.72);
+}
+
+/* 视频版即梦没有缩略图条，翻页是大图区**右侧竖排**的两枚箭头。 */
+.create-detail__pager--vertical {
+  position: absolute;
+  top: 50%;
+  right: 16px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0;
+  background: transparent;
+  transform: translateY(-50%);
+}
+
+.create-detail__pager-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.create-detail__pager-button:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.create-detail__pager-button:disabled {
+  color: rgb(255 255 255 / 0.2);
+  cursor: not-allowed;
+}
+
+.create-detail__counter {
+  min-width: 48px;
+  color: #fff;
+  font-family: var(--font-jimeng-montserrat);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: center;
+}
+
+/* ── 右侧信息栏（即梦 `.detail-area-kykVkS`：440 宽、padding 8px 40px 20px）── */
+
+.create-detail__panel {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 440px;
+  box-sizing: border-box;
+  width: 440px;
+  padding: 8px 40px 20px;
+  overflow-y: auto;
+  background: #121212;
+}
+
+/* 顶部行：左「下载」，右「☆ / ⋯」。 */
+.create-detail__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  margin: 0 14px 0 6px;
+  padding-bottom: 20px;
+}
+
+.create-detail__download {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(250 250 250);
+  font-family: var(--font-jimeng);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.create-detail__download:hover {
+  color: rgb(255 255 255 / 0.7);
+}
+
+/* 即梦的下载图标是 20px（`.icon-wrapper-jydw2i { font-size:20px }`）。 */
+.create-detail__download svg {
+  width: 20px;
+  height: 20px;
+}
+
+.create-detail__top-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.create-detail__icon-button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(255 255 255 / 0.698);
+  cursor: pointer;
+}
+
+.create-detail__icon-button:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+/*
+ * 「重命名」入口与表单。
+ *
+ * 这是本项目**多出来**的一枚入口（即梦这层没有）：本项目有「给产物命名」的后端
+ * 能力，删掉就丢了，所以放在顶部行里、挨着「下载」。
+ */
+.create-detail__rename-trigger {
+  height: 36px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(250 250 250);
+  font-family: var(--font-jimeng);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.create-detail__rename-trigger:hover {
+  background: rgb(255 255 255 / 0.06);
+}
+
+.create-detail__rename {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.create-detail__rename-label {
+  color: rgb(255 255 255 / 0.6);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.create-detail__rename-input {
+  box-sizing: border-box;
+  width: 9rem;
+  height: 28px;
+  padding: 0 8px;
+  border: 0.5px solid rgb(204 221 255 / 0.08);
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.08);
+  color: #fff;
+  font-family: var(--font-jimeng);
+  font-size: 13px;
+  line-height: 22px;
+}
+
+.create-detail__rename-input:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(255 255 255 / 0.16);
+}
+
+.create-detail__rename-button {
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.08);
+  color: #fff;
+  font-family: var(--font-jimeng);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.create-detail__rename-button:hover:not(:disabled) {
+  background: rgb(255 255 255 / 0.14);
+}
+
+.create-detail__rename-button:disabled {
+  color: rgb(255 255 255 / 0.2);
+  cursor: not-allowed;
+}
+
+/* 中段：缩略图 + 提示词 + 参数标签。 */
+.create-detail__info {
+  padding: 0 6px;
+  overflow: hidden auto;
+}
+
+.create-detail__thumbs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 20px;
+}
+
+.create-detail__thumb {
+  position: relative;
+  width: 86px;
+  height: 86px;
+  padding: 0;
+  overflow: hidden;
+  border: none;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 0.08);
+  cursor: pointer;
+}
+
+.create-detail__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.create-detail__thumb[data-active="true"] {
+  box-shadow: 0 0 0 2px #fff;
+}
+
+.create-detail__prompt-title {
+  margin-top: 20px;
+  color: rgb(255 255 255 / 0.6);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.create-detail__prompt-box {
+  position: relative;
+  margin-top: 8px;
+  padding-right: 24px;
+}
+
+.create-detail__prompt {
+  margin: 0;
+  max-height: 132px;
+  overflow: hidden;
+  color: rgb(255 255 255 / 0.698);
+  font-size: 14px;
+  line-height: 22px;
+  word-break: break-word;
+}
+
+.create-detail__prompt[data-expanded="true"] {
+  max-height: none;
+  overflow: visible;
+}
+
+.create-detail__prompt-arrows {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.create-detail__prompt-arrow {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgb(255 255 255 / 0.6);
+  cursor: pointer;
+}
+
+.create-detail__prompt-arrow:hover {
+  color: #fff;
+}
+
+.create-detail__labels {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.create-detail__label {
+  color: rgb(255 255 255 / 0.6);
+  font-size: 14px;
+  line-height: 24px;
+}
+
+/* ── 工具面板（即梦 `.group-container-Sia8JH`）───────────────────────── */
+
+.create-detail__tools {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 20px 0 0 0;
+  padding: 0 6px;
+}
+
+.create-detail__bottom {
+  margin: 20px 0 0 0;
+  padding: 0 6px;
+}
+
+/*
+ * 工具卡片：底色 rgba(255,255,255,.08)、圆角 12px、内边距 4px，
+ * 卡内是 168×36 的两列网格（间隙 4px）。
+ */
+.create-detail__group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border-radius: 12px;
+  background: rgb(255 255 255 / 0.08);
+}
+
+.create-detail__tool {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgb(250 250 250);
+  font-family: var(--font-jimeng);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 24px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-detail__tool:hover {
+  background: rgb(255 255 255 / 0.08);
+}
+
+.create-detail__tool svg {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.create-detail__tool-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「用作参考图」「对口型」占满两列。 */
+.create-detail__tool[data-wide="true"] {
+  grid-column: span 2;
+}
+
+/* 「多角度」那枚 New 角标。 */
+.create-detail__tool-new {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: #2b6cf6;
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+/* 即梦给 AI 能力打的蓝色 ✦（「智能超清 / 补帧 / 擦除字幕」）。 */
+.create-detail__tool-ai {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  color: #2b6cf6;
+}
+
+/* 视频版的「详细信息 ⓘ」另起一行（即梦 `.detail-info-fBoMDH` 是 column 布局）。 */
+.create-detail__detail-line {
+  margin-top: 8px;
+}
+
+.create-detail__detail {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: rgb(255 255 255 / 0.6);
+  font-family: var(--font-jimeng);
+  font-size: 14px;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.create-detail__detail svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* ── 视频版播放器（即梦用 xgplayer，这里用自绘控件条）────────────────── */
+
+/* 播放器外壳要「包住视频」而不是铺满区域——控件条才贴得住视频底边。 */
+.create-detail__player {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.create-detail__video {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 200px);
+  object-fit: contain;
+  border-radius: 16px;
+}
+
+/* 进度线：贴着视频底边的一条细线。 */
+.create-detail__player-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 40px;
+  height: 2px;
+  background: rgb(255 255 255 / 0.2);
+}
+
+.create-detail__player-track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.create-detail__player-played {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: #fff;
+}
+
+.create-detail__player-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 12px;
+}
+
+.create-detail__player-left,
+.create-detail__player-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.create-detail__player-button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: #fff;
+  cursor: pointer;
+}
+
+.create-detail__player-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.create-detail__player-time {
+  color: #fff;
+  font-family: var(--font-jimeng-montserrat);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 22px;
+}

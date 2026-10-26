@@ -2,20 +2,30 @@ import {
   assetNodeDimensions,
   nearestAvailableNodePosition,
   outputNodeDimensions,
+  genNodeDimensions,
+  SCREENPLAY_NODE_WIDTH,
+  SCREENPLAY_NODE_HEIGHT,
+  VIDEO_CLIP_NODE_WIDTH,
+  VIDEO_CLIP_NODE_HEIGHT,
+  PROMPT_NODE_WIDTH,
+  PROMPT_NODE_HEIGHT,
+  RESULT_NODE_WIDTH,
+  RESULT_NODE_HEIGHT,
   type AssetItem,
   type AssetNodeData,
   type CanvasNodeRect,
   type OutputNodeData,
 } from "./workspaceModel";
+import type { CanvasNodeData } from "../canvas/canvasStore";
 
-/** 可以框进同一组的画布卡片：素材或已落下的产物。 */
-export type CanvasGroupMember = AssetNodeData | OutputNodeData;
+/** 普通组可组织任意画布节点，组本身不参与执行。 */
+export type CanvasGroupMember = CanvasNodeData;
 
 interface GroupableNode {
   readonly key: string;
   readonly x: number;
   readonly y: number;
-  readonly name: string | null;
+  readonly name?: string | null;
   readonly libraryPickOrder?: number;
   readonly assetGroupId?: string;
   readonly measured?: { readonly width: number; readonly height: number };
@@ -26,6 +36,8 @@ export const ASSET_GROUP_FLOW_PREFIX = "asset-group:";
 
 const GROUP_PAD = 16;
 const GROUP_HEADER = 32;
+/** 普通节点的标题伸出卡片上沿，组工具条必须在标题之外。 */
+const GROUP_NODE_LABEL_GAP = 40;
 /** 右侧留白，让组的输出端口落在素材卡片外面。 */
 const GROUP_GUTTER = 28;
 
@@ -65,10 +77,38 @@ function withoutAssetGroup<T extends GroupableNode>(node: T): T {
 
 export function isUploadableOutput(node: CanvasGroupMember): node is OutputNodeData {
   return (
-    !("assetId" in node) &&
+    "resultKey" in node &&
     (node.mediaType === "image" || node.mediaType === "video" || node.mediaType === "audio") &&
     node.finalPath != null
   );
+}
+
+export function isMediaGroupMember(
+  node: CanvasGroupMember,
+): node is AssetNodeData | OutputNodeData {
+  return "assetId" in node || "resultKey" in node;
+}
+
+export function canvasGroupMemberName(node: CanvasGroupMember): string {
+  if ("name" in node && node.name) return node.name;
+  if ("resultKey" in node) return "产物";
+  if (!("kind" in node)) return "结果展示";
+  switch (node.kind) {
+    case "prompt":
+      return "提示词";
+    case "image":
+      return "图片生成";
+    case "video":
+      return "视频生成";
+    case "screenplay":
+      return "剧本";
+    case "video_clip":
+      return "智能剪辑";
+    case "audio":
+      return "音频素材";
+    default:
+      return "节点";
+  }
 }
 
 function finitePickOrder(node: GroupableNode): number | null {
@@ -197,11 +237,26 @@ export function dissolveAssetGroupNodes<T extends GroupableNode>(
 function memberSize(node: CanvasGroupMember): { readonly width: number; readonly height: number } {
   const measured = node.measured;
   if (measured != null && measured.width > 0 && measured.height > 0) return measured;
-  return "assetId" in node ? assetNodeDimensions(node) : outputNodeDimensions(node);
+  if ("assetId" in node) return assetNodeDimensions(node);
+  if ("resultKey" in node) return outputNodeDimensions(node);
+  if (!("kind" in node)) return { width: RESULT_NODE_WIDTH, height: RESULT_NODE_HEIGHT };
+  switch (node.kind) {
+    case "image":
+    case "video":
+    case "prompt":
+      return genNodeDimensions(node.kind);
+    case "screenplay":
+      return { width: SCREENPLAY_NODE_WIDTH, height: SCREENPLAY_NODE_HEIGHT };
+    case "video_clip":
+      return { width: VIDEO_CLIP_NODE_WIDTH, height: VIDEO_CLIP_NODE_HEIGHT };
+    default:
+      return { width: PROMPT_NODE_WIDTH, height: PROMPT_NODE_HEIGHT };
+  }
 }
 
 /** 包住全部成员，并在上方留标题栏、右侧留输出端口。 */
 export function assetGroupBounds(members: readonly CanvasGroupMember[]): CanvasNodeRect {
+  const header = GROUP_HEADER + (members.every(isMediaGroupMember) ? 0 : GROUP_NODE_LABEL_GAP);
   if (members.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -216,9 +271,9 @@ export function assetGroupBounds(members: readonly CanvasGroupMember[]): CanvasN
   }
   return {
     x: minX - GROUP_PAD,
-    y: minY - GROUP_PAD - GROUP_HEADER,
+    y: minY - GROUP_PAD - header,
     width: maxX - minX + GROUP_PAD * 2 + GROUP_GUTTER,
-    height: maxY - minY + GROUP_PAD * 2 + GROUP_HEADER,
+    height: maxY - minY + GROUP_PAD * 2 + header,
   };
 }
 

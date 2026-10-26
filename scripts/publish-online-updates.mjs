@@ -8,9 +8,7 @@ import {
   COMPONENT_REPO_ROOT,
   componentBytesSha256,
   componentFileSha256,
-  RUNTIME_COMPONENTS,
-  runtimeComponentArchiveUrl,
-} from "./runtime-component-catalog.mjs";
+} from "./runtime-resources.mjs";
 import { verifyEditionRelease } from "./verify-edition-release.mjs";
 import { tosUpdatesObjectKey, tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 
@@ -161,7 +159,6 @@ export async function prepareOnlinePublication({
       verification.publishManifestVerified === true &&
       verification.sourceFreshnessVerified === true &&
       SHA256.test(verification.sourceFingerprint) &&
-      verification.executable?.compiledPinsVerified === true &&
       (isMac
         ? Number.isSafeInteger(verification.bundleResourceCount) &&
           verification.bundleResourceCount > 0 &&
@@ -183,7 +180,6 @@ export async function prepareOnlinePublication({
           SHA256.test(verification.macos.pkg.sha256)
         : Number.isSafeInteger(verification.nsisResourceCount) &&
           verification.nsisResourceCount > 0) &&
-      verification.componentArchiveCount === RUNTIME_COMPONENTS.length &&
       verification.installer?.updaterSignatureVerified === true,
     "Publication requires successful full online release verification",
   );
@@ -194,17 +190,7 @@ export async function prepareOnlinePublication({
   const manifest = JSON.parse(originalManifest);
   exactKeys(
     manifest,
-    [
-      "schemaVersion",
-      "edition",
-      "applicationVersion",
-      "platform",
-      "channel",
-      "catalogSha256",
-      "feed",
-      "artifacts",
-      "componentArchives",
-    ],
+    ["schemaVersion", "edition", "applicationVersion", "platform", "channel", "feed", "artifacts"],
     "Publish manifest",
   );
   requireValue(
@@ -212,10 +198,8 @@ export async function prepareOnlinePublication({
       manifest.edition === "online" &&
       manifest.applicationVersion === version &&
       manifest.platform === platform &&
-      manifest.channel === channel &&
-      SHA256.test(manifest.catalogSha256) &&
-      manifest.catalogSha256 === verification.catalogSha256,
-    "Publish manifest identity changed or does not match the verified catalog",
+      manifest.channel === channel,
+    "Publish manifest identity changed or does not match the verified release",
   );
   exactKeys(manifest.feed, ["localPath", "objectKey", "url"], "Publish feed");
   requireValue(
@@ -225,42 +209,10 @@ export async function prepareOnlinePublication({
     "Feed path escapes the dedicated online channel",
   );
   requireValue(
-    Array.isArray(manifest.artifacts) &&
-      manifest.artifacts.length === (isMac ? 5 : 2) &&
-      Array.isArray(manifest.componentArchives) &&
-      manifest.componentArchives.length === RUNTIME_COMPONENTS.length,
-    "Publish exactly the native edition artifacts and seven ZIP components",
+    Array.isArray(manifest.artifacts) && manifest.artifacts.length === (isMac ? 5 : 2),
+    "Publish exactly the native edition artifacts",
   );
   const objects = [];
-  const ids = new Set();
-  for (const archive of manifest.componentArchives) {
-    exactKeys(
-      archive,
-      ["id", "localPath", "format", "url", "size", "sha256"],
-      "Publish component archive",
-    );
-    requireValue(
-      RUNTIME_COMPONENTS.some(({ id }) => id === archive.id) &&
-        !ids.has(archive.id) &&
-        archive.format === "zip" &&
-        SHA256.test(archive.sha256) &&
-        Number.isSafeInteger(archive.size) &&
-        archive.size > 0 &&
-        archive.size <= 8 * 1024 ** 3 &&
-        archive.localPath ===
-          path.join(root, ".cache/runtime-components/packages", `${archive.sha256}.zip`) &&
-        archive.url ===
-          runtimeComponentArchiveUrl(archive.id, archive.sha256, {
-            platform,
-          }),
-      "Component upload is outside the trusted catalog/cache contract",
-    );
-    ids.add(archive.id);
-    const objectKey = tosUpdatesObjectKey(
-      `components/${platform}/${archive.id}-${archive.sha256}.zip`,
-    );
-    objects.push({ ...archive, objectKey, contentType: "application/zip" });
-  }
   const installerName = updaterName(version, platform);
   const artifactPaths = isMac
     ? [
@@ -324,7 +276,6 @@ export async function prepareOnlinePublication({
     applicationVersion: version,
     platform,
     channel,
-    catalogSha256: manifest.catalogSha256,
     directory,
     root,
     objects,
@@ -412,7 +363,6 @@ export async function publishOnlineEdition({
   transportFactory = defaultTransportFactory,
   verifyRelease = verifyEditionRelease,
   dryRun = false,
-  componentsOnly = false,
   onProgress = () => {},
 }) {
   const plan = await prepareOnlinePublication({
@@ -421,23 +371,13 @@ export async function publishOnlineEdition({
     platform,
     verifyRelease,
   });
-  // --components-only 只预热组件包对象（不读频道、不动 latest.json）：
-  // 组件升级后可先行上传，正式发布时同内容对象直接 HEAD 命中复用。
-  const componentPrefix = tosUpdatesObjectKey(`components/${platform}/`);
-  const objects = componentsOnly
-    ? plan.objects.filter((entry) => entry.objectKey.startsWith(componentPrefix))
-    : plan.objects;
-  requireValue(
-    !componentsOnly || objects.length > 0,
-    "No component objects matched the requested platform",
-  );
+  const objects = plan.objects;
   const report = {
     schemaVersion: 1,
     edition: plan.edition,
     applicationVersion: plan.applicationVersion,
     platform: plan.platform,
     channel: plan.channel,
-    catalogSha256: plan.catalogSha256,
     dryRun,
     objects: objects.map(({ objectKey, url, size, sha256 }) => ({
       objectKey,
@@ -456,27 +396,11 @@ export async function publishOnlineEdition({
     return {
       ...report,
       published: false,
-      ...(componentsOnly ? { componentsOnly: true } : {}),
       localReleaseVerified: true,
     };
   const transport = await transportFactory({ root: plan.root, platform: plan.platform });
   for (const method of ["readObject", "headObject", "putObject", "verifyPublicObject"])
     requireValue(typeof transport?.[method] === "function", `Online transport lacks ${method}`);
-  if (componentsOnly) {
-    const outcomes = [];
-    for (const entry of objects) {
-      await assertLocalObject(entry, plan.root);
-      outcomes.push(await publishImmutable(transport, entry, onProgress));
-    }
-    return {
-      ...report,
-      published: false,
-      componentsOnly: true,
-      uploadedObjectCount: outcomes.filter((value) => value === "uploaded").length,
-      reusedObjectCount: outcomes.filter((value) => value === "reused").length,
-      publicObjectsVerified: true,
-    };
-  }
   const previous = await transport.readObject({
     objectKey: plan.feed.objectKey,
     maxBytes: JSON_BUDGET,
@@ -495,7 +419,7 @@ export async function publishOnlineEdition({
     await assertLocalObject(entry, plan.root);
     outcomes.push(await publishImmutable(transport, entry, onProgress));
   }
-  // Uploading the large components can take time. Re-run source freshness and
+  // Uploading the installer can take time. Re-run source freshness and
   // installer verification before the only mutable release pointer is touched.
   const finalVerification = await verifyRelease({
     distributionDirectory: plan.directory,
@@ -526,10 +450,8 @@ export async function publishOnlineEdition({
           finalVerification.macos.pkg.packageIdentifier ===
             plan.verification.macos.pkg.packageIdentifier &&
           finalVerification.macos.pkg.sha256 === plan.verification.macos.pkg.sha256)) &&
-      finalVerification.catalogSha256 === plan.catalogSha256 &&
       finalVerification.installer?.sha256 === plan.verification.installer.sha256 &&
       finalVerification.installer?.updaterSignatureVerified === true &&
-      finalVerification.executable?.compiledPinsVerified === true &&
       finalVerification.executable.sha256 === plan.verification.executable.sha256 &&
       finalVerification.sourceFreshnessVerified === true &&
       finalVerification.sourceFingerprint === plan.verification.sourceFingerprint,
@@ -628,18 +550,16 @@ export async function publishOnlineEdition({
 export function parseOnlinePublishArgs(args) {
   const distributionAt = args.indexOf("--distribution-dir");
   const dryRun = args.includes("--dry-run");
-  const componentsOnly = args.includes("--components-only");
   requireValue(
     distributionAt >= 0 &&
       args[distributionAt + 1] &&
       !args[distributionAt + 1].startsWith("--") &&
-      args.length === 2 + (dryRun ? 1 : 0) + (componentsOnly ? 1 : 0) &&
+      args.length === 2 + (dryRun ? 1 : 0) &&
       args.filter((argument) => argument === "--distribution-dir").length === 1 &&
-      args.filter((argument) => argument === "--dry-run").length <= 1 &&
-      args.filter((argument) => argument === "--components-only").length <= 1,
-    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run] [--components-only]",
+      args.filter((argument) => argument === "--dry-run").length <= 1,
+    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run]",
   );
-  return { distributionDirectory: args[distributionAt + 1], dryRun, componentsOnly };
+  return { distributionDirectory: args[distributionAt + 1], dryRun };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

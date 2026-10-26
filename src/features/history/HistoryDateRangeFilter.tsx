@@ -1,5 +1,5 @@
 import { useId, useState } from "react";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { parseHistoryDateRange, type HistoryDateRange } from "./historyDateRange";
 import "./HistoryDateRangeFilter.css";
 
@@ -69,12 +69,11 @@ export function HistoryDateRangeFilter({
         </button>
       </div>
       {error ? (
-        <>
-          <p id={`${id}-error`} role="alert">
-            {error}
-          </p>
-          <ErrorCopyButton text={error} />
-        </>
+        <ErrorAlert
+          error={error}
+          id={`${id}-error`}
+          hint="请调整开始/结束时间后重新查询。"
+        />
       ) : null}
     </form>
   );

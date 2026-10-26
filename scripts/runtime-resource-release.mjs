@@ -25,28 +25,10 @@ const WINDOWS_RESERVED_STEMS = new Set([
 ]);
 export const RESOURCE_COMPONENTS = [
   {
-    name: "blender",
-    source: "src-tauri/resources/blender",
-    manifestPath: "manifest.json",
-    installed: "blender",
-  },
-  {
-    name: "remotion-runtime",
-    source: "src-tauri/resources/remotion-runtime",
-    manifestPath: "runtime-manifest.json",
-    installed: "remotion-runtime",
-  },
-  {
     name: "ffmpeg",
     source: "src-tauri/resources/ffmpeg",
     manifestPath: "manifest.json",
     installed: "ffmpeg",
-  },
-  {
-    name: "gpt-image-2-style-library",
-    source: "src-tauri/skills/gpt-image-2-style-library",
-    manifestPath: "data/manifest.json",
-    installed: "skills/gpt-image-2-style-library",
   },
 ];
 

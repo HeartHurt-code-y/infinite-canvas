@@ -344,13 +344,7 @@
   border-color: var(--color-rule);
 }
 
-.history-dialog
-  :is(
-    .history-list__error,
-    .history-detail__error,
-    .history-regenerate__error,
-    .workflow-history__error
-  ) {
+.history-dialog :is(.history-list__error, .history-detail__error, .history-regenerate__error) {
   min-width: 0;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -454,19 +448,12 @@
     .history-attempt__meta,
     .history-attempt__number,
     .history-call__index,
-    .history-payload__format,
-    .workflow-history__tasks span
+    .history-payload__format
   ) {
   font-size: var(--text-xs);
 }
 
-.history-dialog
-  :is(
-    .history-facts dd,
-    .history-prompt-text,
-    .workflow-history__timeline p,
-    .workflow-history__message
-  ) {
+.history-dialog :is(.history-facts dd, .history-prompt-text) {
   font-size: var(--text-sm);
   line-height: 1.65;
 }
@@ -495,12 +482,6 @@
 }
 
 .history-dialog .remote-video-history .remote-video-history__primary {
-  color: var(--color-brand-ink);
-  background: var(--color-brand);
-  border-color: var(--color-brand);
-}
-
-.history-dialog .workflow-history__detail .workflow-history__primary {
   color: var(--color-brand-ink);
   background: var(--color-brand);
   border-color: var(--color-brand);
@@ -700,7 +681,6 @@
     :is(.provider-fetch-action, .model-save-action, .asset-token-save-action):hover:not(:disabled),
   .settings-dialog .token-group-settings__actions .token-group-settings__add:hover:not(:disabled),
   .history-dialog .remote-video-history .remote-video-history__primary:hover:not(:disabled),
-  .history-dialog .workflow-history__detail .workflow-history__primary:hover:not(:disabled),
   .history-dialog .history-date-filter__actions button[type="submit"]:hover:not(:disabled),
   .history-dialog .history-regenerate .history-regenerate__primary:hover:not(:disabled),
   .regenerate-dialog .regenerate-dialog__actions .regenerate-dialog__submit:hover:not(:disabled),

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
-import { formatRawBackendError } from "../../lib/backend";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { formatRawBackendError, frontendLog } from "../../lib/backend";
 import { validateArtifactName } from "./artifactNames";
 import "./NodeNameEditor.css";
 
@@ -16,7 +16,8 @@ export function NodeNameEditor({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [error, setError] = useState<unknown>(null);
   const submit = async () => {
     if (busy) return;
     const validation = validateArtifactName(draft);
@@ -30,7 +31,9 @@ export function NodeNameEditor({
       setEditing(false);
       setError(null);
     } catch (failure) {
-      setError(formatRawBackendError(failure));
+      // 原始 payload 只进日志；界面上的摘要交给 ErrorAlert。
+      frontendLog("error", `[canvas] 保存节点名称失败：${formatRawBackendError(failure)}`);
+      setError(failure);
     } finally {
       setBusy(false);
     }
@@ -80,12 +83,9 @@ export function NodeNameEditor({
             取消
           </button>
           {error ? (
-            <>
-              <span className="node-name-editor__error" role="alert">
-                {error}
-              </span>
-              <ErrorCopyButton text={error} />
-            </>
+            <span className="node-name-editor__error">
+              <ErrorAlert error={error} hint="请换一个名称后重试。" />
+            </span>
           ) : null}
         </>
       ) : (

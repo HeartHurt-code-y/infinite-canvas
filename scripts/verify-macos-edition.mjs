@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { createGunzip } from "node:zlib";
 import os from "node:os";
 import path from "node:path";
-import { componentFileSha256, componentPathIsValid } from "./runtime-component-catalog.mjs";
+import { componentFileSha256, componentPathIsValid } from "./runtime-resources.mjs";
 
 const executeFile = promisify(execFile);
 const TAR_BUDGET = 2 * 1024 ** 3;

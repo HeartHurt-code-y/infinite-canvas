@@ -40,8 +40,6 @@
 }
 
 .canvas-tabs__tab,
-.canvas-tabs__rename,
-.canvas-tabs__delete,
 .canvas-tabs__create {
   display: inline-flex;
   align-items: center;
@@ -60,6 +58,84 @@
   min-width: 0;
 }
 
+/* 画布切换（原站顶栏的「画布 1 ⌄」）：下拉里放画布列表 + 重命名 / 删除。 */
+.canvas-tabs__switcher {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--size-control-small);
+  min-width: var(--size-control-small);
+  height: var(--size-control-small);
+  padding: 0;
+  color: var(--color-chrome-muted);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+.canvas-tabs__switcher-menu {
+  position: fixed;
+  z-index: var(--z-modal);
+  display: flex;
+  min-width: 12.5rem;
+  max-height: 20rem;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3xs);
+  overflow: auto;
+  color: var(--color-text);
+  background: var(--nt-bg-float);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-menu);
+}
+
+.canvas-tabs__switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.canvas-tabs__switcher-item {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  height: var(--size-control-small);
+  padding: 0 var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  text-align: start;
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
+.canvas-tabs__switcher-item.is-current {
+  color: var(--nt-text-brand);
+}
+
+.canvas-tabs__switcher-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-tabs__switcher-action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: var(--size-control-small);
+  min-width: var(--size-control-small);
+  height: var(--size-control-small);
+  padding: 0;
+  color: var(--color-chrome-muted);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+}
+
 .canvas-tabs__name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -69,12 +145,6 @@
 .canvas-tabs__tab[aria-selected="true"] {
   color: var(--color-chrome-ink);
   font-weight: 600;
-}
-
-.canvas-tabs__rename,
-.canvas-tabs__delete {
-  flex: 0 0 2rem;
-  padding-inline: var(--space-xs);
 }
 
 .canvas-tabs__create {
@@ -105,15 +175,12 @@
 
 @media (hover: hover) {
   .canvas-tabs__tab:hover:not([aria-disabled="true"]),
-  .canvas-tabs__rename:hover:not(:disabled),
+  .canvas-tabs__switcher:hover:not(:disabled),
+  .canvas-tabs__switcher-item:hover:not(:disabled),
+  .canvas-tabs__switcher-action:hover:not(:disabled),
   .canvas-tabs__create:hover:not(:disabled) {
     background: var(--color-chrome-3);
     color: var(--color-chrome-ink);
-  }
-
-  .canvas-tabs__delete:hover:not(:disabled) {
-    background: var(--color-error-soft);
-    color: var(--color-error);
   }
 }
 

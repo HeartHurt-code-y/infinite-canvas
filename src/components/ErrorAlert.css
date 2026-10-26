@@ -19,6 +19,83 @@
   line-height: 1.5;
 }
 
+/*
+ * 警告色调：琥珀色而不是红色。
+ *
+ * 有些提示不是「操作失败」而是「这里还差一步」（素材角色与模型要求不符、
+ * 白模控制项待完善）。过去它们各写各的 `<p role="alert">`，样式散在好几处
+ * CSS 里；收敛到 ErrorAlert 后仍要保留「警告 ≠ 错误」的视觉区分 —— 否则
+ * 用户会把黄色提示当成红色失败，白白改掉本来正确的东西。
+ *
+ * 描边比错误态更实一点：警告不紧急，但确实需要用户处理。
+ */
+.error-alert[data-tone="warning"] .error-alert__summary {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border-color: color-mix(in oklch, var(--color-warning) 52%, transparent);
+}
+
+/*
+ * 紧凑版式：用在本来就该紧凑的地方（画布节点工具栏、素材上传列表行）。
+ *
+ * 那些位置套上带底色描边的面板会撑破布局 —— 节点卡被顶高、列表行多出半屏空白。
+ * 紧凑版去掉底色与描边，只留「图标 + 文字 + 复制」：
+ * 错误仍然靠图标与红色文字双重编码（不靠颜色单独传达），
+ * 但视觉重量回到与周围文字一致。
+ */
+.error-alert--inline {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.error-alert--inline .error-alert__summary {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--space-3xs);
+  min-width: 0;
+  padding: 0;
+  color: var(--color-error);
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-size: inherit;
+  line-height: inherit;
+  overflow-wrap: anywhere;
+}
+
+.error-alert--inline .error-alert__summary svg {
+  margin-block-start: 0;
+}
+
+.error-alert--inline .error-alert__text {
+  display: inline;
+  gap: 0;
+  min-width: 0;
+}
+
+.error-alert--inline .error-alert__hint {
+  display: inline;
+  margin-inline-start: var(--space-3xs);
+}
+
+.error-alert--inline .error-alert__actions {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.error-alert--inline[data-tone="warning"] .error-alert__summary {
+  color: var(--color-warning);
+}
+
+.error-alert[data-tone="warning"] .error-alert__details summary:hover {
+  color: var(--color-warning);
+}
+
 .error-alert__summary svg {
   flex: 0 0 auto;
   margin-block-start: var(--space-3xs);

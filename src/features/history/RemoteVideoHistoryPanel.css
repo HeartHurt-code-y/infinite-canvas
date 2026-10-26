@@ -93,20 +93,6 @@
   font-size: var(--text-xs);
 }
 
-.remote-video-history__error {
-  color: var(--color-error);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-sm);
-}
-
-.remote-video-history__error button {
-  font-size: var(--text-xs);
-}
-
 .remote-video-history__notice {
   color: var(--color-ink);
 }

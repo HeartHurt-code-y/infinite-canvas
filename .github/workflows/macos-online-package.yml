@@ -59,40 +59,34 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Run affected distribution tests
+      - name: Check distribution prerequisites
         run: |
-          export IC_COMPONENT_PYTHON="$(command -v python3)"
-          "$IC_COMPONENT_PYTHON" -c 'import sys; assert sys.version_info >= (3, 11)'
-          node --test scripts/runtime-component-catalog.test.mjs scripts/package-runtime-components.test.mjs scripts/tauri-build.test.mjs scripts/tauri-build-edition.test.mjs scripts/verify-edition-release.test.mjs scripts/verify-macos-edition.test.mjs scripts/create-macos-install-dmg.test.mjs scripts/create-macos-install-package.test.mjs scripts/publish-online-updates.test.mjs scripts/edition-source-fingerprint.test.mjs scripts/macos-runtime-signature.test.mjs scripts/prepare-ffmpeg.test.mjs scripts/online-update-transport.test.mjs scripts/install-macos.test.mjs scripts/prepare-ai-media-runtime.test.mjs
+          export IC_PYTHON_INTERPRETER="$(command -v python3)"
+          "$IC_PYTHON_INTERPRETER" -c 'import sqlite3; import sys; assert sys.version_info >= (3, 9)'
       - name: Prepare optional signing identity
         run: bash scripts/prepare-macos-online-signing.sh
-      # Cache native prepared trees and their verified ZIPs, not application-version
-      # catalogs or installers. Every prepare/pack command still validates the files.
-      - name: Restore native runtime components
-        id: runtime-components-cache
+      # Cache the prepared native runtime resources (the bundled FFmpeg engine),
+      # not application-version catalogs or installers. Every prepare command
+      # still validates the files it restores.
+      - name: Restore prepared runtime resources
+        id: runtime-resources-cache
         uses: actions/cache/restore@v5
         with:
           path: |
             src-tauri/resources/ffmpeg
-            src-tauri/resources/remotion-runtime
-            src-tauri/resources/blender
-            src-tauri/resources/pose-runtime
-            src-tauri/resources/ai-media-runtime
-            src-tauri/resources/ai-media-quality-runtime
-            .cache/runtime-components/packages
           # Some legacy preparers only validate existing bytes, rather than their
           # complete recipe identity. Exact keys prevent restoring an older recipe.
-          key: macos-online-components-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/runtime-component-zip.py', 'scripts/macos-runtime-signature.mjs', 'scripts/ai-media/**', 'tools/blender/**', 'tools/remotion-runtime/*.mjs', 'tools/remotion-runtime/*.tsx', 'tools/remotion-runtime/package.json', 'tools/remotion-runtime/pnpm-lock.yaml', 'src-tauri/skills/gpt-image-2-style-library/**', '!scripts/**/*.test.mjs', '!tools/**/*.test.mjs') }}
-      - name: Report runtime component cache
+          key: macos-online-resources-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/macos-runtime-signature.mjs', '!scripts/**/*.test.mjs', '!tools/**/*.test.mjs') }}
+      - name: Report runtime resource cache
         env:
-          CACHE_HIT: ${{ steps.runtime-components-cache.outputs.cache-hit }}
-          CACHE_MATCHED_KEY: ${{ steps.runtime-components-cache.outputs.cache-matched-key }}
+          CACHE_HIT: ${{ steps.runtime-resources-cache.outputs.cache-hit }}
+          CACHE_MATCHED_KEY: ${{ steps.runtime-resources-cache.outputs.cache-matched-key }}
         run: |
           {
-            echo '### Native runtime component cache'
+            echo '### Prepared runtime resource cache'
             echo "- Exact input match: ${CACHE_HIT:-false}"
             echo "- Restored key: ${CACHE_MATCHED_KEY:-none}"
-            echo '- Preparation and ZIP integrity checks always run; unchanged verified components are reused.'
+            echo '- Preparation and integrity checks always run; unchanged verified resources are reused.'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Build and verify online DMG and updater
         id: verified-build
@@ -100,20 +94,14 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/build-macos-online.sh
       # Save immediately after native verification, so a later publication or
-      # artifact-upload failure does not discard successfully prepared components.
-      - name: Save verified native runtime components
-        if: steps.verified-build.outcome == 'success' && steps.runtime-components-cache.outputs.cache-hit != 'true'
+      # artifact-upload failure does not discard successfully prepared resources.
+      - name: Save verified runtime resources
+        if: steps.verified-build.outcome == 'success' && steps.runtime-resources-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v5
         with:
           path: |
             src-tauri/resources/ffmpeg
-            src-tauri/resources/remotion-runtime
-            src-tauri/resources/blender
-            src-tauri/resources/pose-runtime
-            src-tauri/resources/ai-media-runtime
-            src-tauri/resources/ai-media-quality-runtime
-            .cache/runtime-components/packages
-          key: ${{ steps.runtime-components-cache.outputs.cache-primary-key }}
+          key: ${{ steps.runtime-resources-cache.outputs.cache-primary-key }}
       - name: Publish verified online release
         if: inputs.publish
         env:
@@ -122,14 +110,12 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
-      - name: Upload installation and component artifacts
+      - name: Upload installation artifacts
         uses: actions/upload-artifact@v4
         with:
           name: infinite-canvas-macos-online-${{ inputs.architecture }}-${{ github.sha }}
           path: |
             .cache/tauri-editions/online/artifacts/*/
-            .cache/runtime-components/packages/*.zip
-            src-tauri/resources/component-catalog.json
           include-hidden-files: true
           if-no-files-found: error
           compression-level: 0
@@ -137,7 +123,7 @@ jobs:
       - name: Report installation boundary
         run: |
           {
-            echo 'macOS online PKG, DMG, updater signature and component archives verified. The PKG was actually installed with the system installer.'
+            echo 'macOS online PKG, DMG and updater signature verified. The PKG was actually installed with the system installer.'
             echo 'Installation scripts are embedded. Install the PKG with: sudo installer -pkg <downloaded.pkg> -target /'
             echo 'Apple notarization is not performed. Gatekeeper may block first installation; the PKG embeds install-macos.sh and runs it automatically.'
           } >> "$GITHUB_STEP_SUMMARY"

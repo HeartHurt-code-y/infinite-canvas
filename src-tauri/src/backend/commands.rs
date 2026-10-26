@@ -5,9 +5,6 @@ use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
     BackendState,
-    ai_media::{AiMediaJobRecord, AiMediaMode, StartAiMediaCommand},
-    ai_media_runtime::AiMediaRuntimeStatus,
-    blender::{BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
     brand_design::{
         self, BrandDesignExportResult, BrandDesignImage, ExportBrandDesignBundleCommand,
         ReadBrandDesignImageCommand,
@@ -16,9 +13,6 @@ use super::{
         ArchiveBrandModelCommand, BrandModelProfile, BrandModelVersion, BrandModelVersionCommand,
         SaveBrandModelVersionCommand,
     },
-    commerce_sources::{self, CommerceSource},
-    component_manager::{ComponentManagerStatus, RuntimeFeatureStatus},
-    composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
     cover_images::{
         self, NormalizeCoverImageCommand, NormalizedCoverImage, ResumeCoverImageResultCommand,
     },
@@ -31,42 +25,15 @@ use super::{
         GATEWAY_TTS_REQUEST_PROFILE, provider_scoped_model_definition_id,
         validate_schema_for_operations,
     },
-    mv_audio::{
-        self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
-    },
-    product_scene_images::{
-        ApplyProductSceneLogoCommand, ComposeProductSceneCommand,
-        ComposeProtectedProductSceneCommand, ExportProductScenesCommand,
-        NormalizeProductSceneImageCommand, PrepareProductViewCommand, PreparedProductView,
-        ProductSceneComposite, ProductSceneExport, ProductSceneGeneratedImage,
-        ProductSceneLogoComposite, ProductSceneProtectedComposite, ProductViewIdentity,
-        ValidateProductViewsCommand,
-    },
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider_adapter::ProviderAdapterKind,
-    reelbench::{
-        self, AnalyzeReelbenchCommand, ExportReelbenchVideoCommand, RecutReelbenchCommand,
-        ReelbenchShotDraft, ReelbenchValidation, ReelbenchVideoExport,
-    },
-    remotion_renderer::{
-        RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
-    },
     resource_update::{self, RuntimeResourceUpdateStatus},
-    reverse_video::{
-        DeliverReverseVideoCommand, ReverseVideoDelivery, ReverseVideoEvidence,
-        ReverseVideoLearning, SaveReverseVideoEvidenceCommand,
-    },
-    runtime_components::RuntimeComponentMigrationStatus,
     speech::{
         self, ComposeDubbedVideoCommand, DubbedVideo, GetSpeechRequestStatusCommand,
         ListSpeechVoicesCommand, SpeechRequestStatus, SpeechVoice, SynthesizeSpeechCommand,
         SynthesizedSpeech,
     },
     storage::now_ms,
-    storage::workflow_history::{
-        SaveWorkflowHistoryCommand, WorkflowHistoryDetail, WorkflowHistoryPage,
-        WorkflowHistoryQuery, WorkflowHistoryRecord,
-    },
     types::{
         AssetGroupRecord, AssetImportOutputRecord, AssetKindCountCommand, AssetListCommand,
         AssetStatusObservation, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetKindTotals,
@@ -74,120 +41,28 @@ use super::{
         CreateLocalBase64AssetGroupCommand, CreateRealPersonAuthLinkCommand, CredentialStatus,
         DeleteAssetCommand, DeleteAssetGroupCommand, DeleteLocalBase64AssetCommand,
         DeleteLocalBase64AssetGroupCommand, DeleteProviderTokenGroupCommand,
-        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, GenerationOperation,
-        GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
-        GenerationTaskProgress, ImportLocalBase64AssetCommand, ImportedAssetSource,
-        ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, LocalBase64AssetGroupRecord,
-        LocalBase64AssetPage, LocalBase64AssetRecord, MediaType, ModelDefinition,
-        MoveLocalBase64AssetsCommand, ObserveAssetStatusCommand, ProviderConnection,
-        ProviderModelBinding, ProviderModelSelection, ProviderTokenGroup, RealPersonAuthLink,
-        RealPersonGroup, RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
-        RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, GenerationModelCatalogEntry,
+        GenerationOperation, GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery,
+        GenerationTaskPage, GenerationTaskProgress, ImportLocalBase64AssetCommand,
+        ImportedAssetSource, ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage,
+        LocalBase64AssetGroupRecord, LocalBase64AssetPage, LocalBase64AssetRecord, MediaType,
+        ModelDefinition, MoveLocalBase64AssetsCommand, ObserveAssetStatusCommand,
+        ProviderConnection, ProviderModelBinding, ProviderModelSelection, ProviderTokenGroup,
+        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
+        RefreshAssetCoverCommand, RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand,
+        RefreshStagingObjectCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveExistingAssetCommand,
         SaveExistingAssetResult, SaveStatus, SetCredentialCommand, StagingJobRecord,
-        StartGenerationCommand, StartStagingCommand, StartVideoCompositionCommand,
-        StartVideoDownloadCommand, StartVideoFrameExtractionCommand, TosBucketPullSummary,
-        TosStagingConfig, UpdateAssetGroupCommand, UpsertProviderConnectionCommand,
-        UpsertProviderTokenGroupCommand, VideoTaskListCommand, WorkspaceUiPrefs,
+        StartGenerationCommand, StartStagingCommand, StartVideoDownloadCommand,
+        StartVideoFrameExtractionCommand, TosBucketPullSummary, TosStagingConfig,
+        UpdateAssetGroupCommand, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
+        VideoTaskListCommand, WorkspaceUiPrefs,
     },
+    video_clip::StartVideoClipCommand,
     video_preparation::{
         StartVideoPreparationCommand, VideoPreparationJobRecord, VideoPreparationProbe,
     },
 };
-
-#[tauri::command]
-pub fn get_runtime_component_migration_status(
-    state: State<'_, BackendState>,
-) -> RuntimeComponentMigrationStatus {
-    state.runtime_migration.status()
-}
-
-#[tauri::command]
-pub async fn prepare_runtime_components_for_update(
-    app: AppHandle,
-    version: String,
-    manifest_url: String,
-    signature: String,
-) -> Result<(), String> {
-    resource_update::prepare_runtime_components_for_update(
-        &app,
-        &version,
-        &manifest_url,
-        &signature,
-    )
-    .await
-}
-
-#[tauri::command]
-pub fn get_runtime_component_update_status() -> RuntimeResourceUpdateStatus {
-    resource_update::runtime_component_update_status()
-}
-
-#[tauri::command]
-pub async fn get_runtime_component_manager_status(
-    state: State<'_, BackendState>,
-) -> Result<ComponentManagerStatus, String> {
-    let manager = state.component_manager.clone();
-    tokio::task::spawn_blocking(move || manager.status())
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub async fn get_runtime_feature_status(
-    state: State<'_, BackendState>,
-    feature_id: String,
-) -> Result<RuntimeFeatureStatus, String> {
-    let manager = state.component_manager.clone();
-    tokio::task::spawn_blocking(move || manager.feature_status(&feature_id))
-        .await
-        .map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-pub async fn install_runtime_component(
-    state: State<'_, BackendState>,
-    component_id: String,
-    repair: Option<bool>,
-) -> Result<(), String> {
-    state
-        .component_manager
-        .install(&component_id, repair.unwrap_or(false))
-        .await
-}
-
-#[tauri::command]
-pub async fn import_runtime_component_archive(
-    state: State<'_, BackendState>,
-    component_id: String,
-    path: String,
-) -> Result<(), String> {
-    state
-        .component_manager
-        .import_archive(&component_id, Path::new(&path))
-        .await
-}
-
-#[tauri::command]
-pub fn cancel_runtime_component_install(state: State<'_, BackendState>) {
-    state.component_manager.cancel();
-}
-
-#[tauri::command]
-pub async fn get_runtime_component_asset_root(
-    state: State<'_, BackendState>,
-    component_id: String,
-) -> Result<String, String> {
-    let manager = state.component_manager.clone();
-    tokio::task::spawn_blocking(move || {
-        manager
-            .component_asset_root(&component_id)
-            .map(|path| path.to_string_lossy().into_owned())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
 
 #[tauri::command]
 pub async fn prepare_macos_delta_update(app: AppHandle, version: String) -> Result<bool, String> {
@@ -205,78 +80,6 @@ pub async fn install_prepared_macos_delta_update(
     version: String,
 ) -> Result<(), String> {
     mac_delta_update::install(&app, &version).await
-}
-
-#[tauri::command]
-pub async fn save_reverse_video_evidence(
-    state: State<'_, BackendState>,
-    command: SaveReverseVideoEvidenceCommand,
-) -> CommandResult<ReverseVideoEvidence> {
-    let service = state.reverse_video.clone();
-    tokio::task::spawn_blocking(move || service.save_evidence(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("视觉证据保存失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn get_reverse_video_learning(
-    state: State<'_, BackendState>,
-) -> CommandResult<ReverseVideoLearning> {
-    let service = state.reverse_video.clone();
-    tokio::task::spawn_blocking(move || service.get_learning())
-        .await
-        .map_err(|error| BackendError::Conflict(format!("案例统计读取失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn deliver_reverse_video(
-    state: State<'_, BackendState>,
-    command: DeliverReverseVideoCommand,
-) -> CommandResult<ReverseVideoDelivery> {
-    let service = state.reverse_video.clone();
-    tokio::task::spawn_blocking(move || service.deliver(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("反推交付保存失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn fetch_commerce_sources(urls: Vec<String>) -> CommandResult<Vec<CommerceSource>> {
-    commerce_sources::fetch_sources(urls).await.command()
-}
-
-#[tauri::command]
-pub fn save_workflow_history(
-    state: State<'_, BackendState>,
-    command: SaveWorkflowHistoryCommand,
-) -> CommandResult<WorkflowHistoryRecord> {
-    state.storage.save_workflow_history(command).command()
-}
-
-#[tauri::command]
-pub fn list_workflow_history(
-    state: State<'_, BackendState>,
-    query: WorkflowHistoryQuery,
-) -> CommandResult<WorkflowHistoryPage> {
-    state.storage.list_workflow_history(query).command()
-}
-
-#[tauri::command]
-pub fn get_workflow_history(
-    state: State<'_, BackendState>,
-    id: String,
-) -> CommandResult<WorkflowHistoryDetail> {
-    state.storage.get_workflow_history(&id).command()
-}
-
-#[tauri::command]
-pub fn recover_workflow_history(state: State<'_, BackendState>) -> CommandResult<u32> {
-    state.storage.recover_workflow_history().command()
 }
 
 #[tauri::command]
@@ -369,123 +172,6 @@ pub async fn archive_brand_model(
     tokio::task::spawn_blocking(move || library.archive(command))
         .await
         .map_err(|_| BackendError::Conflict("模特归档状态保存失败，请重试".into()))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn prepare_product_scene_view(
-    state: State<'_, BackendState>,
-    command: PrepareProductViewCommand,
-) -> CommandResult<PreparedProductView> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.prepare(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("产品母版准备失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn validate_product_scene_views(
-    state: State<'_, BackendState>,
-    command: ValidateProductViewsCommand,
-) -> CommandResult<bool> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.validate_views(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("产品母版检查失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn prepare_product_scene_logo(
-    state: State<'_, BackendState>,
-    command: PrepareProductViewCommand,
-) -> CommandResult<PreparedProductView> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.prepare_logo(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("Logo 准备失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn validate_product_scene_logo(
-    state: State<'_, BackendState>,
-    command: ProductViewIdentity,
-) -> CommandResult<()> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.validate_logo(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("Logo 检查失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn apply_product_scene_logo(
-    state: State<'_, BackendState>,
-    command: ApplyProductSceneLogoCommand,
-) -> CommandResult<ProductSceneLogoComposite> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.apply_logo(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("Logo 贴回失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn compose_product_scene(
-    state: State<'_, BackendState>,
-    command: ComposeProductSceneCommand,
-) -> CommandResult<ProductSceneComposite> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.compose(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("产品场景合成失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn compose_product_scene_protected(
-    state: State<'_, BackendState>,
-    command: ComposeProtectedProductSceneCommand,
-) -> CommandResult<ProductSceneProtectedComposite> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.compose_protected(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("产品原片保护合成失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn export_product_scenes(
-    state: State<'_, BackendState>,
-    command: ExportProductScenesCommand,
-) -> CommandResult<ProductSceneExport> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.export(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("产品场景导出失败：{error}")))
-        .and_then(|result| result)
-        .command()
-}
-
-#[tauri::command]
-pub async fn normalize_product_scene_image(
-    state: State<'_, BackendState>,
-    command: NormalizeProductSceneImageCommand,
-) -> CommandResult<ProductSceneGeneratedImage> {
-    let service = state.product_scene_images.clone();
-    tokio::task::spawn_blocking(move || service.normalize_generated(command))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("AI 产品场景图片处理失败：{error}")))
         .and_then(|result| result)
         .command()
 }
@@ -596,80 +282,6 @@ pub async fn resume_generation_result(
 }
 
 #[tauri::command]
-pub async fn get_blender_engine(
-    state: State<'_, BackendState>,
-    executable_path: Option<String>,
-) -> CommandResult<BlenderEngineStatus> {
-    Ok(state
-        .blender
-        .detect_engine(executable_path.as_deref())
-        .await)
-}
-
-#[tauri::command]
-pub async fn start_blender_render(
-    state: State<'_, BackendState>,
-    request: StartBlenderRenderRequest,
-) -> CommandResult<BlenderRenderJob> {
-    state.blender.start(request).await.command()
-}
-
-#[tauri::command]
-pub fn get_blender_render(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<BlenderRenderJob> {
-    state.blender.get(&job_id).command()
-}
-
-#[tauri::command]
-pub fn cancel_blender_render(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<BlenderRenderJob> {
-    state.blender.cancel(&job_id).command()
-}
-
-#[tauri::command]
-pub async fn open_blender_project(
-    state: State<'_, BackendState>,
-    executable_path: Option<String>,
-    project_path: String,
-) -> CommandResult<()> {
-    state
-        .blender
-        .open_project(executable_path.as_deref(), Path::new(&project_path))
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub fn remotion_renderer_preflight(state: State<'_, BackendState>) -> RemotionRendererPreflight {
-    state.remotion_renderer.preflight()
-}
-
-#[tauri::command]
-pub fn start_remotion_render(
-    state: State<'_, BackendState>,
-    command: StartRemotionRenderCommand,
-) -> CommandResult<RemotionRenderRecord> {
-    state.remotion_renderer.start(command).command()
-}
-
-#[tauri::command]
-pub fn get_remotion_render(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<RemotionRenderRecord> {
-    state.remotion_renderer.get(&job_id).command()
-}
-
-#[tauri::command]
-pub fn cancel_remotion_render(state: State<'_, BackendState>, job_id: String) -> CommandResult<()> {
-    state.remotion_renderer.cancel(&job_id).command()
-}
-
-#[tauri::command]
 pub fn upsert_provider_connection(
     state: State<'_, BackendState>,
     command: UpsertProviderConnectionCommand,
@@ -730,6 +342,63 @@ pub fn get_credential(
     credential_ref: String,
 ) -> CommandResult<String> {
     state.credentials.get(&credential_ref).command()
+}
+
+/// 创作台模型目录：一次 IPC 拿齐「供应商 + 模型 + 参数能力表」。
+///
+/// 数据全部来自本地已配置项（供应商连接 / 模型定义 / 模型绑定），不触网；
+/// 前端据此渲染模型下拉与参数面板，不再自己按模型名推断能力。
+#[tauri::command]
+pub fn list_generation_models(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<GenerationModelCatalogEntry>> {
+    build_generation_model_catalog(&state).command()
+}
+
+fn build_generation_model_catalog(
+    state: &State<'_, BackendState>,
+) -> BackendResult<Vec<GenerationModelCatalogEntry>> {
+    let providers = state.storage.list_provider_connections()?;
+    let definitions = state.storage.list_model_definitions()?;
+    let bindings = state.storage.list_bindings(None)?;
+    // 按 id 建索引：绑定数 × 供应商数线性查找会在模型多时退化成 O(n²)，
+    // 而创作台每次进入都要拉一次目录，这里用 HashMap 把它压回 O(n)。
+    let providers: std::collections::HashMap<&str, &ProviderConnection> = providers
+        .iter()
+        .filter(|provider| provider.enabled)
+        .map(|provider| (provider.id.as_str(), provider))
+        .collect();
+    let definitions: std::collections::HashMap<&str, &ModelDefinition> = definitions
+        .iter()
+        .map(|definition| (definition.id.as_str(), definition))
+        .collect();
+    let mut entries = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        if !binding.enabled {
+            continue;
+        }
+        let Some(provider) = providers.get(binding.provider_connection_id.as_str()) else {
+            continue;
+        };
+        let Some(definition) = definitions.get(binding.model_definition_id.as_str()) else {
+            continue;
+        };
+        let remote_model_id = binding
+            .remote_model_id
+            .clone()
+            .or_else(|| definition.remote_model_id.clone())
+            .unwrap_or_else(|| binding.model_definition_id.clone());
+        entries.push(GenerationModelCatalogEntry {
+            provider_connection_id: binding.provider_connection_id.clone(),
+            provider_display_name: provider.display_name.clone(),
+            model_definition_id: binding.model_definition_id.clone(),
+            remote_model_id,
+            display_name: definition.display_name.clone(),
+            operations: binding.enabled_operations.clone(),
+            operation_schema: definition.operations.clone(),
+        });
+    }
+    Ok(entries)
 }
 
 #[tauri::command]
@@ -933,7 +602,33 @@ pub fn delete_canvas_document(
     state: State<'_, BackendState>,
     canvas_id: String,
 ) -> CommandResult<()> {
+    // 画布没了，在途生成任务不能继续轮询供应商、继续把产物写进磁盘：
+    // 先置运行时取消位让轮询尽快停下，落库由存储层在删除画布的同一个事务里完成。
+    state.tasks.cancel_canvas_tasks(&canvas_id).command()?;
     state.storage.delete_canvas_document(&canvas_id).command()
+}
+
+/// 准备签名资源补丁：按资源清单下载并校验应用自带资源（如内置 FFmpeg）。
+#[tauri::command]
+pub async fn prepare_runtime_components_for_update(
+    app: AppHandle,
+    version: String,
+    manifest_url: String,
+    signature: String,
+) -> Result<(), String> {
+    resource_update::prepare_runtime_components_for_update(
+        &app,
+        &version,
+        &manifest_url,
+        &signature,
+    )
+    .await
+}
+
+/// 查询资源补丁的准备进度。
+#[tauri::command]
+pub fn get_runtime_component_update_status() -> RuntimeResourceUpdateStatus {
+    resource_update::runtime_component_update_status()
 }
 
 #[tauri::command]
@@ -942,6 +637,15 @@ pub fn start_generation(
     command: StartGenerationCommand,
 ) -> CommandResult<String> {
     state.tasks.start(command).command()
+}
+
+/// 智能剪辑合成：校验模式目录与素材槽位后，复用既有生成任务管线下发。
+#[tauri::command]
+pub fn start_video_clip(
+    state: State<'_, BackendState>,
+    command: StartVideoClipCommand,
+) -> CommandResult<String> {
+    state.video_clip.start(command).command()
 }
 
 #[tauri::command]
@@ -1010,6 +714,16 @@ pub fn get_generation_task_progress(
     task_id: String,
 ) -> CommandResult<GenerationTaskProgress> {
     state.tasks.get_progress(&task_id).command()
+}
+
+/// 取消在途生成任务：停止向供应商轮询、停止把产物写进磁盘。
+/// 终态任务（已成功/已失败）不动，历史保留。
+#[tauri::command]
+pub fn cancel_generation_task(
+    state: State<'_, BackendState>,
+    task_id: String,
+) -> CommandResult<GenerationTaskDetail> {
+    state.tasks.cancel(&task_id).command()
 }
 
 #[tauri::command]
@@ -1927,156 +1641,7 @@ pub async fn compose_dubbed_video(
         .command()
 }
 
-#[tauri::command]
-pub async fn mv_clip_signature(path: String) -> CommandResult<String> {
-    super::mv_media::source_signature(&path).await.command()
-}
-
-#[tauri::command]
-pub async fn transcribe_mv_song(
-    state: State<'_, BackendState>,
-    command: TranscribeMvSongCommand,
-) -> CommandResult<MvAsrTranscript> {
-    mv_audio::transcribe_mv_song(&state.composer, &state.providers, command)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn align_mv_lyrics(
-    state: State<'_, BackendState>,
-    command: AlignMvLyricsCommand,
-) -> CommandResult<MvLyricsAlignment> {
-    mv_audio::align_mv_lyrics(
-        &state.composer,
-        &state.credentials,
-        &state.providers,
-        command,
-    )
-    .await
-    .command()
-}
-
-#[tauri::command]
-pub async fn probe_mv_song(
-    state: State<'_, BackendState>,
-    command: super::mv_media::ProbeMvSongCommand,
-) -> CommandResult<super::mv_media::MvSongProbe> {
-    super::mv_media::probe_song(&state.composer, &command.source_path)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn prepare_mv_audio_window(
-    state: State<'_, BackendState>,
-    command: super::mv_media::PrepareMvAudioWindowCommand,
-) -> CommandResult<super::mv_media::MvAudioWindow> {
-    state
-        .composer
-        .prepare_mv_audio_window(command)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn start_mv_composition(
-    state: State<'_, BackendState>,
-    command: super::mv_media::StartMvCompositionCommand,
-) -> CommandResult<VideoCompositionJobRecord> {
-    state.composer.start_mv_composition(command).await.command()
-}
-
-#[tauri::command]
-pub async fn check_mv_media_alignment(
-    state: State<'_, BackendState>,
-    command: super::mv_media::CheckMvAlignmentCommand,
-) -> CommandResult<super::mv_media::MvMediaAlignment> {
-    super::mv_media::check_alignment(&state.composer, command)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub fn get_video_composer_engine(
-    state: State<'_, BackendState>,
-) -> CommandResult<VideoComposerEngineStatus> {
-    Ok(state.composer.engine_status())
-}
-
-#[tauri::command]
-pub async fn install_video_composer_engine(
-    state: State<'_, BackendState>,
-) -> CommandResult<VideoComposerEngineStatus> {
-    Ok(state.composer.install_engine().await)
-}
-
-#[tauri::command]
-pub fn start_video_composition(
-    state: State<'_, BackendState>,
-    command: StartVideoCompositionCommand,
-) -> CommandResult<VideoCompositionJobRecord> {
-    state.composer.start_composition(command).command()
-}
-
-#[tauri::command]
-pub fn get_video_composition_job(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<VideoCompositionJobRecord> {
-    state.composer.get_job(&job_id).command()
-}
-
-#[tauri::command]
-pub fn cancel_video_composition(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<VideoCompositionJobRecord> {
-    state.composer.cancel_job(&job_id).command()
-}
-
 // ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
-
-#[tauri::command]
-pub async fn analyze_reelbench_video(
-    app: AppHandle,
-    state: State<'_, BackendState>,
-    command: AnalyzeReelbenchCommand,
-) -> CommandResult<ReelbenchShotDraft> {
-    reelbench::analyze(&app, &state.composer, command)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn recut_reelbench_video(
-    app: AppHandle,
-    state: State<'_, BackendState>,
-    command: RecutReelbenchCommand,
-) -> CommandResult<ReelbenchShotDraft> {
-    reelbench::recut(&app, &state.composer, command)
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn validate_reelbench_shots(
-    app: AppHandle,
-    draft: ReelbenchShotDraft,
-) -> CommandResult<ReelbenchValidation> {
-    reelbench::validate(&app, &draft).await.command()
-}
-
-#[tauri::command]
-pub async fn export_reelbench_video(
-    app: AppHandle,
-    state: State<'_, BackendState>,
-    command: ExportReelbenchVideoCommand,
-) -> CommandResult<ReelbenchVideoExport> {
-    reelbench::export_video(&app, &state.composer, command)
-        .await
-        .command()
-}
 
 #[tauri::command]
 pub async fn start_video_frame_extraction(
@@ -2190,299 +1755,4 @@ pub fn rename_video_preparation_output(
         .video_preparation
         .rename_output(&job_id, &name)
         .command()
-}
-
-#[tauri::command]
-pub async fn get_ai_media_runtime_status(
-    state: State<'_, BackendState>,
-    mode: Option<AiMediaMode>,
-) -> CommandResult<AiMediaRuntimeStatus> {
-    let service = state.ai_media.clone();
-    tokio::task::spawn_blocking(move || service.runtime_status(mode.unwrap_or_default()))
-        .await
-        .map_err(|error| BackendError::Conflict(format!("检查 AI 媒体运行组件失败：{error}")))
-        .command()
-}
-
-#[tauri::command]
-pub async fn import_ai_media_runtime(
-    state: State<'_, BackendState>,
-    root_path: String,
-    mode: Option<AiMediaMode>,
-) -> CommandResult<AiMediaRuntimeStatus> {
-    state
-        .ai_media
-        .import_runtime(&root_path, mode.unwrap_or_default())
-        .await
-        .command()
-}
-
-#[tauri::command]
-pub async fn start_ai_media_job(
-    state: State<'_, BackendState>,
-    command: StartAiMediaCommand,
-) -> CommandResult<AiMediaJobRecord> {
-    state.ai_media.start(command).await.command()
-}
-
-#[tauri::command]
-pub fn get_ai_media_job(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<AiMediaJobRecord> {
-    state
-        .ai_media
-        .get(&job_id)
-        .and_then(|record| {
-            record.ok_or_else(|| BackendError::NotFound(format!("AI 媒体任务不存在：{job_id}")))
-        })
-        .command()
-}
-
-#[tauri::command]
-pub fn list_ai_media_jobs(state: State<'_, BackendState>) -> CommandResult<Vec<AiMediaJobRecord>> {
-    state.ai_media.list().command()
-}
-
-#[tauri::command]
-pub fn retry_ai_media_job(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<AiMediaJobRecord> {
-    state.ai_media.retry(&job_id).command()
-}
-
-#[tauri::command]
-pub fn cancel_ai_media_job(
-    state: State<'_, BackendState>,
-    job_id: String,
-) -> CommandResult<AiMediaJobRecord> {
-    state.ai_media.cancel(&job_id).command()
-}
-
-#[tauri::command]
-pub fn rename_ai_media_output(
-    state: State<'_, BackendState>,
-    job_id: String,
-    result_index: u32,
-    name: String,
-) -> CommandResult<AiMediaJobRecord> {
-    state
-        .ai_media
-        .rename_output(&job_id, result_index, &name)
-        .command()
-}
-
-#[cfg(test)]
-mod tests {
-    // 适配器 id 常量只被下面的校验用例消费（生产代码走 is_supported_adapter_id / require）。
-    use super::super::model_schema::DOUBAO_TTS_REQUEST_PROFILE;
-    use super::super::provider_adapter::{
-        ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, DOUBAO_VOICE_ADAPTER_ID, GRSAI_ADAPTER_ID,
-        MOYU_ADAPTER_ID,
-    };
-    use super::*;
-
-    fn provider(base_url: &str) -> UpsertProviderConnectionCommand {
-        UpsertProviderConnectionCommand {
-            id: "company".into(),
-            display_name: "Company".into(),
-            adapter_id: MOYU_ADAPTER_ID.into(),
-            base_url: base_url.into(),
-            enabled: true,
-        }
-    }
-
-    #[test]
-    fn provider_validation_accepts_custom_paths_but_rejects_embedded_secrets() {
-        assert!(validate_provider_command(&provider("https://api.example.com/openai/v1")).is_ok());
-        assert!(
-            validate_provider_command(&provider("https://user:pass@api.example.com/v1")).is_err()
-        );
-        assert!(
-            validate_provider_command(&provider("https://api.example.com/v1?token=secret"))
-                .is_err()
-        );
-        assert!(validate_provider_command(&provider("https://api.example.com/v1#models")).is_err());
-    }
-
-    #[test]
-    fn provider_validation_rejects_unknown_adapters_when_saving() {
-        let mut command = provider("https://api.example.com/v1");
-        command.adapter_id = "unknown".into();
-        assert!(validate_provider_command(&command).is_err());
-    }
-
-    #[test]
-    fn provider_validation_accepts_volcengine_ark_adapter() {
-        let mut command = provider("https://ark.cn-beijing.volces.com/api/v3");
-        command.adapter_id = ARK_ADAPTER_ID.into();
-        assert!(validate_provider_command(&command).is_ok());
-    }
-
-    #[test]
-    fn provider_validation_accepts_aliyun_bailian_beijing_workspace_url() {
-        let mut command = provider("https://llm-ws.cn-beijing.maas.aliyuncs.com");
-        command.adapter_id = BAILIAN_ADAPTER_ID.into();
-        assert!(validate_provider_command(&command).is_ok());
-        command.base_url = "https://dashscope.aliyuncs.com".into();
-        assert!(validate_provider_command(&command).is_err());
-    }
-
-    fn model_selection(
-        provider_connection_id: &str,
-        remote_model_id: &str,
-        enabled_operations: Vec<GenerationOperation>,
-    ) -> ReplaceProviderModelBindingsCommand {
-        ReplaceProviderModelBindingsCommand {
-            provider_connection_id: provider_connection_id.into(),
-            selections: vec![super::super::types::ProviderModelSelection {
-                model_definition_id: provider_scoped_model_definition_id(
-                    provider_connection_id,
-                    remote_model_id,
-                ),
-                display_name: "Company model".into(),
-                remote_model_id: remote_model_id.into(),
-                enabled: !enabled_operations.is_empty(),
-                enabled_operations,
-                token_group: None,
-                operation_schema: json!({}),
-            }],
-        }
-    }
-
-    #[test]
-    fn model_selection_requires_provider_scoping_and_one_generation_category() {
-        let valid_image = model_selection(
-            "company",
-            "image-v1",
-            vec![
-                GenerationOperation::TextToImage,
-                GenerationOperation::ImageToImage,
-            ],
-        );
-        assert!(validate_model_selections(&valid_image).is_ok());
-
-        let disabled = model_selection("company", "declined-v1", Vec::new());
-        assert!(validate_model_selections(&disabled).is_ok());
-
-        let mixed = model_selection(
-            "company",
-            "mixed-v1",
-            vec![
-                GenerationOperation::TextToImage,
-                GenerationOperation::VideoGeneration,
-            ],
-        );
-        assert!(validate_model_selections(&mixed).is_err());
-
-        let mut wrong_scope = model_selection(
-            "company",
-            "video-v1",
-            vec![GenerationOperation::VideoGeneration],
-        );
-        wrong_scope.selections[0].model_definition_id = "remote::other::video-v1".into();
-        assert!(validate_model_selections(&wrong_scope).is_err());
-    }
-
-    fn speech_selection(
-        connection_id: &str,
-        remote_model_id: &str,
-        profile: &str,
-    ) -> ProviderModelSelection {
-        ProviderModelSelection {
-            model_definition_id: provider_scoped_model_definition_id(
-                connection_id,
-                remote_model_id,
-            ),
-            display_name: remote_model_id.into(),
-            remote_model_id: remote_model_id.into(),
-            enabled: true,
-            enabled_operations: vec![GenerationOperation::SpeechGeneration],
-            operation_schema: json!({
-                "speech_generation": { "resultType": "audio", "requestProfileId": profile }
-            }),
-            token_group: None,
-        }
-    }
-
-    #[test]
-    fn speech_bindings_only_accept_protocols_the_app_can_execute() {
-        // OpenAI 兼容网关 + 网关 /v1/tts/create 档案：本次接入的绑定入口。
-        assert!(
-            validate_speech_bindings(
-                "company",
-                MOYU_ADAPTER_ID,
-                &[speech_selection(
-                    "company",
-                    "seed-audio-1.0",
-                    GATEWAY_TTS_REQUEST_PROFILE
-                )],
-            )
-            .is_ok()
-        );
-        // 网关连接上挂豆包 SSE 档案：不能拿 X-Api-Key 协议去打网关，拒绝而不是发错端点。
-        assert!(
-            validate_speech_bindings(
-                "company",
-                MOYU_ADAPTER_ID,
-                &[speech_selection(
-                    "company",
-                    "seed-tts-2.0",
-                    DOUBAO_TTS_REQUEST_PROFILE
-                )],
-            )
-            .is_err()
-        );
-        // 没有语音合成端点的适配器一律不允许绑定语音模型。
-        for adapter in [ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, GRSAI_ADAPTER_ID] {
-            assert!(
-                validate_speech_bindings(
-                    "company",
-                    adapter,
-                    &[speech_selection(
-                        "company",
-                        "seed-audio-1.0",
-                        GATEWAY_TTS_REQUEST_PROFILE
-                    )],
-                )
-                .is_err(),
-                "{adapter} 不应允许绑定语音模型"
-            );
-        }
-        // 独立豆包语音连接仍只允许 seed-tts-2.0，且不能顺带启用其他能力。
-        assert!(
-            validate_speech_bindings(
-                "voice",
-                DOUBAO_VOICE_ADAPTER_ID,
-                &[speech_selection(
-                    "voice",
-                    "seed-tts-2.0",
-                    DOUBAO_TTS_REQUEST_PROFILE
-                )],
-            )
-            .is_ok()
-        );
-        let mut with_text = speech_selection("voice", "seed-tts-2.0", DOUBAO_TTS_REQUEST_PROFILE);
-        with_text
-            .enabled_operations
-            .push(GenerationOperation::TextGeneration);
-        assert!(validate_speech_bindings("voice", DOUBAO_VOICE_ADAPTER_ID, &[with_text]).is_err());
-        assert!(
-            validate_speech_bindings(
-                "voice",
-                DOUBAO_VOICE_ADAPTER_ID,
-                &[speech_selection(
-                    "voice",
-                    "seed-audio-1.0",
-                    GATEWAY_TTS_REQUEST_PROFILE
-                )],
-            )
-            .is_err()
-        );
-        // 停用的绑定不参与校验。
-        let mut disabled = speech_selection("company", "video-v1", "openai_images_v1");
-        disabled.enabled = false;
-        assert!(validate_speech_bindings("company", ARK_ADAPTER_ID, &[disabled]).is_ok());
-    }
 }

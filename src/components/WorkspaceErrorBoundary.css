@@ -1,0 +1,40 @@
+/* 工作区崩溃兜底页：单列居中，报错可复制，唯一的出口是重新载入。 */
+.workspace-error-boundary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-md);
+  max-width: 720px;
+  margin: auto;
+  padding: var(--space-lg);
+}
+
+.workspace-error-boundary h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  line-height: 1.3;
+  color: var(--color-text);
+}
+
+.workspace-error-boundary__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.workspace-error-boundary__action:hover {
+  border-color: var(--color-text-2);
+}
+
+.workspace-error-boundary__action:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--space-2xs);
+}

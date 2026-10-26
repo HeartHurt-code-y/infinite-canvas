@@ -20,7 +20,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 /**
  * 从生成任务详情中还原冻结的 StartGenerationCommand。
- * 只保留重跑必需的字段：去除 workflowRunId（重新生成是独立运行，不续接原工作流运行），
+ * 只保留重跑必需的字段：去除 workflowRunId（重新生成是独立运行，不续接原任务运行），
  * 省略 modelOperationSchemaSnapshot（后端会在 start 时按当前模型定义重新写入）。
  * 快照不完整时返回 null，调用方据此禁用重新生成入口。
  */

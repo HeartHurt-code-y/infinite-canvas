@@ -1,0 +1,1090 @@
+/*
+ * Agent 模式（即梦 `?type=agentic`）的浮坞与三块浮层。
+ *
+ * 数值全部来自 2026-10-22 的实测计算样式，落在 tokens.css 的
+ * `--size-create-agentic-*` / `--radius-create-agentic-*` /
+ * `--shadow-create-popup` / `--angle-create-agentic-reference` 里；
+ * 这里只写结构，不写字面值。
+ */
+
+/* ── 浮坞外壳 ───────────────────────────────────────────────────────── */
+
+.create-agent-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-drawer);
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--space-lg) var(--space-lg);
+  pointer-events: none;
+}
+
+.create-agent-dock__surface {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  /*
+   * 即梦的字体栈（活体实测：正文 `CapCut Sans, PingFang SC, …`，
+   * 工具条按钮 `Montserrat, CapCut Sans, …`）。
+   * 写在这一层而不是只写在整页容器上：浮坞要能独立渲染也保持原站字形。
+   */
+  font-family: var(--font-jimeng);
+  gap: var(--space-md);
+  width: min(100%, var(--size-create-dock));
+  padding: var(--space-md);
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-dock);
+  background: linear-gradient(180deg, rgb(26 26 26 / 0.72) 0, rgb(42 42 42 / 0.72) 106.67%);
+  backdrop-filter: blur(80px);
+  box-shadow: var(--shadow-create-input-hover);
+}
+
+.create-agent-dock__content {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-start;
+}
+
+/* ── 参考素材 ───────────────────────────────────────────────────────── */
+
+/*
+ * 参考列固定 64px 宽（实测 `.references` 宽 64）。
+ * 上传砖是斜的：实测 transform matrix(0.990268, -0.139173, 0.139173,
+ * 0.990268) ≈ 逆时针 8°，悬停时放大到 56×70。
+ */
+.create-agent-dock__references {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--space-xs);
+  width: 4rem;
+  align-items: flex-start;
+  overflow: visible;
+}
+
+.create-agent-reference {
+  position: relative;
+  flex: 0 0 auto;
+  width: var(--size-create-agentic-reference);
+  height: var(--size-create-agentic-reference-h);
+  overflow: hidden;
+  border-radius: var(--radius-create-agentic-reference);
+}
+
+.create-agent-reference__media {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.create-agent-reference__media--empty {
+  display: grid;
+  place-items: center;
+  background: var(--color-create-block);
+  color: var(--color-create-text-ghost);
+}
+
+.create-agent-reference__remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgb(0 0 0 / 0.6);
+  color: var(--color-create-text);
+  cursor: pointer;
+}
+
+.create-agent-reference-upload {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--size-create-agentic-reference);
+  height: var(--size-create-agentic-reference-h);
+  padding: 0;
+  border: 1px dotted var(--color-create-stroke-soft);
+  border-radius: var(--radius-create-agentic-reference);
+  background: var(--color-create-block);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-sm);
+  cursor: pointer;
+  transform: rotate(var(--angle-create-agentic-reference));
+  transition:
+    width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    height 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    border-radius 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/*
+ * 悬停态：实测 `.reference-item` 的 hover 是
+ * `translateY(-8px) scale(1.125)`、active 是 `scale(.98)`（css/async/420 与 5650）。
+ *
+ * 尺寸也要变：即梦实测的 `reference-upload` 静止时 48×64、悬停时 56×70
+ * （`--size-create-agentic-reference-h-hover`）。只缩放不改尺寸，
+ * 磁贴周围的留白对不上。
+ */
+.create-agent-reference-upload:hover {
+  width: 3.5rem;
+  height: var(--size-create-agentic-reference-h-hover);
+  background: var(--color-create-block-hover);
+  color: var(--color-create-text-soft);
+  transform: rotate(var(--angle-create-agentic-reference)) translateY(-8px) scale(1.125);
+}
+
+.create-agent-reference-upload:active {
+  transform: rotate(var(--angle-create-agentic-reference)) translateY(-8px) scale(0.98);
+}
+
+/* ── 提示词 ─────────────────────────────────────────────────────────── */
+
+.create-agent-dock__prompt {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.create-agent-dock__prompt textarea {
+  display: block;
+  width: 100%;
+  min-height: 4.75rem;
+  /* 即梦的 `.tiptap` 是 `padding-right: 4px`（滚动条占位），不是 8px。 */
+  padding: 0 var(--space-2xs) 0 0;
+  border: 0;
+  background: transparent;
+  caret-color: var(--color-create-brand);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: var(--create-leading-body);
+  resize: none;
+  outline: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.create-agent-dock__placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 0;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-sm);
+  line-height: var(--create-leading-body);
+  pointer-events: none;
+}
+
+/*
+ * 占位文案里的「/」「@」两枚行内芯片。
+ *
+ * 实测（css/async/8705）：`.rich-placeholder-widget > :not([data-placeholder-carousel])`
+ * 是 `display:inline-flex; margin:0 4px; pointer-events:auto; vertical-align:bottom`，
+ * 文字用次级白（rgba(255,255,255,.7)）、14px、字重 400。
+ */
+.create-agent-dock__chip {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: bottom;
+  margin: 0 var(--space-2xs);
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-sm);
+  font-weight: 400;
+  cursor: pointer;
+}
+
+.create-agent-dock__chip:hover {
+  color: var(--color-create-text);
+}
+
+/* 已选主体：贴在提示词下方的一排小标签。 */
+.create-agent-dock__subjects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding-top: var(--space-xs);
+}
+
+.create-agent-dock__subject {
+  padding: 2px var(--space-xs);
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-xs);
+  cursor: pointer;
+}
+
+.create-agent-dock__subject:hover {
+  color: var(--color-create-text);
+}
+
+/* ── 工具条 ─────────────────────────────────────────────────────────── */
+
+/*
+ * 工具条按钮的字体：Montserrat 打头。
+ *
+ * 即梦实测 `.toolbar-button-J5Ou4K` 的 font-family 是
+ * `Montserrat, "CapCut Sans", "PingFang SC", …`——拉丁数字与字母用
+ * Montserrat，字面宽度更匀，和原站截图里的观感一致。
+ */
+.create-select,
+.create-param-button,
+.create-toolbar__tool {
+  font-family: var(--font-jimeng-montserrat);
+}
+
+/*
+ * 工具条这一行。
+ *
+ * 即梦实测 `.toolbar-cobXSJ{ display:flex; justify-content:space-between; width:100% }`
+ * 配 `.container-_Hbcq4{ flex:1 1; overflow:scroll hidden }`：
+ * **左半区（创作类型 / 自动 / 技能 / @）吸掉剩余宽度，语音与提交贴住浮坞右缘**。
+ * 少了 `space-between` + `flex:1`，提交按钮就会跟在语音按钮后面，
+ * 右边空出一大片——实测原站的语音在 x=1379、提交在 x=1423（浮坞右缘 1455）。
+ */
+.create-agent-dock__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  width: 100%;
+}
+
+/*
+ * 工具条左半区：创作类型 / 自动 / 技能 / @ 四颗控件。
+ *
+ * 实测即梦（`.container-_Hbcq4.toolbar-settings-Kz0lK8`）：gap **4px**、
+ * 内边距 7px 0、容器高 46（内容高 32）、`flex: 1 1`。
+ */
+.create-agent-dock__settings {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 0;
+}
+
+.create-agent-dock__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+/* 语音输入：32×32 圆形（实测 `voice-input-button` 32×32 / 圆角 50%）。 */
+.create-agent-voice {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--color-create-text-ghost);
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+.create-agent-voice:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text-soft);
+}
+
+/* 提交钮：32×32 圆形，禁用态底 rgba(255,255,255,.16)。 */
+.create-agent-submit {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--color-create-text);
+  color: #121212;
+  cursor: pointer;
+  transition:
+    background-color 0.1s linear,
+    transform 0.1s linear;
+}
+
+.create-agent-submit:hover:not(:disabled) {
+  background: #fff;
+}
+
+.create-agent-submit:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.create-agent-submit:disabled {
+  background: rgb(255 255 255 / 0.16);
+  color: rgb(255 255 255 / 0.2);
+  cursor: not-allowed;
+}
+
+/* ── 技能下拉 ───────────────────────────────────────────────────────── */
+
+/* 技能下拉触发器：60×32、内边距 0 8px、圆角 8。
+ *
+ * 即梦实测：它是个 `lv-select`（不是普通按钮），**字号 14px**，
+ * 图标是**固定 16×16**（svg width/height = 16，不是 1em）。
+ * 我们之前按普通按钮做成 12px + 1em 图标 → 整颗比原站小一档。 */
+.create-agent-skill-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  height: 2rem;
+  padding: 0 var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.428;
+  font-weight: 450;
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+.create-agent-skill-trigger:hover:not(:disabled) {
+  background: var(--color-create-block);
+}
+
+.create-agent-skill-trigger:disabled {
+  color: var(--color-create-text-off);
+  cursor: not-allowed;
+}
+
+.create-agent-skill-trigger__icon {
+  color: var(--color-create-text-ghost);
+  /* 即梦的技能图标是固定 16×16（实测 svg width/height = 16）。 */
+  width: 1rem;
+  height: 1rem;
+}
+
+.create-agent-skill-popup {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 4px 4px;
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  overflow: hidden;
+}
+
+/*
+ * 搜索行：即梦实测高 36、内边距 0 12px、gap 4。
+ * 输入区（含前缀图标）268 宽，「更多技能」按钮 64×20。
+ */
+.create-agent-skill-popup__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  height: 2.25rem;
+  padding: 0 var(--space-sm);
+}
+
+.create-agent-skill-popup__search-field {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 即梦实测：输入区 268 宽（图标 + 输入框合起来）。 */
+  max-width: 16.75rem;
+  height: 2.25rem;
+  padding: 0 var(--space-xs) 0 0;
+  border-radius: var(--radius-create-control);
+}
+
+.create-agent-skill-popup__search-field:focus-within {
+  background: var(--color-create-block);
+}
+
+.create-agent-skill-popup__search-icon {
+  flex: 0 0 auto;
+  margin-right: 6px;
+  color: rgb(229 233 250 / 0.4);
+}
+
+.create-agent-skill-popup__search-field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  /*
+   * 即梦实测输入框 268×36。高度要**含**内边距，所以这里用 border-box：
+   * 之前按 content-box 算，100% 高度再加上下各 8px 内边距，实际是 52，
+   * 撑破了 36 高的搜索行。
+   */
+  box-sizing: border-box;
+  height: 100%;
+  padding: var(--space-xs) 0 var(--space-xs) var(--space-xs);
+  border: 0;
+  background: transparent;
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.429;
+  outline: none;
+}
+
+/*
+ * 焦点环。
+ *
+ * 与顶栏搜索框同一个问题：这里 `outline: none` 抹掉了输入框的焦点指示，
+ * 而全局 `App.css` 的 `input:focus-visible` 因源序更早压不住它 →
+ * Agent「技能」浮层的搜索框**完全没有焦点指示**。显式补一道。
+ */
+.create-agent-skill-popup__search-field input:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+/* 「更多技能」：即梦实测 64×20、色 rgba(255,255,255,.35)。 */
+.create-agent-skill-popup__library {
+  flex: 0 0 auto;
+  width: 4rem;
+  height: 1.25rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1.667;
+  cursor: pointer;
+}
+
+.create-agent-skill-popup__library:hover {
+  color: var(--color-create-text-soft);
+}
+
+.create-agent-skill-popup__divider {
+  flex: 0 0 auto;
+  height: 1px;
+  margin: 0 var(--space-xs);
+  background: var(--color-create-stroke);
+}
+
+/*
+ * 技能列表：即梦实测最大高 314，超出在列表内部滚动。
+ * 第一项没有上边距（即梦的 `margin-top: 4px` 只在项与项之间）。
+ */
+.create-agent-skill-popup__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 19.625rem;
+  overflow-y: auto;
+}
+
+.create-agent-skill-popup__empty {
+  margin: 0;
+  padding: var(--space-md);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-sm);
+  text-align: center;
+}
+
+/*
+ * 技能项：高 52、内边距 5px 12px、圆角 8。
+ * 两行信息：第一行「图标 + 名称 + 官方角标」，第二行简介（缩进 24）。
+ */
+.create-agent-skill-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  width: 100%;
+  margin-top: 4px;
+  padding: 5px var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-create-agentic-option);
+  background: transparent;
+  color: var(--color-create-text);
+  /* 即梦实测：选项行字 14/36 字重 500；名称另起 13/22。 */
+  font-size: var(--create-text-sm);
+  line-height: 2.571;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+.create-agent-skill-option:hover,
+.create-agent-skill-option.is-selected {
+  background: var(--color-create-block);
+}
+
+/* 第一项没有上边距（即梦实测：项与项之间 4px，第一项贴着分隔线）。 */
+.create-agent-skill-option:first-child {
+  margin-top: 0;
+}
+
+.create-agent-skill-option__icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--size-create-agentic-icon);
+  height: var(--size-create-agentic-icon);
+  color: var(--color-create-text);
+}
+
+.create-agent-skill-option__body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.create-agent-skill-option__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 1.375rem;
+}
+
+.create-agent-skill-option__name {
+  font-size: var(--create-text-md);
+  line-height: 1.692;
+  /* 即梦实测：名称 13/22 字重 400（选项行本身是 500，名称要单独压回去）。 */
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 「官方」角标：即梦实测 26×16、圆角 4、底 rgba(255,255,255,.08)、
+ * 字 9/12 字重 500。
+ *
+ * 尺寸要按 border-box 算：之前 min-width/height 走的是 content-box，
+ * 加上左右各 3px 内边距后实际是 32×20，比实测大了一圈。
+ */
+.create-agent-skill-option__tag {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 1rem;
+  padding: 2px 3px;
+  border-radius: 4px;
+  background: var(--color-create-block);
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-agentic-tag);
+  line-height: var(--create-leading-agentic-tag);
+  font-weight: 500;
+}
+
+/*
+ * 技能简介：即梦实测是**一行**（元素 308×20），长文本被截断，
+ * 所以选项行高固定 52（22 名称 + 20 简介 + 上下各 5）。
+ * 这里跟着截断，否则一行简介会撑成两行、行高跳到 92。
+ */
+.create-agent-skill-option__description {
+  padding-left: 1.5rem;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1.667;
+  /* 即梦实测：简介行 12/20 字重 400（选项行本身是 500，说明行要压回去）。 */
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 主体选择器 ─────────────────────────────────────────────────────── */
+
+.create-agent-subject-trigger {
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text);
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+/*
+ * @ 主体按钮里的图标：16×16。
+ *
+ * 即梦那枚 `@` 是品牌路径（1em 属性、实际渲染 16），和我们浮坞里其它 32×32
+ * 图标钮同尺寸；不写死会随字号缩到 14。
+ */
+.create-agent-subject-trigger svg {
+  width: 1rem;
+  height: 1rem;
+}
+
+.create-agent-subject-trigger:hover {
+  background: var(--color-create-block);
+}
+
+.create-agent-subject-popup {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0 4px 4px;
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  overflow: hidden;
+}
+
+.create-agent-subject-popup__title {
+  padding: var(--space-sm) var(--space-sm) var(--space-xs);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1;
+}
+
+/*
+ * 空态：即梦实测内边距 32px 12px 48px、gap 12px、整体居中。
+ * 内容是「80×80 插画（opacity .8）+ 一句说明 + 一枚「创建主体」按钮」。
+ */
+.create-agent-subject-popup__empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 2rem var(--space-sm) 3rem;
+}
+
+/* 空态插画：即梦实测 80×80、opacity .8。 */
+.create-agent-subject-popup__empty-art {
+  display: grid;
+  place-items: center;
+  width: 5rem;
+  height: 5rem;
+  color: var(--color-create-text-ghost);
+  opacity: 0.8;
+}
+
+.create-agent-subject-popup__empty-text {
+  margin: 0;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-sm);
+  /* 即梦实测：14/20。 */
+  line-height: var(--create-leading-tight);
+}
+
+/*
+ * 「创建主体」按钮：即梦实测 105×36（min-width 104、内边距 0 16px）、
+ * 底 rgba(255,255,255,.08)、圆角 8、字 13/20.43 字重 500，
+ * 标签前还有一枚 13×13 的图标，图标与标签之间 8px。
+ */
+.create-agent-subject-popup__create {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 104px;
+  height: 2.25rem;
+  padding: 0 var(--space-md);
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: #fafafa;
+  font-size: var(--create-text-md);
+  line-height: 1.571;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.create-agent-subject-popup__create-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.create-agent-subject-popup__create:hover {
+  background: var(--color-create-block-hover);
+}
+
+.create-agent-subject-popup__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 var(--space-xs) var(--space-xs) 0;
+  overflow-y: auto;
+}
+
+.create-agent-subject-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-agent-subject-option:hover,
+.create-agent-subject-option.is-selected {
+  background: var(--color-create-block);
+}
+
+.create-agent-subject-option__thumb {
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--radius-create-control);
+  object-fit: cover;
+}
+
+.create-agent-subject-option__thumb--empty {
+  display: grid;
+  place-items: center;
+  background: var(--color-create-block-hover);
+  color: var(--color-create-text-soft);
+}
+
+.create-agent-subject-option__name {
+  font-size: var(--create-text-sm);
+}
+
+/* ── 生成偏好面板 ───────────────────────────────────────────────────── */
+
+/* 「自动」触发器：60×32、内边距 0 8px、圆角 8、字 12/18.86 字重 450。 */
+.create-agent-preferences-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 2rem;
+  padding: 0 var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: #fafafa;
+  font-size: var(--create-text-xs);
+  line-height: 1.571;
+  font-weight: 450;
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+.create-agent-preferences-trigger:hover {
+  background: var(--color-create-block);
+}
+
+.create-agent-preferences-trigger__icon {
+  color: var(--color-create-text-ghost);
+}
+
+.create-agent-preferences {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  padding: var(--space-md);
+  border: var(--border-create-popup);
+  /*
+   * 圆角 16（实测 `.lv-popover-content` 486×303，圆角 16px）。
+   * 注意：下拉浮层（`lv-select-popup`）是 12px，两者不同——即梦的
+   * popover 与 select 用了两套圆角，这里照抄各自的实测值。
+   */
+  border-radius: var(--radius-create-preferences);
+  background: var(--color-create-popover);
+  color: rgb(246 247 255 / 0.7);
+  box-shadow: var(--shadow-create-popup);
+  overflow: hidden;
+}
+
+.create-agent-preferences__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: var(--space-lg) 0;
+}
+
+.create-agent-preferences__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.create-agent-preferences__title {
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1;
+}
+
+.create-agent-preferences__title--primary {
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  line-height: 1.571;
+  font-weight: 500;
+}
+
+.create-agent-preferences__auto {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+
+.create-agent-preferences__auto-label {
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-xs);
+  line-height: 1.667;
+}
+
+/* 自动开关：28×16、亮态底 #009EFA、滑块 12×12 白、轨道圆角 12（实测）。 */
+.create-agent-switch {
+  position: relative;
+  width: 1.75rem;
+  height: 1rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-create-agentic-switch);
+  background: rgb(255 255 255 / 0.16);
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+.create-agent-switch.is-on {
+  background: var(--color-create-brand);
+}
+
+.create-agent-switch__dot {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.1s linear;
+}
+
+.create-agent-switch.is-on .create-agent-switch__dot {
+  transform: translateX(12px);
+}
+
+.create-agent-radios {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.create-agent-radios.is-disabled {
+  opacity: 0.5;
+}
+
+/*
+ * 「图片 / 视频」单选：每个 223×36、圆角 8、字 12（实测 `.lv-radio`）。
+ */
+.create-agent-radio {
+  flex: 1 1 0;
+  height: 2.25rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: inherit;
+  font-size: var(--create-text-xs);
+  line-height: 2.143;
+  cursor: pointer;
+}
+
+.create-agent-radio.is-checked {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-agent-radio:disabled {
+  cursor: not-allowed;
+}
+
+/* 比例方卡：48×60（实测）。 */
+/*
+ * 比例组：9 个方卡排成可换行的一组。
+ *
+ * 实测（`.lv-radio-group.radio-group-nYQa35`）：gap 2px、内边距 2px、
+ * 圆角 10、底色 rgba(255,255,255,.08)——即梦给整组垫了一层浅底，
+ * 磁贴之间的缝隙因此呈现为底色透出，而不是透明。
+ * 单个磁贴 48×60、圆角 10（`.lv-radio` 外框 10、内层 8）。
+ */
+.create-agent-ratios {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-create-agentic-group);
+  background: var(--color-create-block);
+}
+
+.create-agent-ratios.is-disabled {
+  opacity: 0.5;
+}
+
+.create-agent-ratio {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 3rem;
+  height: 3.75rem;
+  padding: 0 0 6px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--color-create-text);
+  font-size: var(--create-text-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.create-agent-ratio.is-checked {
+  background: var(--color-create-block);
+}
+
+.create-agent-ratio:disabled {
+  cursor: not-allowed;
+}
+
+.create-agent-preferences__other {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.create-agent-preferences__model {
+  justify-content: space-between;
+  width: 100%;
+  min-height: 2.25rem;
+  background: var(--color-create-block);
+}
+
+.create-agent-preferences__model-hint {
+  margin: 0;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+}
+
+/* ── 创作类型下拉的标题与勾选 ───────────────────────────────────────── */
+
+.create-select__title {
+  flex-shrink: 0;
+  padding: var(--space-sm) var(--space-sm) var(--space-xs);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1;
+}
+
+.create-select__option-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/*
+ * 带图标或带勾的选项排成一行：图标 + 文字 + 右侧勾。
+ * 即梦的创作类型下拉就是这个形态（`select-option-icon` + 文字 + 勾），
+ * 每一项高 36（`li.lv-select-option` 实测）。
+ *
+ * 后端没接入的创作类型要标「后端暂未接入」，但**不另起一行**：
+ * 改成名称右侧的一枚角标（与即梦技能下拉的「官方」角标同一形态），
+ * 这样每一行仍是 36px，浮层仍是即梦那套 200×317。
+ * 具体退路放 tooltip 与点击后的提示里。
+ */
+.create-select__option--rich {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-xs);
+  row-gap: 2px;
+  /* 即梦的创作类型选项高 36（`li.lv-select-option` 实测）。 */
+  min-height: 2.25rem;
+  /*
+   * 不许被压扁：浮层是 flex 列容器，选项一旦被压缩，说明行就会盖住
+   * 名称（实测压掉 5px 就重叠了）。内容比浮层上限高时应该滚动，
+   * 不是把行压扁——压扁了就等于没写说明。
+   */
+  flex-shrink: 0;
+}
+
+.create-select__option--rich .create-select__option-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: var(--space-xs);
+  row-gap: 2px;
+  align-items: center;
+  min-width: 0;
+}
+
+/*
+ * 名称右侧的角标（对照即梦技能下拉的「官方」角标）。
+ *
+ * 即梦实测：26×16、圆角 4、底 `rgba(255,255,255,.08)`、字 9/12 字重 500。
+ * 本项目的文案更长（「后端暂未接入」），宽度随文案走，高度与字号照抄。
+ */
+.create-select__option-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 1rem;
+  padding: 0 4px;
+  border-radius: var(--radius-xs);
+  background: var(--color-create-block);
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-agentic-tag);
+  font-weight: 500;
+  line-height: var(--create-leading-agentic-tag);
+  white-space: nowrap;
+}
+.create-select__option--rich .create-select__option-icon {
+  grid-area: 1 / 1;
+}
+
+.create-select__option--rich .create-select__option-label {
+  grid-area: 1 / 2;
+  /* 名称 13/22（即梦技能项的名称行同口径）。 */
+  line-height: 1.692;
+}
+
+.create-select__option--rich .create-select__option-description {
+  grid-area: 2 / 2;
+  max-width: none;
+}
+
+.create-select__option-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: var(--size-create-agentic-icon);
+  height: var(--size-create-agentic-icon);
+  color: currentColor;
+}
+
+/* 勾在名称那一行里居中（12px 的勾放进 22px 高的名称行）。 */
+.create-select__option--rich .create-select__check {
+  margin-top: 5px;
+}
+
+.create-select__check {
+  flex: 0 0 auto;
+  color: var(--color-create-brand);
+}

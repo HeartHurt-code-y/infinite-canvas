@@ -71,6 +71,7 @@ import { Copy } from "@phosphor-icons/react/Copy";
 import { CopySimple } from "@phosphor-icons/react/CopySimple";
 import { CornersOut } from "@phosphor-icons/react/CornersOut";
 import { CrosshairSimple } from "@phosphor-icons/react/CrosshairSimple";
+import { DotsThreeVertical } from "@phosphor-icons/react/DotsThreeVertical";
 import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
 import { FileText } from "@phosphor-icons/react/FileText";
 import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
@@ -91,6 +92,8 @@ import { LinkSimple } from "@phosphor-icons/react/LinkSimple";
 import { MagicWand } from "@phosphor-icons/react/MagicWand";
 import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
 import { Minus } from "@phosphor-icons/react/Minus";
+import { Microphone } from "@phosphor-icons/react/Microphone";
+import { MicrophoneSlash } from "@phosphor-icons/react/MicrophoneSlash";
 import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
 import { PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { Paperclip } from "@phosphor-icons/react/Paperclip";
@@ -101,6 +104,7 @@ import { Plus } from "@phosphor-icons/react/Plus";
 import { Rectangle } from "@phosphor-icons/react/Rectangle";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { StackSimple } from "@phosphor-icons/react/StackSimple";
+import { Star } from "@phosphor-icons/react/Star";
 import { TextAa } from "@phosphor-icons/react/TextAa";
 import { TextT } from "@phosphor-icons/react/TextT";
 import { Trash } from "@phosphor-icons/react/Trash";
@@ -156,6 +160,7 @@ const GLYPHS = {
   "copy-simple": CopySimple,
   "corners-out": CornersOut,
   "crosshair-simple": CrosshairSimple,
+  "dots-three-vertical": DotsThreeVertical,
   "download-simple": DownloadSimple,
   "file-text": FileText,
   "film-slate": FilmSlate,
@@ -175,6 +180,8 @@ const GLYPHS = {
   "link-simple": LinkSimple,
   "magic-wand": MagicWand,
   "magnifying-glass": MagnifyingGlass,
+  microphone: Microphone,
+  "microphone-slash": MicrophoneSlash,
   minus: Minus,
   "music-notes": MusicNotes,
   "paper-plane-right": PaperPlaneRight,
@@ -186,6 +193,7 @@ const GLYPHS = {
   rectangle: Rectangle,
   sparkle: Sparkle,
   "stack-simple": StackSimple,
+  star: Star,
   "text-aa": TextAa,
   "text-t": TextT,
   trash: Trash,

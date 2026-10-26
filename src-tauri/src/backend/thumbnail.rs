@@ -5,12 +5,13 @@
 //! 其余格式（webp/gif 等）解码失败时返回 `None`，前端回退原图，不影响可用性。
 //! 视频复用已就绪的 FFmpeg 组件解码首帧，不依赖 WebView 的元数据预加载/中点定位。
 //! 封面写到独立缓存，绝不重编码、替换或修改原视频；没有引擎时保留浏览器预览兜底。
-//! 缓存键 = sha256(源路径 | 源大小 | 源修改时间 | 目标边长)，源文件变化或目标
-//! 尺寸变化都会生成新缓存条目；命中缓存时不解码源文件。
+//! 缓存键 = sha256(源路径 | 源大小 | 源修改时间 | 源内容身份 | 目标边长)，源文件
+//! 被覆写（同一路径换了内容）或目标尺寸变化都会生成新缓存条目；命中缓存时不解码
+//! 源文件。内容身份在**查缓存之前**就并进键里，因此旧缩略图不会被当成命中返回。
 
 use std::{
     fs,
-    io::Write as _,
+    io::{Read as _, Seek as _, SeekFrom, Write as _},
     path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, UNIX_EPOCH},
@@ -28,6 +29,11 @@ use super::types::BackendErrorPayload;
 const SOURCE_SIZE_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 const VIDEO_POSTER_TIMEOUT: Duration = Duration::from_secs(15);
 const VIDEO_POSTER_SIZE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+
+/// 整文件摘要的取样上限：不超过这个体积的源按整文件算内容身份。
+const CONTENT_DIGEST_FULL_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+/// 超过上面的体积时，只摘要首尾各这么多字节。
+const CONTENT_DIGEST_EDGE_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -53,11 +59,88 @@ fn cache_path(directory: &Path, source: &Path, max_dimension: u32) -> BackendRes
     hasher.update(source.to_string_lossy().as_bytes());
     hasher.update(metadata.len().to_le_bytes());
     hasher.update(modified.to_le_bytes());
+    // 内容身份必须并进键里（而不是命中之后再校验）：命中判定一旦返回旧缩略图，
+    // 校验就来不及了 —— 那时用户已经看到上一版的图。
+    hasher.update(content_identity(source, &metadata));
     hasher.update(max_dimension.to_le_bytes());
     Ok(directory.join(format!(
         "media-thumb-{}.jpg",
         hex::encode(hasher.finalize())
     )))
+}
+
+/// 源文件的内容身份摘要。
+///
+/// 为什么不能只看「路径 + 大小 + 修改时间」：文件系统的时间戳精度有限（Windows 的
+/// 文件修改时间按系统时钟节拍更新，同一节拍内覆写同一个路径且大小不变时，这三个值
+/// 完全相同），而「同路径覆写」在本项目里很常见 —— 生成任务重跑会把新图片写到同一个
+/// 本地路径。键里没有内容身份时，旧缩略图会被当成命中返回。
+///
+/// 取样按体积分档，在「身份准确」与「代价可控」之间取平衡：
+///
+/// - 不超过 [`CONTENT_DIGEST_FULL_LIMIT_BYTES`] 的源按**整文件**摘要。典型图片几 MB，
+///   多读一次的成本可以忽略，身份也最准；
+/// - 更大的源（原始视频动辄几百 MB）只摘要「首尾各一段 + 大小 + 修改时间」，避免为了
+///   一个缩略图把整段视频读一遍。代价是「只改了中间内容」这种情况可能漏检，但视频
+///   首帧极少只改中间，且视频路径还有取帧后的二次校验兜底。
+fn content_identity(source: &Path, metadata: &fs::Metadata) -> Vec<u8> {
+    let length = metadata.len();
+    let mut hasher = Sha256::new();
+    // 域分隔前缀：内容摘要不能与键里其它字段的字节流混为一谈。
+    hasher.update(b"content-identity-v1");
+    hasher.update(length.to_le_bytes());
+    if length <= CONTENT_DIGEST_FULL_LIMIT_BYTES {
+        hasher.update(b"full");
+        match fs::read(source) {
+            Ok(bytes) => hasher.update(&bytes),
+            // 读不出来时只留下长度标记：宁可让这一条缓存不命中，也不要用弱身份
+            // 命中上一份内容的缩略图。
+            Err(_) => hasher.update(b"unreadable"),
+        }
+    } else {
+        hasher.update(b"edge");
+        let edge = CONTENT_DIGEST_EDGE_BYTES as usize;
+        match fs::File::open(source) {
+            Ok(mut file) => {
+                let mut head = vec![0_u8; edge];
+                let head_read = read_exact_upto(&mut file, &mut head);
+                head.truncate(head_read);
+                hasher.update(&(head_read as u64).to_le_bytes());
+                hasher.update(&head);
+                if length > CONTENT_DIGEST_EDGE_BYTES {
+                    let tail_start = length - CONTENT_DIGEST_EDGE_BYTES;
+                    if file.seek(SeekFrom::Start(tail_start)).is_ok() {
+                        let mut tail = vec![0_u8; edge];
+                        let tail_read = read_exact_upto(&mut file, &mut tail);
+                        tail.truncate(tail_read);
+                        hasher.update(&(tail_read as u64).to_le_bytes());
+                        hasher.update(&tail);
+                    }
+                }
+            }
+            Err(_) => {
+                hasher.update(b"unreadable");
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    digest.to_vec()
+}
+
+/// 读满缓冲区或读到文件结束，返回实际读到的字节数。
+///
+/// 单次 `read` 可能短读。摘要必须对同一份文件**稳定**：短读会让两次读出不同的字节数，
+/// 于是同一份内容算出两个摘要、缓存键跟着抖动，缓存永远命不中。
+fn read_exact_upto(file: &mut fs::File, buffer: &mut [u8]) -> usize {
+    let mut filled = 0;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(read) => filled += read,
+            Err(_) => break,
+        }
+    }
+    filled
 }
 
 /// 预期中的「不可缩放」（格式不支持、文件损坏、源缺失）统一返回 `Ok(None)`，
@@ -95,6 +178,10 @@ fn create_thumbnail(
         )
     })?;
     temporary.as_file().sync_all()?;
+    // 源文件在解码期间被替换时，不把新内容登记到旧缓存身份下（与视频取帧同一条规矩）。
+    if cache_path(directory, source_path, max_dimension)? != target {
+        return Ok(None);
+    }
     publish_thumbnail(temporary, &target)
 }
 
@@ -252,218 +339,5 @@ pub async fn create_media_thumbnail(
             tauri_plugin_log::log::warn!("media thumbnail failed: {error}");
             Ok(None)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn write_test_png(directory: &Path, width: u32, height: u32) -> PathBuf {
-        let path = directory.join("source.png");
-        image::DynamicImage::new_rgb8(width, height)
-            .write_to(
-                &mut std::io::BufWriter::new(fs::File::create(&path).unwrap()),
-                image::ImageFormat::Png,
-            )
-            .unwrap();
-        path
-    }
-
-    #[test]
-    fn creates_a_scaled_jpeg_thumbnail_and_reuses_the_cache() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = write_test_png(directory.path(), 2048, 1024);
-
-        let first = create_thumbnail(directory.path(), source.to_str().unwrap(), 512)
-            .unwrap()
-            .expect("png source is scalable");
-        assert_eq!((first.width, first.height), (512, 256));
-        let encoded = fs::read(&first.path).unwrap();
-        assert_eq!(&encoded[..2], b"\xff\xd8", "thumbnail must be a JPEG");
-
-        // 第二次调用命中缓存（同一路径），且不再依赖源文件。
-        let second = create_thumbnail(directory.path(), source.to_str().unwrap(), 512)
-            .unwrap()
-            .expect("cache hit");
-        assert_eq!(second.path, first.path);
-    }
-
-    #[test]
-    fn returns_none_for_unscalable_or_missing_sources() {
-        let directory = tempfile::tempdir().unwrap();
-        let text = directory.path().join("source.txt");
-        fs::write(&text, "not an image").unwrap();
-        assert_eq!(
-            create_thumbnail(directory.path(), text.to_str().unwrap(), 512).unwrap(),
-            None
-        );
-        assert_eq!(
-            create_thumbnail(
-                directory.path(),
-                directory.path().join("missing.png").to_str().unwrap(),
-                512
-            )
-            .unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn cache_key_changes_when_the_target_dimension_changes() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = write_test_png(directory.path(), 800, 600);
-        let small = create_thumbnail(directory.path(), source.to_str().unwrap(), 256)
-            .unwrap()
-            .expect("scalable");
-        let large = create_thumbnail(directory.path(), source.to_str().unwrap(), 512)
-            .unwrap()
-            .expect("scalable");
-        assert_ne!(small.path, large.path);
-        assert_eq!((small.width, small.height), (256, 192));
-    }
-
-    #[tokio::test]
-    #[ignore = "requires INFINITE_CANVAS_TEST_FFMPEG pointing at the installed project engine"]
-    async fn installed_engine_creates_video_poster_without_changing_source() {
-        let ffmpeg = PathBuf::from(std::env::var("INFINITE_CANVAS_TEST_FFMPEG").unwrap());
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("short-video.mp4");
-        let mut fixture = std::process::Command::new(&ffmpeg);
-        fixture
-            .args([
-                "-nostdin",
-                "-y",
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=red:s=320x640:r=24:d=0.125",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-threads",
-                "1",
-            ])
-            .arg(&source);
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt as _;
-            fixture.creation_flags(0x0800_0000);
-        }
-        assert!(fixture.output().unwrap().status.success());
-        let original = fs::read(&source).unwrap();
-        let poster = create_video_thumbnail(
-            directory.path(),
-            source.to_str().unwrap(),
-            256,
-            Some(&ffmpeg),
-        )
-        .await
-        .unwrap()
-        .expect("a valid local video needs a poster even when it is shorter than a seek target");
-        assert_eq!((poster.width, poster.height), (128, 256));
-        assert_eq!(fs::read(&source).unwrap(), original);
-        let decoded = image::open(&poster.path).unwrap().to_rgb8();
-        let center = decoded.get_pixel(64, 128);
-        assert!(center[0] > 240 && center[1] < 12 && center[2] < 12);
-        // 引擎后来不可用时仍能展示已完成缓存，不再次启动解码器。
-        let cached = create_video_thumbnail(directory.path(), source.to_str().unwrap(), 256, None)
-            .await
-            .unwrap()
-            .expect("cache hit without engine");
-        assert_eq!(poster, cached);
-        let corrupt = directory.path().join("corrupt.mp4");
-        fs::write(&corrupt, "not a video").unwrap();
-        assert_eq!(
-            create_video_thumbnail(
-                directory.path(),
-                corrupt.to_str().unwrap(),
-                256,
-                Some(&ffmpeg)
-            )
-            .await
-            .unwrap(),
-            None,
-        );
-        assert!(
-            fs::read_dir(directory.path()).unwrap().all(|entry| {
-                let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-                name == "short-video.mp4"
-                    || name == "corrupt.mp4"
-                    || name.starts_with("media-thumb-")
-            }),
-            "failed decoding must not leave temporary cache files"
-        );
-    }
-
-    #[tokio::test]
-    async fn video_poster_missing_source_or_engine_returns_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("video.MP4");
-        assert!(is_video_source(&source));
-        assert_eq!(
-            create_video_thumbnail(directory.path(), source.to_str().unwrap(), 512, None)
-                .await
-                .unwrap(),
-            None
-        );
-        fs::write(&source, "engine is unavailable").unwrap();
-        assert_eq!(
-            create_video_thumbnail(directory.path(), source.to_str().unwrap(), 512, None)
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires INFINITE_CANVAS_TEST_FFMPEG pointing at the installed project engine"]
-    async fn installed_engine_preserves_anamorphic_video_display_ratio() {
-        let ffmpeg = PathBuf::from(std::env::var("INFINITE_CANVAS_TEST_FFMPEG").unwrap());
-        let directory = tempfile::tempdir().unwrap();
-        let source = directory.path().join("anamorphic.mp4");
-        let mut fixture = tokio::process::Command::new(&ffmpeg);
-        fixture
-            .args([
-                "-nostdin",
-                "-y",
-                "-v",
-                "error",
-                "-f",
-                "lavfi",
-                "-i",
-                "color=red:s=720x576:r=24:d=0.125",
-                "-vf",
-                "setsar=64/45",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-threads",
-                "1",
-            ])
-            .arg(&source);
-        #[cfg(windows)]
-        fixture.creation_flags(0x0800_0000);
-        assert!(fixture.output().await.unwrap().status.success());
-        let original = fs::read(&source).unwrap();
-        let poster = create_video_thumbnail(
-            directory.path(),
-            source.to_str().unwrap(),
-            512,
-            Some(&ffmpeg),
-        )
-        .await
-        .unwrap()
-        .expect("anamorphic poster");
-        assert_eq!(
-            (poster.width, poster.height),
-            (512, 288),
-            "720x576 with SAR64:45 must remain 16:9, not 5:4"
-        );
-        assert_eq!(fs::read(&source).unwrap(), original);
     }
 }

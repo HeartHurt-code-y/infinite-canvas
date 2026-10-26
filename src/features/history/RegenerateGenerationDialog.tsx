@@ -1,5 +1,6 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useModalFocusTrap } from "../../components/useModalFocusTrap";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   useEffect,
@@ -7,14 +8,16 @@ import {
   useCallback,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 
 import { ImeInput } from "../../components/ImeTextField";
 import { cloudAssetAwaitingId } from "../workspace/workspaceModel";
 import {
   assetLibraryClient,
+  backendErrorMessage,
   formatRawBackendError,
+  frontendLog,
   inferMediaKindFromName,
   isDesktopRuntime,
   localBase64AssetClient,
@@ -418,7 +421,8 @@ interface RegenerateGenerationDialogProps {
   readonly task: GenerationTaskDetail;
   readonly client: GenerationTaskClient;
   readonly busy: boolean;
-  readonly error: string | null;
+  /** 提交失败时的原始错误对象；界面上的摘要由 ErrorAlert 提，原文只进日志。 */
+  readonly error: unknown;
   readonly onSubmit: (command: StartGenerationCommand) => Promise<void>;
   readonly onCancel: () => void;
 }
@@ -453,9 +457,9 @@ export function RegenerateGenerationDialog({
   const [materials, setMaterials] = useState<readonly EditableMaterial[]>(initialMaterials);
   const [addTab, setAddTab] = useState<AddTab>("cloud");
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[] | null>(null);
-  const [cloudError, setCloudError] = useState<string | null>(null);
+  const [cloudError, setCloudError] = useState<unknown>(null);
   const [localAssets, setLocalAssets] = useState<readonly LocalBase64AssetRecord[] | null>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
+  const [localError, setLocalError] = useState<unknown>(null);
   const [legacyLocalAssets, setLegacyLocalAssets] = useState<readonly LocalAssetRecord[]>([]);
   const [localImportPending, setLocalImportPending] = useState(false);
   const localImportBusyRef = useRef(false);
@@ -489,11 +493,18 @@ export function RegenerateGenerationDialog({
         pageSize: 100,
       })
       .then(setCloudAssets)
-      .catch((reason: unknown) => setCloudError(formatRawBackendError(reason)));
+      .catch((reason: unknown) => {
+        // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+        frontendLog("error", `[history] 读取云端素材库失败: ${formatRawBackendError(reason)}`);
+        setCloudError(reason);
+      });
     void localBase64AssetClient
       .listAssets()
       .then((page) => setLocalAssets(page.items))
-      .catch((reason: unknown) => setLocalError(formatRawBackendError(reason)));
+      .catch((reason: unknown) => {
+        frontendLog("error", `[history] 读取本地素材库失败: ${formatRawBackendError(reason)}`);
+        setLocalError(reason);
+      });
     // 只在旧任务真的引用 TOS 本地索引时读取它，不混入新的本机素材库。
     if (initialMaterials.some((material) => material.target.kind === "local_asset")) {
       void tosStagingClient
@@ -739,7 +750,12 @@ export function RegenerateGenerationDialog({
         try {
           imported.push(await localBase64AssetClient.importAsset({ localPath }));
         } catch (reason) {
-          failures.push(`${fileName}：${formatRawBackendError(reason)}`);
+          // 完整原文只进日志；界面上只留一句人话。
+          frontendLog(
+            "error",
+            `[history] 导入本机素材失败: ${fileName}: ${formatRawBackendError(reason)}`,
+          );
+          failures.push(`${fileName}：${backendErrorMessage(reason)}`);
         }
       }
       if (imported.length > 0) {
@@ -766,7 +782,9 @@ export function RegenerateGenerationDialog({
       }
       if (failures.length > 0) setLocalImportError(failures.join("；"));
     } catch (reason) {
-      setLocalImportError(`选择本机文件失败：${formatRawBackendError(reason)}`);
+      // 完整原文只进日志；界面上只留一句人话。
+      frontendLog("error", `[history] 选择本机文件失败: ${formatRawBackendError(reason)}`);
+      setLocalImportError(`选择本机文件失败：${backendErrorMessage(reason)}`);
     } finally {
       localImportBusyRef.current = false;
       setLocalImportPending(false);
@@ -812,15 +830,13 @@ export function RegenerateGenerationDialog({
     });
   };
 
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    onCancel();
-  };
+  // 模态焦点陷阱：焦点锁在对话框内（Tab 不会跑到背后的历史面板上），Esc 关闭，
+  // 关闭后焦点回到打开本对话框的那个元素。
+  const trap = useModalFocusTrap({ active: true, onEscape: onCancel });
 
   const shownError = validationError ?? error;
 
-  return (
+  return createPortal(
     <div className="history-layer regenerate-layer">
       <button
         type="button"
@@ -833,7 +849,8 @@ export function RegenerateGenerationDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="regenerate-dialog-title"
-        onKeyDown={handleKeyDown}
+        ref={trap.ref}
+        {...trap.containerProps}
       >
         <header className="regenerate-dialog__header">
           <span className="history-dialog__eyebrow">生成任务历史</span>
@@ -945,7 +962,11 @@ export function RegenerateGenerationDialog({
                   !runtime ? (
                     <p className="regenerate-add__error">云端素材库需要桌面应用运行环境。</p>
                   ) : cloudError ? (
-                    <p className="regenerate-add__error">{cloudError}</p>
+                    <ErrorAlert
+                      id="regenerate-cloud-library-error"
+                      error={cloudError}
+                      hint="重新打开对话框可重试读取云端素材库。"
+                    />
                   ) : cloudAssets == null ? (
                     <p className="regenerate-add__empty">正在加载云端素材…</p>
                   ) : cloudAssets.length === 0 ? (
@@ -1015,20 +1036,20 @@ export function RegenerateGenerationDialog({
                     ) : null}
                     {localImportSuccess ? <p role="status">{localImportSuccess}</p> : null}
                     {localImportError ? (
-                      <>
-                        <p role="alert" className="regenerate-add__error">
-                          {localImportError}
-                        </p>
-                        <ErrorCopyButton text={localImportError} />
-                      </>
+                      <ErrorAlert
+                        id="regenerate-local-import-error"
+                        error={localImportError}
+                        hint="换一张本机图片或视频再试一次；支持的格式见上传按钮说明。"
+                      />
                     ) : null}
                     {!runtime ? (
                       <p className="regenerate-add__error">本地素材库需要桌面应用运行环境。</p>
                     ) : localError ? (
-                      <>
-                        <p className="regenerate-add__error">{localError}</p>
-                        <ErrorCopyButton text={localError} />
-                      </>
+                      <ErrorAlert
+                        id="regenerate-local-library-error"
+                        error={localError}
+                        hint="重新打开对话框可重试读取本机素材库。"
+                      />
                     ) : localAssets == null ? (
                       <p className="regenerate-add__empty">正在加载本地素材…</p>
                     ) : localAssets.length === 0 ? (
@@ -1126,9 +1147,11 @@ export function RegenerateGenerationDialog({
           </div>
 
           {shownError ? (
-            <p role="alert" className="regenerate-dialog__error">
-              {shownError}
-            </p>
+            <ErrorAlert
+              id="regenerate-dialog-error"
+              error={shownError}
+              hint="先核对原任务的请求快照与素材，再决定是否重新生成。"
+            />
           ) : null}
         </div>
         <footer className="regenerate-dialog__actions">
@@ -1145,6 +1168,7 @@ export function RegenerateGenerationDialog({
           </button>
         </footer>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }

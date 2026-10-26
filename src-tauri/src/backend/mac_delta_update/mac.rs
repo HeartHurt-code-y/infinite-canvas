@@ -55,11 +55,11 @@ struct Descriptor {
 }
 
 fn set_status(change: impl FnOnce(&mut MacDeltaUpdateStatus)) {
-    change(&mut STATUS.lock().expect("macOS delta status poisoned"));
+    change(&mut STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
 }
 
 pub fn status() -> MacDeltaUpdateStatus {
-    STATUS.lock().expect("macOS delta status poisoned").clone()
+    STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
 }
 
 fn trusted_origin() -> Result<Url, String> {
@@ -567,7 +567,7 @@ pub async fn prepare(app: &AppHandle, version: &str) -> Result<bool, String> {
         return Err("macOS 差分更新已在进行中".into());
     }
     let _guard = RunningGuard;
-    *READY.lock().expect("macOS delta ready poisoned") = None;
+    *READY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     set_status(|status| {
         *status = MacDeltaUpdateStatus {
             preparing: true,
@@ -577,7 +577,7 @@ pub async fn prepare(app: &AppHandle, version: &str) -> Result<bool, String> {
     let result = prepare_inner(app, version).await;
     match result {
         Ok(Some(prepared)) => {
-            *READY.lock().expect("macOS delta ready poisoned") = Some(prepared);
+            *READY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
             set_status(|status| {
                 status.preparing = false;
                 status.ready = true;
@@ -608,7 +608,7 @@ pub async fn install(app: &AppHandle, version: &str) -> Result<(), String> {
     let preflight = async {
         let prepared = READY
             .lock()
-            .expect("macOS delta ready poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .ok_or("macOS 差分更新尚未准备好")?;
         if prepared.version != version {

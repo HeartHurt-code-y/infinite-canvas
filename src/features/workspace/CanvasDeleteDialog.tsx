@@ -1,5 +1,5 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 
@@ -103,12 +103,11 @@ export function CanvasDeleteDialog({
         <p className="canvas-delete-dialog__retained">已保存的媒体文件和任务历史会保留。</p>
       </div>
       {error && (
-        <>
-          <p className="canvas-delete-dialog__error" role="alert">
-            {error}
-          </p>
-          <ErrorCopyButton text={error} />
-        </>
+        <ErrorAlert
+          id="canvas-delete-dialog-error"
+          error={error}
+          hint="删除未完成，画布仍在。稍后再试；若持续失败，请复制报错并检查本地数据库是否可写。"
+        />
       )}
       <footer className="canvas-delete-dialog__actions">
         <button ref={cancelRef} type="button" onClick={onClose} disabled={busy}>

@@ -1,11 +1,10 @@
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { mkdir, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { Icon, type IconSize } from "../../components/Icon";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { localBase64AssetClient } from "../../lib/backend";
 import {
-  PROMPT_ATTACHMENT_ACCEPT,
   ingestPromptAttachments,
   type PromptAttachmentIngestReport,
 } from "../../lib/promptAttachments";
@@ -20,7 +19,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
-import { PromptRichTextToolbar } from "./PromptRichTextToolbar";
+import "./PromptEditor.css";
 import {
   frontendLog,
   refreshMediaUrlWithStagingFallback,
@@ -66,8 +65,9 @@ import { isVideoSourceUrl } from "./mediaPreview";
 import { WhiteModelControlSection } from "./WhiteModelControlSection";
 import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
-import { preferredPanoramaParameters } from "../../lib/whiteModelBlocking";
+import { preferredPanoramaParameters } from "../../lib/panorama";
 import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
+import { VideoNodeSettingsControls } from "./VideoNodeSettingsControls";
 
 import type {
   AssetKind,
@@ -208,9 +208,7 @@ export function NodeTypeIcon({
   if (kind === "video") return <Icon name="video-camera" {...iconProps} size="md" />;
   if (kind === "prompt") return <Icon name="sparkle" {...iconProps} size="md" />;
   if (kind === "screenplay") return <Icon name="book-open-text" {...iconProps} size="md" />;
-  if (kind === "storyboard") return <Icon name="film-slate" {...iconProps} size="md" />;
   if (kind === "viral_remix") return <Icon name="film-strip" {...iconProps} size="md" />;
-  if (kind === "video_composer") return <Icon name="film-strip" {...iconProps} size="md" />;
   if (kind === "video_downloader") return <Icon name="download-simple" {...iconProps} size="md" />;
   return <Icon name="folder-open" {...iconProps} size="md" />;
 }
@@ -278,6 +276,7 @@ export function PromptMentionInput({
   expandable = false,
   onTextChange,
   placeholder,
+  onSession,
 }: {
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
@@ -297,17 +296,28 @@ export function PromptMentionInput({
   readonly onTextChange?: (text: string) => void;
   /** 空内容占位文案；缺省时使用提示词输入框的默认文案。仅在首次挂载时生效。 */
   readonly placeholder?: string;
+  /**
+   * 编辑会话的出口。
+   *
+   * 生成节点的编辑层里，参考瓦片上的「@」按钮要往提示词里插引用（原站
+   * liblib 的 @ 就在瓦片上，不在提示词区），而会话由本组件创建——通过这个
+   * 回调把会话交给上层，瓦片才能调用 `insertReference`。
+   */
+  readonly onSession?: ((session: PromptContentEditorSession | null) => void) | undefined;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
   const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
   const sessionRef = useRef(promptSession);
-  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    onSession?.(promptSession);
+    return () => onSession?.(null);
+  }, [onSession, promptSession]);
   /** 附件摄取的用户可见结果：失败与被忽略文件各给一句人话和补救动作。 */
   const [attachmentNotice, setAttachmentNotice] = useState<{
     readonly message: string;
     readonly hint: string;
   } | null>(null);
-  // 粘贴/拖拽/选择器共用的摄取：扩展名口径、临时文件与素材导入都在
+  // 粘贴/拖拽共用的摄取：扩展名口径、临时文件与素材导入都在
   // lib/promptAttachments；这里只接线，并把结果翻译成用户能读懂的提示。
   const ingestAttachmentFiles = useCallback(async (files: readonly File[]) => {
     setAttachmentNotice(null);
@@ -1019,7 +1029,16 @@ export function PromptMentionInput({
       id={expanded ? editorId : undefined}
       className={`prompt-mention${expanded ? " is-expanded" : ""}`}
       role={expanded ? "dialog" : undefined}
-      aria-modal={expanded ? true : undefined}
+      /*
+       * 刻意**不**声明 `aria-modal`。
+       *
+       * 这个编辑区是**画布节点的一部分**，不是独立模态：展开时用户要的是
+       * 「在这个节点里编辑提示词」，而 `aria-modal="true"` 会让读屏屏蔽整个
+       * 画布 —— 正好屏蔽掉用户此刻仍要参照的其它节点与连线。
+       *
+       * 连带后果同上：画布子树内存在 aria-modal 时，焦点陷阱冻结背景的豁免
+       * 会跳过整棵画布，背景就始终可聚焦。
+       */
       aria-labelledby={expanded ? editorTitleId : undefined}
       aria-describedby={expanded ? editorDescriptionId : undefined}
       onKeyDown={(event) => {
@@ -1084,24 +1103,6 @@ export function PromptMentionInput({
         ) : null}
 
         <div ref={fieldRef} className="prompt-mention__field">
-          <PromptRichTextToolbar
-            session={promptSession}
-            onPickFiles={() => attachmentInputRef.current?.click()}
-          />
-          <input
-            ref={attachmentInputRef}
-            type="file"
-            multiple
-            accept={PROMPT_ATTACHMENT_ACCEPT}
-            className="prompt-attachment__picker"
-            aria-hidden="true"
-            tabIndex={-1}
-            onChange={(event) => {
-              const files = Array.from(event.target.files ?? []);
-              event.target.value = "";
-              void ingestAttachmentFiles(files);
-            }}
-          />
           {attachmentNotice != null && (
             <ErrorAlert error={attachmentNotice.message} hint={attachmentNotice.hint} />
           )}
@@ -1512,18 +1513,49 @@ export function PromptMentionInput({
   return expanded ? createPortal(editor, document.body) : editor;
 }
 
+/**
+ * 供应商下拉里的展示名。
+ *
+ * 同一个网关常被配成多条连接（改线路、换 key、留测试通道），它们的展示名可能完全
+ * 一样——下拉里两行同名就分不出该选哪条。同名时补一段连接 id 区分，避免用户对着
+ * 两个一样的名字猜。
+ */
+function providerOptionLabels(
+  providers: readonly ProviderCatalogEntry[],
+): ReadonlyMap<string, string> {
+  const totals = new Map<string, number>();
+  for (const entry of providers) {
+    const name = entry.provider.displayName;
+    totals.set(name, (totals.get(name) ?? 0) + 1);
+  }
+  const labels = new Map<string, string>();
+  for (const entry of providers) {
+    const name = entry.provider.displayName;
+    const id = entry.provider.id;
+    labels.set(
+      id,
+      (totals.get(name) ?? 0) > 1
+        ? `${name} · ${id.length > 12 ? `${id.slice(0, 8)}…` : id}`
+        : name,
+    );
+  }
+  return labels;
+}
+
 export function ImageNodeSettings({
+  presentation = "full",
+  active = true,
   config,
   providerCatalog,
   hasMediaInputs,
   onChange,
-  onOpenWhiteModelStudio,
 }: {
+  readonly presentation?: "full" | "compact";
+  readonly active?: boolean;
   readonly config: ImageNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
   readonly onChange: (config: ImageNodeConfig) => void;
-  readonly onOpenWhiteModelStudio?: (() => void) | undefined;
 }) {
   const operation: GenerationOperation = hasMediaInputs ? "image_to_image" : "text_to_image";
   const availableProviders = providerCatalog.filter(
@@ -1536,6 +1568,7 @@ export function ImageNodeSettings({
   const selectedModel = availableModels.find(
     (model) => model.definitionId === config.modelSelection.modelDefinitionId,
   );
+  const providerLabels = providerOptionLabels(availableProviders);
   const parameterCapabilities = selectedModel
     ? modelParameterCapabilities(
         selectedModel.operationSchema,
@@ -1558,8 +1591,122 @@ export function ImageNodeSettings({
       capability.key !== "n" && !(capability.key === "max_images" && sequentialMode !== "auto"),
   );
 
-  return (
-    <div className="canvas-gen-node__settings" aria-label="图片生成参数">
+  const modelFields = (
+    <>
+      <div className="canvas-gen-node__field canvas-gen-node__field--provider">
+        <span>供应商</span>
+        <CanvasSelect
+          ariaLabel="供应商"
+          value={config.modelSelection.providerId}
+          options={[
+            ...(config.modelSelection.providerId ? [] : [{ value: "", label: "请选择供应商" }]),
+            ...(config.modelSelection.providerId && !selectedProvider
+              ? [
+                  {
+                    value: config.modelSelection.providerId,
+                    label: `${config.modelSelection.providerId}（不可用）`,
+                  },
+                ]
+              : []),
+            ...availableProviders.map((entry) => ({
+              value: entry.provider.id,
+              label: providerLabels.get(entry.provider.id) ?? entry.provider.displayName,
+            })),
+          ]}
+          onChange={(providerId) => {
+            const modelDefinitionId =
+              availableProviders
+                .find((entry) => entry.provider.id === providerId)
+                ?.models.find(isImageGenerationModel)?.definitionId ?? "";
+            onChange({
+              ...config,
+              modelSelection: { providerId, modelDefinitionId },
+              parameterValues: {},
+            });
+          }}
+        />
+      </div>
+
+      <div className="canvas-gen-node__field canvas-gen-node__field--model">
+        <span>图片模型</span>
+        <CanvasSelect
+          ariaLabel="图片模型"
+          value={config.modelSelection.modelDefinitionId}
+          options={[
+            ...(config.modelSelection.modelDefinitionId
+              ? []
+              : [
+                  {
+                    value: "",
+                    label: availableModels.length > 0 ? "请选择图片模型" : "没有可用的图片模型",
+                  },
+                ]),
+            ...(config.modelSelection.modelDefinitionId && !selectedModel
+              ? [
+                  {
+                    value: config.modelSelection.modelDefinitionId,
+                    label: `${config.modelSelection.modelDefinitionId}（不可用）`,
+                  },
+                ]
+              : []),
+            ...availableModels.map((model) => ({
+              value: model.definitionId,
+              label: `${model.displayName}${
+                model.operations.includes(operation) ? "" : "（目录未声明当前操作）"
+              }`,
+            })),
+          ]}
+          onChange={(modelDefinitionId) =>
+            onChange({
+              ...config,
+              modelSelection: {
+                ...config.modelSelection,
+                modelDefinitionId,
+              },
+              parameterValues: {},
+            })
+          }
+        />
+      </div>
+    </>
+  );
+  const parameterFields = (
+    <>
+      <label className="canvas-gen-node__field canvas-gen-node__field--count">
+        <span>生成数量</span>
+        <input
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={supportsBatchCount ? undefined : countMaximum}
+          value={config.generationCount}
+          onChange={(event) =>
+            onChange({
+              ...config,
+              generationCount: parseGenerationCountInput(event.target.value, countMaximum),
+            })
+          }
+        />
+      </label>
+
+      {modelParameterCapabilitiesWithoutCount.map((capability) => (
+        <GenerationParameterField
+          key={capability.key}
+          capability={capability}
+          value={resolvedParameterValue(capability, config.parameterValues)}
+          hasMediaInputs={hasMediaInputs}
+          onChange={(value) =>
+            onChange({
+              ...config,
+              parameterValues: { ...config.parameterValues, [capability.key]: value },
+            })
+          }
+        />
+      ))}
+    </>
+  );
+  const advancedFields = (
+    <>
       <div className="canvas-gen-node__operation" role="status" aria-live="polite">
         <span className="canvas-gen-node__operation-icon" aria-hidden="true">
           <Icon name="image-square" size="md" />
@@ -1595,113 +1742,33 @@ export function ImageNodeSettings({
           />
           <span>全景图</span>
         </label>
-        {onOpenWhiteModelStudio ? (
-          <button
-            type="button"
-            className="canvas-gen-node__studio"
-            onClick={onOpenWhiteModelStudio}
-          >
-            打开白模导演台
-          </button>
-        ) : null}
       </div>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--provider">
-        <span>供应商</span>
-        <select
-          value={config.modelSelection.providerId}
-          onChange={(event) => {
-            const providerId = event.target.value;
-            const modelDefinitionId =
-              availableProviders
-                .find((entry) => entry.provider.id === providerId)
-                ?.models.find(isImageGenerationModel)?.definitionId ?? "";
-            onChange({
-              ...config,
-              modelSelection: { providerId, modelDefinitionId },
-              parameterValues: {},
-            });
-          }}
-        >
-          {!config.modelSelection.providerId ? <option value="">请选择供应商</option> : null}
-          {config.modelSelection.providerId && !selectedProvider ? (
-            <option value={config.modelSelection.providerId}>
-              {config.modelSelection.providerId}（不可用）
-            </option>
-          ) : null}
-          {availableProviders.map((entry) => (
-            <option key={entry.provider.id} value={entry.provider.id}>
-              {entry.provider.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--count">
-        <span>生成数量</span>
-        <input
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={supportsBatchCount ? undefined : countMaximum}
-          value={config.generationCount}
-          onChange={(event) =>
-            onChange({
-              ...config,
-              generationCount: parseGenerationCountInput(event.target.value, countMaximum),
-            })
-          }
-        />
-      </label>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--model">
-        <span>图片模型</span>
-        <select
-          value={config.modelSelection.modelDefinitionId}
-          onChange={(event) =>
-            onChange({
-              ...config,
-              modelSelection: {
-                ...config.modelSelection,
-                modelDefinitionId: event.target.value,
-              },
-              parameterValues: {},
-            })
-          }
-        >
-          {!config.modelSelection.modelDefinitionId ? (
-            <option value="">
-              {availableModels.length > 0 ? "请选择图片模型" : "没有可用的图片模型"}
-            </option>
-          ) : null}
-          {config.modelSelection.modelDefinitionId && !selectedModel ? (
-            <option value={config.modelSelection.modelDefinitionId}>
-              {config.modelSelection.modelDefinitionId}（不可用）
-            </option>
-          ) : null}
-          {availableModels.map((model) => (
-            <option key={model.definitionId} value={model.definitionId}>
-              {model.displayName}
-              {model.operations.includes(operation) ? "" : "（目录未声明当前操作）"}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      {modelParameterCapabilitiesWithoutCount.map((capability) => (
-        <GenerationParameterField
-          key={capability.key}
-          capability={capability}
-          value={resolvedParameterValue(capability, config.parameterValues)}
-          hasMediaInputs={hasMediaInputs}
-          onChange={(value) =>
-            onChange({
-              ...config,
-              parameterValues: { ...config.parameterValues, [capability.key]: value },
-            })
-          }
-        />
-      ))}
+    </>
+  );
+  if (presentation === "compact")
+    return (
+      <VideoNodeSettingsControls
+        kind="image"
+        active={active}
+        modelLabel={selectedModel?.displayName ?? "选择图片模型"}
+        parameterLabel={[
+          ...modelParameterCapabilitiesWithoutCount.flatMap((capability) => {
+            const value = resolvedParameterValue(capability, config.parameterValues);
+            return value === "" || typeof value === "boolean" ? [] : [String(value)];
+          }),
+          `${config.generationCount} 张`,
+        ].join(" · ")}
+        modeLabel={config.panoramaEnabled ? "全景图" : hasMediaInputs ? "参考素材生成" : "文生图"}
+        model={modelFields}
+        parameters={parameterFields}
+        advanced={advancedFields}
+      />
+    );
+  return (
+    <div className="canvas-gen-node__settings" aria-label="图片生成参数">
+      {advancedFields}
+      {modelFields}
+      {parameterFields}
     </div>
   );
 }
@@ -1723,20 +1790,20 @@ function GenerationParameterField({
   const disabled = locked;
   if (capability.type === "boolean" && capability.optional && allowAutomatic) {
     return (
-      <label className="canvas-gen-node__field canvas-gen-node__field--half">
+      <div className="canvas-gen-node__field canvas-gen-node__field--half">
         <span>{capability.label}</span>
-        <select
+        <CanvasSelect
+          ariaLabel={capability.label}
           value={typeof value === "boolean" ? String(value) : ""}
           disabled={disabled}
-          onChange={(event) =>
-            onChange(event.target.value === "" ? "" : event.target.value === "true")
-          }
-        >
-          <option value="">自动</option>
-          <option value="true">开启</option>
-          <option value="false">关闭</option>
-        </select>
-      </label>
+          options={[
+            { value: "", label: "自动" },
+            { value: "true", label: "开启" },
+            { value: "false", label: "关闭" },
+          ]}
+          onChange={(next) => onChange(next === "" ? "" : next === "true")}
+        />
+      </div>
     );
   }
   if (capability.type === "boolean") {
@@ -1759,36 +1826,36 @@ function GenerationParameterField({
   }
 
   if (capability.options.length > 0) {
+    const keepAutomatic = capability.optional && allowAutomatic;
+    const currentIsListed = capability.options.some((option) => option.value === value);
     return (
-      <label className="canvas-gen-node__field canvas-gen-node__field--half">
+      <div className="canvas-gen-node__field canvas-gen-node__field--half">
         <span>{capability.label}</span>
-        <select
+        <CanvasSelect
+          ariaLabel={capability.label}
           value={String(value)}
           disabled={disabled}
           title={locked ? "由当前任务类型自动设置" : undefined}
-          onChange={(event) => {
-            if (capability.optional && allowAutomatic && event.target.value === "") {
+          options={[
+            ...(keepAutomatic ? [{ value: "", label: "自动" }] : []),
+            ...((!keepAutomatic || value !== "") && !currentIsListed
+              ? [{ value: String(value), label: `${String(value)}（当前值）` }]
+              : []),
+            ...capability.options.map((option) => ({
+              value: String(option.value),
+              label: option.label,
+            })),
+          ]}
+          onChange={(next) => {
+            if (keepAutomatic && next === "") {
               onChange("");
               return;
             }
-            const selected = capability.options.find(
-              (option) => String(option.value) === event.target.value,
-            );
+            const selected = capability.options.find((option) => String(option.value) === next);
             if (selected) onChange(selected.value);
           }}
-        >
-          {capability.optional && allowAutomatic ? <option value="">自动</option> : null}
-          {!(capability.optional && allowAutomatic && value === "") &&
-          !capability.options.some((option) => option.value === value) ? (
-            <option value={String(value)}>{String(value)}（当前值）</option>
-          ) : null}
-          {capability.options.map((option) => (
-            <option key={`${capability.key}-${String(option.value)}`} value={String(option.value)}>
-              {option.label}
-            </option>
-          ))}
-        </select>
-      </label>
+        />
+      </div>
     );
   }
 
@@ -1830,20 +1897,22 @@ export function VideoNodeSettings({
   mediaInputs,
   onChange,
   onAnnotateVideo,
-  onOpenWhiteModelStudio,
   onGreenScreenGenerate,
   onGreenScreenUseResult,
   onImportGreenScreenVideo,
   greenScreenResults,
   greenScreenBusy,
+  presentation = "full",
+  active = true,
 }: {
+  readonly presentation?: "full" | "compact";
+  readonly active?: boolean;
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
   readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly onChange: (config: VideoNodeConfig) => void;
   readonly onAnnotateVideo?: (input: ConnectedAssetInput | InheritedAssetInput) => void;
-  readonly onOpenWhiteModelStudio?: (() => void) | undefined;
   readonly onGreenScreenGenerate?: (() => void) | undefined;
   readonly onGreenScreenUseResult?: ((key: string) => void) | undefined;
   readonly onImportGreenScreenVideo?: (() => void) | undefined;
@@ -1863,6 +1932,7 @@ export function VideoNodeSettings({
   const selectedModel = availableModels.find(
     (model) => model.definitionId === config.modelSelection.modelDefinitionId,
   );
+  const providerLabels = providerOptionLabels(availableProviders);
   const fzyVideo = isFzyVideoSchema(selectedModel?.operationSchema ?? {});
   const perTaskProfile = fzyVideo ? null : perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
   const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
@@ -1903,30 +1973,29 @@ export function VideoNodeSettings({
   const pixverse = !fzyVideo && isPixverseVideoModel(selectedModel?.remoteModelId ?? "");
   const pixverseHasImages = (mediaInputs ?? []).some((input) => input.kind === "image");
 
-  return (
-    <div className="canvas-gen-node__settings" aria-label="视频生成参数">
-      <div className="canvas-gen-node__operation" role="status" aria-live="polite">
-        <span className="canvas-gen-node__operation-icon" aria-hidden="true">
-          <Icon name="video-camera" size="md" />
-        </span>
-        <span className="canvas-gen-node__operation-copy">
-          <strong>
-            {taskState.enabled && taskState.mode !== "auto"
-              ? currentTaskLabel
-              : hasMediaInputs
-                ? "参考素材生成"
-                : "文生视频"}
-          </strong>
-          <small>{hasMediaInputs ? "已使用直连或随提示词继承的素材" : "连接素材后自动切换"}</small>
-        </span>
-      </div>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--provider">
+  const modelFields = (
+    <>
+      <div className="canvas-gen-node__field canvas-gen-node__field--provider">
         <span>供应商</span>
-        <select
+        <CanvasSelect
+          ariaLabel="供应商"
           value={config.modelSelection.providerId}
-          onChange={(event) => {
-            const providerId = event.target.value;
+          options={[
+            ...(config.modelSelection.providerId ? [] : [{ value: "", label: "请选择供应商" }]),
+            ...(config.modelSelection.providerId && !selectedProvider
+              ? [
+                  {
+                    value: config.modelSelection.providerId,
+                    label: `${config.modelSelection.providerId}（不可用）`,
+                  },
+                ]
+              : []),
+            ...availableProviders.map((entry) => ({
+              value: entry.provider.id,
+              label: providerLabels.get(entry.provider.id) ?? entry.provider.displayName,
+            })),
+          ]}
+          onChange={(providerId) => {
             const modelDefinitionId =
               availableProviders
                 .find((entry) => entry.provider.id === providerId)
@@ -1940,21 +2009,49 @@ export function VideoNodeSettings({
               mediaRoles: {},
             });
           }}
-        >
-          {!config.modelSelection.providerId ? <option value="">请选择供应商</option> : null}
-          {config.modelSelection.providerId && !selectedProvider ? (
-            <option value={config.modelSelection.providerId}>
-              {config.modelSelection.providerId}（不可用）
-            </option>
-          ) : null}
-          {availableProviders.map((entry) => (
-            <option key={entry.provider.id} value={entry.provider.id}>
-              {entry.provider.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
+        />
+      </div>
 
+      <div className="canvas-gen-node__field canvas-gen-node__field--model">
+        <span>视频模型</span>
+        <CanvasSelect
+          ariaLabel="视频模型"
+          value={config.modelSelection.modelDefinitionId}
+          options={[
+            ...(config.modelSelection.modelDefinitionId
+              ? []
+              : [{ value: "", label: "请选择视频模型" }]),
+            ...(config.modelSelection.modelDefinitionId && !selectedModel
+              ? [
+                  {
+                    value: config.modelSelection.modelDefinitionId,
+                    label: `${config.modelSelection.modelDefinitionId}（不可用）`,
+                  },
+                ]
+              : []),
+            ...availableModels.map((model) => ({
+              value: model.definitionId,
+              label: model.displayName,
+            })),
+          ]}
+          onChange={(modelDefinitionId) =>
+            onChange({
+              ...config,
+              modelSelection: {
+                ...config.modelSelection,
+                modelDefinitionId,
+              },
+              parameterValues: {},
+              seedanceTaskMode: "auto",
+              mediaRoles: {},
+            })
+          }
+        />
+      </div>
+    </>
+  );
+  const parameterFields = (
+    <>
       <label className="canvas-gen-node__field canvas-gen-node__field--count">
         <span>生成数量</span>
         <input
@@ -1972,38 +2069,53 @@ export function VideoNodeSettings({
         />
       </label>
 
-      <label className="canvas-gen-node__field canvas-gen-node__field--model">
-        <span>视频模型</span>
-        <select
-          value={config.modelSelection.modelDefinitionId}
-          onChange={(event) =>
-            onChange({
-              ...config,
-              modelSelection: {
-                ...config.modelSelection,
-                modelDefinitionId: event.target.value,
-              },
-              parameterValues: {},
-              seedanceTaskMode: "auto",
-              mediaRoles: {},
-            })
-          }
-        >
-          {!config.modelSelection.modelDefinitionId ? (
-            <option value="">请选择视频模型</option>
-          ) : null}
-          {config.modelSelection.modelDefinitionId && !selectedModel ? (
-            <option value={config.modelSelection.modelDefinitionId}>
-              {config.modelSelection.modelDefinitionId}（不可用）
-            </option>
-          ) : null}
-          {availableModels.map((model) => (
-            <option key={model.definitionId} value={model.definitionId}>
-              {model.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
+      {taskState.parameterCapabilities.map((capability) => {
+        if (capability.key === "draft") return null;
+        if (taskState.enabled && capability.key === "omni_reference_task_type") return null;
+        // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
+        const taskType = String(config.parameterValues["task_type"] ?? "generation");
+        if (capability.key === "resolution" && taskType === "h3_context_ir") return null;
+        return (
+          <GenerationParameterField
+            key={capability.key}
+            capability={capability}
+            value={resolvedParameterValue(capability, taskState.parameterValues)}
+            hasMediaInputs={hasMediaInputs}
+            allowAutomatic
+            locked={
+              taskState.lockedParameters.includes(capability.key) ||
+              (seedanceDraftEnabled && capability.key === "resolution")
+            }
+            onChange={(value) => {
+              const parameterValues = { ...taskState.parameterValues, [capability.key]: value };
+              if (capability.optional && value === "") delete parameterValues[capability.key];
+              onChange({
+                ...config,
+                parameterValues,
+              });
+            }}
+          />
+        );
+      })}
+    </>
+  );
+  const advancedFields = (
+    <>
+      <div className="canvas-gen-node__operation" role="status" aria-live="polite">
+        <span className="canvas-gen-node__operation-icon" aria-hidden="true">
+          <Icon name="video-camera" size="md" />
+        </span>
+        <span className="canvas-gen-node__operation-copy">
+          <strong>
+            {taskState.enabled && taskState.mode !== "auto"
+              ? currentTaskLabel
+              : hasMediaInputs
+                ? "参考素材生成"
+                : "文生视频"}
+          </strong>
+          <small>{hasMediaInputs ? "已使用直连或随提示词继承的素材" : "连接素材后自动切换"}</small>
+        </span>
+      </div>
 
       {perTaskProfile ? (
         <div className="canvas-gen-node__media-roles" role="status">
@@ -2019,13 +2131,12 @@ export function VideoNodeSettings({
             ；以上为模型目录中的参考信息，素材和参数限制以服务端返回为准。
           </small>
           {perTaskInputIssue ? (
-            <>
-              <div className="canvas-gen-node__media-role-warning" role="alert">
-                <Icon name="warning-circle" aria-hidden="true" size="sm" />
-                <span>{perTaskInputIssue}</span>
-              </div>
-              <ErrorCopyButton text={perTaskInputIssue} />
-            </>
+            <ErrorAlert
+              error={perTaskInputIssue}
+              tone="warning"
+              variant="inline"
+              hint="按上面的模型要求调整素材后再生成。"
+            />
           ) : null}
         </div>
       ) : null}
@@ -2071,31 +2182,30 @@ export function VideoNodeSettings({
 
       {taskState.enabled ? (
         <>
-          <label className="canvas-gen-node__field canvas-gen-node__field--model">
+          <div className="canvas-gen-node__field canvas-gen-node__field--model">
             <span>任务类型</span>
-            <select
+            <CanvasSelect
+              ariaLabel="任务类型"
               value={taskState.mode}
               disabled={config.greenScreen?.enabled}
-              onChange={(event) =>
+              options={seedanceTaskOptions(selectedModel?.remoteModelId ?? "").map((option) => ({
+                value: option.value,
+                label: option.label,
+              }))}
+              onChange={(mode) =>
                 onChange(
                   selectSeedanceTask(
                     selectedModel?.remoteModelId ?? "",
                     parameterCapabilities,
                     config,
                     mediaInputs ?? [],
-                    event.target.value as SeedanceTaskMode,
+                    mode as SeedanceTaskMode,
                     selectedModel?.operationSchema,
                   ),
                 )
               }
-            >
-              {seedanceTaskOptions(selectedModel?.remoteModelId ?? "").map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+            />
+          </div>
           <div className="canvas-gen-node__media-roles" role="status" aria-live="polite">
             <small>{taskState.hint}</small>
             {!parameterCapabilities.some(
@@ -2108,13 +2218,12 @@ export function VideoNodeSettings({
             ) : null}
           </div>
           {taskState.issue ? (
-            <>
-              <div className="canvas-gen-node__media-role-warning" role="alert">
-                <Icon name="warning-circle" aria-hidden="true" size="sm" />
-                <span>{taskState.issue}</span>
-              </div>
-              <ErrorCopyButton text={taskState.issue} />
-            </>
+            <ErrorAlert
+              error={taskState.issue}
+              tone="warning"
+              variant="inline"
+              hint="按上面的模型要求调整素材后再生成。"
+            />
           ) : null}
           {(taskState.mode === "first_frame" || taskState.mode === "first_last_frame") &&
           (mediaInputs?.length ?? 0) > 0 ? (
@@ -2204,7 +2313,6 @@ export function VideoNodeSettings({
 
       {showSeedanceExtras || config.whiteModelControl ? (
         <WhiteModelControlSection
-          onOpenStudio={onOpenWhiteModelStudio}
           {...(config.whiteModelControl ? { config: config.whiteModelControl } : {})}
           inputs={(mediaInputs ?? []).flatMap((input) =>
             input.target
@@ -2265,35 +2373,6 @@ export function VideoNodeSettings({
         </div>
       ) : null}
 
-      {taskState.parameterCapabilities.map((capability) => {
-        if (capability.key === "draft") return null;
-        if (taskState.enabled && capability.key === "omni_reference_task_type") return null;
-        // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
-        const taskType = String(config.parameterValues["task_type"] ?? "generation");
-        if (capability.key === "resolution" && taskType === "h3_context_ir") return null;
-        return (
-          <GenerationParameterField
-            key={capability.key}
-            capability={capability}
-            value={resolvedParameterValue(capability, taskState.parameterValues)}
-            hasMediaInputs={hasMediaInputs}
-            allowAutomatic
-            locked={
-              taskState.lockedParameters.includes(capability.key) ||
-              (seedanceDraftEnabled && capability.key === "resolution")
-            }
-            onChange={(value) => {
-              const parameterValues = { ...taskState.parameterValues, [capability.key]: value };
-              if (capability.optional && value === "") delete parameterValues[capability.key];
-              onChange({
-                ...config,
-                parameterValues,
-              });
-            }}
-          />
-        );
-      })}
-
       {fzyVideo ||
       isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
       isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
@@ -2320,6 +2399,58 @@ export function VideoNodeSettings({
           onChange={(perTaskUrlMedia) => onChange({ ...config, perTaskUrlMedia })}
         />
       ) : null}
+    </>
+  );
+
+  const parameterLabel = [
+    ...taskState.parameterCapabilities
+      .filter(({ key }) =>
+        [
+          "duration",
+          "duration_seconds",
+          "seconds",
+          "ratio",
+          "aspect_ratio",
+          "resolution",
+          "quality",
+        ].includes(key),
+      )
+      .flatMap((capability) => {
+        const value = resolvedParameterValue(capability, taskState.parameterValues);
+        if (value === "") return [];
+        const label = capability.options.find((option) => option.value === value)?.label;
+        return [
+          label ??
+            (typeof value === "number" && /duration|seconds/u.test(capability.key)
+              ? value + " 秒"
+              : String(value)),
+        ];
+      }),
+    config.generationCount + " 段",
+  ].join(" · ");
+  if (presentation === "compact")
+    return (
+      <VideoNodeSettingsControls
+        active={active}
+        modelLabel={selectedModel?.displayName ?? "选择视频模型"}
+        parameterLabel={parameterLabel}
+        modeLabel={
+          taskState.enabled && taskState.mode !== "auto"
+            ? (currentTaskLabel ?? "视频生成")
+            : hasMediaInputs
+              ? "参考素材生成"
+              : "文生视频"
+        }
+        model={modelFields}
+        parameters={parameterFields}
+        advanced={advancedFields}
+      />
+    );
+  return (
+    <div className="canvas-gen-node__settings" aria-label="视频生成参数">
+      {modelFields}
+      {parameterFields}
+      {advancedFields}
     </div>
   );
 }
@@ -2379,22 +2510,20 @@ function VideoMediaRoleSection({
               <span className="canvas-gen-node__media-role-name" title={input.name}>
                 {input.name}
               </span>
-              <select
+              <CanvasSelect
                 className="canvas-gen-node__media-role-select"
+                ariaLabel={`${input.name} 的素材角色`}
+                ariaDescribedBy={issue ? issueId : undefined}
                 value={current}
-                aria-label={`${input.name} 的素材角色`}
-                aria-describedby={issue ? issueId : undefined}
-                onChange={(event) => {
-                  const next = { ...roles, [input.key]: event.target.value };
-                  onChange(next);
+                options={options.map((option) => ({
+                  value: option.value,
+                  label: pairedFrames && option.value === "last_frame" ? "尾帧" : option.label,
+                }))}
+                onChange={(next) => {
+                  const nextRoles = { ...roles, [input.key]: next };
+                  onChange(nextRoles);
                 }}
-              >
-                {options.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {pairedFrames && option.value === "last_frame" ? "尾帧" : option.label}
-                  </option>
-                ))}
-              </select>
+              />
             </li>
           );
         })}
@@ -2550,13 +2679,7 @@ function VideoUrlMediaSection({
         </div>
       )}
       {draftError ? (
-        <>
-          <div className="canvas-gen-node__url-error" role="alert">
-            <Icon name="warning-circle" aria-hidden="true" size="sm" />
-            {draftError}
-          </div>
-          <ErrorCopyButton text={draftError} />
-        </>
+        <ErrorAlert error={draftError} variant="inline" />
       ) : null}
     </div>
   );
@@ -2678,12 +2801,7 @@ function PerTaskVideoUrlSection({
         </div>
       )}
       {draftError ? (
-        <>
-          <div className="canvas-gen-node__url-error" role="alert">
-            {draftError}
-          </div>
-          <ErrorCopyButton text={draftError} />
-        </>
+        <ErrorAlert error={draftError} variant="inline" />
       ) : null}
     </div>
   );

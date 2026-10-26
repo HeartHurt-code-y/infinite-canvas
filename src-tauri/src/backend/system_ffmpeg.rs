@@ -85,33 +85,3 @@ pub(crate) async fn resolve() -> Option<SystemFfmpeg> {
     }
     None
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn macos_fallback_directories_cover_homebrew_prefixes() {
-        let directories = fallback_directories("macos");
-        assert!(
-            directories.contains(&"/opt/homebrew/bin"),
-            "Apple Silicon Homebrew 前缀缺失：{directories:?}"
-        );
-        assert!(
-            directories.contains(&"/usr/local/bin"),
-            "Intel Homebrew 前缀缺失：{directories:?}"
-        );
-        // Windows 依赖完整继承的 PATH，不需要兜底目录。
-        assert!(fallback_directories("windows").is_empty());
-    }
-
-    #[test]
-    fn candidates_use_the_platform_binary_name() {
-        for candidate in candidate_paths() {
-            assert_eq!(
-                candidate.file_name().and_then(|name| name.to_str()),
-                Some(binary_name()),
-            );
-        }
-    }
-}

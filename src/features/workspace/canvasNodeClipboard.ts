@@ -1,11 +1,12 @@
 import type { PromptContentDocumentV1 } from "../../lib/promptContent";
 import type { ExplicitMediaTarget } from "../../lib/backend";
-import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
-import type { AssetEdgeData, KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
-import { createKnowledgeVideoWorkflowConfig } from "./workspaceModel";
 import type { CanvasDocumentV2, CanvasNodeEntry } from "../canvas/canvasStore";
+import type { AssetEdgeData } from "./workspaceModel";
+import { assetGroupsFromNodes } from "./assetGroups";
+import { decodeCanvasGroups, type CanvasGroups } from "../canvas/canvasGroups";
 
 export interface CanvasNodeClipboard {
+  readonly groups: CanvasGroups;
   readonly nodes: readonly CanvasNodeEntry[];
   readonly edges: readonly AssetEdgeData[];
   readonly promptContents: Readonly<Record<string, PromptContentDocumentV1>>;
@@ -16,21 +17,7 @@ const documentNodes = (document: CanvasDocumentV2): CanvasNodeEntry[] => [
   ...document.assetNodes.map((data) => ({ type: "asset" as const, data })),
   ...document.genNodes.map((data) => ({ type: "gen" as const, data })),
   ...(document.screenplayNodes ?? []).map((data) => ({ type: "screenplay" as const, data })),
-  ...(document.storyboardNodes ?? []).map((data) => ({ type: "storyboard" as const, data })),
-  ...(document.knowledgeVideoWorkflowNodes ?? []).map((data) => ({
-    type: "knowledgeVideoWorkflow" as const,
-    data,
-  })),
-  ...(document.viralRemixNodes ?? []).map((data) => ({ type: "viralRemix" as const, data })),
-  ...(document.videoComposerNodes ?? []).map((data) => ({ type: "videoComposer" as const, data })),
-  ...(document.videoDownloaderNodes ?? []).map((data) => ({
-    type: "videoDownloader" as const,
-    data,
-  })),
-  ...(document.frameExtractorNodes ?? []).map((data) => ({
-    type: "frameExtractor" as const,
-    data,
-  })),
+  ...(document.videoClipNodes ?? []).map((data) => ({ type: "videoClip" as const, data })),
   ...document.resultNodes.map((data) => ({ type: "result" as const, data })),
   ...(document.outputNodes ?? []).map((data) => ({ type: "output" as const, data })),
 ];
@@ -57,7 +44,21 @@ export function captureCanvasNodes(
   const promptContents = Object.fromEntries(
     Object.entries(document.promptContents).filter(([key]) => copiedKeys.has(key)),
   );
+  const metadata = decodeCanvasGroups(
+    document.groups,
+    Object.fromEntries(all.map((entry) => [entry.data.key, entry])),
+  );
+  const groups = Object.fromEntries(
+    assetGroupsFromNodes(all.map((entry) => entry.data))
+      .filter(
+        (group) =>
+          group.members.every((member) => selectedKeys.has(member.key)) &&
+          group.members.filter((member) => copiedKeys.has(member.key)).length >= 2,
+      )
+      .map((group) => [group.groupId, metadata[group.groupId]!]),
+  );
   return structuredClone({
+    groups,
     nodes,
     edges: document.assetEdges.filter(
       (edge) => copiedKeys.has(edge.fromKey) && copiedKeys.has(edge.toKey),
@@ -68,36 +69,11 @@ export function captureCanvasNodes(
 }
 
 export interface PastedCanvasNodes {
+  readonly groups: CanvasGroups;
   readonly nodes: readonly CanvasNodeEntry[];
   readonly edges: readonly AssetEdgeData[];
   readonly promptContents: Readonly<Record<string, PromptContentDocumentV1>>;
   readonly keys: readonly string[];
-}
-
-function freshWorkflow(node: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflowNodeData {
-  const config = node.config;
-  const blank = createKnowledgeVideoWorkflowConfig(
-    {
-      prompt: config.models.text,
-      image: config.models.image,
-      video: config.models.video,
-    },
-    config.catalogResolved,
-  );
-  const {
-    executionPlan: _executionPlan,
-    historyRunId: _historyRunId,
-    versionHistory: _versionHistory,
-    connectedMaterials: _connectedMaterials,
-    connectedTexts: _connectedTexts,
-    ...draft
-  } = config;
-  void _executionPlan;
-  void _historyRunId;
-  void _versionHistory;
-  void _connectedMaterials;
-  void _connectedTexts;
-  return { ...node, config: { ...draft, checkpoint: blank.checkpoint } };
 }
 
 /** Remap only copied instances and their internal edges; external references stay unresolved. */
@@ -107,6 +83,15 @@ export function pasteCanvasNodes(
   newKey: (entry: CanvasNodeEntry) => string,
 ): PastedCanvasNodes {
   const keysByOldKey = new Map(clipboard.nodes.map((entry) => [entry.data.key, newKey(entry)]));
+  const groupIds = new Map(
+    Object.keys(clipboard.groups).map((id) => [id, `group-${crypto.randomUUID()}`]),
+  );
+  const groups = Object.fromEntries(
+    Object.entries(clipboard.groups).map(([id, group]) => {
+      const copiedId = groupIds.get(id)!;
+      return [copiedId, { ...group, id: copiedId }];
+    }),
+  );
   const incomingByTarget = new Map<string, Set<string>>();
   for (const edge of clipboard.edges) {
     const incoming = incomingByTarget.get(edge.toKey) ?? new Set<string>();
@@ -127,44 +112,21 @@ export function pasteCanvasNodes(
       ? binding
       : { ...binding, key: copiedKey, target: { ...binding.target, canvasNodeKey: copiedKey } };
   };
-  const freshStudio = (targetKey: string, studio: WhiteModelStudioDraft): WhiteModelStudioDraft => {
-    const {
-      jobInputSignature: _jobInputSignature,
-      blockingImageSignature: _blockingImageSignature,
-      ...draft
-    } = studio;
-    void _jobInputSignature;
-    void _blockingImageSignature;
-    return {
-      ...draft,
-      jobId: null,
-      blockingImagePath: null,
-      ...(studio.environment === undefined
-        ? {}
-        : { environment: remapBinding(targetKey, studio.environment) }),
-      ...(studio.characterBindings === undefined
-        ? {}
-        : {
-            characterBindings: studio.characterBindings.map((item) => ({
-              ...item,
-              reference: remapBinding(targetKey, item.reference),
-            })),
-          }),
-    };
-  };
   const nodes = clipboard.nodes.map((source): CanvasNodeEntry => {
     const entry = structuredClone(source);
+    const previousGroup = entry.data.assetGroupId;
+    delete (entry.data as { assetGroupId?: string }).assetGroupId;
+    const copiedGroup = previousGroup == null ? undefined : groupIds.get(previousGroup);
+    if (copiedGroup != null) Object.assign(entry.data, { assetGroupId: copiedGroup });
     const key = keysByOldKey.get(entry.data.key)!;
     const position = { key, x: entry.data.x + offset.x, y: entry.data.y + offset.y };
     switch (entry.type) {
       case "asset": {
-        const { assetGroupId: _group, ...data } = entry.data;
-        void _group;
+        const data = entry.data;
         return { type: "asset", data: { ...data, ...position } };
       }
       case "output": {
-        const { assetGroupId: _group, ...data } = entry.data;
-        void _group;
+        const data = entry.data;
         return {
           type: "output",
           data: {
@@ -193,9 +155,6 @@ export function pasteCanvasNodes(
                         sourceKey == null ? null : copiedInputKey(entry.data.key, sourceKey),
                       ),
                     }),
-                ...(config.whiteModelStudio == null
-                  ? {}
-                  : { whiteModelStudio: freshStudio(entry.data.key, config.whiteModelStudio) }),
               },
             },
           };
@@ -224,9 +183,6 @@ export function pasteCanvasNodes(
                     ),
                   }),
               ...(mediaRoles == null ? {} : { mediaRoles }),
-              ...(config.whiteModelStudio == null
-                ? {}
-                : { whiteModelStudio: freshStudio(entry.data.key, config.whiteModelStudio) }),
               ...(config.whiteModelControl == null
                 ? {}
                 : {
@@ -265,35 +221,8 @@ export function pasteCanvasNodes(
           },
         };
       }
-      case "videoComposer":
-        return {
-          type: "videoComposer",
-          data: {
-            ...entry.data,
-            ...position,
-            config: {
-              ...entry.data.config,
-              inputOrder: entry.data.config.inputOrder.flatMap((oldKey) => {
-                const copiedKey = copiedInputKey(entry.data.key, oldKey);
-                return copiedKey == null ? [] : [copiedKey];
-              }),
-            },
-          },
-        };
-      case "knowledgeVideoWorkflow":
-        return {
-          type: "knowledgeVideoWorkflow",
-          data: freshWorkflow({ ...entry.data, ...position }),
-        };
-      case "frameExtractor": {
-        const { checkpoint, ...config } = entry.data.config;
-        void checkpoint;
-        return { type: "frameExtractor", data: { ...entry.data, ...position, config } };
-      }
+      case "videoClip":
       case "screenplay":
-      case "storyboard":
-      case "viralRemix":
-      case "videoDownloader":
       case "result":
         return { ...entry, data: { ...entry.data, ...position } } as CanvasNodeEntry;
     }
@@ -322,5 +251,5 @@ export function pasteCanvasNodes(
       },
     ]),
   );
-  return { nodes, edges, promptContents, keys: nodes.map((entry) => entry.data.key) };
+  return { nodes, edges, promptContents, groups, keys: nodes.map((entry) => entry.data.key) };
 }

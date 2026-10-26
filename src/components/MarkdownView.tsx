@@ -15,7 +15,7 @@ import { isExternalHttpUrl, openExternalLink, resolveMarkdownLinkHref } from "..
  * 的 installExternalLinkGuard）被父级 stopPropagation 挡住也能兜住；
  * onClick 里尊重 defaultPrevented，避免与全局守卫各开一次浏览器。
  */
-/** 导出给创作助手消息等需要同样外链安全语义的 Markdown 渲染方复用。 */
+/** 导出给需要同样外链安全语义的 Markdown 渲染方复用。 */
 export function MarkdownLink({
   node,
   href,

@@ -1,0 +1,344 @@
+/*
+ * 画布外壳控件样式：对齐 liblib.tv 画布的左下控件组与底部浮坞。
+ * 数值来自活体实测（docs/integrations/liblib-canvas-re.md），令牌全部来自 tokens.css。
+ */
+
+/*
+ * 视图选项条目组。
+ *
+ * 原站实测（2026-10-22 活体计算样式）：组容器是
+ *   `flex items-center gap-1 rounded-xl p-[6px]`
+ *   → 圆角 12px、内边距 6px、间隙 4px、
+ *     背景 **rgb(26 26 26 / 70%)**（半透明深灰，**没有描边**）。
+ * 组内条目自身透明：文字按钮 28px 高 / 12px 横内边距，纯图标按钮 28×28、
+ * **图标 14px**，圆角 8，hover 才上底色。
+ */
+.canvas-chrome-items {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+
+.canvas-chrome-items__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: var(--size-ll-control);
+  padding: 0 var(--space-sm);
+  color: var(--canvas-controls-text);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  line-height: var(--leading-body);
+  white-space: nowrap;
+  transition: background-color var(--dur-short);
+}
+
+.canvas-chrome-items__button--icon {
+  width: var(--size-ll-control);
+  padding: 0;
+}
+
+.canvas-chrome-items__button[aria-pressed="true"] {
+  background: var(--canvas-controls-active);
+}
+
+.canvas-chrome-items__label {
+  line-height: var(--leading-body);
+}
+
+@media (hover: hover) {
+  .canvas-chrome-items__button:hover:not(:disabled) {
+    background: var(--canvas-controls-hover);
+  }
+}
+
+.canvas-chrome-items__button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/*
+ * 底部浮坞。
+ *
+ * 原站实测：容器 `border-hair border-(--topnav-btn-border) fixed bottom-3 left-1/2
+ * flex flex-row items-center` → 底色 **#262626**、圆角 **12px**、**内边距 8px**、
+ * **间隙 8px**、1px hairline 描边 #363636；按钮 **32×32**、圆角 8、自身透明、
+ * **图标 20px**。品牌球在容器**外面**，48×48，深色圆底 + hairline 描边。
+ */
+.canvas-bottom-dock-row {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  bottom: var(--size-ll-edge);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  transform: translateX(-50%);
+}
+
+.canvas-bottom-dock {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  max-width: calc(100% - 2 * var(--space-md));
+  padding: var(--space-xs);
+  background: var(--canvas-controls-bg);
+  border: 0.5px solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+}
+
+/* 原站浮坞在「快捷键」与「教程」之间有一根 1×24 的竖分隔线。 */
+.canvas-bottom-dock__divider {
+  width: 1px;
+  height: 24px;
+  flex-shrink: 0;
+  align-self: center;
+  background: var(--canvas-controls-border);
+}
+
+.canvas-bottom-dock__action {
+  display: grid;
+  width: var(--size-ll-topnav-btn);
+  height: var(--size-ll-topnav-btn);
+  padding: 0;
+  color: var(--canvas-controls-text);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+  place-items: center;
+  transition: background-color var(--dur-short);
+}
+
+/* 主操作：原站的 ⊕ 是白底深色加号 */
+.canvas-bottom-dock__action--primary {
+  color: var(--canvas-bg);
+  background: var(--canvas-controls-text);
+}
+
+.canvas-bottom-dock__action[aria-pressed="true"] {
+  background: var(--canvas-controls-active);
+}
+
+.canvas-bottom-dock__action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@media (hover: hover) {
+  .canvas-bottom-dock__action:hover:not(:disabled) {
+    background: var(--canvas-controls-hover);
+  }
+  .canvas-bottom-dock__action--primary:hover:not(:disabled) {
+    background: var(--canvas-controls-text);
+  }
+}
+
+/* 品牌球：原站是浮坞右侧一枚 **48×48** 的独立圆球（TV Director），
+   深色圆底 + hairline 描边，里面嵌着渐变球。 */
+.canvas-bottom-dock__brand {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 3rem;
+  height: 3rem;
+  padding: 0;
+  background: var(--canvas-controls-bg);
+  border: 0.5px solid var(--canvas-controls-border);
+  border-radius: 999px;
+  transition: filter var(--dur-short);
+}
+
+@media (hover: hover) {
+  .canvas-bottom-dock__brand:hover {
+    filter: brightness(1.08);
+  }
+}
+
+.canvas-bottom-dock__brand-mark {
+  width: 2.5rem;
+  height: 2.5rem;
+  background: var(--brand-orb);
+  border-radius: 999px;
+}
+
+/*
+ * 视口控件组：把本项目原本分散成四块的面板收成原站那样的**一条连续组**。
+ *
+ * 原站的左下控件组内层是一条带底的胶囊（rounded-xl p-[6px]，
+ * 底色 --canvas-controls-bg），组内条目之间只有 4px 间隙，各自没有边框与
+ * 投影。本项目原本每组各带一块面板底（App.css 的 .canvas-node-selection-control
+ * 等），摆在一起会变成四个小盒子。这里把内层组的表面清掉，只留外层一条。
+ */
+/*
+ * 左下控件组：原站是一层**半透明**的深灰胶囊（`rgb(26 26 26 / 70%)`），
+ * 圆角 12、内边距 6、间隙 4，**没有描边也没有投影**——所以它几乎融进画布，
+ * 看上去像一组直接浮在画布上的按钮。组内条目各自透明，hover 才上底色。
+ */
+.canvas-stage .canvas-viewport-dock {
+  bottom: var(--size-ll-edge);
+  left: var(--size-ll-edge);
+  right: auto;
+  align-items: center;
+  gap: var(--space-2xs);
+  max-width: calc(100% - 2 * var(--space-sm));
+  padding: 6px;
+  background: rgb(26 26 26 / 70%);
+  border: 0;
+  border-radius: var(--radius-ll-float);
+  box-shadow: none;
+  justify-content: flex-start;
+}
+
+.canvas-stage .canvas-viewport-dock > * {
+  min-height: var(--size-ll-control);
+  padding: 0;
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+  box-shadow: none;
+}
+
+/*
+ * 组内那层（`.canvas-chrome-items`）自己不再带表面——原站只有**一层**半透明胶囊，
+ * 组内条目直接躺在上面。这条选择器比 studio-shell.css 的 `> *` 更具体，
+ * 保证「组内不再有第二块面板底」这条规则一定生效。
+ */
+.canvas-stage .canvas-viewport-dock > .canvas-chrome-items {
+  min-height: auto;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* 左下控件组贴左下角：原站实测距左 8px、距底 12px。 */
+.workspace-shell--immersive .canvas-stage .canvas-viewport-dock {
+  bottom: var(--size-ll-edge);
+  left: 0.5rem;
+}
+
+/* 原站这一组内部没有竖分隔线，条目之间只有 4px 间隙。 */
+.canvas-stage .canvas-viewport-dock button:not([aria-pressed="true"]) {
+  color: var(--canvas-controls-text);
+  border-radius: var(--radius-control);
+  transition: background-color var(--dur-short);
+}
+
+@media (hover: hover) {
+  .canvas-stage .canvas-viewport-dock button:hover:not(:disabled) {
+    background: var(--canvas-controls-hover);
+  }
+}
+
+/*
+ * 空画布状态（对齐原站 liblib）。
+ *
+ * 原站不是一张说明卡片，而是一行提示 + 一排创建入口：
+ *   [指针图标] 双击画布  自由生成节点
+ *   [图片生成] [视频生成] [音频生成] [剧本生成] [智能剪辑]
+ * 入口是带图标的圆角按钮：图标装在一个方形小托里（32×32、圆角 8、浅色底），
+ * 右边跟 14px 的文案。
+ */
+/*
+ * 选择器比 studio-shell.css 的同名规则更具体（三个 class），保证空态这一排
+ * 入口是一行、宽度按原站的 1135px 铺开。
+ */
+.canvas-stage .canvas-viewport .canvas-empty-hint {
+  top: 46%;
+  width: min(76rem, calc(100% - 2rem));
+  max-width: none;
+  gap: var(--space-lg);
+}
+
+.canvas-empty-hint__guide {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin: 0;
+  color: var(--color-text-2);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+}
+
+.canvas-empty-hint__guide > svg {
+  color: var(--color-text);
+}
+
+.canvas-empty-hint__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-sm);
+  width: 100%;
+  max-width: 72rem;
+}
+
+.canvas-empty-hint__action {
+  display: inline-flex;
+  min-width: 13rem;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 2.75rem;
+  padding: 0 var(--space-md) 0 var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  transition:
+    background-color var(--dur-short),
+    border-color var(--dur-short);
+}
+
+.canvas-empty-hint__action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-radius: var(--radius-control);
+}
+
+.canvas-empty-hint__action-label {
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .canvas-empty-hint__action:hover {
+    background: var(--canvas-controls-hover);
+    border-color: var(--nt-text-tertiary);
+  }
+}
+
+/* 小地图贴在右下角，避开左下控件组。 */
+.canvas-minimap {
+  right: var(--size-ll-edge);
+  bottom: var(--size-ll-edge);
+  overflow: hidden;
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-control);
+}
+
+@media (max-width: 39.999rem) {
+  .canvas-stage .canvas-viewport-dock {
+    bottom: var(--size-studio-dock-clearance);
+  }
+  .canvas-chrome-items__label {
+    display: none;
+  }
+  .canvas-chrome-items__button {
+    width: var(--size-ll-control);
+    padding: 0;
+  }
+}

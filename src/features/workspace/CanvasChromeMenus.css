@@ -1,0 +1,250 @@
+/*
+ * 画布外壳浮层：缩放菜单与画布切换器（对齐 liblib.tv 画布）。
+ *
+ * 视觉规格来自 docs/integrations/liblib-canvas-re.md 的活体实测：
+ *   - 缩放菜单：Mantine Menu 形态，实测 218×277；
+ *   - 画布切换浮层：Mantine Popover 形态，实测 214×81。
+ *
+ * 高度是怎么凑到 277 的（改样式前先看这里）：
+ *   6 个 40px 的菜单项 + 5 个 2px 间距 + 上下各 4px 内边距
+ *   + 一条 1px 分隔线（含上下各 8px 外边距）= 277px。
+ *   也就是说行高、间距、分隔线三者是**一起**定的：单独改任何一个，菜单就不再是
+ *   原站那个高度。
+ *
+ * 所有颜色与尺寸都走 tokens.css 的令牌，组件里不写字面值。
+ */
+
+/* ── 缩放菜单 ─────────────────────────────────────────────────────────── */
+
+.canvas-zoom-menu__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  min-height: var(--size-ll-control);
+  /* 原站的缩放档位按钮只有百分比（实测 36.89×28、px-1），没有下拉箭头。 */
+  padding-inline: var(--space-2xs);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.canvas-zoom-menu__trigger:hover {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-zoom-menu__trigger:focus-visible {
+  outline: var(--rule-active) solid var(--nt-text-secondary);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+.canvas-zoom-menu__trigger-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-zoom-menu__caret {
+  color: var(--nt-text-tertiary);
+}
+
+.canvas-zoom-menu__panel {
+  /* 浮层挂在 document.body 上并按视口定位：画布的缩放层会裁掉留在 DOM 里的浮层。 */
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  padding: var(--space-2xs);
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-menu);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+  overscroll-behavior: contain;
+}
+
+.canvas-zoom-menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  min-height: var(--space-xl);
+  padding: var(--space-xs) var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.canvas-zoom-menu__item:hover {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-zoom-menu__item:focus-visible {
+  outline: var(--rule-active) solid var(--nt-text-secondary);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+/* 当前档位：品牌面 + 品牌文字（写在 hover 之后，hover 不许盖掉当前值）。 */
+.canvas-zoom-menu__item.is-current {
+  background: var(--nt-brand-surface-l1);
+  color: var(--nt-text-brand);
+}
+
+.canvas-zoom-menu__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-zoom-menu__shortcut {
+  flex: 0 0 auto;
+  /* 正文级（快捷键文字）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-family: inherit;
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.canvas-zoom-menu__divider {
+  height: var(--rule-thin);
+  margin: var(--space-xs) 0;
+  background: var(--canvas-controls-border);
+}
+
+/* ── 画布切换器 ───────────────────────────────────────────────────────── */
+
+.canvas-project-switcher {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  min-height: var(--size-ll-control);
+  padding-inline: var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.canvas-project-switcher:hover {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-project-switcher:focus-visible {
+  outline: var(--rule-active) solid var(--nt-text-secondary);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+.canvas-project-switcher__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-project-switcher__caret {
+  color: var(--nt-text-tertiary);
+}
+
+.canvas-project-switcher__popover {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-2xs);
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  color: var(--canvas-controls-text);
+  overscroll-behavior: contain;
+}
+
+.canvas-project-switcher__group-title {
+  padding: var(--space-2xs) var(--space-xs);
+  /* 正文级（分组标题）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.canvas-project-switcher__menu {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.canvas-project-switcher__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  min-height: var(--size-ll-control);
+  padding: var(--space-2xs) var(--space-xs);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.canvas-project-switcher__item:hover {
+  background: var(--canvas-controls-hover);
+}
+
+.canvas-project-switcher__item:focus-visible {
+  outline: var(--rule-active) solid var(--nt-text-secondary);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+/* 当前画布：品牌面 + 品牌文字。 */
+.canvas-project-switcher__item.is-active {
+  background: var(--nt-brand-surface-l1);
+  color: var(--nt-text-brand);
+}
+
+.canvas-project-switcher__item--action {
+  color: var(--nt-text-secondary);
+}
+
+.canvas-project-switcher__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-project-switcher__edit {
+  padding: var(--space-2xs);
+}
+
+.canvas-project-switcher__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--size-ll-control);
+  padding: var(--space-2xs) var(--space-xs);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--canvas-controls-text);
+  font-size: var(--text-sm);
+}
+
+.canvas-project-switcher__input:focus-visible {
+  outline: var(--rule-active) solid var(--nt-text-secondary);
+  outline-offset: calc(-1 * var(--rule-active));
+}

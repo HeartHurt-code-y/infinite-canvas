@@ -4,9 +4,9 @@ import { useState } from "react";
 import { Toaster } from "sonner";
 import "./App.css";
 import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
+import { CreateSurface, resolveCurrentEntry } from "./features/create";
 import { createQueryClient } from "./lib/queryClient";
-import { FeedbackHub } from "./features/feedback/FeedbackHub";
-import { WorkspaceErrorBoundary } from "./features/feedback/WorkspaceErrorBoundary";
+import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
 import "./styles/studio.css";
 
 export {
@@ -20,20 +20,25 @@ export type {
   OutputNodeData,
   ResultNodeData,
   ScreenplayNodeData,
-  StoryboardNodeData,
-  VideoComposerNodeData,
-  VideoDownloaderNodeData,
-  ViralRemixNodeData,
+  VideoClipNodeData,
 } from "./features/workspace/workspaceModel";
 
 function App() {
   const [queryClient] = useState(createQueryClient);
+  /*
+   * 同一个前端产物有两个入口：
+   *   - studio（默认）：完整的无限画布工作台；
+   *   - create：创作台。整页外壳（侧栏 + 记录流 + 底部浮坞 + 资产库抽屉）
+   *     与即梦创作页一致，资产库接本项目自己的素材库。
+   * 入口判定见 features/create/createEntry.ts：URL 的 ?view=create、
+   * hash 的 #create、或 Tauri 窗口标签为 create 都会进入创作台。
+   */
+  const [entry] = useState(resolveCurrentEntry);
   return (
     <QueryClientProvider client={queryClient}>
       <WorkspaceErrorBoundary>
-        <CanvasWorkspace />
+        {entry === "create" ? <CreateSurface /> : <CanvasWorkspace />}
       </WorkspaceErrorBoundary>
-      <FeedbackHub />
       <Toaster
         className="app-toaster"
         closeButton

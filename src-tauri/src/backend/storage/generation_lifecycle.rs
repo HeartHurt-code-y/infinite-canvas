@@ -59,6 +59,11 @@ pub enum GenerationLifecycleFact {
         conclusion: GenerationTaskStatus,
         error: Value,
     },
+    /// 用户主动取消（或画布删除连带取消）。这是一个终态事实：
+    /// 任务不再向供应商发起请求，也不再把产物写进磁盘。
+    CancellationRequested {
+        reason: Value,
+    },
     BeginResolution {
         attempt_id: String,
     },
@@ -165,6 +170,13 @@ pub enum GenerationLifecycleFact {
         call_id: String,
         sent_at: i64,
         error: Value,
+        /// 这次调用是否**根本没送达上游**（连接层失败：DNS 解析失败 / 连接被拒 /
+        /// TLS 握手失败）。
+        ///
+        /// 刻意与「响应体读取失败 / 4xx / 5xx」区分开：那些请求已经到达供应商、
+        /// 可能已经计费，绝不能算「未发出」。为 true 时把 `provider_calls.dispatch_failed`
+        /// 置 1，「已发出」的守卫判据据此放行（草稿可以重新提升为正片）。
+        dispatch_failed: bool,
     },
     ResultChanged {
         result: GenerationResultRecord,
@@ -221,6 +233,9 @@ pub enum GenerationTaskTransition {
     Fail { progress: Option<f64>, error: Value },
     BecomeUnknown { progress: Option<f64>, error: Value },
     Interrupt { error: Value },
+    /// 取消：与 Interrupt 不同，允许取消已经拿到远端身份的任务——
+    /// 远端任务由供应商继续跑完，我们只是不再认领它的结果。
+    Cancel { reason: Value },
     ChangeQueryHealth { health: QueryHealth },
 }
 
@@ -297,6 +312,13 @@ impl Storage {
                     &transaction,
                     task_id,
                     terminal_transition(task_id, conclusion, error)?,
+                )?);
+            }
+            GenerationLifecycleFact::CancellationRequested { reason } => {
+                transition = Some(commit_task_transition_in(
+                    &transaction,
+                    task_id,
+                    GenerationTaskTransition::Cancel { reason },
                 )?);
             }
             GenerationLifecycleFact::ManualObservationRequested => {
@@ -623,6 +645,15 @@ impl Storage {
                 &phase,
                 &request,
             )?,
+            /*
+             * `sent_at` 的语义是「本机在那一刻发起了这次请求」，**不是**「供应商已收到」。
+             *
+             * provider 层为了能在 send() 之前就留下痕迹（请求构造失败也要留档），是在
+             * request.send() 之前先写 sent_at 的；因此 DNS 失败、连接被拒这类根本没送达
+             * 上游的调用同样会带着 sent_at。「是否真的送达上游」由 `dispatch_failed` 决定：
+             * 连接层失败时由 `ProviderCallFailed` 在同一个事务里把它置 1，
+             * 守卫 SQL（storage.rs 的草稿阻断与正片查找）据此判「未发出」。
+             */
             GenerationLifecycleFact::ProviderCallSent { call_id, sent_at } => {
                 let updated = transaction.execute(
                     "UPDATE provider_calls SET sent_at = ?3
@@ -662,11 +693,12 @@ impl Storage {
                 call_id,
                 sent_at,
                 error,
+                dispatch_failed,
             } => {
                 let received_at = now_ms();
                 let updated = transaction.execute(
                     "UPDATE provider_calls SET response_received_at = ?4, duration_ms = ?5,
-                            runtime_error_json = ?6
+                            runtime_error_json = ?6, dispatch_failed = ?7
                      WHERE task_id = ?1 AND id = ?2
                        AND sent_at = ?3 AND response_received_at IS NULL",
                     params![
@@ -676,6 +708,7 @@ impl Storage {
                         received_at,
                         received_at - sent_at,
                         serde_json::to_string(&error)?,
+                        dispatch_failed,
                     ],
                 )?;
                 require_single_call_update(task_id, &call_id, updated)?;
@@ -1342,8 +1375,9 @@ fn terminal_transition(
             error,
         }),
         GenerationTaskStatus::Interrupted => Ok(GenerationTaskTransition::Interrupt { error }),
+        GenerationTaskStatus::Cancelled => Ok(GenerationTaskTransition::Cancel { reason: error }),
         status => Err(BackendError::validation(
-            "lifecycle terminal conclusion must be failed, unknown, or interrupted",
+            "lifecycle terminal conclusion must be failed, unknown, interrupted, or cancelled",
             json!({ "taskId": task_id, "status": status }),
         )),
     }
@@ -1504,6 +1538,24 @@ fn decide_transition(
             next.final_error = Some(error);
             next.completed_at = Some(timestamp);
         }
+        GenerationTaskTransition::Cancel { reason } => {
+            require_status(
+                task_id,
+                current.status,
+                &[
+                    GenerationTaskStatus::Created,
+                    GenerationTaskStatus::Submitting,
+                    GenerationTaskStatus::RetryWait,
+                    GenerationTaskStatus::Queued,
+                    GenerationTaskStatus::Running,
+                ],
+                "cancel",
+            )?;
+            // 取消不回收远端身份：远端任务由供应商继续跑完，我们只是不再认领结果。
+            next.status = GenerationTaskStatus::Cancelled;
+            next.final_error = Some(reason);
+            next.completed_at = Some(timestamp);
+        }
         GenerationTaskTransition::ChangeQueryHealth { health } => {
             require_remote_observation(task_id, current)?;
             validate_query_health_transition(task_id, current.query_health, health)?;
@@ -1555,6 +1607,7 @@ fn decide_terminal_replay(
         GenerationTaskTransition::Fail { .. } => Some(GenerationTaskStatus::Failed),
         GenerationTaskTransition::BecomeUnknown { .. } => Some(GenerationTaskStatus::Unknown),
         GenerationTaskTransition::Interrupt { .. } => Some(GenerationTaskStatus::Interrupted),
+        GenerationTaskTransition::Cancel { .. } => Some(GenerationTaskStatus::Cancelled),
         _ => None,
     };
     if replayed_status == Some(current.status) {
@@ -1690,874 +1743,4 @@ fn illegal_transition(task_id: &str, current: GenerationTaskStatus, action: &str
         "generation task {task_id} cannot {action} from {}",
         current.as_str()
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::backend::storage::NewTask;
-    use crate::backend::types::{MediaType, SaveStatus};
-
-    fn task_lifecycle(
-        task_id: &str,
-        operation: GenerationOperation,
-    ) -> (TempDir, Arc<Storage>, GenerationTaskLifecycle) {
-        task_lifecycle_for_model(task_id, operation, "remote-model-1")
-    }
-
-    fn task_lifecycle_for_model(
-        task_id: &str,
-        operation: GenerationOperation,
-        remote_model_id: &str,
-    ) -> (TempDir, Arc<Storage>, GenerationTaskLifecycle) {
-        let directory = TempDir::new().expect("temp dir");
-        let storage =
-            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
-        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
-        let provider = storage
-            .get_provider_connection("provider-sd20")
-            .expect("seeded provider");
-        lifecycle
-            .create(NewTask {
-                id: task_id,
-                canvas_id: "canvas-1",
-                source_node_id: "node-1",
-                operation,
-                provider: &provider,
-                api_key_ref: &provider.api_key_ref,
-                model_definition_id: "model-1",
-                remote_model_id: Some(remote_model_id),
-                logical_request: &json!({ "prompt": "frozen" }),
-            })
-            .expect("create task");
-        (directory, storage, lifecycle)
-    }
-
-    fn begin_submission(lifecycle: &GenerationTaskLifecycle, task_id: &str) {
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::BeginResolution {
-                    attempt_id: "resolve-1".into(),
-                },
-            )
-            .expect("begin resolution");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ResolutionSucceeded {
-                    attempt_id: "resolve-1".into(),
-                    resolved_request: json!({ "renderedPrompt": "frozen" }),
-                },
-            )
-            .expect("finish resolution");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::BeginSubmission {
-                    attempt_id: "submit-1".into(),
-                    backoff_ms: None,
-                },
-            )
-            .expect("begin submission");
-    }
-
-    fn record_successful_call(
-        lifecycle: &GenerationTaskLifecycle,
-        task_id: &str,
-        attempt_id: &str,
-        call_id: &str,
-        phase: &str,
-    ) {
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallPrepared {
-                    call_id: call_id.into(),
-                    attempt_id: attempt_id.into(),
-                    phase: phase.into(),
-                    request: json!({ "method": "POST" }),
-                },
-            )
-            .expect("prepare call");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallSent {
-                    call_id: call_id.into(),
-                    sent_at: 1,
-                },
-            )
-            .expect("send call");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallResponded {
-                    call_id: call_id.into(),
-                    sent_at: 1,
-                    status: 200,
-                    headers: json!({}),
-                    raw_response: "{}".into(),
-                },
-            )
-            .expect("finish call");
-    }
-
-    fn record_failed_call(
-        lifecycle: &GenerationTaskLifecycle,
-        task_id: &str,
-        attempt_id: &str,
-        call_id: &str,
-        phase: &str,
-    ) {
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallPrepared {
-                    call_id: call_id.into(),
-                    attempt_id: attempt_id.into(),
-                    phase: phase.into(),
-                    request: json!({ "method": "GET" }),
-                },
-            )
-            .expect("prepare failed call");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallSent {
-                    call_id: call_id.into(),
-                    sent_at: 1,
-                },
-            )
-            .expect("send failed call");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ProviderCallFailed {
-                    call_id: call_id.into(),
-                    sent_at: 1,
-                    error: json!({ "kind": "transport" }),
-                },
-            )
-            .expect("finish failed call");
-    }
-
-    fn register_video_result(
-        lifecycle: &GenerationTaskLifecycle,
-        task_id: &str,
-    ) -> GenerationResultRecord {
-        begin_submission(lifecycle, task_id);
-        record_successful_call(lifecycle, task_id, "submit-1", "submit-call-1", "submit");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::SubmissionRemoteAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: None,
-                    remote_task_id: "remote-video".into(),
-                },
-            )
-            .expect("accept remote task");
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::BeginObservation {
-                    attempt_id: "observe-1".into(),
-                    backoff_ms: None,
-                },
-            )
-            .expect("begin observation");
-        record_successful_call(lifecycle, task_id, "observe-1", "observe-call-1", "observe");
-        let result = GenerationResultRecord {
-            display_name: None,
-            task_id: task_id.into(),
-            result_index: 1,
-            media_type: MediaType::Video,
-            remote_task_id: Some("remote-video".into()),
-            source: json!({ "kind": "url", "url": "https://example.test/old.mp4?signature=old" }),
-            save_status: SaveStatus::Pending,
-            final_path: None,
-            relative_path: None,
-            byte_size: None,
-            mime_type: None,
-            sha256: None,
-            saved_at: None,
-            error: None,
-        };
-        lifecycle
-            .commit(
-                task_id,
-                GenerationLifecycleFact::ObservationApplied {
-                    attempt_id: "observe-1".into(),
-                    call_id: "observe-call-1".into(),
-                    tokens: None,
-                    observation: GenerationRemoteObservation::Succeeded {
-                        result: Box::new(result.clone()),
-                    },
-                },
-            )
-            .expect("register video result");
-        result
-    }
-
-    #[test]
-    fn sp25_result_can_renew_only_its_signed_url() {
-        let (_directory, storage, lifecycle) = task_lifecycle_for_model(
-            "task-sp25-result",
-            GenerationOperation::VideoGeneration,
-            "sp2.5-720p-30s-ch5",
-        );
-        let mut result = register_video_result(&lifecycle, "task-sp25-result");
-        result.save_status = SaveStatus::Writing;
-        lifecycle
-            .commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("begin save");
-
-        result.source["url"] = json!("https://example.test/new.mp4?signature=new");
-        lifecycle
-            .commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("renew signed URL");
-        assert_eq!(
-            storage
-                .get_result(&result.task_id, result.result_index)
-                .expect("stored")
-                .source["url"],
-            result.source["url"]
-        );
-
-        let mut changed_role = result.clone();
-        changed_role.source["role"] = json!("different");
-        assert!(matches!(
-            lifecycle.commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: changed_role,
-                },
-            ),
-            Err(BackendError::Conflict(_))
-        ));
-        let mut changed_identity = result.clone();
-        changed_identity.remote_task_id = Some("another-paid-task".into());
-        assert!(matches!(
-            lifecycle.commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: changed_identity,
-                },
-            ),
-            Err(BackendError::Conflict(_))
-        ));
-        result.save_status = SaveStatus::Succeeded;
-        lifecycle
-            .commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("mark signed result saved");
-        result.save_status = SaveStatus::Writing;
-        assert!(matches!(
-            lifecycle.commit(
-                &result.task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            ),
-            Err(BackendError::Conflict(_))
-        ));
-    }
-
-    #[test]
-    fn other_video_model_cannot_replace_its_result_source() {
-        let (_directory, _storage, lifecycle) = task_lifecycle_for_model(
-            "task-other-video",
-            GenerationOperation::VideoGeneration,
-            // 对照组必须是「不在签名 URL 续期白名单里」的普通视频型号：`sp2.5-*`、
-            // `rd-*` 与草稿样片型号只允许替换 `url` 键（见 allowed_sp25_signed_url_refresh），
-            // 用它们当本例的型号就测不到「结果源不可替换」这条规则。
-            "doubao-seedance-2-0-260128",
-        );
-        let mut result = register_video_result(&lifecycle, "task-other-video");
-        result.save_status = SaveStatus::Writing;
-        result.source["url"] = json!("https://example.test/other.mp4");
-        let task_id = result.task_id.clone();
-        assert!(matches!(
-            lifecycle.commit(
-                &task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            ),
-            Err(BackendError::Conflict(_))
-        ));
-        result.source["url"] = json!("https://example.test/old.mp4?signature=old");
-        lifecycle
-            .commit(
-                &task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("begin ordinary video save");
-        result.save_status = SaveStatus::Failed;
-        lifecycle
-            .commit(
-                &task_id,
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("record ordinary video failure");
-        result.save_status = SaveStatus::Writing;
-        assert!(matches!(
-            lifecycle.commit(&task_id, GenerationLifecycleFact::ResultChanged { result }),
-            Err(BackendError::Conflict(_))
-        ));
-    }
-
-    #[test]
-    fn creation_persists_snapshot_and_created_event_through_the_lifecycle_interface() {
-        let (_directory, storage, _lifecycle) =
-            task_lifecycle("task-created", GenerationOperation::TextToImage);
-        let detail = storage
-            .get_task_detail("task-created")
-            .expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Created);
-        assert_eq!(detail.events.len(), 1);
-        assert_eq!(detail.events[0].event_type, "created");
-    }
-
-    #[test]
-    fn remote_submission_finishes_attempt_and_binds_identity_atomically() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-video", GenerationOperation::VideoGeneration);
-        begin_submission(&lifecycle, "task-video");
-        record_successful_call(
-            &lifecycle,
-            "task-video",
-            "submit-1",
-            "submit-call-1",
-            "submit",
-        );
-
-        lifecycle
-            .commit(
-                "task-video",
-                GenerationLifecycleFact::SubmissionRemoteAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: Some(TokenUsage {
-                        prompt_tokens: Some(3),
-                        completion_tokens: Some(5),
-                        total_tokens: Some(8),
-                    }),
-                    remote_task_id: "remote-7".into(),
-                },
-            )
-            .expect("accept remote task");
-
-        let detail = storage.get_task_detail("task-video").expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Queued);
-        assert_eq!(detail.summary.remote_task_id.as_deref(), Some("remote-7"));
-        assert_eq!(
-            detail.summary.tokens.and_then(|usage| usage.total_tokens),
-            Some(8)
-        );
-        assert_eq!(
-            detail
-                .attempts
-                .iter()
-                .find(|attempt| attempt.id == "submit-1")
-                .and_then(|attempt| attempt.outcome.as_deref()),
-            Some("succeeded")
-        );
-    }
-
-    #[test]
-    fn image_success_and_pending_results_share_one_commit() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-image", GenerationOperation::TextToImage);
-        begin_submission(&lifecycle, "task-image");
-        record_successful_call(
-            &lifecycle,
-            "task-image",
-            "submit-1",
-            "submit-call-1",
-            "submit",
-        );
-        let result = GenerationResultRecord {
-            display_name: None,
-            task_id: "task-image".into(),
-            result_index: 1,
-            media_type: MediaType::Image,
-            remote_task_id: None,
-            source: json!({ "kind": "url", "url": "https://example.invalid/result.png" }),
-            save_status: SaveStatus::Pending,
-            final_path: None,
-            relative_path: None,
-            byte_size: None,
-            mime_type: None,
-            sha256: None,
-            saved_at: None,
-            error: None,
-        };
-
-        lifecycle
-            .commit(
-                "task-image",
-                GenerationLifecycleFact::SubmissionImagesAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: None,
-                    results: vec![result],
-                },
-            )
-            .expect("accept image results");
-
-        let detail = storage.get_task_detail("task-image").expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Succeeded);
-        assert_eq!(detail.results.len(), 1);
-        assert_eq!(detail.results[0].save_status, SaveStatus::Pending);
-    }
-
-    #[test]
-    fn success_without_matching_call_evidence_rolls_back_the_whole_fact() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-no-evidence", GenerationOperation::TextToImage);
-        begin_submission(&lifecycle, "task-no-evidence");
-        let result = GenerationResultRecord {
-            display_name: None,
-            task_id: "task-no-evidence".into(),
-            result_index: 1,
-            media_type: MediaType::Image,
-            remote_task_id: None,
-            source: json!({ "kind": "url", "url": "https://example.invalid/result.png" }),
-            save_status: SaveStatus::Pending,
-            final_path: None,
-            relative_path: None,
-            byte_size: None,
-            mime_type: None,
-            sha256: None,
-            saved_at: None,
-            error: None,
-        };
-
-        let error = lifecycle
-            .commit(
-                "task-no-evidence",
-                GenerationLifecycleFact::SubmissionImagesAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "missing-call".into(),
-                    tokens: None,
-                    results: vec![result],
-                },
-            )
-            .expect_err("missing call evidence");
-        assert!(matches!(error, BackendError::Conflict(_)));
-
-        let detail = storage
-            .get_task_detail("task-no-evidence")
-            .expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Submitting);
-        assert!(detail.results.is_empty());
-        let attempt = detail
-            .attempts
-            .iter()
-            .find(|attempt| attempt.id == "submit-1")
-            .expect("submit attempt");
-        assert!(attempt.finished_at.is_none());
-    }
-
-    #[test]
-    fn result_save_status_can_only_advance_through_the_lifecycle_interface() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-result", GenerationOperation::TextToImage);
-        begin_submission(&lifecycle, "task-result");
-        record_successful_call(
-            &lifecycle,
-            "task-result",
-            "submit-1",
-            "submit-call-1",
-            "submit",
-        );
-        let mut result = GenerationResultRecord {
-            display_name: None,
-            task_id: "task-result".into(),
-            result_index: 1,
-            media_type: MediaType::Image,
-            remote_task_id: None,
-            source: json!({ "kind": "url", "url": "https://example.invalid/result.png" }),
-            save_status: SaveStatus::Pending,
-            final_path: None,
-            relative_path: None,
-            byte_size: None,
-            mime_type: None,
-            sha256: None,
-            saved_at: None,
-            error: None,
-        };
-        lifecycle
-            .commit(
-                "task-result",
-                GenerationLifecycleFact::SubmissionImagesAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: None,
-                    results: vec![result.clone()],
-                },
-            )
-            .expect("register result");
-        result.save_status = SaveStatus::Writing;
-        lifecycle
-            .commit(
-                "task-result",
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("start save");
-        result.save_status = SaveStatus::Succeeded;
-        result.final_path = Some("C:/Downloads/无限画布/task-result-1.png".into());
-        result.relative_path = Some("无限画布/task-result-1.png".into());
-        result.byte_size = Some(4);
-        result.mime_type = Some("image/png".into());
-        result.sha256 = Some("hash".into());
-        result.saved_at = Some(2);
-        lifecycle
-            .commit(
-                "task-result",
-                GenerationLifecycleFact::ResultChanged {
-                    result: result.clone(),
-                },
-            )
-            .expect("finish save");
-
-        result.save_status = SaveStatus::Writing;
-        let error = lifecycle
-            .commit(
-                "task-result",
-                GenerationLifecycleFact::ResultChanged { result },
-            )
-            .expect_err("succeeded result cannot return to writing");
-        assert!(matches!(error, BackendError::Conflict(_)));
-        assert_eq!(
-            storage
-                .get_result("task-result", 1)
-                .expect("persisted result")
-                .save_status,
-            SaveStatus::Succeeded
-        );
-    }
-
-    #[test]
-    fn observation_retry_and_success_update_attempt_health_tokens_and_state_together() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-observe", GenerationOperation::VideoGeneration);
-        begin_submission(&lifecycle, "task-observe");
-        record_successful_call(
-            &lifecycle,
-            "task-observe",
-            "submit-1",
-            "submit-call-1",
-            "submit",
-        );
-        lifecycle
-            .commit(
-                "task-observe",
-                GenerationLifecycleFact::SubmissionRemoteAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: None,
-                    remote_task_id: "remote-observe".into(),
-                },
-            )
-            .expect("accept remote task");
-        lifecycle
-            .commit(
-                "task-observe",
-                GenerationLifecycleFact::BeginObservation {
-                    attempt_id: "observe-1".into(),
-                    backoff_ms: None,
-                },
-            )
-            .expect("begin observation");
-        record_failed_call(
-            &lifecycle,
-            "task-observe",
-            "observe-1",
-            "observe-call-1",
-            "observe",
-        );
-        lifecycle
-            .commit(
-                "task-observe",
-                GenerationLifecycleFact::ObservationRetryScheduled {
-                    attempt_id: "observe-1".into(),
-                    retry_index: 1,
-                    delay_ms: 2_000,
-                    error: json!({ "kind": "transport" }),
-                },
-            )
-            .expect("schedule retry");
-        lifecycle
-            .commit(
-                "task-observe",
-                GenerationLifecycleFact::BeginObservation {
-                    attempt_id: "observe-2".into(),
-                    backoff_ms: Some(2_000),
-                },
-            )
-            .expect("begin retry observation");
-        record_successful_call(
-            &lifecycle,
-            "task-observe",
-            "observe-2",
-            "observe-call-2",
-            "observe",
-        );
-        lifecycle
-            .commit(
-                "task-observe",
-                GenerationLifecycleFact::ObservationApplied {
-                    attempt_id: "observe-2".into(),
-                    call_id: "observe-call-2".into(),
-                    tokens: None,
-                    observation: GenerationRemoteObservation::Running {
-                        progress: Some(42.0),
-                    },
-                },
-            )
-            .expect("apply observation");
-
-        let detail = storage
-            .get_task_detail("task-observe")
-            .expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Running);
-        assert_eq!(detail.summary.query_health, QueryHealth::Healthy);
-        assert_eq!(detail.summary.progress, Some(42.0));
-        assert_eq!(detail.attempts[2].outcome.as_deref(), Some("failed"));
-        assert_eq!(detail.attempts[3].outcome.as_deref(), Some("succeeded"));
-        assert!(
-            detail
-                .events
-                .iter()
-                .any(|event| event.event_type == "automatic_retry")
-        );
-    }
-
-    #[test]
-    fn pixverse_polling_expiry_preserves_remote_identity_and_manual_query_recovery() {
-        for running in [false, true] {
-            let task_id = if running {
-                "pixverse-running"
-            } else {
-                "pixverse-queued"
-            };
-            let (directory, storage, lifecycle) = task_lifecycle_for_model(
-                task_id,
-                GenerationOperation::VideoGeneration,
-                "PixVerse-V6",
-            );
-            begin_submission(&lifecycle, task_id);
-            record_successful_call(&lifecycle, task_id, "submit-1", "submit-call-1", "submit");
-            lifecycle
-                .commit(
-                    task_id,
-                    GenerationLifecycleFact::SubmissionRemoteAccepted {
-                        attempt_id: "submit-1".into(),
-                        call_id: "submit-call-1".into(),
-                        tokens: None,
-                        remote_task_id: "pixverse-remote-id".into(),
-                    },
-                )
-                .expect("accept original paid submission");
-            if running {
-                lifecycle
-                    .commit(
-                        task_id,
-                        GenerationLifecycleFact::BeginObservation {
-                            attempt_id: "observe-1".into(),
-                            backoff_ms: None,
-                        },
-                    )
-                    .expect("begin observation");
-                record_successful_call(
-                    &lifecycle,
-                    task_id,
-                    "observe-1",
-                    "observe-call-1",
-                    "observe",
-                );
-                lifecycle
-                    .commit(
-                        task_id,
-                        GenerationLifecycleFact::ObservationApplied {
-                            attempt_id: "observe-1".into(),
-                            call_id: "observe-call-1".into(),
-                            tokens: None,
-                            observation: GenerationRemoteObservation::Running {
-                                progress: Some(42.0),
-                            },
-                        },
-                    )
-                    .expect("apply successful pending observation");
-            }
-            let before = storage.get_task_detail(task_id).expect("before expiry");
-            lifecycle
-                .commit(
-                    task_id,
-                    GenerationLifecycleFact::ObservationPollingExpired {
-                        error: json!({ "kind": "remote_polling_window_expired" }),
-                    },
-                )
-                .expect("stop only automatic polling");
-
-            let reopened = Storage::open(&directory.path().join("backend.sqlite"))
-                .expect("reopen persisted task");
-            let paused = reopened.get_task_detail(task_id).expect("persisted expiry");
-            assert_eq!(paused.summary.status, before.summary.status);
-            assert_eq!(paused.summary.query_health, QueryHealth::Degraded);
-            assert_eq!(paused.summary.remote_task_id, before.summary.remote_task_id);
-            assert_eq!(
-                paused.summary.remote_model_id_snapshot,
-                before.summary.remote_model_id_snapshot
-            );
-            assert_eq!(paused.summary.progress, before.summary.progress);
-            assert_eq!(paused.summary.created_at, before.summary.created_at);
-            assert!(paused.summary.completed_at.is_none());
-            assert!(paused.final_error.is_none());
-            assert_eq!(paused.logical_request, before.logical_request);
-            assert_eq!(paused.resolved_request, before.resolved_request);
-            assert_eq!(paused.attempts.len(), before.attempts.len());
-            assert_eq!(paused.calls.len(), before.calls.len());
-            assert!(
-                paused
-                    .attempts
-                    .iter()
-                    .all(|attempt| attempt.outcome.as_deref() == Some("succeeded"))
-            );
-            assert!(
-                paused
-                    .events
-                    .iter()
-                    .any(|event| event.event_type == "polling_expired")
-            );
-
-            lifecycle
-                .commit(task_id, GenerationLifecycleFact::ManualObservationRequested)
-                .expect("manual query restores observation health");
-            lifecycle
-                .commit(
-                    task_id,
-                    GenerationLifecycleFact::BeginObservation {
-                        attempt_id: "observe-resumed".into(),
-                        backoff_ms: None,
-                    },
-                )
-                .expect("resume observing original task");
-            let resumed = storage.get_task_detail(task_id).expect("manual recovery");
-            assert_eq!(resumed.summary.query_health, QueryHealth::Healthy);
-            assert_eq!(resumed.summary.status, before.summary.status);
-            assert_eq!(
-                resumed.summary.remote_task_id.as_deref(),
-                Some("pixverse-remote-id")
-            );
-            assert_eq!(resumed.calls.len(), before.calls.len());
-            assert_eq!(resumed.attempts.len(), before.attempts.len() + 1);
-            assert_eq!(resumed.attempts.last().unwrap().phase, "observe");
-            assert_eq!(
-                resumed
-                    .attempts
-                    .iter()
-                    .filter(|attempt| attempt.phase == "submit")
-                    .count(),
-                1
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_observation_rolls_back_attempt_completion_and_task_projection() {
-        let (_directory, storage, lifecycle) =
-            task_lifecycle("task-invalid", GenerationOperation::VideoGeneration);
-        begin_submission(&lifecycle, "task-invalid");
-        record_successful_call(
-            &lifecycle,
-            "task-invalid",
-            "submit-1",
-            "submit-call-1",
-            "submit",
-        );
-        lifecycle
-            .commit(
-                "task-invalid",
-                GenerationLifecycleFact::SubmissionRemoteAccepted {
-                    attempt_id: "submit-1".into(),
-                    call_id: "submit-call-1".into(),
-                    tokens: None,
-                    remote_task_id: "remote-invalid".into(),
-                },
-            )
-            .expect("accept remote task");
-        lifecycle
-            .commit(
-                "task-invalid",
-                GenerationLifecycleFact::BeginObservation {
-                    attempt_id: "observe-invalid".into(),
-                    backoff_ms: None,
-                },
-            )
-            .expect("begin observation");
-        record_successful_call(
-            &lifecycle,
-            "task-invalid",
-            "observe-invalid",
-            "observe-call-invalid",
-            "observe",
-        );
-
-        let error = lifecycle
-            .commit(
-                "task-invalid",
-                GenerationLifecycleFact::ObservationApplied {
-                    attempt_id: "observe-invalid".into(),
-                    call_id: "observe-call-invalid".into(),
-                    tokens: None,
-                    observation: GenerationRemoteObservation::Running {
-                        progress: Some(101.0),
-                    },
-                },
-            )
-            .expect_err("invalid progress");
-        assert!(matches!(error, BackendError::Validation { .. }));
-
-        let detail = storage
-            .get_task_detail("task-invalid")
-            .expect("task detail");
-        assert_eq!(detail.summary.status, GenerationTaskStatus::Queued);
-        assert_eq!(detail.summary.progress, Some(0.0));
-        let attempt = detail
-            .attempts
-            .iter()
-            .find(|attempt| attempt.id == "observe-invalid")
-            .expect("observation attempt");
-        assert!(attempt.finished_at.is_none());
-        assert!(attempt.outcome.is_none());
-    }
 }

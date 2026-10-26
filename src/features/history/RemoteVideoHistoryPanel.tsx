@@ -1,8 +1,8 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
-  formatRawBackendError,
+  backendErrorMessage,
   generationClient,
   providerSettingsClient,
   remoteVideoTaskClient,
@@ -45,7 +45,8 @@ function dateTime(seconds: number) {
 }
 
 function errorText(error: unknown) {
-  return error instanceof Error ? error.message : formatRawBackendError(error);
+  // 载荷对象也要给人话摘要：直接摊平成 JSON 会把整坨 payload 印在界面上。
+  return backendErrorMessage(error);
 }
 
 type SettingsClient = Pick<
@@ -84,7 +85,7 @@ export function RemoteVideoHistoryPanel({
   const [resumingTaskId, setResumingTaskId] = useState<string | null>(null);
   const requestRef = useRef(0);
   const mountedRef = useRef(true);
-  const errorRef = useRef<HTMLParagraphElement>(null);
+  const errorRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -345,9 +346,10 @@ export function RemoteVideoHistoryPanel({
         按提交时间查询，使用本机时区。应用关闭期间的任务仍可在这里查询；选择提交时使用的供应商和令牌。仅查询视频任务。
       </p>
       {settingsError ? (
-        <>
-          <div className="remote-video-history__error" role="alert">
-            {settingsError}{" "}
+        <ErrorAlert
+          error={settingsError}
+          hint="供应商连接读取失败，请检查供应商设置后重新加载。"
+          action={
             <button
               type="button"
               onClick={() => {
@@ -358,20 +360,18 @@ export function RemoteVideoHistoryPanel({
             >
               重试加载配置
             </button>
-          </div>
-          <ErrorCopyButton text={settingsError} />
-        </>
+          }
+        />
       ) : null}
       {providersLoaded && !providers.length && !settingsError ? (
         <p className="remote-video-history__hint">请先在供应商设置中配置并启用连接。</p>
       ) : null}
       {error ? (
-        <>
-          <p ref={errorRef} tabIndex={-1} className="remote-video-history__error" role="alert">
-            {error}
-          </p>
-          <ErrorCopyButton text={error} />
-        </>
+        <ErrorAlert
+          error={error}
+          ref={errorRef}
+          hint="查询没有成功，请确认供应商与令牌后重试。"
+        />
       ) : null}
       {notice ? (
         <p className="remote-video-history__notice" role="status">
@@ -454,7 +454,7 @@ export function RemoteVideoHistoryPanel({
                     </div>
                   </dl>
                   {task.failureReason ? (
-                    <p className="remote-video-history__error">{task.failureReason}</p>
+                    <ErrorAlert error={task.failureReason} variant="inline" />
                   ) : null}
                   {task.videoUrl ? (
                     <p className="remote-video-history__url">{task.videoUrl}</p>

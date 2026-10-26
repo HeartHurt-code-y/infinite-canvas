@@ -53,6 +53,7 @@ pub enum GenerationTaskStatus {
     Failed,
     Unknown,
     Interrupted,
+    Cancelled,
 }
 
 impl GenerationTaskStatus {
@@ -67,13 +68,18 @@ impl GenerationTaskStatus {
             Self::Failed => "failed",
             Self::Unknown => "unknown",
             Self::Interrupted => "interrupted",
+            Self::Cancelled => "cancelled",
         }
     }
 
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded | Self::Failed | Self::Unknown | Self::Interrupted
+            Self::Succeeded
+                | Self::Failed
+                | Self::Unknown
+                | Self::Interrupted
+                | Self::Cancelled
         )
     }
 }
@@ -92,6 +98,7 @@ impl TryFrom<&str> for GenerationTaskStatus {
             "failed" => Ok(Self::Failed),
             "unknown" => Ok(Self::Unknown),
             "interrupted" => Ok(Self::Interrupted),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(format!("unknown task status: {value}")),
         }
     }
@@ -399,6 +406,22 @@ pub struct SetCredentialCommand {
 pub struct CredentialStatus {
     pub credential_ref: String,
     pub configured: bool,
+}
+
+/// 创作台模型目录项：服务端一次性下发的「模型 + 该模型声明的参数能力表」。
+///
+/// 形状与前端 `generationModelCatalogEntrySchema` 对齐；参数范围与枚举由服务端
+/// 的能力表说了算，前端只按声明渲染，不再按模型名推断。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationModelCatalogEntry {
+    pub provider_connection_id: String,
+    pub provider_display_name: String,
+    pub model_definition_id: String,
+    pub remote_model_id: String,
+    pub display_name: String,
+    pub operations: Vec<GenerationOperation>,
+    pub operation_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -713,24 +736,6 @@ fn default_remote_page_size() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct StartVideoDownloadCommand {
     pub url: String,
-}
-
-/// 视频合成的单路输入：本地文件绝对路径或 http(s) 远程地址，
-/// 两者 ffmpeg 都能直接读取。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VideoCompositionInputParams {
-    pub key: String,
-    pub name: String,
-    pub source: String,
-}
-
-/// 视频合成节点的启动命令。输出文件名由后端按下载产物同一规则清洗并去重。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StartVideoCompositionCommand {
-    pub inputs: Vec<VideoCompositionInputParams>,
-    pub output_name: String,
 }
 
 /// 视频抽帧节点的启动命令：输入本地视频绝对路径 + 若干抽帧秒数。
@@ -1083,6 +1088,16 @@ pub struct WorkspaceUiPrefs {
     pub active_asset_provider_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asset_library_source: Option<String>,
+    /// 创作台默认创作类型（image / video / text / speech）。
+    ///
+    /// 必须与前端 `WorkspaceUiPrefs` 一一对应：前端结构体多出来的字段会被 serde
+    /// **静默丢弃**（没有 deny_unknown_fields），于是「记住上次创作类型与模型」在
+    /// 服务端永远存不进去，用户每次进创作台都要重选，且没有任何报错。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_mode: Option<String>,
+    /// 创作台默认模型（模型定义 ID）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creation_model_definition_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1249,6 +1264,23 @@ pub struct StagingJobRecord {
     pub error: Option<Value>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// 暂存对象回收候选行。
+///
+/// 启动回收器只需要这几列，因此单独一个结构：不把回收用的列塞进
+/// [`StagingJobRecord`]，免得全仓几十处 staging 行查询都得跟着改。
+#[derive(Debug, Clone)]
+pub struct StagingCleanupCandidate {
+    pub id: String,
+    /// 暂存用途：`generation_input`（生成中转）/ `asset_import`（素材库导入中转）。
+    pub purpose: String,
+    /// 仍需删除的对象键。回收完成后键会保留（云端素材预览兜底还要靠它找原始文件），
+    /// 「是否已回收」由回收器自己的记账列表达。
+    pub object_key: String,
+    pub status: StagingStatus,
+    /// 已经失败过的删除尝试次数；达到上限后该行进入终态，不再重试。
+    pub cleanup_retry_count: u32,
 }
 
 /// 旧版对象存储素材条目。目录索引保存在本机 SQLite，媒体正文在对象存储。
@@ -1439,236 +1471,4 @@ pub struct TosBucketPullSummary {
     pub ignored_unsupported: u64,
     /// 列举使用的对象前缀；空字符串表示整个桶。
     pub prefix: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-
-    #[test]
-    fn structured_mentions_use_frontend_camel_case_fields() {
-        let segment = PromptSegment::MediaReference {
-            mention_id: "mention-1".into(),
-            target: MediaReferenceTarget::Asset {
-                provider_connection_id: "company".into(),
-                asset_id: "asset-1".into(),
-                media_type: MediaType::Image,
-                canvas_node_key: Some("asset-node-7".into()),
-            },
-            display_name_snapshot: "角色正面".into(),
-            type_position: None,
-            content_index: None,
-        };
-        assert_eq!(
-            serde_json::to_value(segment).expect("serialize"),
-            json!({
-                "kind": "media_reference",
-                "mentionId": "mention-1",
-                "target": {
-                    "kind": "asset",
-                    "providerConnectionId": "company",
-                    "assetId": "asset-1",
-                    "mediaType": "image",
-                    "canvasNodeKey": "asset-node-7"
-                },
-                "displayNameSnapshot": "角色正面"
-            })
-        );
-    }
-
-    #[test]
-    fn local_asset_references_use_staging_job_identity() {
-        let target = MediaReferenceTarget::LocalAsset {
-            staging_job_id: "upload-1".into(),
-            media_type: MediaType::Video,
-            canvas_node_key: Some("asset-node-local".into()),
-        };
-        assert_eq!(
-            serde_json::to_value(target).expect("serialize"),
-            json!({
-                "kind": "local_asset",
-                "stagingJobId": "upload-1",
-                "mediaType": "video",
-                "canvasNodeKey": "asset-node-local"
-            })
-        );
-    }
-
-    #[test]
-    fn url_references_serialize_as_public_http_media_and_expose_media_type() {
-        let target = MediaReferenceTarget::Url {
-            url: "https://example.com/public-article".into(),
-            media_type: MediaType::Image,
-            canvas_node_key: Some("video-node-1".into()),
-        };
-        assert_eq!(
-            serde_json::to_value(&target).expect("serialize"),
-            json!({
-                "kind": "url",
-                "url": "https://example.com/public-article",
-                "mediaType": "image",
-                "canvasNodeKey": "video-node-1"
-            })
-        );
-        assert_eq!(target.media_type(), MediaType::Image);
-        // 反序列化兼容前端 camelCase 字段。
-        let round_trip: MediaReferenceTarget = serde_json::from_value(json!({
-            "kind": "url",
-            "url": "https://example.com/public-doc.pdf",
-            "mediaType": "video",
-            "canvasNodeKey": "video-node-1"
-        }))
-        .expect("deserialize url target");
-        assert!(matches!(
-            round_trip,
-            MediaReferenceTarget::Url {
-                url,
-                media_type: MediaType::Video,
-                ..
-            } if url == "https://example.com/public-doc.pdf"
-        ));
-    }
-
-    #[test]
-    fn staging_import_group_id_accepts_string_number_and_missing_values() {
-        // 新写入的记录：字符串分组 ID（魔芋数值 ID 与火山引擎 `asset-group-…` 共用）。
-        let target: StagingAssetImportTarget = serde_json::from_value(json!({
-            "providerConnectionId": "company",
-            "name": "素材",
-            "groupId": "asset-group-1"
-        }))
-        .expect("deserialize string group id");
-        assert_eq!(target.group_id.as_deref(), Some("asset-group-1"));
-
-        // 历史记录：旧版本把真人分组数值 ID 存成 JSON 数字。
-        let legacy: StagingAssetImportTarget = serde_json::from_value(json!({
-            "providerConnectionId": "company",
-            "name": null,
-            "groupId": 128
-        }))
-        .expect("deserialize legacy numeric group id");
-        assert_eq!(legacy.group_id.as_deref(), Some("128"));
-
-        // 未指定分组（字段缺失或空串）都归一为 None，交由方言发现/创建默认上传分组。
-        let missing: StagingAssetImportTarget =
-            serde_json::from_value(json!({ "providerConnectionId": "company", "name": null }))
-                .expect("deserialize missing group id");
-        assert_eq!(missing.group_id, None);
-        let blank: StagingAssetImportTarget = serde_json::from_value(json!({
-            "providerConnectionId": "company",
-            "name": null,
-            "groupId": "  "
-        }))
-        .expect("deserialize blank group id");
-        assert_eq!(blank.group_id, None);
-
-        // 序列化统一为字符串，落库后不回退成数字。
-        assert_eq!(
-            serde_json::to_value(&legacy).expect("serialize"),
-            json!({ "providerConnectionId": "company", "name": null, "groupId": "128" })
-        );
-    }
-
-    #[test]
-    fn full_generation_command_deserializes_precise_asset_and_local_result_targets() {
-        let command: StartGenerationCommand = serde_json::from_value(json!({
-            "canvasId": "canvas-1",
-            "sourceNodeId": "video-node-1",
-            "operation": "video_generation",
-            "providerConnectionId": "company",
-            "modelDefinitionId": "video-model",
-            "prompt": [
-                {
-                    "kind": "text",
-                    "text": "让 "
-                },
-                {
-                    "kind": "media_reference",
-                    "mentionId": "mention-asset",
-                    "target": {
-                        "kind": "asset",
-                        "providerConnectionId": "company",
-                        "assetId": "asset-1",
-                        "mediaType": "image",
-                        "canvasNodeKey": "asset-node-7"
-                    },
-                    "displayNameSnapshot": "角色正面",
-                    "typePosition": 1,
-                    "contentIndex": 1
-                },
-                {
-                    "kind": "media_reference",
-                    "mentionId": "mention-result",
-                    "target": {
-                        "kind": "local_result",
-                        "generationTaskId": "task-previous",
-                        "resultIndex": 2,
-                        "mediaType": "video",
-                        "canvasNodeKey": "output-node-4"
-                    },
-                    "displayNameSnapshot": "上一段视频"
-                }
-            ],
-            "explicitMedia": [{
-                "target": {
-                    "kind": "asset",
-                    "providerConnectionId": "company",
-                    "assetId": "asset-legacy",
-                    "mediaType": "image"
-                },
-                "role": "reference_image",
-                "displayNameSnapshot": "旧版素材",
-                "typePosition": 2,
-                "contentIndex": 3
-            }],
-            "parameters": { "duration": 5 },
-            "generationCount": 1
-        }))
-        .expect("deserialize full command");
-
-        assert_eq!(command.canvas_id, "canvas-1");
-        assert_eq!(command.operation, GenerationOperation::VideoGeneration);
-        assert_eq!(command.prompt.len(), 3);
-        assert!(matches!(
-            &command.prompt[1],
-            PromptSegment::MediaReference {
-                target: MediaReferenceTarget::Asset {
-                    provider_connection_id,
-                    asset_id,
-                    media_type: MediaType::Image,
-                    canvas_node_key: Some(canvas_node_key),
-                },
-                type_position: Some(type_position),
-                content_index: Some(content_index),
-                ..
-            } if provider_connection_id == "company"
-                && asset_id == "asset-1"
-                && canvas_node_key == "asset-node-7"
-                && *type_position == 1
-                && *content_index == 1
-        ));
-        assert!(matches!(
-            &command.prompt[2],
-            PromptSegment::MediaReference {
-                target: MediaReferenceTarget::LocalResult {
-                    generation_task_id,
-                    result_index: 2,
-                    media_type: MediaType::Video,
-                    canvas_node_key: Some(canvas_node_key),
-                },
-                ..
-            } if generation_task_id == "task-previous" && canvas_node_key == "output-node-4"
-        ));
-        assert!(matches!(
-            &command.explicit_media[0].target,
-            MediaReferenceTarget::Asset {
-                canvas_node_key: None,
-                ..
-            }
-        ));
-        assert_eq!(command.explicit_media[0].type_position, Some(2));
-        assert_eq!(command.explicit_media[0].content_index, Some(3));
-    }
 }

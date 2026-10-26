@@ -8,13 +8,14 @@ import {
 } from "../../lib/backend";
 
 import { MarkdownView } from "../../components/MarkdownView";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { CanvasSelect } from "../../components/CanvasSelect";
 import { ImeTextarea } from "../../components/ImeTextField";
 
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import { AutoSizeThumb } from "./MediaNodeViews";
-import { RequiredMark } from "./workflowFieldRequirements";
+import { RequiredMark } from "../../components/RequiredMark";
 import type {
   AssetKind,
   CanvasNodeDimensions,
@@ -25,9 +26,6 @@ import type {
   PromptNodeConfig,
   ScreenplayNodeConfig,
   StaticNodeDescriptor,
-  ViralRemixNodeConfig,
-  ViralRemixNodeData,
-  ViralRemixVideoInput,
 } from "./workspaceModel";
 import type { PromptContentEditorSession, PromptContentModule } from "../../lib/promptContent";
 import {
@@ -36,6 +34,7 @@ import {
   documentSkillRoleLabel,
   isTextGenerationModel,
   promptConversationRoleLabel,
+  resolvePromptOptimizationMode,
 } from "./workspaceModel";
 
 function ScreenplayMaterialIcon({ kind }: { readonly kind: PromptMaterialKind }) {
@@ -77,7 +76,6 @@ export function CanvasDocumentSkillNode({
   connectedMedia = [],
   onSelect,
   onNodeDragStart,
-  onRemove,
   onUnlink,
   onSizeChange,
   onChange,
@@ -104,6 +102,10 @@ export function CanvasDocumentSkillNode({
     clientX: number,
     clientY: number,
   ) => void;
+  /**
+   * 删除节点：原站节点卡上没有叉号按钮，删除走「选中后按 Delete」。
+   * 这里只保留 prop 形状以兼容父组件既有传参，卡片里不再渲染删除按钮。
+   */
   readonly onRemove: (key: string) => void;
   readonly onUnlink: (edgeId: string) => void;
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
@@ -213,18 +215,6 @@ export function CanvasDocumentSkillNode({
             )}
             <span>{exporting ? "导出中" : "导出 MD"}</span>
           </button>
-          <button
-            type="button"
-            className="canvas-gen-node__remove"
-            aria-label={copy.removeAriaLabel}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
         </span>
       </div>
 
@@ -267,11 +257,7 @@ export function CanvasDocumentSkillNode({
           </div>
         ))}
         <div className="canvas-screenplay-node__skill-badge">
-          {node.kind === "storyboard" ? (
-            <Icon name="film-slate" aria-hidden="true" size="md" />
-          ) : (
-            <Icon name="book-open-text" aria-hidden="true" size="md" />
-          )}
+          <Icon name="book-open-text" aria-hidden="true" size="md" />
           <span>
             <strong>{copy.skillTitle}</strong>
             <small>{copy.skillDetail}</small>
@@ -281,63 +267,71 @@ export function CanvasDocumentSkillNode({
         <div className="canvas-prompt-node__fields">
           <label className="canvas-prompt-node__field">
             <span>文本模型供应商</span>
-            <select
-              aria-label={copy.providerAriaLabel}
+            <CanvasSelect
+              ariaLabel={copy.providerAriaLabel}
               value={node.config.modelSelection.providerId}
-              onChange={(event) => {
-                const providerId = event.target.value;
+              options={[
+                ...(node.config.modelSelection.providerId
+                  ? []
+                  : [{ value: "", label: "请选择供应商" }]),
+                ...(node.config.modelSelection.providerId && !selectedProvider
+                  ? [
+                      {
+                        value: node.config.modelSelection.providerId,
+                        label: `${node.config.modelSelection.providerId}（不可用）`,
+                      },
+                    ]
+                  : []),
+                ...textModelProviders.map((entry) => ({
+                  value: entry.provider.id,
+                  label: entry.provider.displayName,
+                })),
+              ]}
+              onChange={(providerId) => {
                 const modelDefinitionId =
                   textModelProviders.find((entry) => entry.provider.id === providerId)?.models[0]
                     ?.definitionId ?? "";
                 onChange({ ...node.config, modelSelection: { providerId, modelDefinitionId } });
               }}
-            >
-              {!node.config.modelSelection.providerId ? (
-                <option value="">请选择供应商</option>
-              ) : null}
-              {node.config.modelSelection.providerId && !selectedProvider ? (
-                <option value={node.config.modelSelection.providerId}>
-                  {node.config.modelSelection.providerId}（不可用）
-                </option>
-              ) : null}
-              {textModelProviders.map((entry) => (
-                <option key={entry.provider.id} value={entry.provider.id}>
-                  {entry.provider.displayName}
-                </option>
-              ))}
-            </select>
+            />
           </label>
           <label className="canvas-prompt-node__field">
             <span>文本模型</span>
-            <select
-              aria-label={copy.modelAriaLabel}
+            <CanvasSelect
+              ariaLabel={copy.modelAriaLabel}
               value={node.config.modelSelection.modelDefinitionId}
-              onChange={(event) =>
+              options={[
+                ...(node.config.modelSelection.modelDefinitionId
+                  ? []
+                  : [
+                      {
+                        value: "",
+                        label: availableModels.length ? "请选择文本模型" : "没有可用文本模型",
+                      },
+                    ]),
+                ...(node.config.modelSelection.modelDefinitionId && !selectedModel
+                  ? [
+                      {
+                        value: node.config.modelSelection.modelDefinitionId,
+                        label: `${node.config.modelSelection.modelDefinitionId}（不可用）`,
+                      },
+                    ]
+                  : []),
+                ...availableModels.map((model) => ({
+                  value: model.definitionId,
+                  label: model.displayName,
+                })),
+              ]}
+              onChange={(modelDefinitionId) =>
                 onChange({
                   ...node.config,
                   modelSelection: {
                     ...node.config.modelSelection,
-                    modelDefinitionId: event.target.value,
+                    modelDefinitionId,
                   },
                 })
               }
-            >
-              {!node.config.modelSelection.modelDefinitionId ? (
-                <option value="">
-                  {availableModels.length ? "请选择文本模型" : "没有可用文本模型"}
-                </option>
-              ) : null}
-              {node.config.modelSelection.modelDefinitionId && !selectedModel ? (
-                <option value={node.config.modelSelection.modelDefinitionId}>
-                  {node.config.modelSelection.modelDefinitionId}（不可用）
-                </option>
-              ) : null}
-              {availableModels.map((model) => (
-                <option key={model.definitionId} value={model.definitionId}>
-                  {model.displayName}
-                </option>
-              ))}
-            </select>
+            />
           </label>
         </div>
 
@@ -377,6 +371,7 @@ export function CanvasDocumentSkillNode({
           <ImeTextarea
             ref={composerRef}
             className="canvas-screenplay-node__composer"
+            aria-describedby={error ? `text-node-error-${node.key}` : undefined}
             aria-label={copy.composerAriaLabel}
             placeholder={
               sourceDocumentReady
@@ -467,6 +462,7 @@ export function CanvasDocumentSkillNode({
           <span>Ctrl / ⌘ + Enter 发送</span>
           <button
             type="button"
+            aria-describedby={error ? `text-node-error-${node.key}` : undefined}
             disabled={
               running ||
               !selectionReady ||
@@ -559,377 +555,11 @@ export function CanvasDocumentSkillNode({
         ) : null}
 
         {error ? (
-          <>
-            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-              {error}
-            </pre>
-            <ErrorCopyButton text={error} />
-          </>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-/** 爆款视频复刻节点：消费已存在的视频，在本地抽帧后调用内置纯复刻技能。 */
-export function CanvasViralRemixNode({
-  node,
-  inputs,
-  selected,
-  dragging,
-  running,
-  streamingText,
-  error,
-  providerCatalog,
-  onSelect,
-  onNodeDragStart,
-  onRemove,
-  onUnlink,
-  onSizeChange,
-  onChange,
-  onRun,
-  onExport,
-}: {
-  readonly node: ViralRemixNodeData;
-  readonly inputs: readonly ViralRemixVideoInput[];
-  readonly selected: boolean;
-  readonly dragging: boolean;
-  readonly running: boolean;
-  readonly streamingText: string | null;
-  readonly error: string | null;
-  readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly onSelect: (key: string) => void;
-  readonly onNodeDragStart: (
-    key: string,
-    x: number,
-    y: number,
-    clientX: number,
-    clientY: number,
-  ) => void;
-  readonly onRemove: (key: string) => void;
-  readonly onUnlink: (edgeId: string) => void;
-  readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
-  readonly onChange: (config: ViralRemixNodeConfig) => void;
-  readonly onRun: (key: string) => void;
-  readonly onExport: (key: string) => Promise<void>;
-}) {
-  const nodeElementRef = useRef<HTMLDivElement>(null);
-  const [exporting, setExporting] = useState(false);
-  /** 文档区视图：默认「预览」渲染 Markdown；无内容或用户主动编辑时切回「编辑」。 */
-  const [documentMode, setDocumentMode] = useState<"edit" | "preview">("preview");
-  const textModelProviders = providerCatalog
-    .map((entry) => ({
-      provider: entry.provider,
-      models: entry.models.filter(isTextGenerationModel),
-    }))
-    .filter((entry) => entry.provider.enabled && entry.models.length > 0);
-  const selectedProvider = textModelProviders.find(
-    (entry) => entry.provider.id === node.config.modelSelection.providerId,
-  );
-  const availableModels = selectedProvider?.models ?? [];
-  const selectedModel = availableModels.find(
-    (model) => model.definitionId === node.config.modelSelection.modelDefinitionId,
-  );
-  const selectionReady = Boolean(selectedProvider && selectedModel);
-  // 文档区视图：无稿件时始终落在「编辑」，方便粘贴；有稿件时按用户选择的 预览/编辑 展示。
-  const hasDocument = node.config.currentDocument.trim().length > 0;
-  const effectiveDocumentMode = hasDocument ? documentMode : "edit";
-
-  useEffect(() => {
-    const element = nodeElementRef.current;
-    if (element == null) return;
-    const reportSize = () => {
-      if (element.offsetWidth > 0 && element.offsetHeight > 0) {
-        onSizeChange(node.key, { width: element.offsetWidth, height: element.offsetHeight });
-      }
-    };
-    reportSize();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(reportSize);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [node.key, onSizeChange]);
-
-  const unavailableReason =
-    inputs.length === 0
-      ? "请先连接视频来源"
-      : inputs.some((input) => !input.src)
-        ? "已连接下载节点，请先完成视频下载"
-        : !selectionReady
-          ? "请先选择可用的多模态文本模型"
-          : null;
-
-  return (
-    <div
-      ref={nodeElementRef}
-      className={`canvas-screenplay-node canvas-screenplay-node--viral_remix${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      data-connection-target={node.key}
-      aria-busy={running || exporting}
-      onMouseDown={(event) => {
-        const target = event.target as HTMLElement;
-        onSelect(node.key);
-        if (target.closest("textarea, select, button, .canvas-viral-remix-node__body")) return;
-        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
-      }}
-    >
-      <div className="canvas-gen-node__header">
-        <span className="canvas-gen-node__type canvas-gen-node__type--viral_remix">
-          <span className="canvas-gen-node__type-icon" aria-hidden="true">
-            <NodeTypeIcon kind="viral_remix" size={16} />
-          </span>
-          <span className="canvas-gen-node__type-copy">
-            <strong>爆款视频复刻</strong>
-            <small>{selectedModel?.displayName ?? "多模态文本模型待配置"}</small>
-          </span>
-        </span>
-        <span className="canvas-gen-node__actions">
-          <button
-            type="button"
-            className="canvas-screenplay-node__export"
-            aria-label="导出 Markdown 爆款视频复刻方案"
-            disabled={exporting || !node.config.currentDocument.trim()}
-            title={node.config.currentDocument.trim() ? "导出当前复刻方案" : "暂无可导出的复刻方案"}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              setExporting(true);
-              void onExport(node.key).finally(() => setExporting(false));
-            }}
-          >
-            {exporting ? (
-              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
-            ) : (
-              <Icon name="download-simple" aria-hidden="true" size="sm" />
-            )}
-            <span>{exporting ? "导出中" : "导出 MD"}</span>
-          </button>
-          <button
-            type="button"
-            className="canvas-gen-node__remove"
-            aria-label="移除爆款视频复刻节点"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
-      </div>
-
-      <div className="canvas-viral-remix-node__body">
-        <div className="canvas-screenplay-node__skill-badge">
-          <Icon name="film-strip" aria-hidden="true" size="md" />
-          <span>
-            <strong>V1.1 复刻技能已内置</strong>
-            <small>只分析与二创 · 不包含下载能力</small>
-          </span>
-        </div>
-
-        {inputs.length === 0 ? (
-          <div className="canvas-viral-remix-node__input">
-            <strong>连接待复刻视频</strong>
-            <small>可通过任何上游节点传入视频；多个视频按连接顺序分别分析。</small>
-          </div>
-        ) : (
-          inputs.map((input, index) => (
-            <div className="canvas-viral-remix-node__input is-connected" key={input.key}>
-              <div>
-                <strong>
-                  {index + 1}. {input.name}
-                </strong>
-                <small>
-                  {input.src
-                    ? `${input.sourceLabel}已就绪 · 运行时本地密集抽帧`
-                    : `${input.sourceLabel}已连接 · 等待下载完成`}
-                </small>
-              </div>
-              <button
-                type="button"
-                aria-label={`解除复刻视频连线：${input.name}`}
-                title="解除视频连线"
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onUnlink(input.edgeId);
-                }}
-              >
-                <Icon name="x" aria-hidden="true" size="xs" />
-              </button>
-            </div>
-          ))
-        )}
-
-        <div className="canvas-prompt-node__fields">
-          <label className="canvas-prompt-node__field">
-            <span>多模态文本模型供应商</span>
-            <select
-              aria-label="复刻文本模型供应商"
-              value={node.config.modelSelection.providerId}
-              onChange={(event) => {
-                const providerId = event.target.value;
-                const modelDefinitionId =
-                  textModelProviders.find((entry) => entry.provider.id === providerId)?.models[0]
-                    ?.definitionId ?? "";
-                onChange({ ...node.config, modelSelection: { providerId, modelDefinitionId } });
-              }}
-            >
-              {!node.config.modelSelection.providerId ? (
-                <option value="">请选择供应商</option>
-              ) : null}
-              {node.config.modelSelection.providerId && !selectedProvider ? (
-                <option value={node.config.modelSelection.providerId}>
-                  {node.config.modelSelection.providerId}（不可用）
-                </option>
-              ) : null}
-              {textModelProviders.map((entry) => (
-                <option key={entry.provider.id} value={entry.provider.id}>
-                  {entry.provider.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="canvas-prompt-node__field">
-            <span>多模态文本模型</span>
-            <select
-              aria-label="复刻文本模型"
-              value={node.config.modelSelection.modelDefinitionId}
-              onChange={(event) =>
-                onChange({
-                  ...node.config,
-                  modelSelection: {
-                    ...node.config.modelSelection,
-                    modelDefinitionId: event.target.value,
-                  },
-                })
-              }
-            >
-              {!node.config.modelSelection.modelDefinitionId ? (
-                <option value="">
-                  {availableModels.length ? "请选择文本模型" : "没有可用文本模型"}
-                </option>
-              ) : null}
-              {node.config.modelSelection.modelDefinitionId && !selectedModel ? (
-                <option value={node.config.modelSelection.modelDefinitionId}>
-                  {node.config.modelSelection.modelDefinitionId}（不可用）
-                </option>
-              ) : null}
-              {availableModels.map((model) => (
-                <option key={model.definitionId} value={model.definitionId}>
-                  {model.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        <label className="canvas-prompt-node__field">
-          <span>补充复刻方向（可选）</span>
-          <ImeTextarea
-            className="canvas-viral-remix-node__instructions"
-            aria-label="爆款视频复刻方向"
-            placeholder="例如：保留节奏与运镜，改成国风美妆题材；为空则自动给出忠实复刻与三条二创路线。"
-            value={node.config.instructions}
-            disabled={running}
-            onValueChange={(instructions) => onChange({ ...node.config, instructions })}
+          <ErrorAlert
+            id={`text-node-error-${node.key}`}
+            error={error}
+            hint="检查本轮消息、上游内容、参考素材与文本模型设置后再试；已生成的正文会保留。"
           />
-        </label>
-
-        <button
-          type="button"
-          className="canvas-viral-remix-node__run"
-          disabled={running || unavailableReason != null}
-          title={unavailableReason ?? "密集抽帧并用内置 V1.1 复刻技能分析"}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onRun(node.key);
-          }}
-        >
-          {running ? (
-            <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
-          ) : (
-            <Icon name="sparkle" aria-hidden="true" size="md" />
-          )}
-          {running ? "正在密集抽帧与复刻…" : "开始复刻"}
-        </button>
-
-        <div className="canvas-screenplay-node__document canvas-viral-remix-node__document">
-          <div className="canvas-screenplay-node__document-heading">
-            <label htmlFor={`viral-remix-document-${node.key}`}>当前复刻方案</label>
-            <span className="canvas-screenplay-node__document-tools">
-              <span
-                className="canvas-screenplay-node__document-mode"
-                role="group"
-                aria-label="当前复刻方案视图"
-              >
-                <button
-                  type="button"
-                  aria-pressed={effectiveDocumentMode === "edit"}
-                  title="切换到 Markdown 源码编辑"
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => setDocumentMode("edit")}
-                >
-                  编辑
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={effectiveDocumentMode === "preview"}
-                  title="切换到 Markdown 渲染预览"
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={() => setDocumentMode("preview")}
-                >
-                  预览
-                </button>
-              </span>
-              <span className="canvas-screenplay-node__document-hint">可编辑 · 可导出</span>
-            </span>
-          </div>
-          {running && streamingText ? (
-            // 流式草稿：模型还在生成时就把已收到的正文展示出来。
-            <div
-              className="canvas-screenplay-node__document-preview nodrag is-streaming"
-              role="region"
-              aria-label="当前复刻方案流式草稿"
-              data-testid="streaming-text"
-            >
-              <p className="canvas-screenplay-node__streaming-note">
-                正在生成（已接收 {streamingText.length} 字符）
-              </p>
-              <MarkdownView content={streamingText} />
-            </div>
-          ) : null}
-          {effectiveDocumentMode === "preview" ? (
-            <div
-              className="canvas-screenplay-node__document-preview nodrag"
-              role="region"
-              aria-label="当前复刻方案预览"
-            >
-              <MarkdownView content={node.config.currentDocument} />
-            </div>
-          ) : (
-            <textarea
-              id={`viral-remix-document-${node.key}`}
-              aria-label="当前爆款视频复刻方案"
-              placeholder="连接视频并运行后，将在这里生成逐秒复刻提示词、爆点诊断和三条二创路线。"
-              value={node.config.currentDocument}
-              disabled={running}
-              onChange={(event) => {
-                setDocumentMode("edit");
-                onChange({ ...node.config, currentDocument: event.target.value });
-              }}
-            />
-          )}
-        </div>
-
-        {error ? (
-          <>
-            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-              {error}
-            </pre>
-            <ErrorCopyButton text={error} />
-          </>
         ) : null}
       </div>
     </div>
@@ -950,7 +580,6 @@ export function CanvasPromptNode({
   targetConnections,
   onSelect,
   onNodeDragStart,
-  onRemove,
   onUnlink,
   onConnectionStart,
   onSizeChange,
@@ -960,7 +589,9 @@ export function CanvasPromptNode({
   registerPromptInput,
   mentionCandidates,
   aliveCanvasNodeKeys,
+  expandable = true,
 }: {
+  readonly expandable?: boolean;
   readonly node: Extract<GenNodeData, { kind: "prompt" }>;
   readonly descriptor: StaticNodeDescriptor;
   readonly selected: boolean;
@@ -991,6 +622,10 @@ export function CanvasPromptNode({
     clientX: number,
     clientY: number,
   ) => void;
+  /**
+   * 删除节点：原站节点卡上没有叉号按钮，删除走「选中后按 Delete」。
+   * 这里只保留 prop 形状以兼容父组件既有传参，卡片里不再渲染删除按钮。
+   */
   readonly onRemove: (key: string) => void;
   readonly onUnlink: (edgeId: string) => void;
   readonly onConnectionStart: (key: string) => void;
@@ -1024,22 +659,13 @@ export function CanvasPromptNode({
   const taskLabel = node.config.task === "generate" ? "生成提示词" : "优化提示词";
   const isFpvPath = node.config.mode === "fpv_path";
   const isFightPromptMaster = node.config.mode === "fight_prompt_master";
-  const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
-  const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
-  const isGptImage2Style = node.config.mode === "gpt_image_2_style";
   const isCinematicDialogue = node.config.mode === "cinematic_dialogue";
   const cinematicDialogueGuard: CinematicDialogueGuard = node.config.cinematicDialogueGuard ?? {
     lockedLines: "",
     targetDurationSeconds: null,
     targetFormat: "generic",
   };
-  const hasModeHint =
-    isFpvPath ||
-    isFightPromptMaster ||
-    isMultiGridStoryboard ||
-    isStoryboardPrompt ||
-    isGptImage2Style ||
-    isCinematicDialogue;
+  const hasModeHint = isFpvPath || isFightPromptMaster || isCinematicDialogue;
   const modeHintId = `prompt-mode-hint-${node.key}`;
   const conversation = node.config.conversation ?? [];
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -1064,11 +690,46 @@ export function CanvasPromptNode({
   // 大模型生成新提示词时，同步到 PromptMentionInput 的 session，并自动识别 @素材名。
   useEffect(() => {
     const next = node.config.generatedPrompt;
-    if (next === lastExternalTextRef.current) return;
+    /*
+     * 守卫比的是「canonical 当前纯文本」而不是「上次外部写入的文本」。
+     *
+     * canonical 是唯一真源：`config.generatedPrompt` 只是它的**纯文本镜像**，
+     * 用镜像回灌 canonical 是**有损**的（附件与 @引用会丢，块结构与 marks 也会
+     * 被压平）。所以只有当 canonical 与镜像**确实不一致**时才回灌。
+     *
+     * 这样三种情形都自然正确：
+     *  - 用户打字：canonical 已是最新的 → 两者一致 → 不回灌（附件不会丢）；
+     *  - 撤销：canonical 已被历史快照精确恢复 → 两者一致 → 不回灌（恢复不被覆盖）；
+     *  - 外部写入（AI 生成）：canonical 还没变 → 两者不一致 → 回灌。
+     */
+    const currentPlainText = promptContents.read(node.key)?.plainText ?? "";
+    if (next === currentPlainText) return;
     lastExternalTextRef.current = next;
-    if (next) {
-      promptContents.replaceText(node.key, next, mentionCandidates);
+    if (next === "") {
+      /*
+       * 回到「没有提示词」：整体清空。
+       *
+       * 之前的 `if (next)` 守卫让空串**什么都不做** —— 撤销到空时编辑器里仍是
+       * 新文字，而节点状态行按 `config.generatedPrompt` 显示 0 字，撤销看起来
+       * 完全没有发生。
+       */
+      promptContents.replaceText(node.key, "", mentionCandidates);
+      return;
     }
+    /*
+     * 用纯文本回灌 canonical，但**保留附件与 @引用**。
+     *
+     * 画布的撤销栈只存 `config.generatedPrompt` 这份纯文本镜像（canonical 文档
+     * 不在历史切片里），撤销后只能靠它回灌。而附件**根本不进 plainText**
+     * （`viewFromDocument` 里附件只计数、不进正文）—— 用 `replaceText` 回灌会把
+     * 整篇文档压成一条纯文本，附件被**永久丢弃**，用户根本不知道发生过什么。
+     *
+     * 所以这里用「保留附件」的版本：文本回退，附件与 @引用的素材身份保住。
+     *
+     * 「整篇替换」（AI 生成新提示词）走的是另一条路：WorkspaceApp 在写 config
+     * 之前会先清空模块里的文档，所以那时这里保不住任何附件 —— 旧附件确实该清掉。
+     */
+    promptContents.replaceTextKeepingAttachments(node.key, next, mentionCandidates);
   }, [node.config.generatedPrompt, node.key, promptContents, mentionCandidates]);
 
   const handlePromptTextChange = useCallback(
@@ -1135,20 +796,6 @@ export function CanvasPromptNode({
             <small>{selectedModel?.displayName ?? "文本模型待配置"}</small>
           </span>
         </span>
-        <span className="canvas-gen-node__actions">
-          <button
-            type="button"
-            className="canvas-gen-node__remove"
-            aria-label="移除提示词生成与优化节点"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
       </div>
 
       <div className="canvas-prompt-node__body">
@@ -1212,11 +859,27 @@ export function CanvasPromptNode({
         <div className="canvas-prompt-node__fields">
           <label className="canvas-prompt-node__field">
             <span>文本模型供应商</span>
-            <select
-              aria-label="提示词文本模型供应商"
+            <CanvasSelect
+              ariaLabel="提示词文本模型供应商"
               value={node.config.modelSelection.providerId}
-              onChange={(event) => {
-                const providerId = event.target.value;
+              options={[
+                ...(node.config.modelSelection.providerId
+                  ? []
+                  : [{ value: "", label: "请选择供应商" }]),
+                ...(node.config.modelSelection.providerId && !selectedProvider
+                  ? [
+                      {
+                        value: node.config.modelSelection.providerId,
+                        label: `${node.config.modelSelection.providerId}（不可用）`,
+                      },
+                    ]
+                  : []),
+                ...textModelProviders.map((entry) => ({
+                  value: entry.provider.id,
+                  label: entry.provider.displayName,
+                })),
+              ]}
+              onChange={(providerId) => {
                 const modelDefinitionId =
                   textModelProviders.find((entry) => entry.provider.id === providerId)?.models[0]
                     ?.definitionId ?? "";
@@ -1225,77 +888,67 @@ export function CanvasPromptNode({
                   modelSelection: { providerId, modelDefinitionId },
                 });
               }}
-            >
-              {!node.config.modelSelection.providerId ? (
-                <option value="">请选择供应商</option>
-              ) : null}
-              {node.config.modelSelection.providerId && !selectedProvider ? (
-                <option value={node.config.modelSelection.providerId}>
-                  {node.config.modelSelection.providerId}（不可用）
-                </option>
-              ) : null}
-              {textModelProviders.map((entry) => (
-                <option key={entry.provider.id} value={entry.provider.id}>
-                  {entry.provider.displayName}
-                </option>
-              ))}
-            </select>
+            />
           </label>
           <label className="canvas-prompt-node__field">
             <span>文本模型</span>
-            <select
-              aria-label="提示词文本模型"
+            <CanvasSelect
+              ariaLabel="提示词文本模型"
               value={node.config.modelSelection.modelDefinitionId}
-              onChange={(event) =>
+              options={[
+                ...(node.config.modelSelection.modelDefinitionId
+                  ? []
+                  : [
+                      {
+                        value: "",
+                        label: availableModels.length > 0 ? "请选择文本模型" : "没有可用文本模型",
+                      },
+                    ]),
+                ...(node.config.modelSelection.modelDefinitionId && !selectedModel
+                  ? [
+                      {
+                        value: node.config.modelSelection.modelDefinitionId,
+                        label: `${node.config.modelSelection.modelDefinitionId}（不可用）`,
+                      },
+                    ]
+                  : []),
+                ...availableModels.map((model) => ({
+                  value: model.definitionId,
+                  label: model.displayName,
+                })),
+              ]}
+              onChange={(modelDefinitionId) =>
                 onChange({
                   ...node.config,
                   modelSelection: {
                     ...node.config.modelSelection,
-                    modelDefinitionId: event.target.value,
+                    modelDefinitionId,
                   },
                 })
               }
-            >
-              {!node.config.modelSelection.modelDefinitionId ? (
-                <option value="">
-                  {availableModels.length > 0 ? "请选择文本模型" : "没有可用文本模型"}
-                </option>
-              ) : null}
-              {node.config.modelSelection.modelDefinitionId && !selectedModel ? (
-                <option value={node.config.modelSelection.modelDefinitionId}>
-                  {node.config.modelSelection.modelDefinitionId}（不可用）
-                </option>
-              ) : null}
-              {availableModels.map((model) => (
-                <option key={model.definitionId} value={model.definitionId}>
-                  {model.displayName}
-                </option>
-              ))}
-            </select>
+            />
           </label>
         </div>
         <label className="canvas-prompt-node__field">
           <span>提示词技能模式</span>
-          <select
-            aria-label="提示词技能模式"
-            aria-describedby={hasModeHint ? modeHintId : undefined}
-            value={node.config.mode}
-            onChange={(event) =>
+          <CanvasSelect
+            ariaLabel="提示词技能模式"
+            ariaDescribedBy={hasModeHint ? modeHintId : undefined}
+            value={resolvePromptOptimizationMode(node.config.mode)}
+            options={(
+              Object.keys(PROMPT_OPTIMIZATION_MODE_LABELS) as PromptOptimizationMode[]
+            ).map((mode) => ({
+              value: mode,
+              label: PROMPT_OPTIMIZATION_MODE_LABELS[mode],
+            }))}
+            onChange={(mode) =>
               onChange({
                 ...node.config,
-                mode: event.target.value as PromptOptimizationMode,
+                mode: mode as PromptOptimizationMode,
                 cinematicDialogueValidated: false,
               })
             }
-          >
-            {(Object.keys(PROMPT_OPTIMIZATION_MODE_LABELS) as PromptOptimizationMode[]).map(
-              (mode) => (
-                <option key={mode} value={mode}>
-                  {PROMPT_OPTIMIZATION_MODE_LABELS[mode]}
-                </option>
-              ),
-            )}
-          </select>
+          />
         </label>
         {isFpvPath ? (
           <div id={modeHintId} className="canvas-prompt-node__intro">
@@ -1309,25 +962,6 @@ export function CanvasPromptNode({
             <span>
               在对话中指定目标视频模型（SD2.0 / SD2.5 /
               H3）、时长和速度档，缺失时会先补问；默认交付高强度、中间型、慢节奏三套方案。参考图片与视频画面需使用支持图片理解的文本模型。
-            </span>
-          </div>
-        ) : isMultiGridStoryboard ? (
-          <div id={modeHintId} className="canvas-prompt-node__intro">
-            <span>
-              在对话中指定 4 / 6 / 9
-              宫格、目标时长和风格，已填写的参数会继续沿用；生成图片与视频两套提示词。参考图片与视频画面需使用支持图片理解的文本模型。
-            </span>
-          </div>
-        ) : isStoryboardPrompt ? (
-          <div id={modeHintId} className="canvas-prompt-node__intro">
-            <span>
-              按电影、广告、短剧、动画、漫画、品牌、MV、游戏、社交、教程、体育或国漫视觉开发场景组织画面，输出可直接交给图片节点的整张故事板提示词。可指定格数、画幅与风格；参考图片与视频画面需使用支持图片理解的文本模型。
-            </span>
-          </div>
-        ) : isGptImage2Style ? (
-          <div id={modeHintId} className="canvas-prompt-node__intro">
-            <span>
-              按图片用途匹配内置案例与风格，也可指定风格名称；输出可直接交给图片节点的提示词正文，不附模板说明或案例编号。沿用所选项目文本模型，案例图、参考图片与视频画面需使用支持图片理解的文本模型；生成图片请连接图片节点。
             </span>
           </div>
         ) : isCinematicDialogue ? (
@@ -1362,19 +996,20 @@ export function CanvasPromptNode({
               </label>
               <label className="canvas-prompt-node__field">
                 目标格式
-                <select
-                  aria-label="对白目标格式"
+                <CanvasSelect
+                  ariaLabel="对白目标格式"
                   value={cinematicDialogueGuard.targetFormat}
                   disabled={running}
-                  onChange={(event) =>
+                  options={[
+                    { value: "generic", label: "通用视频提示词" },
+                    { value: "h3", label: "H3 分区格式" },
+                  ]}
+                  onChange={(targetFormat) =>
                     updateCinematicDialogueGuard({
-                      targetFormat: event.target.value as CinematicDialogueGuard["targetFormat"],
+                      targetFormat: targetFormat as CinematicDialogueGuard["targetFormat"],
                     })
                   }
-                >
-                  <option value="generic">通用视频提示词</option>
-                  <option value="h3">H3 分区格式</option>
-                </select>
+                />
               </label>
             </div>
             <label className="canvas-prompt-node__field">
@@ -1411,15 +1046,9 @@ export function CanvasPromptNode({
                   ? "连接路径图，或写下起点、途经点和终点"
                   : isFightPromptMaster
                     ? "描述一场打斗，或连接角色、场景与动作参考素材"
-                    : isMultiGridStoryboard
-                      ? "提供剧情，或连接角色、场景与视频参考素材"
-                      : isStoryboardPrompt
-                        ? "描述故事与用途，或连接角色、场景与风格参考素材"
-                        : isGptImage2Style
-                          ? "描述图片用途与主体，或连接图片和风格参考素材"
-                          : isCinematicDialogue
-                            ? "提供双人或多人对白、目标视频模型与时长"
-                            : "从一句创意或待优化提示词开始"}
+                    : isCinematicDialogue
+                      ? "提供双人或多人对白、目标视频模型与时长"
+                      : "从一句创意或待优化提示词开始"}
               </strong>
               <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
             </div>
@@ -1477,25 +1106,13 @@ export function CanvasPromptNode({
                   ? node.config.task === "generate"
                     ? "例如：SD2.5，15 秒，超高速；雨夜站台双人近战。已连接参考素材时可直接生成"
                     : "粘贴打斗提示词或填写修改要求，例如：加强攻防因果，减少镜头切换；留空可优化当前输出"
-                  : isMultiGridStoryboard
+                  : isCinematicDialogue
                     ? node.config.task === "generate"
-                      ? "例如：6 宫格，12 秒，电影写实；女孩走进雨夜站台，发现遗落的信封。已连接参考素材时可直接生成"
-                      : "粘贴分镜方案或填写修改要求，例如：保留角色与总时长，强化最后一格；留空可优化当前输出"
-                    : isStoryboardPrompt
-                      ? node.config.task === "generate"
-                        ? "例如：咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格；已连接参考素材时可直接生成"
-                        : "粘贴故事板提示词或填写修改要求，例如：保留角色与版式，加强最后一格的情绪；留空可优化当前输出"
-                      : isGptImage2Style
-                        ? node.config.task === "generate"
-                          ? "例如：咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」；也可指定风格名称或连接参考素材"
-                          : "粘贴图片提示词或填写修改要求，例如：保留主体和标题，改成杂志封面风格；留空可优化当前输出"
-                        : isCinematicDialogue
-                          ? node.config.task === "generate"
-                            ? "例如：这段台词可以改编；目标视频模型和时长…… 两人因一封信发生争执，附对白原文……"
-                            : "例如：保留原台词与角色关系，调整抢话时机；留空可优化当前输出"
-                          : node.config.task === "generate"
-                            ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
-                            : "粘贴一段已有提示词，补充镜头、主体和风格细节"
+                      ? "例如：这段台词可以改编；目标视频模型和时长…… 两人因一封信发生争执，附对白原文……"
+                      : "例如：保留原台词与角色关系，调整抢话时机；留空可优化当前输出"
+                    : node.config.task === "generate"
+                      ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
+                      : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
             disabled={running}
@@ -1514,6 +1131,7 @@ export function CanvasPromptNode({
             type="button"
             className="canvas-gen-node__start canvas-gen-node__start--labeled canvas-prompt-node__run"
             aria-label={taskLabel}
+            aria-describedby={error ? `text-node-error-${node.key}` : undefined}
             data-state={running ? "loading" : undefined}
             disabled={running || !selectionReady}
             title={!selectionReady ? "请先选择可用的文本模型" : `调用文本模型${taskLabel}`}
@@ -1542,7 +1160,7 @@ export function CanvasPromptNode({
               registerInput={registerPromptInput}
               labelledBy={promptOutputId}
               describedBy={promptOutputId}
-              expandable
+              expandable={expandable}
               onTextChange={handlePromptTextChange}
             />
           </div>
@@ -1551,12 +1169,11 @@ export function CanvasPromptNode({
           <span className={node.config.generatedPrompt ? "is-ready" : ""}>{promptStatusText}</span>
         </div>
         {error ? (
-          <>
-            <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
-              {error}
-            </pre>
-            <ErrorCopyButton text={error} />
-          </>
+          <ErrorAlert
+            id={`text-node-error-${node.key}`}
+            error={error}
+            hint="检查本轮消息、上游内容、参考素材与文本模型设置后再试；已生成的正文会保留。"
+          />
         ) : null}
         {targetConnections.length > 0 ? (
           <div className="canvas-prompt-node__connections">

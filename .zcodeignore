@@ -51,12 +51,6 @@ __pycache__/
 docs/
 CONTEXT.md
 
-# Generated, bundled local animation engine (rebuilt by remotion:prepare)
-src-tauri/resources/remotion-runtime/
-tools/remotion-runtime/.remotion/
-tools/remotion-runtime/.smoke/
-tools/remotion-runtime/.build-node/
-
 # Generated, bundled FFmpeg engine (rebuilt by ffmpeg:prepare)
 src-tauri/resources/ffmpeg/
 
@@ -64,21 +58,6 @@ src-tauri/resources/ffmpeg/
 src-tauri/.updater-key
 src-tauri/.updater-key.pub
 .tos-updates.env
-
-# Generated Blender distribution, verified and bundled by blender:prepare
-src-tauri/resources/blender/
-
-# MediaPipe pose runtime + model for the white-model motion capture (rebuilt by pose:prepare)
-public/pose/
-src-tauri/resources/pose-runtime/
-src-tauri/resources/.pose-*/
-src-tauri/resources/component-catalog.json
-
-# Optional, verified local AI inference pack (rebuilt by ai-media:prepare)
-.cache/ai-media/
-src-tauri/resources/.ai-media-*/
-src-tauri/resources/ai-media-runtime/
-src-tauri/resources/ai-media-quality-runtime/
 
 # ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
 .git/

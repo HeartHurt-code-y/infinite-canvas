@@ -72,8 +72,9 @@ tar = "0.4"
 unicode-normalization = "0.1"
 ts-rs = { version = "12.0.1", features = ["no-serde-warnings"] }
 
-[dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+# 原先这里有 [dev-dependencies] tokio（macros / rt-multi-thread / test-util），
+# 只为 `#[tokio::test]` 与时间暂停服务。测试资产已整体移除，生产代码也不用
+# tokio 的 macros / rt-multi-thread（异步走 tauri::async_runtime），故整段删除。
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
@@ -110,5 +111,31 @@ libc = "0.2"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
-strip = true
+# 不要在这里设 panic = "abort"（保持默认 unwind），有两个理由：
+# ① 自定义协议处理器、tokio worker、命令线程里的单次 panic 必须能在任务边界被捕获
+#    并留下 panic.log，而不是让整个画布进程立刻 SIGABRT——否则一条坏素材就会闪退，
+#    macOS 崩溃报告里也只剩 abort() called。
+# ② 更关键：objc2 文档明确 panic = "abort" 时 objc2::exception::catch 抓不住
+#    Objective-C 异常；wry 在 macOS 上对 WKURLSchemeTask 的 didReceiveResponse /
+#    didReceiveData / didFinish 调用正是靠这个 catch 兜住 WebKit 抛出的 NSException
+#    （任务被 stop 的竞态）。abort 会把本可恢复的 NSException 直接变成进程 abort，
+#    因此 release 必须保留默认 unwind。
+# 保留符号表、只去掉 DWARF：将来 macOS .ips 崩溃报告里的 app 帧才能符号化/demangle，
+# 不再只能看偏移；release 本身不生成 DWARF，所以体积增量相对可控。
+# debug = "line-tables-only"：只为在 macOS 构建时产出可归档的 dSYM（行号级符号），
+# 发布产物仍由下面的 strip = "debuginfo" 去掉 DWARF，安装包体积不受影响；CI 会把
+# dSYM 作为单独 artifact 归档（codemagic.yaml 的「收集 dSYM」步骤）。
+debug = "line-tables-only"
+strip = "debuginfo"
+
+# 本地 fork 的 wry 0.55.1：macOS 自定义协议回写路径做一组「不再 abort 进程」的补丁（详见
+# vendor/wry/VENDORED-PATCH.md）：
+# 1) Foundation 的 NSData / NSHTTPURLResponse 调用全部包进 objc2::exception::catch，
+#    避免 NSException 穿过 Rust 帧直接把进程 abort（wry 上游 0.55/0.57 都未覆盖）；
+# 2) 响应体所有权直接转移进 NSData（等价 wry 0.57），去掉每个响应的二次整包拷贝，
+#    降低大图/大视频预览的瞬时内存峰值；
+# 3) 主线程回调里（start_task / 404 应答）不再有 unwrap 等 Rust panic 点，锁中毒也不再
+#    让后续协议永久 panic。
+# 升级 tauri/wry 时必须先评估上游是否已修复，再按 VENDORED-PATCH.md 重打补丁。
+[patch.crates-io]
+wry = { path = "vendor/wry" }

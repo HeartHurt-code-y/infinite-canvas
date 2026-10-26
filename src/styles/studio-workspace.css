@@ -1,0 +1,205 @@
+/* Immersive creative workspace: the canvas owns the space; tools open on demand.
+ * Keep these layout overrides separate from node rendering and task controls.
+ */
+.workspace-shell.workspace-shell--immersive {
+  --size-header: var(--size-studio-header);
+  position: relative;
+  grid-template:
+    "header" var(--size-header)
+    "canvas" minmax(0, 1fr) / minmax(0, 1fr);
+}
+.workspace-shell--immersive .workspace-header {
+  display: flex;
+  gap: var(--space-md);
+  padding-inline: var(--space-md);
+  background: var(--color-bg-base);
+}
+.workspace-shell--immersive .brand-lockup {
+  flex: 0 0 auto;
+}
+.workspace-shell--immersive .brand-mark {
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  box-shadow: none;
+}
+.workspace-shell--immersive .workspace-header__navigation {
+  margin: 0;
+}
+.workspace-shell--immersive .header-actions {
+  flex: 0 0 auto;
+  margin-inline-start: auto;
+  border: 0;
+}
+.workspace-shell--immersive .header-icon {
+  display: grid;
+}
+.workspace-shell--immersive .canvas-stage {
+  container: creative-stage / inline-size;
+}
+.workspace-shell--immersive .asset-panel {
+  position: absolute;
+  z-index: var(--z-modal);
+  inset: calc(var(--size-header) + var(--space-md)) auto var(--size-studio-dock-clearance)
+    var(--space-md);
+  display: flex;
+  width: min(calc(var(--size-assets) + var(--space-md)), calc(100% - 2 * var(--space-md)));
+  padding: var(--space-md);
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  background: var(--color-surface-1);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-raised);
+  transform: none;
+  transition: none;
+}
+.workspace-shell--immersive .asset-panel.is-mobile-open {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+.workspace-shell--immersive .panel-title-row {
+  gap: var(--space-xs);
+}
+.workspace-shell--immersive .panel-title-row__actions {
+  gap: var(--space-2xs);
+}
+.workspace-shell--immersive .mobile-panel-close--assets {
+  position: static;
+}
+.workspace-shell--immersive .canvas-flow-bg--minor circle {
+  fill: var(--color-grid-major);
+}
+.workspace-shell--immersive .canvas-empty-hint {
+  gap: var(--space-sm);
+}
+.workspace-shell--immersive .canvas-empty-hint__art {
+  width: var(--size-empty-art);
+  height: var(--size-empty-art);
+  color: var(--color-text-3);
+  background: var(--color-surface-1);
+  border: var(--rule-thin) solid var(--color-rule-faint);
+  border-radius: var(--radius-panel);
+}
+.workspace-shell--immersive .canvas-empty-hint strong {
+  font-size: var(--text-xl);
+}
+.workspace-shell--immersive .canvas-empty-hint > span {
+  max-width: var(--size-empty-layout);
+  color: var(--color-text-3);
+}
+.canvas-creation-dock {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  bottom: var(--space-lg);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  max-width: calc(100% - 2 * var(--space-md));
+  padding: var(--space-xs);
+  color: var(--color-text-2);
+  background: var(--color-surface-1);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-raised);
+  transform: translateX(-50%);
+}
+.canvas-creation-dock .canvas-add-node-trigger,
+.canvas-creation-dock__action {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text-2);
+  background: var(--color-transparent);
+  border: var(--rule-thin) solid var(--color-transparent);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+.canvas-creation-dock .canvas-add-node-trigger {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+}
+.canvas-creation-dock__action[aria-expanded="true"] {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule);
+}
+.canvas-creation-dock__divider {
+  flex: 0 0 var(--rule-thin);
+  height: var(--space-lg);
+  margin-inline: var(--space-2xs);
+  background: var(--color-rule);
+}
+.workspace-shell--immersive .canvas-viewport-dock {
+  right: auto;
+  left: var(--space-md);
+  bottom: var(--space-lg);
+  justify-content: flex-start;
+}
+@media (hover: hover) {
+  .canvas-creation-dock__action:hover {
+    color: var(--color-text);
+    background: var(--color-surface-3);
+  }
+  .canvas-creation-dock .canvas-add-node-trigger:hover {
+    background: var(--color-brand-hover);
+  }
+}
+@container creative-stage (max-width: 108rem) {
+  .workspace-shell--immersive .canvas-viewport-dock {
+    bottom: var(--size-studio-dock-clearance);
+  }
+}
+@media (max-width: 59.999rem) {
+  .workspace-shell--immersive .workspace-header {
+    gap: var(--space-xs);
+    padding-inline: var(--space-sm);
+  }
+  .workspace-shell--immersive .save-state {
+    display: none;
+  }
+  .workspace-shell--immersive .brand-name {
+    display: none;
+  }
+}
+@media (max-width: 39.999rem) {
+  .canvas-creation-dock {
+    gap: var(--space-3xs);
+    padding: var(--space-xs);
+  }
+  .canvas-creation-dock__action > span {
+    display: none;
+  }
+  .workspace-shell--immersive .canvas-viewport-dock {
+    max-width: calc(100% - var(--space-3xl));
+  }
+}
+@media (max-height: 40rem) {
+  .workspace-shell--immersive .asset-panel {
+    bottom: var(--space-md);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .workspace-shell--immersive .asset-panel > * {
+    flex-shrink: 0;
+  }
+  .workspace-shell--immersive .asset-panel .panel-title-row {
+    position: sticky;
+    z-index: var(--z-raised);
+    top: 0;
+    background: var(--color-surface-1);
+  }
+  .workspace-shell--immersive .asset-panel .asset-grid {
+    flex: 0 0 auto;
+    min-height: var(--size-assets);
+    overflow: visible;
+  }
+}

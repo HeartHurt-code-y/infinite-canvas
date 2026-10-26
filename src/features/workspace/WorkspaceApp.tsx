@@ -1,27 +1,22 @@
+import { CanvasContentNode, type NodeEditingProps } from "./CanvasContentNode";
+import { usePromptSummary } from "./useNodePromptSummary";
 import { Icon } from "../../components/Icon";
-import { ErrorAlert } from "../../components/ErrorAlert";
 import { AppUpdateBanner } from "./AppUpdateBanner";
-import {
-  ensureRuntimeFeatureInstalled,
-  RUNTIME_COMPONENTS_REQUEST_EVENT,
-} from "../../lib/runtimeComponents";
-import { CanvasAgentController } from "./agent/canvasAgentController";
-import { createAgentCanvasTools } from "./agent/agentCanvasTools";
-import { createAgentBlenderTools, previewAgentBlenderScenes } from "./agent/agentBlenderTools";
-import { createAgentVideoDownloadTools } from "./agent/agentVideoDownloadTools";
-import { createAgentWorkflowNodeTools } from "./agent/agentWorkflowNodeTools";
-import {
-  agentCanvasContext,
-  agentCanvasSignature,
-  agentGenNodeParameterCapabilities,
-  agentPlanReview,
-} from "./agent/agentCanvasContext";
-import type { AgentToolContext } from "./agent/agentTypes";
-import { videoDownloadInputs } from "./videoDownloadInputs";
+import { CanvasBottomDock, CanvasChromeControls } from "./CanvasChromeControls";
+import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { CanvasAssetDrawerHost } from "./CanvasAssetDrawerHost";
+import { CanvasOnboardingGuide } from "./CanvasOnboardingGuide";
+import { readOnboardingSeen } from "./canvasOnboarding";
+import { CanvasNodeFloatingToolbar } from "./CanvasNodeFloatingToolbar";
+import { CanvasZoomMenu } from "./CanvasZoomMenu";
+import { CanvasShortcutsDialog } from "./CanvasShortcutsDialog";
+import { CanvasContextMenu, type CanvasContextMenuItem } from "./CanvasContextMenu";
+import { openCreateStudio } from "../create/openCreateStudio";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Background,
   BackgroundVariant,
+  MiniMap,
   ReactFlow,
   SelectionMode,
   type Connection,
@@ -37,6 +32,7 @@ import {
 } from "@xyflow/react";
 import {
   Suspense,
+  cloneElement,
   lazy,
   memo,
   useCallback,
@@ -49,18 +45,19 @@ import {
   useSyncExternalStore,
   type ComponentProps,
   type ReactNode,
+  type ReactElement,
 } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { toast } from "../../lib/toast";
-import { openFeedback } from "../../lib/errorReporting";
-import { registerDiagnosticCanvas } from "../../lib/collectFeedbackDiagnostics";
 import { useShallow } from "zustand/react/shallow";
 import {
   assetLibraryClient,
   existingAssetClient,
+  backendErrorMessage,
   formatRawBackendError,
   frontendLog,
   generationClient,
+  videoClipClient,
   promoteSeedanceDraft,
   renameGenerationResult,
   inferMediaKindFromName,
@@ -76,15 +73,13 @@ import {
   localBase64AssetClient,
   LOCAL_ASSET_UNGROUPED_GROUP_ID,
   workspaceUiClient,
-  videoComposerClient,
-  videoDownloaderClient,
-  videoFrameExtractionClient,
   type CloudAsset,
   type AssetGroupRecord,
   type AssetImportOutputRecord,
   type CloudAssetKindTotals,
   type GenerationOperation,
   type GenerationResultRecord,
+  type VideoClipMode,
   type GenerationResultSaveProgress,
   type GenerationTaskSummary,
   type GenerationTaskDetail,
@@ -101,10 +96,6 @@ import {
   type StagingJobRecord,
   type StartGenerationCommand,
   type TosStagingConfig,
-  type VideoDownloadJobRecord,
-  type VideoDownloaderCookieBrowser,
-  type VideoDownloaderEngineStatus,
-  type VideoFrameExtractionJobRecord,
 } from "../../lib/backend";
 import { artifactFileName, resultDisplayName } from "./artifactNames";
 import {
@@ -120,17 +111,12 @@ import {
   type VideoPreparationJob,
   type VideoPreparationOutput,
 } from "../../lib/videoPreparation";
-import { aiMediaClient, type AiMediaJob, type AiMediaOutput } from "../../lib/aiMedia";
 import {
   assetLibraryProviders,
   isDeletableCloudAssetGroupId,
   resolveActiveAssetLibraryProvider,
 } from "../../lib/assetLibrarySupport";
-import {
-  generationParameters,
-  modelParameterCapabilities,
-  parameterValueIssue,
-} from "../../lib/modelCapabilities";
+import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
 import { perTaskVideoUrlConnection, perTaskVideoUrlIssue } from "../../lib/perTaskVideo";
 import type {
   PromptContentConnection,
@@ -138,22 +124,18 @@ import type {
   PromptContentEditorSession,
   PromptContentIssue,
 } from "../../lib/promptContent";
-import { cleanGeneratedPrompt, createPromptContentModule } from "../../lib/promptContent";
-import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
+import {
+  cleanGeneratedPrompt,
+  createPromptContentModule,
+  promptContentDocumentMapsEqual,
+} from "../../lib/promptContent";
 import { parseCinematicDialogueResponse } from "./cinematicDialogueResponse";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import {
-  composeVideosInOrder,
-  composedVideoFileName,
-  normalizeVideoInputOrder,
-  preferredVideoCompositionFormat,
-} from "../../lib/videoComposer";
-import {
   useCanvas,
   useCanvasCommands,
-  useCanvasHistoryCounts,
   useCanvasNodeEntry,
-  useCanvasNodeKeys,
+  useAllCanvasNodeKeys,
   useCanvasStore,
   canvasNodesOfState,
   canvasReadModelOfState,
@@ -172,8 +154,6 @@ import {
   type CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { useDeferredSessionState } from "./useDeferredSessionState";
-import { WorkflowSessionsProvider, useWorkflowSessions } from "./useWorkflowSessions";
-import { WorkflowSessionRegistry } from "./workflowSessionRegistry";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import {
   createCanvasInputResolver,
@@ -186,7 +166,11 @@ import {
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
-import { type CanvasQuickAddKind } from "./canvasQuickAddCatalog";
+import {
+  CANVAS_QUICK_ADD_CHOICES,
+  EMPTY_CANVAS_SHORTCUTS,
+  type CanvasQuickAddKind,
+} from "./canvasQuickAddCatalog";
 import { AssetPanel } from "./AssetPanelViews";
 import {
   AssetGroupCreateDialog,
@@ -197,12 +181,8 @@ import {
   RealPersonAssetDialog,
 } from "./deferredDialogs";
 import { preloadHistoryDialog, preloadProviderSettingsDialog } from "./deferredDialogLoaders";
-import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "./desktopActions";
-import {
-  CanvasDocumentSkillNode,
-  CanvasPromptNode,
-  CanvasViralRemixNode,
-} from "./DocumentNodeViews";
+import { saveMarkdownDocumentToDesktop } from "./desktopActions";
+import { CanvasDocumentSkillNode, CanvasPromptNode } from "./DocumentNodeViews";
 import {
   CanvasAssetLightbox,
   CanvasAssetNode,
@@ -210,10 +190,8 @@ import {
   CanvasOutputLightbox,
   CanvasOutputNode,
   CanvasResultNode,
-  CanvasVideoComposerNode,
-  CanvasVideoDownloaderNode,
-  CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
+import { VideoClipNode } from "./VideoClipNode";
 import { AssetGroupFrame, CanvasMarqueeSelectionReader } from "./AssetGroupFrame";
 import { classifyExternalMediaPaths, nativeDropClientPoint } from "./canvasExternalMediaDrop";
 import {
@@ -227,12 +205,13 @@ import {
   assetGroupIdFromFlowId,
   assetGroupKey,
   assetGroupsFromNodes,
+  type CanvasGroupMember,
+  canvasGroupMemberName,
   assetPickKey,
-  dissolveAssetGroupNodes,
+  isMediaGroupMember,
   isUploadableOutput,
   layoutAssetPlacements,
   nextLibraryPickOrder,
-  regroupAssetNodes,
 } from "./assetGroups";
 import {
   resolveSeedanceTask,
@@ -240,28 +219,10 @@ import {
   selectSeedanceTask,
 } from "../../lib/seedanceTasks";
 import { prepareGreenScreenGeneration } from "../../lib/greenScreen";
-import { greenScreenPreparationOutputs, greenScreenWorkflowSignature } from "./greenScreenWorkflow";
+import { greenScreenPreparationOutputs, greenScreenNodeSignature } from "./greenScreenPreparation";
 import { prefetchLocalAssetMedia, resetLocalAssetMediaRegistry } from "./localAssetMedia";
-import {
-  createWhiteModelControlConfig,
-  prepareWhiteModelGeneration,
-} from "../../lib/whiteModelControl";
-import {
-  createWhiteModelStudioDraft,
-  getBlenderRender,
-  whiteModelRenderSignature,
-  type BlenderRenderJob,
-  type WhiteModelStudioDraft,
-} from "../../lib/whiteModelStudio";
-import {
-  buildBlockingPromptDocument,
-  createWhiteModelBlockingDraft,
-  studioImageInputsFromMedia,
-  whiteModelBlockingSignature,
-  type WhiteModelBlockingCapture,
-  preferredPanoramaParameters,
-  preparePanoramaGeneration,
-} from "../../lib/whiteModelBlocking";
+import { prepareWhiteModelGeneration } from "../../lib/whiteModelControl";
+import { preferredPanoramaParameters, preparePanoramaGeneration } from "../../lib/panorama";
 import { appendVideoLocalEditPrompt, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type {
@@ -269,13 +230,6 @@ import type {
   VideoLocalEditResult,
   VideoLocalEditSource,
 } from "./VideoLocalEditDialog";
-import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
-import { workflowExecutionInputSignature } from "./workflowExecutionPlan";
-import { workflowCanvasInputsFromResolved } from "./workflowCanvasInputs";
-import { formatWorkflowError, workflowUsageError } from "../../lib/workflowErrors";
-import { WorkflowRepository } from "./WorkflowRepository";
-import { workflowHistoryClient } from "../../lib/workflowHistory";
-import { workflowKindDefinitionOf, type WorkflowKind } from "./workflowKinds";
 import type {
   AssetEdgeData,
   AssetItem,
@@ -294,7 +248,6 @@ import type {
   GenNodeData,
   GenerationMediaInput,
   ImageNodeConfig,
-  KnowledgeVideoWorkflowConfig,
   MentionCandidate,
   MobilePanel,
   NodeModelSelections,
@@ -304,23 +257,11 @@ import type {
   RetryInfo,
   ScreenplayNodeConfig,
   ScreenplayNodeData,
-  StoryboardNodeData,
-  VideoComposerInput,
-  VideoComposerNodeConfig,
-  VideoComposerNodeData,
-  VideoComposerRunState,
-  VideoDownloaderNodeConfig,
-  VideoDownloaderNodeData,
-  VideoDownloaderRunState,
-  VideoFrameExtractorNodeConfig,
-  VideoFrameExtractorNodeData,
-  VideoFrameExtractorRunState,
-  FrameExtractorVideoInput,
+  VideoClipInput,
+  VideoClipNodeConfig,
+  VideoClipNodeData,
   VideoNodeConfig,
   VideoUrlMediaInput,
-  ViralRemixNodeConfig,
-  ViralRemixNodeData,
-  ViralRemixVideoInput,
 } from "./workspaceModel";
 import { settleUnreadyCloudAsset } from "./cloudAssetSettlement";
 import {
@@ -337,8 +278,6 @@ import {
   DEFAULT_NODE_MODEL_SELECTIONS,
   DEFAULT_ZOOM,
   DEMO_PROVIDER_CATALOG,
-  DOCUMENT_SKILL_NODE_COPY,
-  DOWNLOAD_POLL_INTERVAL_MS,
   EMPTY_GENERATION_TASKS,
   GENERATION_TASKS_POLL_INTERVAL_MS,
   GENERATION_TASKS_QUERY_KEY,
@@ -348,22 +287,12 @@ import {
   MIN_ZOOM,
   RESULT_NODE_HEIGHT,
   RESULT_NODE_WIDTH,
+  resolvePromptOptimizationMode,
   SCREENPLAY_NODE_COARSE_HEIGHT,
   SCREENPLAY_NODE_HEIGHT,
   SCREENPLAY_NODE_WIDTH,
   UPLOAD_ABANDONED_MS,
   UPLOAD_POLL_INTERVAL_MS,
-  VIDEO_COMPOSER_NODE_HEIGHT,
-  VIDEO_COMPOSER_NODE_WIDTH,
-  VIDEO_DOWNLOADER_NODE_HEIGHT,
-  VIDEO_DOWNLOADER_NODE_WIDTH,
-  VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT,
-  VIDEO_FRAME_EXTRACTOR_NODE_WIDTH,
-  VIRAL_REMIX_NODE_COARSE_HEIGHT,
-  VIRAL_REMIX_NODE_HEIGHT,
-  VIRAL_REMIX_NODE_WIDTH,
-  KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT,
-  KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
   ZOOM_STEP,
   assetNodeDimensions,
   assetNodeReferenceTarget,
@@ -375,7 +304,6 @@ import {
   createPromptNodeConfig,
   createScreenplayNodeConfig,
   createVideoNodeConfig,
-  createViralRemixNodeConfig,
   documentSkillRoleLabel,
   fileNameFromPath,
   formatTaskRawResponse,
@@ -392,11 +320,9 @@ import {
   isUnresolvedLegacyAssetImport,
   isTerminalTaskStatus,
   isTextGenerationModel,
-  isVideoGenerationModel,
   localAssetToItem,
   localPathFileName,
   markdownDocumentExportName,
-  materializeCompositionInputs,
   measuredFor,
   mergeStagingJobsIntoUploads,
   shouldAutoDismissUpload,
@@ -408,9 +334,6 @@ import {
   nearestAvailableNodePosition,
   nextOutputSlot,
   nextPreparedMediaOutputSlot,
-  nextVideoComposerOutputSlot,
-  nextVideoDownloaderOutputSlot,
-  knowledgeVideoWorkflowNodeWidth,
   normalizeLocalPathKey,
   outputNodeDimensions,
   outputNodeKey,
@@ -423,40 +346,73 @@ import {
   readActiveAssetProviderId,
   readAssetLibrarySource,
   reconcileNodeModelSelections,
-  reconcileTextModelSelection,
   resolveGenerationSelection,
   resolvePendingDocumentNodeConfig,
   resolvePendingGenerationNodeConfig,
-  resolvePendingKnowledgeVideoWorkflowConfig,
-  saveComposedVideoBlob,
   screenplayMessageId,
   screenplayMaterialId,
   screenplayNodeKey,
-  storyboardNodeKey,
   usesCoarsePointer,
-  videoComposerNodeKey,
-  videoDownloaderNodeKey,
-  frameExtractorNodeKey,
-  nextFrameExtractorOutputSlot,
-  viralRemixNodeKey,
+  videoClipNodeKey,
+  videoClipNodeName,
+  VIDEO_CLIP_NODE_HEIGHT,
+  VIDEO_CLIP_NODE_WIDTH,
 } from "./workspaceModel";
+import {
+  VIDEO_CLIP_BACKEND_MODES,
+  VIDEO_CLIP_DEFAULT_PARAMS,
+  assignVideoClipSlots,
+  videoClipMode,
+  videoClipSlotIssue,
+  videoClipUnusedMaterials,
+  resolveVideoClipParams,
+  type VideoClipModeKey,
+  type VideoClipParams,
+} from "./videoClipModes";
 
 const CANVAS_FLOW_NODE_TYPES = { canvas: CanvasFlowNodeView };
+/*
+ * 节点右键菜单条目。
+ *
+ * 前六项是原站 liblib 的节点级上下文项；后四项是左下控件组按原站收敛成六项后
+ * 迁到这里的节点动作（粘贴 / 删除 / 交付）——原站把这些动作放在右键菜单与
+ * 键盘快捷键里，没有独立的工具条按钮。
+ */
+const CANVAS_NODE_CONTEXT_MENU_ITEMS = [
+  { id: "copyNode", label: "复制节点", hint: "仅复制当前节点" },
+  { id: "copyImage", label: "复制图片" },
+  { id: "copyText", label: "复制文本" },
+  { id: "duplicate", label: "创建副本", hint: "创建当前所有参数" },
+  { id: "paste", label: "粘贴已复制节点" },
+  { id: "group", label: "成组" },
+  { id: "copyExpanded", label: "复制整组" },
+  { id: "remove", label: "删除节点", danger: true },
+  { id: "exportArtifacts", label: "按名称批量交付选中产物" },
+  { id: "formatLayout", label: "整理画布" },
+];
+/*
+ * 选中素材节点时浮在节点上方的工具条条目（liblib 的 .node-floating-ui）。
+ * 顺序与原站一致：全景 / 多角度 / 打光 / 九宫格 / 高清 / 元素编辑 / 图层分离 / 宫格切分。
+ * 这几项在原站都是图像 AI 编辑能力，本项目后端尚未提供，统一标注「后端暂未接入」。
+ */
+const CANVAS_NODE_FLOATING_TOOLBAR_ITEMS = [
+  { id: "upscale", label: "高清", icon: "upscale" },
+  { id: "retake", label: "片段重拍", icon: "retake", hasMenu: true },
+  { id: "breakdown", label: "逐帧拉片", icon: "breakdown", hasMenu: true },
+  { id: "subtitle", label: "智能去字幕", icon: "subtitle", hasMenu: true },
+  { id: "separate", label: "音视频分离", icon: "separate", hasMenu: true },
+  { id: "replace", label: "元素替换", icon: "replace", hasMenu: true },
+  { id: "titlecard", label: "创意片头", icon: "titlecard" },
+  { id: "camera", label: "截图", icon: "camera" },
+  { id: "download", label: "下载", icon: "download" },
+  { id: "fullscreen", label: "全屏", icon: "fullscreen" },
+] as const;
 const EMPTY_CANVAS_FLOW_NODES: CanvasFlowNode[] = [];
 const VideoLocalEditDialog = lazy(() =>
   import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
 );
 const VideoPreparationDialog = lazy(() =>
   import("./VideoPreparationDialog").then((module) => ({ default: module.VideoPreparationDialog })),
-);
-const WhiteModelStudioDialog = lazy(() =>
-  import("./WhiteModelStudioDialog").then((module) => ({ default: module.WhiteModelStudioDialog })),
-);
-const RuntimeComponentsPanel = lazy(() =>
-  import("./RuntimeComponentsPanel").then((module) => ({ default: module.RuntimeComponentsPanel })),
-);
-const CanvasAgentPanel = lazy(() =>
-  import("./agent/CanvasAgentPanel").then((module) => ({ default: module.CanvasAgentPanel })),
 );
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
@@ -480,6 +436,29 @@ type CanvasFlowNodeCacheEntry = {
   readonly node: CanvasFlowNode;
 };
 type CanvasFlowNodeCache = Map<string, Map<string, CanvasFlowNodeCacheEntry>>;
+
+/**
+ * 画布保存时间戳：显示成「14:32:05」。
+ *
+ * 只显示时刻（不显示日期）是因为状态栏位置窄；而「是今天几点存的」正是用户
+ * 判断「这份内容新不新」需要的粒度 —— 跨天的情况由状态栏的 title 属性补上
+ * 完整日期，鼠标悬停即可看到。
+ */
+function formatSavedAt(timestamp: number): string {
+  const date = new Date(timestamp);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+/** 保存时间的完整表述（供 title 属性用）：「2026-10-25 14:32:05」。 */
+function formatSavedAtFull(timestamp: number): string {
+  const date = new Date(timestamp);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day} ${formatSavedAt(timestamp)}`;
+}
 
 function stableCachedItem<T>(
   cache: Map<string, { inputs: unknown[]; node: T }>,
@@ -579,6 +558,7 @@ interface CanvasNodeLayoutFields {
   readonly x: number;
   readonly y: number;
   readonly measured?: { readonly width: number; readonly height: number };
+  readonly assetGroupId?: string;
 }
 
 /**
@@ -598,6 +578,7 @@ function canvasNodeLayoutToken(
     node.measured?.height ?? "",
     selected ? 1 : 0,
     node.groupId ?? "",
+    node.assetGroupId ?? "",
     extra,
   ].join("\u0001");
 }
@@ -663,7 +644,7 @@ function mediaInputsToken(inputs: readonly ConnectedAssetInput[]): string {
     .join("\u0003");
 }
 
-/** 文档类节点（剧本/分镜）的已连文本来源清单。 */
+/** 文档类节点（剧本）的已连文本来源清单。 */
 function documentInputsFor(
   state: CanvasReadModel,
   key: string,
@@ -681,128 +662,71 @@ function documentInputsToken(inputs: readonly ConnectedScreenplayInput[]): strin
     .join("\u0003");
 }
 
-/** 工作流节点的已连媒体/文本输入。 */
-function workflowInputsFor(state: CanvasReadModel, key: string) {
-  return workflowCanvasInputsFromResolved(sharedCanvasInputResolver(state)(key));
-}
-function workflowInputsToken(inputs: ReturnType<typeof workflowCanvasInputsFromResolved>): string {
-  return `${inputs.media.length}\u0002${inputs.texts.length}`;
-}
-
-/** 爆款复刻节点的视频输入（含下载节点来源标记与等待项）。 */
-function viralRemixInputsFor(state: CanvasReadModel, key: string): readonly ViralRemixVideoInput[] {
+/**
+ * 智能剪辑节点的上游素材。
+ *
+ * 媒体与文本都来自画布的通用输入解析：素材节点 / 产物节点给出媒体，
+ * 提示词节点与剧本节点给出文本。原站按节点类型分槽位（视频 / 音频 /
+ * 文字 / 产品图 / 参考视频 / 生成视频），槽位归属在 videoClipModes.ts 里按
+ * 模式声明，这里只负责把上游条目按类型分好。
+ */
+function videoClipInputsFor(state: CanvasReadModel, key: string): readonly VideoClipInput[] {
   const resolved = sharedCanvasInputResolver(state)(key);
-  const videos: ViralRemixVideoInput[] = resolved.media
-    .filter((input) => input.kind === "video")
-    .map((input) => ({
-      key: input.key,
-      name: input.name,
-      src: input.src,
-      sourceLabel: state.nodeByKey.videoDownloader.has(
-        state.nodeByKey.output.get(input.sourceKey)?.sourceNodeId ?? "",
-      )
-        ? "下载节点"
-        : input.sourceLabel,
-      edgeId: input.edgeId,
-    }));
-  for (const input of resolved.pending) {
-    if (!state.nodeByKey.videoDownloader.has(input.sourceKey)) continue;
-    videos.push({
-      key: input.sourceKey,
-      name: input.name,
-      src: null,
-      sourceLabel: "下载节点",
-      edgeId: input.edgeId,
-    });
-  }
-  return videos;
+  const media: VideoClipInput[] = resolved.media.map((input) => ({
+    key: input.key,
+    name: input.name,
+    nodeType:
+      input.kind === "video" || input.kind === "image" || input.kind === "audio"
+        ? input.kind
+        : "video",
+    edgeId: input.edgeId,
+    previewUrl: input.previewUrl ?? null,
+    ...(input.target ? { target: input.target } : {}),
+  }));
+  const texts: VideoClipInput[] = resolved.texts.map((input) => ({
+    key: input.key,
+    name: input.name,
+    nodeType: "text" as const,
+    edgeId: input.edgeId,
+    previewUrl: null,
+    text: input.text,
+  }));
+  return [...media, ...texts];
 }
-function viralRemixInputsToken(inputs: readonly ViralRemixVideoInput[]): string {
+function videoClipInputsToken(inputs: readonly VideoClipInput[]): string {
   return inputs
     .map(
       (input) =>
-        `${input.key}\u0002${input.name}\u0002${input.src ?? ""}\u0002${input.sourceLabel}`,
+        `${input.key}\u0002${input.nodeType}\u0002${input.edgeId}\u0002${input.previewUrl ?? ""}\u0002${input.text ?? ""}`,
     )
     .join("\u0003");
 }
 
-/** 合成节点的上游可读视频，按节点内保存的顺序排列。 */
-function composerInputsFor(state: CanvasReadModel, key: string): readonly VideoComposerInput[] {
-  const connected: VideoComposerInput[] = sharedCanvasInputResolver(state)(key)
-    .media.filter((input) => input.kind === "video" && input.src != null)
-    .map((input) => ({
-      key: input.key,
-      name: input.name,
-      src: input.src!,
-      sourceLabel: input.sourceLabel,
-      edgeId: input.edgeId,
-      ffmpegSource: input.finalPath ?? (/^https?:\/\//i.test(input.src!) ? input.src : null),
-    }));
-  const composer = state.nodeByKey.videoComposer.get(key);
-  const order = normalizeVideoInputOrder(
-    composer?.config.inputOrder ?? [],
-    connected.map((input) => input.key),
-  );
-  const orderIndex = new Map(order.map((k, index) => [k, index]));
-  connected.sort(
-    (first, second) =>
-      (orderIndex.get(first.key) ?? Number.MAX_SAFE_INTEGER) -
-      (orderIndex.get(second.key) ?? Number.MAX_SAFE_INTEGER),
-  );
-  return connected;
-}
-function composerInputsToken(inputs: readonly VideoComposerInput[]): string {
-  return inputs
-    .map((input) => `${input.key}\u0002${input.src ?? ""}\u0002${input.edgeId}`)
-    .join("\u0003");
+const generationPreviewIndex = new WeakMap<
+  readonly OutputNodeData[],
+  ReadonlyMap<string, OutputNodeData>
+>();
+function latestGenerationPreviewFor(state: CanvasReadModel, key: string): OutputNodeData | null {
+  let index = generationPreviewIndex.get(state.nodes.output);
+  if (index == null) {
+    const previews = new Map<string, OutputNodeData>();
+    for (const output of state.nodes.output) {
+      if (
+        (output.mediaType === "image" || output.mediaType === "video") &&
+        (output.finalPath != null || output.previewSrc != null)
+      )
+        previews.set(output.sourceNodeId, output);
+    }
+    index = previews;
+    generationPreviewIndex.set(state.nodes.output, index);
+  }
+  return index.get(key) ?? null;
 }
 
-/** 下载节点的候选视频清单：节点 URL + 连线传入的文本/直链视频。 */
-function downloaderSourcesFor(state: CanvasReadModel, key: string, configUrl: string) {
-  const resolved = sharedCanvasInputResolver(state)(key);
-  return videoDownloadInputs(configUrl, [
-    ...resolved.texts.map((input) => input.text),
-    ...resolved.media
-      .filter((input) => input.kind === "video" && input.src && /^https?:\/\//i.test(input.src))
-      .map((input) => input.src!),
-  ]);
-}
-function downloaderSourcesToken(urls: readonly string[]): string {
-  return urls.join("\u0003");
-}
-
-/** 抽帧节点的上游视频输入。 */
-function extractorInputsFor(
-  state: CanvasReadModel,
-  key: string,
-): readonly FrameExtractorVideoInput[] {
-  return sharedCanvasInputResolver(state)(key)
-    .media.filter((input) => input.kind === "video")
-    .map((input) => ({
-      key: input.key,
-      name: input.name,
-      src: input.src,
-      sourceLabel: input.sourceLabel,
-      edgeId: input.edgeId,
-      finalPath:
-        input.finalPath ?? (input.src && /^https?:\/\//i.test(input.src) ? input.src : null),
-    }));
-}
-function extractorInputsToken(inputs: readonly FrameExtractorVideoInput[]): string {
-  return inputs
-    .map((input) => `${input.key}\u0002${input.src ?? ""}\u0002${input.edgeId}`)
-    .join("\u0003");
-}
-
-/** 抽帧节点已产出的图片产物卡片（origin=frame_extract）。 */
-function extractorOutputsFor(state: CanvasReadModel, key: string): readonly OutputNodeData[] {
-  return state.nodes.output.filter(
-    (output) =>
-      output.sourceNodeId === key && output.origin === "frame_extract" && output.finalPath != null,
-  );
-}
-function extractorOutputsToken(outputs: readonly OutputNodeData[]): string {
-  return outputs.map((output) => `${output.key}\u0002${output.finalPath ?? ""}`).join("\u0003");
+function generationPreviewToken(output: OutputNodeData | null): string {
+  return output == null
+    ? ""
+    : `${output.key}\u0002${output.finalPath ?? ""}\u0002${output.previewSrc ?? ""}`;
 }
 
 /** 某生成节点的 @ 候选：直连素材 + 随提示词继承的参考图。 */
@@ -967,153 +891,99 @@ const CanvasResultNodeCardSlot = memo(function CanvasResultNodeCardSlot(
   );
 });
 
+const ignoreEditorSizeChange = () => {};
+
 type DocumentNodeCardSlotProps = Omit<
   ComponentProps<typeof CanvasDocumentSkillNode>,
   "node" | "selected" | "dragging" | "sourceInputs" | "connectedMedia"
-> & { readonly nodeKey: string; readonly selected: boolean };
+> &
+  NodeEditingProps & { readonly nodeKey: string; readonly selected: boolean };
 function CanvasDocumentNodeCardSlot(props: DocumentNodeCardSlotProps) {
-  const { nodeKey, selected, ...card } = props;
+  const {
+    nodeKey,
+    selected,
+    presentation = "card",
+    editorOpen,
+    onEdit,
+    onCloseEditor,
+    ...card
+  } = props;
   const entry = useCanvasNodeEntry(nodeKey);
   const sourceInputs = useCanvasNodeDerived(nodeKey, documentInputsFor, documentInputsToken);
   const connectedMedia = useCanvas((state) => sharedCanvasInputResolver(state)(nodeKey).media);
-  if (entry == null || (entry.type !== "screenplay" && entry.type !== "storyboard")) return null;
+  if (entry == null || entry.type !== "screenplay") return null;
+  const kindLabel = "剧本创作与优化";
   return (
     <>
-      <CanvasDocumentSkillNode
+      <CanvasContentNode
         node={entry.data}
+        kindLabel={kindLabel}
+        icon="book-open-text"
         selected={selected}
-        dragging={false}
-        sourceInputs={sourceInputs}
-        connectedMedia={connectedMedia}
-        {...card}
-      />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
+        presentation={presentation}
+        editorOpen={editorOpen}
+        onEdit={onEdit}
+        onCloseEditor={onCloseEditor}
+        onSelect={card.onSelect}
+        onRemove={card.onRemove}
+        onSizeChange={card.onSizeChange}
+        summary={
+          card.streamingText?.trim()
+            ? card.streamingText
+            : entry.data.config.currentDocument.trim()
+              ? entry.data.config.currentDocument
+              : entry.data.config.composer
+        }
+        metadata={`${sourceInputs.length} 份上游文本 · ${connectedMedia.length + (entry.data.config.materials?.length ?? 0)} 项参考 · ${entry.data.config.currentDocument.length} 字`}
+        status={
+          card.running
+            ? "正在生成"
+            : card.error
+              ? "需要处理"
+              : entry.data.config.currentDocument.trim()
+                ? "稿件已就绪"
+                : "等待创作"
+        }
+        busy={card.running}
+        error={card.error}
+      >
+        <CanvasDocumentSkillNode
+          node={entry.data}
+          selected={selected}
+          dragging={false}
+          sourceInputs={sourceInputs}
+          connectedMedia={connectedMedia}
+          {...card}
+          onSizeChange={ignoreEditorSizeChange}
+        />
+      </CanvasContentNode>
+      {presentation === "card" ? <CanvasNodeInputBadge nodeKey={nodeKey} /> : null}
     </>
   );
 }
 
-type WorkflowNodeCardSlotProps = Omit<
-  ComponentProps<typeof KnowledgeVideoWorkflowNode>,
-  "node" | "selected" | "dragging" | "connectedInputs" | "connectedTexts"
+/**
+ * 智能剪辑节点 slot：卡片与编辑层共用一份节点数据与输入派生，
+ * store 写入只有真正改变该节点派生内容时才重渲染。
+ */
+type VideoClipNodeCardProps = Omit<
+  ComponentProps<typeof VideoClipNode>,
+  "node" | "selected" | "dragging" | "inputs" | "candidates"
 > & { readonly nodeKey: string; readonly selected: boolean };
-function CanvasWorkflowNodeCardSlot(props: WorkflowNodeCardSlotProps) {
-  const { nodeKey, selected, ...card } = props;
-  const entry = useCanvasNodeEntry(nodeKey);
-  const inputs = useCanvasNodeDerived(nodeKey, workflowInputsFor, workflowInputsToken);
-  if (entry?.type !== "knowledgeVideoWorkflow") return null;
-  return (
-    <>
-      <KnowledgeVideoWorkflowNode
-        node={entry.data}
-        connectedInputs={inputs.media}
-        connectedTexts={inputs.texts}
-        selected={selected}
-        dragging={false}
-        {...card}
-      />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
-    </>
-  );
-}
-
-type ViralRemixNodeCardSlotProps = Omit<
-  ComponentProps<typeof CanvasViralRemixNode>,
-  "node" | "selected" | "dragging" | "inputs"
-> & { readonly nodeKey: string; readonly selected: boolean };
-const CanvasViralRemixNodeCardSlot = memo(function CanvasViralRemixNodeCardSlot(
-  props: ViralRemixNodeCardSlotProps,
+const CanvasVideoClipNodeCardSlot = memo(function CanvasVideoClipNodeCardSlot(
+  props: VideoClipNodeCardProps,
 ) {
   const { nodeKey, selected, ...card } = props;
   const entry = useCanvasNodeEntry(nodeKey);
-  const inputs = useCanvasNodeDerived(nodeKey, viralRemixInputsFor, viralRemixInputsToken);
-  if (entry?.type !== "viralRemix") return null;
+  const inputs = useCanvasNodeDerived(nodeKey, videoClipInputsFor, videoClipInputsToken);
+  const candidates = useCanvasNodeDerived(nodeKey, mentionCandidatesFor, mentionCandidatesToken);
+  if (entry?.type !== "videoClip") return null;
   return (
     <>
-      <CanvasViralRemixNode
+      <VideoClipNode
         node={entry.data}
         inputs={inputs}
-        selected={selected}
-        dragging={false}
-        {...card}
-      />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
-    </>
-  );
-});
-
-type ComposerNodeCardSlotProps = Omit<
-  ComponentProps<typeof CanvasVideoComposerNode>,
-  "node" | "selected" | "dragging" | "inputs"
-> & { readonly nodeKey: string; readonly selected: boolean };
-const CanvasVideoComposerNodeCardSlot = memo(function CanvasVideoComposerNodeCardSlot(
-  props: ComposerNodeCardSlotProps,
-) {
-  const { nodeKey, selected, ...card } = props;
-  const entry = useCanvasNodeEntry(nodeKey);
-  const inputs = useCanvasNodeDerived(nodeKey, composerInputsFor, composerInputsToken);
-  if (entry?.type !== "videoComposer") return null;
-  return (
-    <>
-      <CanvasVideoComposerNode
-        node={entry.data}
-        inputs={inputs}
-        selected={selected}
-        dragging={false}
-        {...card}
-      />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
-    </>
-  );
-});
-
-type DownloaderNodeCardSlotProps = Omit<
-  ComponentProps<typeof CanvasVideoDownloaderNode>,
-  "node" | "selected" | "dragging" | "downloadSources"
-> & { readonly nodeKey: string; readonly selected: boolean };
-const CanvasVideoDownloaderNodeCardSlot = memo(function CanvasVideoDownloaderNodeCardSlot(
-  props: DownloaderNodeCardSlotProps,
-) {
-  const { nodeKey, selected, ...card } = props;
-  const entry = useCanvasNodeEntry(nodeKey);
-  const configUrl = entry?.type === "videoDownloader" ? entry.data.config.url : "";
-  const sources = useCanvasNodeDerived(
-    nodeKey,
-    (state, key) => downloaderSourcesFor(state, key, configUrl),
-    downloaderSourcesToken,
-  );
-  if (entry?.type !== "videoDownloader") return null;
-  return (
-    <>
-      <CanvasVideoDownloaderNode
-        node={entry.data}
-        downloadSources={sources}
-        selected={selected}
-        dragging={false}
-        {...card}
-      />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
-    </>
-  );
-});
-
-type FrameExtractorNodeCardSlotProps = Omit<
-  ComponentProps<typeof CanvasVideoFrameExtractorNode>,
-  "node" | "selected" | "dragging" | "inputs" | "producedFrames"
-> & { readonly nodeKey: string; readonly selected: boolean };
-const CanvasVideoFrameExtractorNodeCardSlot = memo(function CanvasVideoFrameExtractorNodeCardSlot(
-  props: FrameExtractorNodeCardSlotProps,
-) {
-  const { nodeKey, selected, ...card } = props;
-  const entry = useCanvasNodeEntry(nodeKey);
-  const inputs = useCanvasNodeDerived(nodeKey, extractorInputsFor, extractorInputsToken);
-  const producedFrames = useCanvasNodeDerived(nodeKey, extractorOutputsFor, extractorOutputsToken);
-  if (entry?.type !== "frameExtractor") return null;
-  return (
-    <>
-      <CanvasVideoFrameExtractorNode
-        node={entry.data}
-        inputs={inputs}
-        producedFrames={producedFrames}
+        candidates={candidates}
         selected={selected}
         dragging={false}
         {...card}
@@ -1127,7 +997,22 @@ const CanvasVideoFrameExtractorNodeCardSlot = memo(function CanvasVideoFrameExtr
 type PromptNodeCardProps = ComponentProps<typeof CanvasPromptNode>;
 type GenNodeCardProps = ComponentProps<typeof CanvasGenNode>;
 type Param0<T> = Parameters<T extends (...args: never) => unknown ? T : never>[0];
+
+/** 首次选中前不创建大表单；打开过的编辑会话随后常驻，避免视口裁剪打断输入。 */
+function RetainedNodeEditor({
+  open,
+  children,
+}: {
+  readonly open: boolean;
+  readonly children: ReactNode;
+}) {
+  const [visited, setVisited] = useState(open);
+  if (open && !visited) setVisited(true);
+  return open || visited ? children : null;
+}
 type GenNodeCardSlotProps = {
+  readonly presentation?: "card" | "editor";
+  readonly editorOpen: boolean;
   readonly onRename: (key: string, name: string) => void;
   readonly nodeKey: string;
   readonly selected: boolean;
@@ -1135,11 +1020,14 @@ type GenNodeCardSlotProps = {
   readonly streamingText: string | null;
   readonly error: string | null;
   readonly activeTask: GenerationTaskSummary | null;
+  readonly latestTask: GenerationTaskSummary | null;
   readonly descriptorContext: Parameters<typeof getNodeDescriptor>[1];
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly promptContents: ReturnType<typeof createPromptContentModule>;
   readonly aliveCanvasNodeKeys: ReadonlySet<string>;
   readonly onSelect: NonNullable<GenNodeCardProps["onSelect"]>;
+  readonly onEdit: NonNullable<GenNodeCardProps["onEdit"]>;
+  readonly onCloseEditor: () => void;
   readonly onNodeDragStart: NonNullable<GenNodeCardProps["onNodeDragStart"]>;
   readonly onRemove: NonNullable<GenNodeCardProps["onRemove"]>;
   readonly onUnlink: NonNullable<GenNodeCardProps["onUnlink"]>;
@@ -1155,7 +1043,6 @@ type GenNodeCardSlotProps = {
   readonly onImageConfigChange: NonNullable<GenNodeCardProps["onImageConfigChange"]>;
   readonly onVideoConfigChange: NonNullable<GenNodeCardProps["onVideoConfigChange"]>;
   readonly onAnnotateVideo: NonNullable<GenNodeCardProps["onAnnotateVideo"]>;
-  readonly onOpenWhiteModelStudio: NonNullable<GenNodeCardProps["onOpenWhiteModelStudio"]>;
   readonly onGreenScreenUseResult: (
     ...args: Parameters<NonNullable<GenNodeCardProps["onGreenScreenUseResult"]>>
   ) => unknown;
@@ -1168,17 +1055,22 @@ type GenNodeCardSlotProps = {
 };
 function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
   const {
+    presentation = "card",
+    editorOpen,
+    onCloseEditor,
     nodeKey,
     selected,
     running,
     streamingText,
     error,
     activeTask,
+    latestTask,
     descriptorContext,
     providerCatalog,
     promptContents,
     aliveCanvasNodeKeys,
     onSelect,
+    onEdit,
     onNodeDragStart,
     onRemove,
     onUnlink,
@@ -1191,13 +1083,18 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
     onImageConfigChange,
     onVideoConfigChange,
     onAnnotateVideo,
-    onOpenWhiteModelStudio,
     onGreenScreenUseResult,
     onImportGreenScreenVideo,
     onStartGeneration,
     onRename,
   } = props;
   const entry = useCanvasNodeEntry(nodeKey);
+  const promptSummary = usePromptSummary(promptContents, nodeKey);
+  const previewOutput = useCanvasNodeDerived(
+    nodeKey,
+    latestGenerationPreviewFor,
+    generationPreviewToken,
+  );
   const connectedInputs = useCanvasNodeDerived(nodeKey, genConnectedInputsFor, mediaInputsToken);
   const mentionCandidates = useCanvasNodeDerived(
     nodeKey,
@@ -1247,37 +1144,78 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
   if (isPrompt) {
     return (
       <>
-        <CanvasPromptNode
+        <CanvasContentNode
           node={node}
-          descriptor={descriptor}
+          kindLabel="提示词生成与优化"
+          icon="sparkle"
           selected={selected}
-          dragging={false}
-          running={running}
-          streamingText={streamingText}
-          error={error}
-          providerCatalog={providerCatalog}
-          sourceConnections={connectedInputs}
-          targetConnections={promptTargets}
+          presentation={presentation}
+          editorOpen={editorOpen}
+          onEdit={onEdit}
+          onCloseEditor={onCloseEditor}
           onSelect={onSelect}
-          onNodeDragStart={onNodeDragStart}
           onRemove={onRemove}
-          onUnlink={onUnlink}
-          onConnectionStart={onConnectionStart}
           onSizeChange={onSizeChange}
-          onChange={(config) => onPromptChange(nodeKey, config)}
-          onRun={() => onRunPrompt(nodeKey)}
-          promptContents={promptContents}
-          registerPromptInput={registerPromptInput}
-          mentionCandidates={mentionCandidates}
-          aliveCanvasNodeKeys={aliveCanvasNodeKeys}
-        />
-        <CanvasNodeInputBadge nodeKey={nodeKey} />
+          summary={
+            streamingText?.trim()
+              ? streamingText
+              : promptSummary.trim()
+                ? promptSummary
+                : node.config.generatedPrompt.trim()
+                  ? node.config.generatedPrompt
+                  : node.config.sourcePrompt
+          }
+          metadata={`${connectedInputs.length} 项参考 · ${promptTargets.length} 个下游节点 · ${(promptSummary || node.config.generatedPrompt).length} 字`}
+          status={
+            running
+              ? "正在生成"
+              : error
+                ? "需要处理"
+                : node.config.generatedPrompt.trim()
+                  ? "输出已就绪"
+                  : "等待创作"
+          }
+          busy={running}
+          error={error}
+        >
+          <CanvasPromptNode
+            node={node}
+            descriptor={descriptor}
+            selected={selected}
+            dragging={false}
+            running={running}
+            streamingText={streamingText}
+            error={error}
+            providerCatalog={providerCatalog}
+            sourceConnections={connectedInputs}
+            targetConnections={promptTargets}
+            onSelect={onSelect}
+            onNodeDragStart={onNodeDragStart}
+            onRemove={onRemove}
+            onUnlink={onUnlink}
+            onConnectionStart={onConnectionStart}
+            onSizeChange={ignoreEditorSizeChange}
+            expandable={false}
+            onChange={(config) => onPromptChange(nodeKey, config)}
+            onRun={() => onRunPrompt(nodeKey)}
+            promptContents={promptContents}
+            registerPromptInput={registerPromptInput}
+            mentionCandidates={mentionCandidates}
+            aliveCanvasNodeKeys={aliveCanvasNodeKeys}
+          />
+        </CanvasContentNode>
+        {presentation === "card" ? <CanvasNodeInputBadge nodeKey={nodeKey} /> : null}
       </>
     );
   }
   return (
     <>
       <CanvasGenNode
+        presentation={presentation}
+        editorOpen={editorOpen}
+        onCloseEditor={onCloseEditor}
+        previewOutput={previewOutput}
+        promptContents={promptContents}
         node={node}
         descriptor={descriptor}
         selected={selected}
@@ -1285,6 +1223,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         starting={running}
         startError={error}
         activeTask={activeTask}
+        latestTask={latestTask}
         connectedInputs={connectedInputs}
         inheritedInputs={[]}
         {...(mediaSlots != null ? { inputSlotPositions: mediaSlots } : {})}
@@ -1296,6 +1235,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         registerPromptInput={registerPromptInput}
         providerCatalog={providerCatalog}
         onSelect={onSelect}
+        onEdit={onEdit}
         onNodeDragStart={onNodeDragStart}
         onRemove={onRemove}
         onUnlink={onUnlink}
@@ -1305,7 +1245,6 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         onRename={onRename}
         onVideoConfigChange={onVideoConfigChange}
         onAnnotateVideo={onAnnotateVideo}
-        onOpenWhiteModelStudio={onOpenWhiteModelStudio}
         greenScreenResults={greenScreenResults.length ? greenScreenResults : undefined}
         onGreenScreenUseResult={(nodeKeyOf, key) => {
           void onGreenScreenUseResult(nodeKeyOf, key);
@@ -1317,7 +1256,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
           void onStartGeneration(key);
         }}
       />
-      <CanvasNodeInputBadge nodeKey={nodeKey} />
+      {presentation === "card" ? <CanvasNodeInputBadge nodeKey={nodeKey} /> : null}
     </>
   );
 }
@@ -1337,16 +1276,13 @@ function edgeOrderIndexFor(state: CanvasReadModel): ReadonlyMap<string, number> 
   if (cached != null) return cached;
   const groups = new Map<string, { edgeId: string }[]>();
   for (const [key, edges] of state.graph.byTarget) {
-    const preferred = state.nodeByKey.videoComposer.has(key)
-      ? composerInputsFor(state, key).map((input) => input.edgeId)
-      : [];
     const ordered = canvasInputEdgeOrder(
       sharedCanvasInputResolver(state)(key),
       edges.map((edge) => edge.id),
     );
     groups.set(
       key,
-      [...new Set([...preferred, ...ordered])].map((edgeId) => ({ edgeId })),
+      ordered.map((edgeId) => ({ edgeId })),
     );
   }
   const index = buildInputOrderByEdge(groups);
@@ -1358,12 +1294,7 @@ const CANVAS_NODE_TYPE_KEYS = [
   "asset",
   "gen",
   "screenplay",
-  "storyboard",
-  "knowledgeVideoWorkflow",
-  "viralRemix",
-  "videoComposer",
-  "videoDownloader",
-  "frameExtractor",
+  "videoClip",
   "result",
   "output",
 ] as const satisfies readonly CanvasNodeType[];
@@ -1382,56 +1313,28 @@ function canvasFlowEdgeDescriptor(
   edge: CanvasReadModel["graph"]["edges"][number],
 ): CanvasFlowEdgeDescriptor {
   const genSource = state.nodeByKey.gen.get(edge.fromKey);
-  const composerSource = state.nodeByKey.videoComposer.get(edge.fromKey);
-  const downloaderSource = state.nodeByKey.videoDownloader.get(edge.fromKey);
-  const frameExtractorSource = state.nodeByKey.frameExtractor.get(edge.fromKey);
   const screenplaySource = state.nodeByKey.screenplay.get(edge.fromKey);
   const assetSource = state.nodeByKey.asset.get(edge.fromKey);
   const outputSource = state.nodeByKey.output.get(edge.fromKey);
   const generationTarget = state.nodeByKey.gen.get(edge.toKey);
-  const composerTarget = state.nodeByKey.videoComposer.get(edge.toKey);
-  const viralRemixTarget = state.nodeByKey.viralRemix.get(edge.toKey);
-  const frameExtractorTarget = state.nodeByKey.frameExtractor.get(edge.toKey);
-  const storyboardTarget = state.nodeByKey.storyboard.get(edge.toKey);
-  const workflowTarget = state.nodeByKey.knowledgeVideoWorkflow.has(edge.toKey);
   const assetTarget = state.nodeByKey.asset.get(edge.toKey);
-  const isGenOutput =
-    (genSource != null || composerSource != null) && state.nodeByKey.output.has(edge.toKey);
+  const isGenOutput = genSource != null && state.nodeByKey.output.has(edge.toKey);
   const promptSource = genSource?.kind === "prompt" ? genSource : null;
-  const isScreenplayToStoryboard = screenplaySource != null && storyboardTarget != null;
   const sourceName = promptSource
     ? "提示词节点"
     : screenplaySource
       ? connectedScreenplayName(screenplaySource)
-      : downloaderSource
-        ? "网络爆款视频下载节点"
-        : composerSource
-          ? "视频拼接与合成节点"
-          : frameExtractorSource
-            ? "视频抽帧节点"
-            : (assetSource?.name ??
-              outputSource?.name ??
-              canvasNodeLabel(canvasNodeEntryInModel(state, edge.fromKey)));
+      : (assetSource?.name ??
+        outputSource?.name ??
+        canvasNodeLabel(canvasNodeEntryInModel(state, edge.fromKey)));
   const targetName = generationTarget
     ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}生成节点`
-    : composerTarget
-      ? "视频拼接与合成节点"
-      : viralRemixTarget
-        ? "爆款视频复刻节点"
-        : frameExtractorTarget
-          ? "视频抽帧节点"
-          : storyboardTarget
-            ? "剧本转工业级分镜脚本节点"
-            : workflowTarget
-              ? "工作流节点"
-              : (assetTarget?.name ?? canvasNodeLabel(canvasNodeEntryInModel(state, edge.toKey)));
+    : (assetTarget?.name ?? canvasNodeLabel(canvasNodeEntryInModel(state, edge.toKey)));
   const edgeClassName = isGenOutput
     ? `edge edge--gen-output edge--gen-output--${genSource?.kind ?? "video"}`
     : promptSource
       ? "edge edge--prompt-generation"
-      : isScreenplayToStoryboard
-        ? "edge edge--screenplay-storyboard"
-        : `edge edge--asset${workflowTarget || generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`;
+      : `edge edge--asset${generationTarget ? " edge--asset-generation" : ""}`;
   return {
     sourceName,
     targetName,
@@ -1447,6 +1350,8 @@ function canvasFlowEdgeDescriptorToken(
   return `${descriptor.sourceName}\u0002${descriptor.targetName}\u0002${descriptor.edgeClassName}\u0002${descriptor.order}\u0002${selected ? 1 : 0}`;
 }
 
+const DEFAULT_CANVAS_FLOW_VIEWPORT: Viewport = { x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 };
+
 /**
  * React Flow 的受控节点层：拖动帧只更新这个窄组件，避免让 WorkspaceApp 与画布文档
  * 每个 pointer move 都重渲染；上游节点内容变化时仍以业务状态为准同步进来。
@@ -1458,6 +1363,12 @@ function LiveCanvasFlow({
 }: ReactFlowProps<CanvasFlowNode, CanvasFlowEdge>) {
   const [liveNodes, setLiveNodes, applyLiveNodeChanges] =
     useNodesState<CanvasFlowNode>(upstreamNodes);
+  const liveNodesRef = useRef(liveNodes);
+  // 渲染期不写 ref：事件处理器读的是上一次提交后的最新节点，
+  // 效果在提交后刷新，下一次交互前一定已经落定。
+  useEffect(() => {
+    liveNodesRef.current = liveNodes;
+  }, [liveNodes]);
 
   useEffect(() => {
     setLiveNodes((currentNodes) => {
@@ -1476,7 +1387,30 @@ function LiveCanvasFlow({
 
   const handleNodesChange = useCallback(
     (changes: NodeChange<CanvasFlowNode>[]) => {
-      applyLiveNodeChanges(changes);
+      const explicitKeys = new Set(
+        changes.filter((change) => change.type === "position").map((change) => change.id),
+      );
+      const memberChanges: NodeChange<CanvasFlowNode>[] = [];
+      for (const change of changes) {
+        if (change.type !== "position" || !change.position) continue;
+        const groupNode = liveNodesRef.current.find((node) => node.id === change.id);
+        if (!groupNode?.data.groupMemberKeys) continue;
+        for (const memberKey of groupNode.data.groupMemberKeys) {
+          if (explicitKeys.has(memberKey)) continue;
+          const member = liveNodesRef.current.find((node) => node.id === memberKey);
+          if (!member) continue;
+          memberChanges.push({
+            type: "position",
+            id: memberKey,
+            position: {
+              x: member.position.x + change.position.x - groupNode.position.x,
+              y: member.position.y + change.position.y - groupNode.position.y,
+            },
+            ...(change.dragging === undefined ? {} : { dragging: change.dragging }),
+          });
+        }
+      }
+      applyLiveNodeChanges([...changes, ...memberChanges]);
       onNodesChange?.(changes);
     },
     [applyLiveNodeChanges, onNodesChange],
@@ -1557,24 +1491,14 @@ function canvasNodeLabel(entry: CanvasNodeEntry | null): string {
       return `${entry.data.kind === "prompt" ? "提示词" : entry.data.kind === "image" ? "图片生成" : "视频生成"}节点`;
     case "screenplay":
       return connectedScreenplayName(entry.data);
-    case "storyboard":
-      return "剧本转工业级分镜脚本节点";
-    case "knowledgeVideoWorkflow":
-      return "工作流节点";
-    case "viralRemix":
-      return "爆款视频复刻节点";
-    case "videoComposer":
-      return "视频拼接与合成节点";
-    case "videoDownloader":
-      return "网络爆款视频下载节点";
-    case "frameExtractor":
-      return "视频抽帧节点";
+    case "videoClip":
+      return entry.data.name ?? "智能剪辑节点";
     case "result":
       return "结果节点";
   }
 }
 
-function liveCanvasNodeRect(entry: CanvasNodeEntry, viewportWidth: number): CanvasNodeRect {
+function liveCanvasNodeRect(entry: CanvasNodeEntry): CanvasNodeRect {
   const { data } = entry;
   let fallback: CanvasNodeDimensions;
   switch (entry.type) {
@@ -1585,37 +1509,13 @@ function liveCanvasNodeRect(entry: CanvasNodeEntry, viewportWidth: number): Canv
       fallback = genNodeDimensions(entry.data.kind);
       break;
     case "screenplay":
-    case "storyboard":
       fallback = {
         width: SCREENPLAY_NODE_WIDTH,
         height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
       };
       break;
-    case "knowledgeVideoWorkflow":
-      fallback = {
-        width: knowledgeVideoWorkflowNodeWidth(viewportWidth),
-        height: usesCoarsePointer()
-          ? KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT
-          : KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-      };
-      break;
-    case "viralRemix":
-      fallback = {
-        width: VIRAL_REMIX_NODE_WIDTH,
-        height: usesCoarsePointer() ? VIRAL_REMIX_NODE_COARSE_HEIGHT : VIRAL_REMIX_NODE_HEIGHT,
-      };
-      break;
-    case "videoComposer":
-      fallback = { width: VIDEO_COMPOSER_NODE_WIDTH, height: VIDEO_COMPOSER_NODE_HEIGHT };
-      break;
-    case "videoDownloader":
-      fallback = { width: VIDEO_DOWNLOADER_NODE_WIDTH, height: VIDEO_DOWNLOADER_NODE_HEIGHT };
-      break;
-    case "frameExtractor":
-      fallback = {
-        width: VIDEO_FRAME_EXTRACTOR_NODE_WIDTH,
-        height: VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT,
-      };
+    case "videoClip":
+      fallback = { width: VIDEO_CLIP_NODE_WIDTH, height: VIDEO_CLIP_NODE_HEIGHT };
       break;
     case "result":
       fallback = { width: RESULT_NODE_WIDTH, height: RESULT_NODE_HEIGHT };
@@ -1692,11 +1592,17 @@ export function WorkspaceApp({
   active,
   services,
   canvasNavigation,
+  canvasCatalog,
+  onSelectCanvas,
 }: {
   readonly canvasId: string;
   readonly active: boolean;
   readonly services: CanvasSessionServices;
   readonly canvasNavigation?: ReactNode;
+  /** 工作区里的画布清单：资产管理抽屉的第一级树。 */
+  readonly canvasCatalog?: readonly { readonly id: string; readonly name: string }[];
+  /** 从资产管理抽屉切换画布。 */
+  readonly onSelectCanvas?: (id: string) => void;
 }) {
   // 非活跃画布的降载开关：后台事件回调与 store 订阅读 ref，激活态变化驱动缓冲回放。
   const activeRef = useRef(active);
@@ -1710,6 +1616,40 @@ export function WorkspaceApp({
   const [assetMultiSelect, setAssetMultiSelect] = useState(false);
   const [pickedAssets, setPickedAssets] = useState<readonly AssetItem[]>([]);
   const [nodeMarquee, setNodeMarquee] = useState(false);
+  /*
+   * 画布视图开关：对齐 liblib.tv 左下控件组的「切换小地图 / 隐藏节点连线 /
+   * 网格吸附」三项（逆向规格 docs/integrations/liblib-canvas-re.md 第 3 节）。
+   * 这三项都是纯前端状态，不进画布文档 —— 它们描述的是「怎么看」而不是
+   * 「画了什么」，持久化会让下次打开时画布外观与上次不符。
+   */
+  const [minimapVisible, setMinimapVisible] = useState(false);
+  const [edgesVisible, setEdgesVisible] = useState(true);
+  const [snapToGrid, setSnapToGrid] = useState(false);
+  /** 快捷键面板（原站 liblib 的「快捷键」浮层）。 */
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  /** 资产管理抽屉（原站 liblib 的左侧可调宽抽屉）。 */
+  const [assetDrawerOpen, setAssetDrawerOpen] = useState(false);
+  /** 缩放菜单（liblib 左下控件组里那个「72%」按钮弹出的菜单）。 */
+  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
+  /** 节点右键菜单（liblib 的画布上下文菜单）。 */
+  const [nodeContextMenu, setNodeContextMenu] = useState<{
+    readonly x: number;
+    readonly y: number;
+    readonly nodeKey: string;
+  } | null>(null);
+  /**
+   * 分组右键菜单。
+   *
+   * 原站的分组只有「彩色框 + 小标签」两件东西，框上没有工具条；组动作（复制整组 /
+   * 折叠 / 添加到素材库 / 解散）因此收在这里——原站的组操作同样走右键菜单。
+   */
+  const [groupContextMenu, setGroupContextMenu] = useState<{
+    readonly x: number;
+    readonly y: number;
+    readonly groupId: string;
+  } | null>(null);
+  /** 4 步新手引导（原站首次进入画布时弹一次；浮坞「教程」格可以再次打开）。 */
+  const [guideOpen, setGuideOpen] = useState(false);
   const canPasteCanvasNodes = useSyncExternalStore(
     subscribeCanvasNodeClipboard,
     hasCanvasNodeClipboard,
@@ -1754,31 +1694,8 @@ export function WorkspaceApp({
   /** 最近一次请求的计数作用域；晚到的扫描结果只合并增量，不覆盖当前作用域的计数。 */
   const countedAssetScopeKeyRef = useRef<string | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
-  const [workflowRepositoryExpanded, setWorkflowRepositoryExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [runtimeComponentsOpen, setRuntimeComponentsOpen] = useState(false);
-  const [runtimeComponentFeatureId, setRuntimeComponentFeatureId] = useState<string | null>(null);
-  useEffect(() => {
-    const openComponents = (event: Event) => {
-      const detail = (event as CustomEvent<unknown>).detail;
-      const featureId =
-        detail &&
-        typeof detail === "object" &&
-        "featureId" in detail &&
-        typeof detail.featureId === "string"
-          ? detail.featureId
-          : null;
-      setRuntimeComponentFeatureId(featureId);
-      setRuntimeComponentsOpen(true);
-    };
-    window.addEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, openComponents);
-    return () => window.removeEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, openComponents);
-  }, []);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [historyInitialTab, setHistoryInitialTab] = useState<"generation" | "workflow">(
-    "generation",
-  );
-  const [historyInitialWorkflowId, setHistoryInitialWorkflowId] = useState<string | null>(null);
   const [historyInitialTaskId, setHistoryInitialTaskId] = useState<string | null>(null);
   const [realPersonDialogOpen, setRealPersonDialogOpen] = useState(false);
   const [videoLocalEdit, setVideoLocalEdit] = useState<{
@@ -1787,10 +1704,6 @@ export function WorkspaceApp({
     readonly input: GenerationMediaInput;
   } | null>(null);
   const [videoPreparation, setVideoPreparation] = useState<VideoPreparationSource | null>(null);
-  const [whiteModelStudioNodeKey, setWhiteModelStudioNodeKey] = useState<string | null>(null);
-  // 白模工作台目标节点窄订阅：仅该节点自身变化时重渲染弹窗区域。
-  const whiteModelStudioEntry = useCanvasNodeEntry(whiteModelStudioNodeKey ?? "");
-  const [canvasAgent] = useState(() => new CanvasAgentController());
   const canvasViewRef = useRef<CanvasViewModel | null>(null);
   const { selectedNodeKey, selectedEdgeId, zoom, pan, hasCanvasNodes } = useCanvas(
     useShallow((state) => {
@@ -1826,20 +1739,17 @@ export function WorkspaceApp({
     if (selectedNodeKey != null && canvasNodeKeys.has(selectedNodeKey)) keys.add(selectedNodeKey);
     return keys;
   }, [canvasNodeKeys, marqueeNodeKeys, selectedNodeKey]);
-  const assetOutputNodeKeys = useCanvas(
-    useShallow((state) => [
-      ...state.nodes.asset.map((node) => node.key),
-      ...state.nodes.output.map((node) => node.key),
-    ]),
-  );
   const selectedGroupableNodeKeys = useMemo(
-    () => [...selectedCanvasNodeKeys].filter((key) => assetOutputNodeKeys.includes(key)),
-    [assetOutputNodeKeys, selectedCanvasNodeKeys],
+    () => [...selectedCanvasNodeKeys],
+    [selectedCanvasNodeKeys],
   );
   const canGroupSelectedNodes =
     selectedGroupableNodeKeys.length >= 2 &&
     selectedGroupableNodeKeys.length === selectedCanvasNodeKeys.size;
   const {
+    groupNodes,
+    dissolveGroup,
+    updateGroup,
     insertSubgraph,
     addNode,
     addOutput,
@@ -1854,13 +1764,12 @@ export function WorkspaceApp({
     selectNode,
     selectEdge,
     clear: clearCanvasState,
+    runWithCoalescedHistory,
     snapshotV2,
     restoreDocument,
     undo: undoCanvasOperation,
     redo: redoCanvasOperation,
   } = useCanvasCommands();
-  // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
-  const { pastCount, futureCount } = useCanvasHistoryCounts();
 
   // ── 节点外壳指纹订阅 ───────────────────────────────────────────────────────
   // 各类节点只订阅「成员/坐标/尺寸/选中/分组」指纹；内容补丁不触发 WorkspaceApp
@@ -1875,32 +1784,8 @@ export function WorkspaceApp({
     "screenplay",
     selectedCanvasNodeKeys,
   );
-  const storyboardNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "storyboard",
-    selectedCanvasNodeKeys,
-  );
-  const workflowNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "knowledgeVideoWorkflow",
-    selectedCanvasNodeKeys,
-    (node) => `${node.config.productScene ? 1 : 0}\u0002${node.config.reelbench ? 1 : 0}`,
-  );
-  const viralRemixNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "viralRemix",
-    selectedCanvasNodeKeys,
-  );
   const genNodeLayoutTokens = useCanvasNodeLayoutTokens("gen", selectedCanvasNodeKeys);
-  const videoComposerNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "videoComposer",
-    selectedCanvasNodeKeys,
-  );
-  const videoDownloaderNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "videoDownloader",
-    selectedCanvasNodeKeys,
-  );
-  const frameExtractorNodeLayoutTokens = useCanvasNodeLayoutTokens(
-    "frameExtractor",
-    selectedCanvasNodeKeys,
-  );
+  const videoClipNodeLayoutTokens = useCanvasNodeLayoutTokens("videoClip", selectedCanvasNodeKeys);
   const resultNodeLayoutTokens = useCanvasNodeLayoutTokens("result", selectedCanvasNodeKeys);
   // 保存调度与事件期读取共用的 store 句柄：非活跃画布冻结渲染后，后台进度写入不再
   // 触发组件重渲染与 effect 重跑，但断点与画布文档仍必须按时落盘；订阅与渲染解耦。
@@ -1963,6 +1848,10 @@ export function WorkspaceApp({
   );
   // 正在提交生成任务的节点 key；不同节点可以同时提交。
   const [startingNodeKeys, setStartingNodeKeys] = useState<ReadonlySet<string>>(() => new Set());
+  // 正在提交智能剪辑合成请求的节点 key；原站同款：合成进行中不允许重复发起。
+  const [startingVideoClipKeys, setStartingVideoClipKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   /**
    * 文本模型正在生成的正文（按节点 key 累加）。
    *
@@ -2031,6 +1920,24 @@ export function WorkspaceApp({
   );
   const [retryInfoByTask, setRetryInfoByTaskInternal] = useState<Record<string, RetryInfo>>({});
   const setRetryInfoByTask = useDeferredSessionState(setRetryInfoByTaskInternal, activeRef, active);
+  /*
+   * 自动查询已停止的任务（PixVerse 达 10 分钟上限 / 自动重试耗尽）。
+   *
+   * 后端会发 `generation:polling-stopped` 事件，但**任务状态仍是 running**
+   * （`ChangeQueryHealth` 只改 query_health 不改 status）—— 前端若不接这个事件，
+   * 卡片就永远转圈。这里记下这些任务 id，让它们不再被当作「在途」。
+   *
+   * 但**光靠事件不够**：事件是一次性的瞬时信号。用户重启应用、重新加载前端、
+   * 或在事件投递前就打开了画布，这个 Set 就是空的 —— 于是任务又被当成在途，
+   * 卡片永久转圈，该节点也**无法再次提交生成**（提示「该节点已有任务正在生成」）。
+   *
+   * 所以判定必须并上后端**持久化**的状态：`queryHealth === "degraded"` 表示
+   * 后端已停止自动轮询（两条来源都是「停止轮询」：轮询达时限、自动重试耗尽）。
+   * 后端持久化的东西不会因为进程重启而消失，这才是可靠判据。
+   */
+  const [pollingStoppedTaskIds, setPollingStoppedTaskIds] = useState<ReadonlySet<string>>(
+    () => new Set<string>(),
+  );
   const [rawResponses, setRawResponses] = useState<Record<string, string>>({});
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[]>([]);
   // 云端素材库分组：按令牌作用域隔离，所有供应商/平台共用同一套接口。
@@ -2163,131 +2070,6 @@ export function WorkspaceApp({
   }, [assetUploads]);
   // startUpload 返回 jobId 前，占位行的临时自增 id（前缀避免与后端真实 id 冲突）。
   const pendingUploadSeqRef = useRef(0);
-  const [videoComposerRuns, setVideoComposerRunsInternal] = useState<
-    Readonly<Record<string, VideoComposerRunState>>
-  >({});
-  const setVideoComposerRuns = useDeferredSessionState(
-    setVideoComposerRunsInternal,
-    activeRef,
-    active,
-  );
-  const videoComposerAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
-  // 网络爆款视频下载节点：节点随画布持久化，下载任务与引擎状态只在会话内。
-  const [videoDownloaderRuns, setVideoDownloaderRunsInternal] = useState<
-    Readonly<Record<string, VideoDownloaderRunState>>
-  >({});
-  const setVideoDownloaderRuns = useDeferredSessionState(
-    setVideoDownloaderRunsInternal,
-    activeRef,
-    active,
-  );
-  // 下载启动时的节点快照：产物卡片落点按启动时节点位置计算（轮询期间用户
-  // 拖动节点不改变落点，与迁移前 setTimeout 轮询的语义一致）。
-  const videoDownloaderStartNodesRef = useRef<Map<string, VideoDownloaderNodeData>>(new Map());
-  const videoDownloadQueuesRef = useRef(
-    new Map<
-      string,
-      {
-        sources: string[];
-        batchId: string;
-        activeJobId: string;
-      }
-    >(),
-  );
-  const [downloaderEngineStatus, setDownloaderEngineStatus] =
-    useState<VideoDownloaderEngineStatus | null>(null);
-  const downloaderEngineLoadedRef = useRef(false);
-  const [downloaderEngineBusy, setDownloaderEngineBusy] = useState(false);
-  const [downloaderCookieBusy, setDownloaderCookieBusy] = useState(false);
-  // 视频抽帧节点：抽帧任务与会话内运行状态；产物自动落 origin=frame_extract 图片卡片。
-  const [frameExtractorRuns, setFrameExtractorRunsInternal] = useState<
-    Readonly<Record<string, VideoFrameExtractorRunState>>
-  >({});
-  const setFrameExtractorProgress = useDeferredSessionState(
-    setFrameExtractorRunsInternal,
-    activeRef,
-    active,
-  );
-  // 身份与状态必须立即推进后台批次；隐藏画布仅延迟高频进度。
-  const setFrameExtractorRuns = setFrameExtractorRunsInternal;
-  const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
-  const frameExtractionQueuesRef = useRef(
-    new Map<
-      string,
-      {
-        sources: string[];
-        timestamps: readonly number[];
-        batchId: string;
-        activeJobId: string;
-        cancelRequested?: boolean;
-        requestId?: string;
-      }
-    >(),
-  );
-  const cancelVideoToolBatches = useCallback(() => {
-    for (const queue of videoDownloadQueuesRef.current.values()) {
-      if (queue.activeJobId)
-        void videoDownloaderClient.cancelJob(queue.activeJobId).catch(() => undefined);
-    }
-    videoDownloadQueuesRef.current.clear();
-    videoDownloaderStartNodesRef.current.clear();
-    for (const queue of frameExtractionQueuesRef.current.values()) {
-      if (queue.activeJobId)
-        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch(() => undefined);
-    }
-    frameExtractionQueuesRef.current.clear();
-    frameExtractorStartNodesRef.current.clear();
-  }, []);
-  // 下载/抽帧节点的成员 key 订阅：节点删除时清理运行态与队列（内容补丁不触发）。
-  const videoDownloaderNodeKeys = useCanvasNodeKeys("videoDownloader");
-  const frameExtractorNodeKeys = useCanvasNodeKeys("frameExtractor");
-  useEffect(() => {
-    const downloaderKeys = new Set(videoDownloaderNodeKeys);
-    for (const [key, queue] of videoDownloadQueuesRef.current) {
-      if (downloaderKeys.has(key)) continue;
-      videoDownloadQueuesRef.current.delete(key);
-      videoDownloaderStartNodesRef.current.delete(key);
-      setVideoDownloaderRuns((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      if (queue.activeJobId)
-        void videoDownloaderClient.cancelJob(queue.activeJobId).catch(() => undefined);
-    }
-    const extractorKeys = new Set(frameExtractorNodeKeys);
-    for (const [key, queue] of frameExtractionQueuesRef.current) {
-      if (extractorKeys.has(key)) continue;
-      frameExtractionQueuesRef.current.delete(key);
-      frameExtractorStartNodesRef.current.delete(key);
-      setFrameExtractorRuns((current) => {
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      if (queue.activeJobId)
-        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch(() => undefined);
-    }
-  }, [
-    videoDownloaderNodeKeys,
-    frameExtractorNodeKeys,
-    setVideoDownloaderRuns,
-    setFrameExtractorRuns,
-  ]);
-  const recoverWorkflowHistory = services.recoverWorkflowHistory;
-  useEffect(() => {
-    if (!isDesktopRuntime()) return;
-    void recoverWorkflowHistory().catch((error: unknown) => {
-      toast.error("工作流历史恢复失败", {
-        description: (
-          <ErrorAlert
-            error={workflowUsageError("storage", "工作流历史恢复失败。", error)}
-            workflow
-          />
-        ),
-      });
-    });
-  }, [recoverWorkflowHistory]);
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
   const [genNodeSizes, setGenNodeSizes] = useState<Record<string, CanvasNodeDimensions>>({});
   const [previewOutputNodeKey, setPreviewOutputNodeKey] = useState<string | null>(null);
@@ -2313,12 +2095,6 @@ export function WorkspaceApp({
     assetNodeLayoutTokens,
     genNodeLayoutTokens,
     screenplayNodeLayoutTokens,
-    storyboardNodeLayoutTokens,
-    workflowNodeLayoutTokens,
-    viralRemixNodeLayoutTokens,
-    videoComposerNodeLayoutTokens,
-    videoDownloaderNodeLayoutTokens,
-    frameExtractorNodeLayoutTokens,
     resultNodeLayoutTokens,
     outputNodeLayoutTokens,
   ].join("");
@@ -2339,50 +2115,6 @@ export function WorkspaceApp({
           height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
         }),
       })),
-      ...canvasNodesNow("storyboard").map((node) => ({
-        x: node.x,
-        y: node.y,
-        ...(genNodeSizes[node.key] ?? {
-          width: SCREENPLAY_NODE_WIDTH,
-          height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
-        }),
-      })),
-      ...canvasNodesNow("knowledgeVideoWorkflow").map((node) => ({
-        x: node.x,
-        y: node.y,
-        ...(genNodeSizes[node.key] ?? {
-          width: knowledgeVideoWorkflowNodeWidth(window.innerWidth),
-          height: usesCoarsePointer()
-            ? KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT
-            : KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-        }),
-      })),
-      ...canvasNodesNow("viralRemix").map((node) => ({
-        x: node.x,
-        y: node.y,
-        ...(genNodeSizes[node.key] ?? {
-          width: VIRAL_REMIX_NODE_WIDTH,
-          height: usesCoarsePointer() ? VIRAL_REMIX_NODE_COARSE_HEIGHT : VIRAL_REMIX_NODE_HEIGHT,
-        }),
-      })),
-      ...canvasNodesNow("videoComposer").map((node) => ({
-        x: node.x,
-        y: node.y,
-        width: VIDEO_COMPOSER_NODE_WIDTH,
-        height: VIDEO_COMPOSER_NODE_HEIGHT,
-      })),
-      ...canvasNodesNow("videoDownloader").map((node) => ({
-        x: node.x,
-        y: node.y,
-        width: VIDEO_DOWNLOADER_NODE_WIDTH,
-        height: VIDEO_DOWNLOADER_NODE_HEIGHT,
-      })),
-      ...canvasNodesNow("frameExtractor").map((node) => ({
-        x: node.x,
-        y: node.y,
-        width: VIDEO_FRAME_EXTRACTOR_NODE_WIDTH,
-        height: VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT,
-      })),
       ...canvasNodesNow("result").map((node) => ({
         x: node.x,
         y: node.y,
@@ -2400,16 +2132,36 @@ export function WorkspaceApp({
   // 提示内容 module 持有 canonical documents 与节点级 handle；视口裁剪不会丢内容。
   const [promptContents] = useState(createPromptContentModule);
   const deletedPromptContentsRef = useRef(new Map<string, PromptContentDocumentV1>());
-  // gen 节点成员 key 订阅：删除的提示词文档在同类节点复用时恢复（内容补丁不触发）。
-  const genNodeMembershipKeys = useCanvasNodeKeys("gen");
+  /*
+   * 持有提示内容的节点成员 key 订阅：删除的提示词文档在同类节点复用时恢复。
+   *
+   * 这里**不再按节点类型登记**（此前是 gen + videoClip 两类手工列表）：
+   * 那份登记表与真正的注册点（`PromptMentionInput` 挂载处）没有任何编译期关联，
+   * 已经因此丢过两次提示词（智能剪辑漏一次、提示词节点漏一次）—— 症状都是
+   * 「排期与落盘都正常，但重开画布就丢」，丢的恰是 @引用的素材身份绑定与
+   * 粘贴附件（纯文本有 config 镜像所以不丢），最难被察觉。
+   *
+   * 改成「画布里现存的节点 key」之后登记表整个不需要了：新增节点类型天然被覆盖，
+   * 也不可能再漏登记。
+   */
+  const promptContentNodeKeys = useAllCanvasNodeKeys();
   useEffect(() => {
-    for (const key of genNodeMembershipKeys) {
+    let restored = 0;
+    for (const key of promptContentNodeKeys) {
       const deleted = deletedPromptContentsRef.current.get(key);
       if (deleted == null) continue;
       promptContents.restoreDocument(key, deleted);
       deletedPromptContentsRef.current.delete(key);
+      restored += 1;
     }
-  }, [genNodeMembershipKeys, promptContents]);
+    /*
+     * 撤销/重做会触发一次「立即落盘」，而它取快照的时刻**早于**上面这个 effect
+     * （提示词恢复在 effect 里，晚一步）——那次落盘会把该节点的提示词写成空文档，
+     * 界面看着正常、磁盘上却是空的，直到下次任意落盘才被纠正。恢复成功后补一次
+     * 排期，把正确内容写回去。
+     */
+    if (restored > 0) scheduleCanvasSaveRef.current?.();
+  }, [promptContentNodeKeys, promptContents]);
   // 追踪上游原始输出版本；结构化引用的显示文字和用户手改内容都不用于判定重新导入。
   const importedPromptSourcesRef = useRef(
     new Map<string, { edgeId: string; sourceKey: string; text: string; importedText: string }>(),
@@ -2452,79 +2204,22 @@ export function WorkspaceApp({
         visibleHeight,
         occupied: Object.values(nodesById)
           .filter((entry) => entry.type !== "output")
-          .map((entry) => liveCanvasNodeRect(entry, window.innerWidth)),
+          .map((entry) => liveCanvasNodeRect(entry)),
       };
     },
     [zoom],
   );
   const mobilePanelTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
-  // 工作流会话注册表：清空画布、卸载中止、删除校验、撤销/重做排除都在
-  // 会话控制器钩子之前消费它，因此实例在此创建并注入钩子。
-  const [workflowSessionRegistry] = useState(() => new WorkflowSessionRegistry());
-
   // 会话控制器的宿主依赖里，保存调度与视口取点声明在持久化/视口层（本钩子之后），
   // 经 latest-ref 在动作触发时读取；动作只在回调期消费它们，语义与直连一致。
   const scheduleCanvasSaveRef = useRef<() => void>(() => {});
+  /** 提示内容变化 → 落盘排期的订阅（按节点 key 记录退订函数）。 */
+  const promptSaveSubscriptionsRef = useRef(new Map<string, () => void>());
   const viewportCenterBoardCoordinatesRef = useRef<() => { x: number; y: number }>(() => ({
     x: 0,
     y: 0,
   }));
-  const showHistoryPanel = useCallback((workflowId: string | null) => {
-    setHistoryInitialTab("workflow");
-    setHistoryInitialWorkflowId(workflowId);
-    setHistoryOpen(true);
-  }, []);
-  const closeHistoryPanel = useCallback(() => {
-    setHistoryOpen(false);
-  }, []);
-  const centerView = useCallback(
-    (boardX: number, boardY: number) => {
-      void flowInstanceRef.current?.setCenter(boardX, boardY, {
-        zoom: zoom / 100,
-        duration: 200,
-      });
-    },
-    [zoom],
-  );
-  /**
-   * 创作助手消息里节点代号芯片的定位：与点击节点同一套选中语义（清空框选与
-   * 边选），再把视口动画居中到节点几何中心。节点已删除时静默不动——渲染层已把
-   * 失效代号降级为纯文本，这里只兜住渲染与点击之间被删除的竞态。
-   */
-  const focusCanvasNodeKey = useCallback(
-    (key: string) => {
-      const entry = canvasStore.getState().nodesById[key];
-      if (entry == null) return;
-      setMarqueeNodeKeys(new Set());
-      selectNode(key);
-      selectEdge(null);
-      // React Flow 上的实时坐标优先（拖拽中、悬停展开的卡片），store 兜底。
-      const flowNode = flowInstanceRef.current?.getNode(key);
-      const width = flowNode?.measured?.width ?? entry.data.measured?.width ?? 0;
-      const height = flowNode?.measured?.height ?? entry.data.measured?.height ?? 0;
-      const x = flowNode?.position.x ?? entry.data.x;
-      const y = flowNode?.position.y ?? entry.data.y;
-      centerView(x + width / 2, y + height / 2);
-    },
-    [canvasStore, centerView, selectEdge, selectNode],
-  );
-  const sessions = useWorkflowSessions({
-    canvasId,
-    active,
-    activeRef,
-    registry: workflowSessionRegistry,
-    recoverWorkflowHistory: services.recoverWorkflowHistory,
-    providerCatalog,
-    scheduleCanvasSave: () => scheduleCanvasSaveRef.current(),
-    showHistoryPanel,
-    closeHistoryPanel,
-    centerView,
-    viewportCenterBoardCoordinates: () => viewportCenterBoardCoordinatesRef.current(),
-    occupiedNodeRects,
-  });
-  const knowledgeVideoWorkflowRuns = sessions.runs;
-  const activeWorkflowHistoryIds = sessions.activeHistoryRunIds;
   // 「清空画布」确认弹窗的原生 <dialog> 引用——HTMLDialogElement 自带
   // modal 语义（ESC 关闭、focus trap、::backdrop 遮罩），无需自建 dialog 框架。
   const clearCanvasDialogRef = useRef<HTMLDialogElement | null>(null);
@@ -2532,68 +2227,33 @@ export function WorkspaceApp({
   const clearCanvas = useCallback(() => {
     // 清空画布上的节点与连线，同时重置与画布交互相关的临时状态；
     // 不清空任务历史（生成节点删除/本地结果文件缺失都不能清理历史，详见 MVP 契约）。
-    for (const controller of videoComposerAbortControllersRef.current.values()) controller.abort();
-    videoComposerAbortControllersRef.current.clear();
-    workflowSessionRegistry.abortAll();
     // 先撤销拼接产物仅会话内有效的 blob 预览，再原子清空画布持久状态。
     for (const node of canvasNodesOfState(canvasStore.getState(), "output")) {
       if (node.origin === "composition" && node.previewSrc?.startsWith("blob:")) {
         URL.revokeObjectURL(node.previewSrc);
       }
     }
-    cancelVideoToolBatches();
     clearCanvasState();
-    setVideoComposerRuns({});
-    setVideoDownloaderRuns({});
-    setFrameExtractorRuns({});
-    sessions.clearAllRuns();
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
-  }, [
-    cancelVideoToolBatches,
-    clearCanvasState,
-    canvasStore,
-    sessions,
-    workflowSessionRegistry,
-    setVideoComposerRuns,
-    setVideoDownloaderRuns,
-    setFrameExtractorRuns,
-    setGenNodeSizes,
-    setPreviewOutputNodeKey,
-  ]);
-
-  useEffect(
-    () => () => {
-      cancelVideoToolBatches();
-      for (const controller of videoComposerAbortControllersRef.current.values()) {
-        controller.abort();
-      }
-      videoComposerAbortControllersRef.current.clear();
-      workflowSessionRegistry.abortAll();
-    },
-    [cancelVideoToolBatches, canvasStore, workflowSessionRegistry],
-  );
+  }, [clearCanvasState, canvasStore, setGenNodeSizes, setPreviewOutputNodeKey]);
 
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
-    const generationNodeKeys = new Set(
-      snapshotV2({})
-        .genNodes.filter((node) => node.kind !== "prompt")
-        .map((node) => node.key),
-    );
-    return {
-      ...snapshotV2(promptContents.snapshotAll(generationNodeKeys)),
-      agent: canvasAgent.getState(),
-    };
-  }, [canvasAgent, promptContents, snapshotV2]);
-
-  useEffect(
-    () =>
-      registerDiagnosticCanvas(canvasId, {
-        read: collectCanvasDocument,
-        isActive: () => activeRef.current,
-      }),
-    [canvasId, collectCanvasDocument],
-  );
+    /*
+     * 提示词内容住在提示词模块里（不进画布 store），落盘快照必须带上它们。
+     *
+     * 这里**不再手工登记持有提示词的节点类型**（此前是 gen + videoClip）：
+     * 那份登记表与真正的注册点没有任何编译期关联，已经因此丢过两次提示词
+     * （智能剪辑漏一次、提示词节点漏一次）。症状很隐蔽：排期与落盘都"正常"，
+     * 但存出来的画布文档里没有这段提示词，重新打开就丢了 —— 丢的恰是 @引用的
+     * 素材身份绑定与粘贴的附件（纯文本有 config 镜像所以不丢），最难被察觉。
+     *
+     * 改成「画布里现存的节点 key」求交集后，登记表整个不需要了：新增节点类型
+     * 天然被覆盖，也不可能再漏登记。
+     */
+    const promptContentKeys = new Set<string>(promptContentNodeKeys);
+    return snapshotV2(promptContents.snapshotAll(promptContentKeys));
+  }, [promptContentNodeKeys, promptContents, snapshotV2]);
 
   const restoreCanvasDocument = useCallback(
     (raw: unknown) => {
@@ -2601,7 +2261,6 @@ export function WorkspaceApp({
       if (!restored.ok) throw new Error(`画布存档无法恢复：${restored.issues.join("；")}`);
       deletedPromptContentsRef.current.clear();
       const document = raw as CanvasDocument;
-      canvasAgent.restore(document.version === 2 ? document.agent : undefined);
       // restoreDocument 已原子替换节点、连线、视图与选择并清空画布操作历史。
       void flowInstanceRef.current?.setViewport({
         x: restored.view.pan.x,
@@ -2638,23 +2297,24 @@ export function WorkspaceApp({
           });
         }
       }
+      /*
+       * 画布水合完成后，把当前 canonical 写进 store 的快照字段。
+       *
+       * 这一步**必需**：撤销栈记录的是「变更前」的切片，而切片里的快照来自
+       * store 此刻的值。画布刚打开时 store 的快照是空的 —— 若不初始化，用户
+       * 第一次打字时记下的历史就带着**空**快照 → 撤销会把提示词清空
+       * （节点回来了，内容没了）。
+       *
+       * 水合后立刻初始化，第一条历史就带着「打开画布时的内容」→ 撤销回到那个
+       * 状态，精确无损。
+       */
+      canvasStore.getState().setPromptDocuments(promptContents.snapshotAll());
     },
-    [canvasAgent, promptContents, restoreDocument],
+    [canvasStore, promptContents, restoreDocument],
   );
 
   const validateCanvasDelete = useCallback(async () => {
-    if (
-      canvasAgent.getState().status !== "idle" ||
-      startingNodeKeys.size > 0 ||
-      workflowSessionRegistry.runningCount > 0 ||
-      workflowSessionRegistry.historyRunCount > 0 ||
-      workflowSessionRegistry.historyActionCount > 0 ||
-      videoComposerAbortControllersRef.current.size > 0 ||
-      videoDownloadQueuesRef.current.size > 0 ||
-      Object.values(videoComposerRuns).some((run) => run.status === "running") ||
-      Object.values(videoDownloaderRuns).some((run) => run.status === "running") ||
-      Object.values(frameExtractorRuns).some((run) => run.status === "running")
-    ) {
+    if (startingNodeKeys.size > 0) {
       throw new Error("此画布仍有任务正在执行，请先暂停工作流或等待任务完成后再删除。");
     }
     if (!isDesktopRuntime()) return;
@@ -2667,15 +2327,7 @@ export function WorkspaceApp({
     if (tasks.items.length > 0) {
       throw new Error("此画布仍有生成任务正在执行，请等待任务完成后再删除。");
     }
-  }, [
-    canvasAgent,
-    canvasId,
-    startingNodeKeys,
-    workflowSessionRegistry,
-    videoComposerRuns,
-    videoDownloaderRuns,
-    frameExtractorRuns,
-  ]);
+  }, [canvasId, startingNodeKeys]);
 
   const canvasPersistence = useCanvasDocumentPersistence({
     canvasId,
@@ -2698,28 +2350,83 @@ export function WorkspaceApp({
     scheduleCanvasSaveRef.current = scheduleCanvasSave;
   }, [scheduleCanvasSave]);
 
+  /*
+   * 撤销/重做后把 canonical 从 store 的历史快照恢复回来。
+   *
+   * zundo 的 undo/redo 会把历史切片（含 `promptDocuments`）合并回 store，所以这里
+   * 只要盯着这个字段的变化，把新值灌回提示词模块即可。
+   *
+   * 比**内容**而不是引用：恢复动作会让提示词模块 notify，而那个 notify 若又被
+   * 用来写 store，就会绕回这里形成**无限递归**（主线程卡死）。
+   */
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    let lastDocuments = canvasStore.getState().promptDocuments;
+    const unsubscribe = canvasStore.subscribe((state) => {
+      const documents = state.promptDocuments;
+      if (promptContentDocumentMapsEqual(documents, lastDocuments)) {
+        lastDocuments = documents;
+        return;
+      }
+      lastDocuments = documents;
+      /*
+       * 用**按 key 的增量恢复**，不是 `restoreAll`。
+       *
+       * `restoreAll` 的语义是「整个画布回到这份快照」—— 快照里没有的节点会被
+       * **清空**。那是存档恢复该有的语义，但**撤销**只回滚一步，不该把这一步
+       * 之外的内容清掉：用户删掉一个提示词节点再撤销，节点回来了，它的提示词
+       * 却被清空了。
+       */
+      const result = promptContents.restoreSubset(documents);
+      if (!result.ok) {
+        frontendLog(
+          "warn",
+          `[canvas] 撤销恢复提示词失败，节点：${result.invalidNodeKeys.join(", ")}`,
+        );
+      }
+    });
+    return unsubscribe;
+  }, [canvasHydrated, canvasStore, promptContents]);
+
   useEffect(() => {
     if (!canvasHydrated) return;
     documentChanged();
     let lastNodes = canvasStore.getState().nodesById;
     let lastEdges = canvasStore.getState().assetEdges;
+    let lastGroups = canvasStore.getState().groups;
     let lastZoom = canvasStore.getState().zoom;
     let lastPan = canvasStore.getState().pan;
     return canvasStore.subscribe((state) => {
-      if (
-        state.nodesById === lastNodes &&
-        state.assetEdges === lastEdges &&
-        state.zoom === lastZoom &&
-        state.pan === lastPan
-      )
-        return;
+      // 分组元数据（名称、折叠态）也是画布文档的一部分：只改分组时同样要排期保存，
+      // 否则存档里的 collapsed 会停在旧值，重开画布就丢掉了这次折叠/展开。
+      const contentChanged =
+        state.nodesById !== lastNodes ||
+        state.assetEdges !== lastEdges ||
+        state.groups !== lastGroups;
+      const viewChanged = state.zoom !== lastZoom || state.pan !== lastPan;
+      if (!contentChanged && !viewChanged) return;
       lastNodes = state.nodesById;
       lastEdges = state.assetEdges;
+      lastGroups = state.groups;
       lastZoom = state.zoom;
       lastPan = state.pan;
+      // 用户命令（成组、改名、折叠、粘贴、撤销、拖动提交）立刻落盘：明确的一次操作
+      // 不该排在防抖窗口之后，否则紧接着切画布或关窗就会丢掉这次改动。被动测量
+      // （尺寸回存、选中同步）、机器批写与视图变化仍走防抖，避免连续写入打爆落盘。
+      if (contentChanged && canvasStore.lastWriteWasUserCommand()) {
+        void flushCanvasDocument().catch(() => undefined);
+        return;
+      }
       documentChanged();
     });
-  }, [canvasHydrated, documentChanged, canvasStore]);
+  }, [canvasHydrated, documentChanged, canvasStore, flushCanvasDocument]);
+
+  // 首次进入画布时自动弹 4 步引导；看过之后不再自动弹（浮坞「教程」格仍可打开）。
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    if (readOnboardingSeen()) return;
+    setGuideOpen(true);
+  }, [canvasHydrated]);
 
   useEffect(() => {
     if (!canvasHydrated || !active) return;
@@ -3028,7 +2735,7 @@ export function WorkspaceApp({
             }
             // 素材库 module 返回的领域错误直接展示 message；IPC 错误保留完整 JSON。
             // 两种情况的完整详情都进入日志。
-            setAssetsError(error instanceof Error ? error.message : formatted);
+            setAssetsError(backendErrorMessage(error));
             setCloudAssets([]);
             setLibraryError(true);
             frontendLog(
@@ -3176,7 +2883,7 @@ export function WorkspaceApp({
         (error: unknown) => {
           if (requestId !== localAssetsRequestRef.current) return;
           const formatted = formatRawBackendError(error);
-          setLocalAssetsError(error instanceof Error ? error.message : formatted);
+          setLocalAssetsError(backendErrorMessage(error));
           setLocalLibraryError(true);
           frontendLog(
             "error",
@@ -3208,7 +2915,7 @@ export function WorkspaceApp({
         (error: unknown) => {
           const formatted = formatRawBackendError(error);
           frontendLog("error", `[assets] 本地素材分组读取失败: 错误: ${formatted}`);
-          setLocalGroupsError(error instanceof Error ? error.message : formatted);
+          setLocalGroupsError(backendErrorMessage(error));
         },
       )
       .finally(() => setLocalGroupsLoading(false));
@@ -3250,7 +2957,7 @@ export function WorkspaceApp({
             const formatted = formatRawBackendError(error);
             frontendLog("error", `[assets] 本地素材分组创建失败: 错误: ${formatted}`);
             // 同名冲突最常见；弹窗挡着面板错误区，直接 toast 给出结论。
-            toast.error("新建本地分组失败", { description: formatted });
+            toast.error("新建本地分组失败", { description: backendErrorMessage(error) });
           },
         )
         .finally(() => setCreatingLocalGroup(false));
@@ -3283,7 +2990,7 @@ export function WorkspaceApp({
               "error",
               `[assets] 本地素材分组删除失败: groupId=${groupId}, 错误: ${formatted}`,
             );
-            setLocalAssetsError(error instanceof Error ? error.message : formatted);
+            setLocalAssetsError(backendErrorMessage(error));
           },
         )
         .finally(() => setDeletingLocalAssetGroupId(null));
@@ -3316,7 +3023,7 @@ export function WorkspaceApp({
         (error: unknown) => {
           const formatted = formatRawBackendError(error);
           frontendLog("error", `[assets] 本地素材移动分组失败: 错误: ${formatted}`);
-          toast.error("移动分组失败", { description: formatted });
+          toast.error("移动分组失败", { description: backendErrorMessage(error) });
         },
       );
     },
@@ -3391,7 +3098,7 @@ export function WorkspaceApp({
         (error: unknown) => {
           if (requestId !== objectStorageRequestRef.current) return;
           const formatted = formatRawBackendError(error);
-          setObjectStorageError(formatted);
+          setObjectStorageError(backendErrorMessage(error));
           setObjectStorageLibraryError(true);
           frontendLog("error", `[assets] 对象存储索引读取失败: 来源=${source}, 错误=${formatted}`);
         },
@@ -3413,7 +3120,7 @@ export function WorkspaceApp({
         `对象存储同步完成：新增 ${summary.imported} 项，已有 ${summary.skippedExisting} 项`,
       );
     } catch (error) {
-      const message = formatRawBackendError(error);
+      const message = backendErrorMessage(error);
       setObjectStorageError(message);
       toast.error(`对象存储同步失败：${message}`);
     } finally {
@@ -3503,7 +3210,7 @@ export function WorkspaceApp({
               "error",
               `[assets] 素材库分组创建失败: providerConnectionId=${providerConnectionId}, 错误: ${formatted}`,
             );
-            setAssetsError(error instanceof Error ? error.message : formatted);
+            setAssetsError(backendErrorMessage(error));
           },
         )
         .finally(() => setCreatingGroup(false));
@@ -3549,7 +3256,7 @@ export function WorkspaceApp({
               "error",
               `[assets] 素材库分组删除失败: providerConnectionId=${providerConnectionId}, groupId=${groupId}, 错误: ${formatted}`,
             );
-            setAssetsError(error instanceof Error ? error.message : formatted);
+            setAssetsError(backendErrorMessage(error));
           },
         )
         .finally(() => setDeletingAssetGroupId(null));
@@ -3590,7 +3297,7 @@ export function WorkspaceApp({
               "error",
               `[assets] 云端素材改名失败: assetId=${asset.id}, 错误: ${formatted}`,
             );
-            setAssetsError(error instanceof Error ? error.message : formatted);
+            setAssetsError(backendErrorMessage(error));
           },
         )
         .finally(() => setRenamingAssetId(null));
@@ -3865,7 +3572,7 @@ export function WorkspaceApp({
         try {
           stagingConfig = await tosStagingClient.getConfig();
         } catch (error) {
-          reportError(`对象存储配置读取失败：${formatRawBackendError(error)}`);
+          reportError(`对象存储配置读取失败：${backendErrorMessage(error)}`);
           return 0;
         }
         if (stagingConfig == null || !stagingConfig.enabled) {
@@ -4000,11 +3707,11 @@ export function WorkspaceApp({
                 : entry,
             ),
           );
-          if (destination === "cloud") setAssetsError(formatRawBackendError(error));
+          if (destination === "cloud") setAssetsError(backendErrorMessage(error));
           else if (destination === "object_storage")
-            setObjectStorageError(formatRawBackendError(error));
-          else setLocalAssetsError(formatRawBackendError(error));
-          if (uploadOutsideCurrentLibrary) toast.error(`上传失败：${formatRawBackendError(error)}`);
+            setObjectStorageError(backendErrorMessage(error));
+          else setLocalAssetsError(backendErrorMessage(error));
+          if (uploadOutsideCurrentLibrary) toast.error("上传失败", { description: backendErrorMessage(error) });
         }
       }
       if (unsupportedFiles.length > 0) {
@@ -4027,7 +3734,7 @@ export function WorkspaceApp({
       if (startedCount === 0 && firstError != null && realPersonGroup) {
         throw firstError instanceof Error
           ? firstError
-          : new Error(formatRawBackendError(firstError));
+          : new Error(backendErrorMessage(firstError));
       }
       return startedCount;
     },
@@ -4069,7 +3776,7 @@ export function WorkspaceApp({
         try {
           stagingConfig = await tosStagingClient.getConfig();
         } catch (error) {
-          toast.error(`对象存储配置读取失败：${formatRawBackendError(error)}`);
+          toast.error("对象存储配置读取失败", { description: backendErrorMessage(error) });
           return;
         }
         if (stagingConfig == null || !stagingConfig.enabled) {
@@ -4183,7 +3890,7 @@ export function WorkspaceApp({
           );
           uploadJobToOutputRef.current.delete(pendingId);
           objectStorageUploadJobToOutputRef.current.delete(pendingId);
-          toast.error(`上传失败：${formatRawBackendError(error)}`);
+          toast.error("上传失败", { description: backendErrorMessage(error) });
         }
       }
       const skipped = outputKeys.length - saved.length;
@@ -4289,7 +3996,7 @@ export function WorkspaceApp({
             : `已保存「${asset.name}」到${targetName}`,
         );
       } catch (error) {
-        toast.error(`保存素材失败：${formatRawBackendError(error)}`);
+        toast.error("保存素材失败", { description: backendErrorMessage(error) });
       } finally {
         toast.dismiss(toastId);
         savingExistingAssetsRef.current.delete(saveKey);
@@ -4428,6 +4135,20 @@ export function WorkspaceApp({
             );
             if (next) promptContents.restoreDocument(nodeKey, next);
           }
+          /*
+           * 显式排期落盘。
+           *
+           * 提示词内容住在提示词模块里，**不进画布 store**，所以内容变化不会
+           * 触发 store 订阅里的落盘；节点卡里的编辑器靠 input 事件冒泡到画布视口
+           * 触发排期，而独立编辑区（视口之外）的冒泡到不了视口。
+           *
+           * 这里是**程序改写**（素材自愈后把 @引用换到新素材身份），既没有
+           * input 事件，也没有「编辑器已挂载」的订阅者（未挂载的节点连
+           * promptContents.subscribe 都没建）——不显式排期，这次改写就只留在
+           * 内存里：界面上看着是对的，重开画布后 @引用又指回已删除的旧素材。
+           * 这正是 AGENTS.md 点名的「排期与落盘都正常，但重开画布就丢」那一类。
+           */
+          scheduleCanvasSaveRef.current?.();
           previewRepairJobsRef.current.delete(payload.jobId);
         }
       } else if (status === "failed" || status === "interrupted") {
@@ -4723,246 +4444,50 @@ export function WorkspaceApp({
     [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
   );
 
-  /** 创建剧本转工业级分镜脚本节点；V5.0 技能与历史均由文本模型通道注入。 */
-  const createStoryboardNode = useCallback(
+  /** 在画布上创建智能剪辑节点（照抄原站 liblib 的 `video-clip` 节点）。 */
+  const createVideoClipNode = useCallback(
     (x: number, y: number) => {
-      const position = dropPosition(x, y, SCREENPLAY_NODE_WIDTH, SCREENPLAY_NODE_HEIGHT);
-      const node: StoryboardNodeData = {
-        key: storyboardNodeKey(),
-        kind: "storyboard",
+      const position = dropPosition(x, y, VIDEO_CLIP_NODE_WIDTH, VIDEO_CLIP_NODE_HEIGHT);
+      const index = canvasNodesOfState(canvasStore.getState(), "videoClip").length + 1;
+      const node: VideoClipNodeData = {
+        key: videoClipNodeKey(),
+        kind: "video_clip",
+        name: videoClipNodeName(index),
         ...position,
-        config: createScreenplayNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
+        config: {
+          modeKey: "default",
+          aspectRatio: VIDEO_CLIP_DEFAULT_PARAMS.aspectRatio,
+          durationSeconds: VIDEO_CLIP_DEFAULT_PARAMS.durationSeconds,
+          resolution: VIDEO_CLIP_DEFAULT_PARAMS.resolution,
+          outputName: `智能剪辑成片 ${index}`,
+        },
       };
       return node;
     },
-    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
-  );
-
-  /** 创建爆款视频复刻节点；视频输入由连线提供，技能本身不执行下载。 */
-  const createViralRemixNode = useCallback(
-    (x: number, y: number) => {
-      const position = dropPosition(x, y, VIRAL_REMIX_NODE_WIDTH, VIRAL_REMIX_NODE_HEIGHT);
-      const node: ViralRemixNodeData = {
-        key: viralRemixNodeKey(),
-        kind: "viral_remix",
-        ...position,
-        config: createViralRemixNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
-      };
-      return node;
-    },
-    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
-  );
-
-  /** 在画布上创建本地视频拼接与合成节点。 */
-  const createVideoComposerNode = useCallback(
-    (x: number, y: number) => {
-      const position = dropPosition(x, y, VIDEO_COMPOSER_NODE_WIDTH, VIDEO_COMPOSER_NODE_HEIGHT);
-      const node: VideoComposerNodeData = {
-        key: videoComposerNodeKey(),
-        kind: "video_composer",
-        ...position,
-        config: { outputName: "合成视频", inputOrder: [] },
-      };
-      return node;
-    },
-    [dropPosition],
-  );
-
-  /** 在画布上创建网络爆款视频下载节点（内置 yt-dlp 引擎的本地工具）。 */
-  const createVideoDownloaderNode = useCallback(
-    (x: number, y: number) => {
-      const position = dropPosition(
-        x,
-        y,
-        VIDEO_DOWNLOADER_NODE_WIDTH,
-        VIDEO_DOWNLOADER_NODE_HEIGHT,
-      );
-      const node: VideoDownloaderNodeData = {
-        key: videoDownloaderNodeKey(),
-        kind: "video_downloader",
-        ...position,
-        config: { url: "" },
-      };
-      return node;
-    },
-    [dropPosition],
-  );
-
-  /** 在画布上创建视频抽帧节点（复用内置 FFmpeg 引擎的本地工具）。 */
-  const createFrameExtractorNode = useCallback(
-    (x: number, y: number) => {
-      const position = dropPosition(
-        x,
-        y,
-        VIDEO_FRAME_EXTRACTOR_NODE_WIDTH,
-        VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT,
-      );
-      const node: VideoFrameExtractorNodeData = {
-        key: frameExtractorNodeKey(),
-        kind: "frame_extractor",
-        ...position,
-        config: { timestamps: [], videoPath: "" },
-      };
-      return node;
-    },
-    [dropPosition],
+    [canvasStore, dropPosition],
   );
 
   /** 先准备完整节点，再由菜单将节点和可选连线一次写入。 */
   const createQuickAddEntry = (kind: CanvasQuickAddKind, x: number, y: number): CanvasNodeEntry => {
     switch (kind) {
+      case "text":
+        return { type: "gen", data: createGenNode("prompt", x, y) };
       case "image":
+        return { type: "gen", data: createGenNode("image", x, y) };
       case "video":
-      case "prompt":
-        return { type: "gen", data: createGenNode(kind, x, y) };
+        return { type: "gen", data: createGenNode("video", x, y) };
       case "screenplay":
         return { type: "screenplay", data: createScreenplayNode(x, y) };
-      case "storyboard":
-        return { type: "storyboard", data: createStoryboardNode(x, y) };
-      case "viral_remix":
-        return { type: "viralRemix", data: createViralRemixNode(x, y) };
-      case "video_composer":
-        return { type: "videoComposer", data: createVideoComposerNode(x, y) };
-      case "video_downloader":
-        return { type: "videoDownloader", data: createVideoDownloaderNode(x, y) };
-      case "frame_extractor":
-        return { type: "frameExtractor", data: createFrameExtractorNode(x, y) };
+      case "video_clip":
+        return { type: "videoClip", data: createVideoClipNode(x, y) };
+      case "director":
+      case "shot_breakdown":
+      case "audio":
+      case "reference":
+        // 原站有、本项目后端尚未提供的节点类型：入口在菜单里已给出说明。
+        throw new Error("该节点类型后端暂未接入");
     }
   };
-
-  /**
-   * 从顶部工作流仓库一次性放入知识教学视频导演流程。
-   * 模板只保存当前项目供应商目录校准后的模型绑定；插入本身不会发起任何模型任务。
-   */
-  const insertWorkflow = useCallback(
-    async (kind: WorkflowKind) => {
-      try {
-        const anchor = viewportCenterBoardCoordinates();
-        const scale = flowInstanceRef.current?.getZoom() ?? zoom / 100;
-        const visibleHeight =
-          (canvasViewportRef.current?.getBoundingClientRect().height ?? 0) / scale;
-        // 仓库展开时可视区域较矮，先保证折叠节点的标题与需求输入留在视口内。
-        const topInset =
-          visibleHeight > 0
-            ? Math.max(0, (KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT + 48 - visibleHeight) / 2)
-            : 0;
-        // 模板工厂经注册表按需加载，保留工作流模板代码的分块加载。
-        const createWorkflow = await workflowKindDefinitionOf(kind).loadTemplate();
-        const workflow = createWorkflow({
-          anchor: { x: anchor.x, y: anchor.y + topInset },
-          occupied: occupiedNodeRects,
-          viewportWidth: window.innerWidth,
-          nodeModelSelections,
-          providerCatalog,
-          providerCatalogLoaded,
-        });
-        insertSubgraph(workflow.nodes, workflow.edges, {
-          selectNodeKey: workflow.selectedNodeKey,
-        });
-        setWorkflowRepositoryExpanded(false);
-        const { insertTitle, insertToastDescription } = workflowKindDefinitionOf(kind);
-        frontendLog(
-          "info",
-          `[canvas] ${insertTitle}工作流已放入画布: 节点=${workflow.nodes.length}, 连线=${workflow.edges.length}, 位置=(${Math.round(workflow.bounds.x)}, ${Math.round(workflow.bounds.y)})`,
-        );
-        toast.success(`${insertTitle}工作流已放入画布`, {
-          description: insertToastDescription,
-        });
-      } catch (error: unknown) {
-        const message = formatRawBackendError(error);
-        frontendLog("error", `[canvas] 工作流放入失败: ${message}`);
-        toast.error("工作流放入失败", {
-          description: (
-            <ErrorAlert
-              error={workflowUsageError("unknown", "工作流节点未能放入当前画布。", error)}
-              workflow
-            />
-          ),
-        });
-      }
-    },
-    [
-      insertSubgraph,
-      nodeModelSelections,
-      occupiedNodeRects,
-      providerCatalog,
-      providerCatalogLoaded,
-      viewportCenterBoardCoordinates,
-      zoom,
-    ],
-  );
-  const toggleWorkflowRepository = useCallback(
-    () => setWorkflowRepositoryExpanded((current) => !current),
-    [],
-  );
-
-  const updateKnowledgeVideoWorkflowConfig = useCallback(
-    (key: string, config: KnowledgeVideoWorkflowConfig) => {
-      const previousNode =
-        config.brandVideo || config.productScene || config.reelbench
-          ? snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key)
-          : undefined;
-      if (
-        previousNode &&
-        workflowExecutionInputSignature(previousNode) !==
-          workflowExecutionInputSignature({ ...previousNode, config })
-      ) {
-        // Edited inputs begin a new production run. The previous run retains its
-        // original media/model association in the durable archive.
-        const next = { ...config };
-        delete next.historyRunId;
-        config = next;
-      }
-      patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
-      if (
-        (config.brandVideo || config.musicVideo || config.productScene || config.reelbench) &&
-        !workflowSessionRegistry.isRunning(key)
-      ) {
-        sessions.clearRun(key);
-      }
-      if (
-        (config.productScene || config.reelbench) &&
-        config.historyRunId &&
-        previousNode &&
-        workflowExecutionInputSignature(previousNode) ===
-          workflowExecutionInputSignature({ ...previousNode, config }) &&
-        !workflowSessionRegistry.isRunning(key)
-      ) {
-        const node = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
-        if (node) {
-          const previous = sessions.pendingReviewHistoryEdit(key) ?? Promise.resolve();
-          const save = previous
-            .catch(() => undefined)
-            .then(async () => {
-              const { record } = await workflowHistoryClient.get(config.historyRunId!);
-              await workflowHistoryClient.save({
-                record: {
-                  ...record,
-                  nodeSnapshot: node,
-                  status: node.config.checkpoint.phase,
-                  message: node.config.reelbench
-                    ? `镜头表审核 · 已标注 ${node.config.checkpoint.reelbench?.draft?.shots.filter((shot) => Boolean(shot.frame?.trim())).length ?? 0} 镜`
-                    : `产品场景图审核 · 已选用 ${node.config.checkpoint.productScene?.rows.filter((row) => row.status === "accepted").length ?? 0} 张`,
-                  updatedAt: Date.now(),
-                },
-              });
-            });
-          sessions.trackReviewHistoryEdit(key, save);
-          void save.catch((error: unknown) =>
-            toast.error("工作流审核历史保存失败", {
-              description: (
-                <ErrorAlert
-                  error={workflowUsageError("storage", "工作流审核历史保存失败。", error)}
-                  workflow
-                />
-              ),
-            }),
-          );
-        }
-      }
-    },
-    [snapshotV2, patchNode, sessions, workflowSessionRegistry],
-  );
 
   const updateImageNodeConfig = useCallback(
     (key: string, config: ImageNodeConfig) => {
@@ -4971,42 +4496,260 @@ export function WorkspaceApp({
     [patchNode],
   );
 
-  const updateVideoComposerConfig = useCallback(
-    (key: string, config: VideoComposerNodeConfig) => {
-      patchNode("videoComposer", key, (node) => ({ ...node, config }));
+  /** 智能剪辑节点配置（模式 / 参数 / 输出名）。 */
+  const updateVideoClipConfig = useCallback(
+    (key: string, config: Partial<VideoClipNodeConfig>) => {
+      patchNode("videoClip", key, (node) => ({ ...node, config: { ...node.config, ...config } }));
     },
     [patchNode],
   );
 
-  const updateVideoDownloaderConfig = useCallback(
-    (key: string, config: VideoDownloaderNodeConfig) => {
-      patchNode("videoDownloader", key, (node) => ({ ...node, config }));
+  /** 切换剪辑模式；模式变了，参数保持原站默认组合（比例 / 时长 / 清晰度不随模式变）。 */
+  const changeVideoClipMode = useCallback(
+    (key: string, modeKey: VideoClipModeKey) => {
+      updateVideoClipConfig(key, { modeKey });
     },
-    [patchNode],
+    [updateVideoClipConfig],
   );
 
-  const updateFrameExtractorConfig = useCallback(
-    (key: string, config: VideoFrameExtractorNodeConfig) => {
-      if (!config.checkpoint) {
-        frameExtractionQueuesRef.current.delete(key);
-        frameExtractorStartNodesRef.current.delete(key);
-        setFrameExtractorRuns((current) => {
-          if (!current[key]) return current;
-          const next = { ...current };
-          delete next[key];
+  /** 改参数：比例 / 时长 / 清晰度。 */
+  const changeVideoClipParams = useCallback(
+    (key: string, params: VideoClipParams) => {
+      updateVideoClipConfig(key, {
+        aspectRatio: params.aspectRatio,
+        durationSeconds: params.durationSeconds,
+        resolution: params.resolution,
+      });
+    },
+    [updateVideoClipConfig],
+  );
+
+  /**
+   * 点「尝试：」里的某个预设：切到该模式并把原站的预置提示词写进提示词模块。
+   *
+   * 原站预置素材是它自家的资源地址，这里不引入外链素材——模式与提示词先落位，
+   * 素材由用户自己连进来（这也是原站空态提示的用意）。
+   *
+   * 同时把节点**单选**出来，让编辑层展开：编辑层是「选中即展开」，而「尝试」按钮
+   * 为了不触发拖拽会吃掉冒泡，不显式选中就会写完配置却什么都看不到（面板不出现）。
+   * 这里必须连框选/多选一起清掉——编辑层的展开条件是「未框选且恰好选中一个」，
+   * 只 selectNode 的话，多选残留会让面板照样不出现。
+   */
+  const applyVideoClipPreset = useCallback(
+    (key: string, modeKey: string) => {
+      const mode = videoClipMode(modeKey);
+      updateVideoClipConfig(key, { modeKey: mode.modeKey });
+      if (mode.preset?.prompt) {
+        promptContents.replaceText(key, mode.preset.prompt, []);
+      }
+      setNodeMarquee(false);
+      setMarqueeNodeKeys(new Set());
+      selectNode(key);
+    },
+    [promptContents, updateVideoClipConfig, selectNode],
+  );
+
+  /**
+   * 「打开智能剪辑」：原站由此进入视频剪辑时间轴编辑器（多层时间轴 / 字幕 / 转场 /
+   * 导出工程）。本项目后端尚未接入该编辑器，按项目约定给出明确说明，不静默失败。
+   */
+  const handleOpenVideoClipEditor = useCallback(() => {
+    toast.error("视频剪辑时间轴编辑器后端暂未接入", {
+      description: "当前只能按提示词合成成片；字幕轨、转场与工程导出尚未接入。",
+    });
+  }, []);
+
+  /** 「＋参考」：从素材库选参考的入口后端暂未接入，提示词节点连线仍可传素材。 */
+  const handleOpenVideoClipReferencePicker = useCallback(() => {
+    toast.error("参考素材选择后端暂未接入：可从节点左侧手柄的「引用该节点生成」接入素材");
+  }, []);
+
+  /**
+   * 发起智能剪辑合成。
+   *
+   * 照抄原站的提交链路：提示词 + 素材 + 模式参数 → 后端合成请求 → 生成任务，
+   * 成片作为一条视频产物落在节点右侧。合成进行中不允许重复发起（原站同款：
+   * 「智能剪辑进行中，完成后可再次发起」）。
+   */
+  const startVideoClip = useCallback(
+    async (nodeKey: string) => {
+      const node = canvasNodesNow("videoClip").find((item) => item.key === nodeKey);
+      if (!node) return;
+      if (startingVideoClipKeys.has(nodeKey)) {
+        setNodeStartError(nodeKey, "智能剪辑进行中，完成后可再次发起。");
+        return;
+      }
+      const mode = videoClipMode(node.config.modeKey);
+      const prepared = promptContents.preparePlainText(nodeKey);
+      const prompt = prepared?.ok === true ? prepared.text.trim() : "";
+      if (mode.promptRequired && !prompt) {
+        setNodeStartError(nodeKey, "请填写提示词");
+        return;
+      }
+      const inputs = videoClipInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
+      const slots = assignVideoClipSlots(mode, inputs);
+      const issue = videoClipSlotIssue(mode, slots);
+      if (issue) {
+        setNodeStartError(nodeKey, issue);
+        return;
+      }
+      // 有素材没被当前模式采用（多为切换模式后残留，或超过槽位上限）：
+      // 它们不会进合成载荷，必须明确告知用户，不能静默丢弃。
+      const unused = videoClipUnusedMaterials(mode, inputs, slots);
+      if (unused.overflow.length > 0) {
+        const detail = unused.overflow
+          .map((entry) => `${entry.label}最多 ${entry.max} 个（还有 ${entry.count} 个素材未使用）`)
+          .join("；");
+        setNodeStartError(nodeKey, `${detail}，请解绑多余的素材或换用其它素材。`);
+        return;
+      }
+      if (unused.unmatched.length > 0) {
+        setNodeStartError(
+          nodeKey,
+          `当前模式下有 ${unused.unmatched.length} 个素材不参与合成（节点类型与槽位不匹配），请解绑它们或切换到匹配的模式。`,
+        );
+        return;
+      }
+      const selection = resolveGenerationSelection(
+        "video",
+        nodeModelSelections.video,
+        providerCatalog,
+      );
+      if (!selection) {
+        setNodeStartError(
+          nodeKey,
+          "当前没有可用的视频模型，请先在「视频生成」节点里选好供应商与模型。",
+        );
+        return;
+      }
+      const materials = mode.materialSlots.flatMap((slot) => {
+        const filled = slots.find((entry) => entry.slotKey === slot.slotKey)?.items ?? [];
+        return filled.map((item) => ({
+          slotKey: slot.slotKey,
+          nodeType: item.nodeType,
+          displayName: item.name,
+          role: slot.role ?? "",
+          text: item.nodeType === "text" ? (item.text ?? "") : null,
+          target: item.target ?? null,
+        }));
+      });
+      setNodeStartError(nodeKey, null);
+      setStartingVideoClipKeys((current) => new Set(current).add(nodeKey));
+      try {
+        const taskId = await videoClipClient.start({
+          canvasId,
+          sourceNodeId: nodeKey,
+          mode: VIDEO_CLIP_BACKEND_MODES[mode.modeKey] as VideoClipMode,
+          prompt,
+          materials,
+          params: resolveVideoClipParams(node.config),
+          providerConnectionId: nodeModelSelections.video.providerId,
+          modelDefinitionId: nodeModelSelections.video.modelDefinitionId,
+          operation: "video_generation",
+          outputName: node.config.outputName,
+        });
+        addOutput((current, nodesById) => ({
+          key: outputNodeKey(),
+          resultKey: null,
+          sourceNodeId: nodeKey,
+          taskId,
+          mediaType: "video",
+          finalPath: null,
+          previewSrc: null,
+          name: node.config.outputName,
+          ...nextPreparedMediaOutputSlot(
+            {
+              x: node.x,
+              y: node.y,
+              width: node.measured?.width ?? VIDEO_CLIP_NODE_WIDTH,
+              height: 0,
+            },
+            current,
+            outputPlacementOptionsFor(nodesById, nodeKey),
+          ),
+        }));
+        toast.success("智能剪辑已提交，完成后会生成成片。");
+      } catch (error) {
+        setNodeStartError(nodeKey, backendErrorMessage(error));
+      } finally {
+        setStartingVideoClipKeys((current) => {
+          const next = new Set(current);
+          next.delete(nodeKey);
           return next;
         });
       }
-      patchNode("frameExtractor", key, (node) => ({ ...node, config }));
     },
-    [patchNode, setFrameExtractorRuns],
+    [
+      addOutput,
+      canvasId,
+      canvasNodesNow,
+      canvasStore,
+      nodeModelSelections.video,
+      outputPlacementOptionsFor,
+      promptContents,
+      providerCatalog,
+      setNodeStartError,
+      startingVideoClipKeys,
+    ],
   );
 
   const updatePromptNodeConfig = useCallback(
     (key: string, config: PromptNodeConfig) => {
-      patchNode("gen", key, (node) => (node.kind === "prompt" ? { ...node, config } : node));
+      /*
+       * 提示词**打字**要合并历史；**离散设置**（换模型 / 换模式 / 换任务）不要。
+       *
+       * 每击一键就往撤销栈里塞一条记录：200 字就把栈填满，真正的操作（成组、粘贴）
+       * 会被打字挤出撤销栈，Ctrl+Z 一次也只退一个字符。store 里已有
+       * runWithCoalescedHistory（500ms 窗口，包裹期写入保留最早的变更前快照、收口时
+       * 补一条记录），打字走它——用户预期是「一次撤销退一段」，不是「退一个字」。
+       *
+       * 但包裹期写入**不再算用户命令**（`lastWriteWasUserCommand()` 为 false），
+       * 于是落盘从「每击键立即写库」变成 1 秒防抖。这对打字是对的（本来就该防抖），
+       * 对**离散设置**却是回退：换完模型立刻关窗/崩溃，这次设置就丢了
+       * （而图片/视频节点改同样的设置仍然是立即落盘，行为不一致）。
+       *
+       * 所以这里按「离散设置是否变化」分流：变了就走普通 patchNode（立即落盘、
+       * 一步撤销），只有纯内容变化才进合并窗口。
+       */
+      const previousNode = canvasNodesNow("gen").find((node) => node.key === key);
+      const previous = previousNode?.kind === "prompt" ? previousNode.config : undefined;
+      const discreteChanged =
+        previous == null ||
+        previous.modelSelection.providerId !== config.modelSelection.providerId ||
+        previous.modelSelection.modelDefinitionId !== config.modelSelection.modelDefinitionId ||
+        previous.task !== config.task ||
+        previous.mode !== config.mode;
+      /*
+       * 提示词 canonical 快照与节点写入**同批**落下。
+       *
+       * 撤销栈只存 `config.generatedPrompt` 这份纯文本镜像（canonical 不在历史里），
+       * 所以撤销只能靠纯文本回灌 canonical —— **有损**：附件与 @引用会丢，块结构与
+       * 行内 marks 也会被压平。把 canonical 快照放进 store 的 `promptDocuments`
+       * 字段后，zundo 的历史里就带着「上一步的完整 canonical」，撤销可以精确还原。
+       *
+       * 必须**同一次 set**：zundo 记录的是 set 之前的完整 state，分两次写的话，
+       * 第一次写完历史里就已经是新快照，撤销恢复回来的是当前内容 —— 等于没撤销。
+       */
+      const promptDocuments = promptContents.snapshotAll();
+      if (discreteChanged) {
+        patchNode(
+          "gen",
+          key,
+          (node) => (node.kind === "prompt" ? { ...node, config } : node),
+          promptDocuments,
+        );
+        return;
+      }
+      runWithCoalescedHistory(() => {
+        patchNode(
+          "gen",
+          key,
+          (node) => (node.kind === "prompt" ? { ...node, config } : node),
+          promptDocuments,
+        );
+      });
     },
-    [patchNode],
+    [canvasNodesNow, patchNode, promptContents, runWithCoalescedHistory],
   );
 
   const updateScreenplayNodeConfig = useCallback(
@@ -5059,7 +4802,7 @@ export function WorkspaceApp({
           });
         }
       } catch (error) {
-        const message = formatRawBackendError(error);
+        const message = backendErrorMessage(error);
         setNodeStartError(nodeKey, message);
         toast.error("读取参考素材失败", { description: message });
       }
@@ -5076,20 +4819,6 @@ export function WorkspaceApp({
           materials: (node.config.materials ?? []).filter((material) => material.id !== materialId),
         },
       }));
-    },
-    [patchNode],
-  );
-
-  const updateStoryboardNodeConfig = useCallback(
-    (key: string, config: ScreenplayNodeConfig) => {
-      patchNode("storyboard", key, (node) => ({ ...node, config }));
-    },
-    [patchNode],
-  );
-
-  const updateViralRemixNodeConfig = useCallback(
-    (key: string, config: ViralRemixNodeConfig) => {
-      patchNode("viralRemix", key, (node) => ({ ...node, config }));
     },
     [patchNode],
   );
@@ -5135,9 +4864,6 @@ export function WorkspaceApp({
       const videoMaterials = promptVideoMaterials(nodeKey);
       const isFpvPath = node.config.mode === "fpv_path";
       const isFightPromptMaster = node.config.mode === "fight_prompt_master";
-      const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
-      const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
-      const isGptImage2Style = node.config.mode === "gpt_image_2_style";
       const isCinematicDialogue = node.config.mode === "cinematic_dialogue";
       const dialogueGuard: CinematicDialogueGuard = node.config.cinematicDialogueGuard ?? {
         lockedLines: "",
@@ -5160,36 +4886,6 @@ export function WorkspaceApp({
               node.config.generatedPrompt.trim()
             ? "请继续优化当前输出中的打斗提示词，保留已确认的角色、动作逻辑与用户要求。"
             : "";
-      const defaultMultiGridPrompt =
-        isMultiGridStoryboard &&
-        node.config.task === "generate" &&
-        (visionImages.length > 0 || videoMaterials.length > 0)
-          ? "请根据已连接参考素材中可见的人物、场景与动作提出多宫格分镜建议，参考画面不等于已有剧本；沿用对话中已确认的剧情和参数，仅在宫格数量、目标时长或风格缺失时补问，确认后生成图片与视频两套提示词。"
-          : isMultiGridStoryboard &&
-              node.config.task === "optimize" &&
-              node.config.generatedPrompt.trim()
-            ? "请继续优化当前输出中的多宫格分镜方案，沿用已确认的宫格数量、目标时长、风格、剧情与交付范围，完整保留本次所需的提示词和说明。"
-            : "";
-      const defaultStoryboardPrompt =
-        isStoryboardPrompt &&
-        node.config.task === "generate" &&
-        (visionImages.length > 0 || videoMaterials.length > 0)
-          ? "请根据已连接参考素材中实际可见的人物、场景与风格，结合对话中已确认的用途和剧情，生成可直接交给图片节点的完整整张故事板提示词。仅将可见内容作为参考，不把参考画面当作已确认的剧情；合理补全可推断细节，必要的核心信息缺失时再补问。"
-          : isStoryboardPrompt &&
-              node.config.task === "optimize" &&
-              node.config.generatedPrompt.trim()
-            ? "请继续优化当前输出中的故事板提示词，保留已确认的用途、角色、剧情、格数、画幅和风格，返回可直接交给图片节点的完整整张故事板提示词。"
-            : "";
-      const defaultGptImage2StylePrompt =
-        isGptImage2Style &&
-        node.config.task === "generate" &&
-        (visionImages.length > 0 || videoMaterials.length > 0)
-          ? "请根据已连接参考素材中实际可见的主体、构图与视觉风格，结合对话中已确认的图片用途，匹配风格库模板并生成可直接交给图片节点的完整图片提示词。保留已确认的主体、文字与画幅要求；不编造未提供的品牌、产品事实或读图结果。"
-          : isGptImage2Style &&
-              node.config.task === "optimize" &&
-              node.config.generatedPrompt.trim()
-            ? "请继续优化当前输出中的图片提示词，沿用已确认的图片用途、主体、文字、画幅与风格要求，结合风格库模板完善构图、材质和细节，返回可直接交给图片节点的完整提示词。"
-            : "";
       const defaultCinematicDialoguePrompt =
         isCinematicDialogue &&
         node.config.task === "generate" &&
@@ -5207,9 +4903,6 @@ export function WorkspaceApp({
         node.config.sourcePrompt.trim() ||
         defaultFpvPrompt ||
         defaultFightPrompt ||
-        defaultMultiGridPrompt ||
-        defaultStoryboardPrompt ||
-        defaultGptImage2StylePrompt ||
         defaultCinematicDialoguePrompt ||
         (canvasInputsFor(nodeKey).texts.length || canvasInputsFor(nodeKey).media.length
           ? "请依据已连接的文本和参考素材生成或优化提示词。"
@@ -5221,15 +4914,9 @@ export function WorkspaceApp({
               ? "请连接带路径标记的参考图，或填写飞行路径描述。"
               : isFightPromptMaster
                 ? "请连接参考图片或已保存的视频产物，或填写打斗创意与需求。"
-                : isMultiGridStoryboard
-                  ? "请填写剧情或分镜需求，或连接参考图片、已保存的视频产物。"
-                  : isStoryboardPrompt
-                    ? "请填写故事板用途与创意，或连接参考图片、已保存的视频产物。"
-                    : isGptImage2Style
-                      ? "请填写图片用途、主体或风格要求，或连接参考图片、已保存的视频产物。"
-                      : isCinematicDialogue
-                        ? "请填写对白创意、锁定原台词，或连接剧本文字、参考素材。"
-                        : "请输入创意或需求，再生成提示词。"
+                : isCinematicDialogue
+                  ? "请填写对白创意、锁定原台词，或连接剧本文字、参考素材。"
+                  : "请输入创意或需求，再生成提示词。"
             : "请输入需要优化的提示词。",
         );
         return;
@@ -5263,12 +4950,7 @@ export function WorkspaceApp({
         })),
       );
       if (
-        (isFpvPath ||
-          isFightPromptMaster ||
-          isMultiGridStoryboard ||
-          isStoryboardPrompt ||
-          isGptImage2Style ||
-          isCinematicDialogue) &&
+        (isFpvPath || isFightPromptMaster || isCinematicDialogue) &&
         node.config.generatedPrompt.trim()
       ) {
         contextHistory.push({ role: "当前输出提示词", content: node.config.generatedPrompt });
@@ -5321,24 +5003,19 @@ export function WorkspaceApp({
         "info",
         `[generation] 发起提示词节点请求: node=${nodeKey}, task=${node.config.task}, mode=${node.config.mode}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${sourcePrompt.length} 字符, 视觉素材 ${visionImages.length} 张, 视频素材 ${videoMaterials.length} 个`,
       );
-      void (async () => {
-        if (isGptImage2Style && !(await ensureRuntimeFeatureInstalled("image-style-library"))) {
-          setNodeStartError(nodeKey, "请先安装图片风格库组件，完成后再次点击生成。");
-          return null;
-        }
-        return promptNodeClient.run({
+      void promptNodeClient
+        .run({
           canvasId: canvasId,
           sourceNodeId: nodeKey,
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
-          mode: node.config.mode,
+          mode: resolvePromptOptimizationMode(node.config.mode),
           task: node.config.task,
           userPrompt: sourcePrompt,
           contextHistory,
           visionImages,
           referenceInputs: videoMaterials,
-        });
-      })()
+        })
         .then((result) => {
           if (!result) return;
           const dialogueResponse = isCinematicDialogue
@@ -5346,31 +5023,48 @@ export function WorkspaceApp({
             : null;
           const outputPrompt = dialogueResponse
             ? dialogueResponse.downstreamPrompt
-            : isGptImage2Style
-              ? cleanGptImage2Prompt(result.optimizedPrompt)
-              : cleanGeneratedPrompt(result.optimizedPrompt);
+            : cleanGeneratedPrompt(result.optimizedPrompt);
           const assistantText = dialogueResponse?.displayText ?? outputPrompt ?? "";
-          patchNode("gen", nodeKey, (item) =>
-            item.kind === "prompt"
-              ? {
-                  ...item,
-                  config: {
-                    ...item.config,
-                    generatedPrompt: outputPrompt ?? item.config.generatedPrompt,
-                    cinematicDialogueValidated:
-                      dialogueResponse?.status === "ready"
-                        ? true
-                        : isCinematicDialogue
-                          ? (item.config.cinematicDialogueValidated ?? false)
-                          : false,
-                    conversation: [
-                      ...(item.config.conversation ?? []),
-                      { id: promptMessageId(), role: "user", content: sourcePrompt },
-                      { id: promptMessageId(), role: "assistant", content: assistantText },
-                    ],
-                  },
-                }
-              : item,
+          /*
+           * AI 生成的提示词是**整篇替换**：先把提示词模块里的文档清空。
+           *
+           * 不清的话会留下旧附件：撤销回灌那条路径用的是「保留附件」的版本
+           * （`replaceTextKeepingAttachments`）—— 那是为撤销保数据的，代价是
+           * 「整篇替换」时旧附件会残留。这里提前清空，模块里就没有可保留的东西。
+           */
+          promptContents.replaceText(nodeKey, "", []);
+          /*
+           * 快照与节点写入**同批**落下：zundo 记录的是 set 之前的切片，分两次写
+           * 的话历史里已经是新快照，撤销恢复回来的是当前内容 —— 等于没撤销。
+           * （同批的快照取的是「模块清空之后」的状态，也就是 AI 生成的纯文本 ——
+           * 与撤销要恢复的「AI 生成之前」那份由 zundo 自己保留。）
+           */
+          const promptDocuments = promptContents.snapshotAll();
+          patchNode(
+            "gen",
+            nodeKey,
+            (item) =>
+              item.kind === "prompt"
+                ? {
+                    ...item,
+                    config: {
+                      ...item.config,
+                      generatedPrompt: outputPrompt ?? item.config.generatedPrompt,
+                      cinematicDialogueValidated:
+                        dialogueResponse?.status === "ready"
+                          ? true
+                          : isCinematicDialogue
+                            ? (item.config.cinematicDialogueValidated ?? false)
+                            : false,
+                      conversation: [
+                        ...(item.config.conversation ?? []),
+                        { id: promptMessageId(), role: "user", content: sourcePrompt },
+                        { id: promptMessageId(), role: "assistant", content: assistantText },
+                      ],
+                    },
+                  }
+                : item,
+            promptDocuments,
           );
           frontendLog(
             "info",
@@ -5384,7 +5078,7 @@ export function WorkspaceApp({
           const message =
             isCinematicDialogue && error instanceof Error
               ? error.message
-              : formatRawBackendError(error);
+              : backendErrorMessage(error);
           setNodeStartError(nodeKey, message);
           toast.error("提示词生成失败", { description: message });
           frontendLog("error", `[generation] 提示词节点请求失败: node=${nodeKey}, ${message}`);
@@ -5520,7 +5214,7 @@ export function WorkspaceApp({
           );
         })
         .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
+          const message = backendErrorMessage(error);
           setNodeStartError(nodeKey, message);
           frontendLog("error", `[generation] 剧本多轮对话失败: node=${nodeKey}, ${message}`);
         })
@@ -5572,311 +5266,12 @@ export function WorkspaceApp({
         }
         setNodeStartError(nodeKey, null);
       } catch (error) {
-        const message = `导出 Markdown 失败：${formatRawBackendError(error)}`;
+        const message = `导出 Markdown 失败：${backendErrorMessage(error)}`;
         setNodeStartError(nodeKey, message);
         frontendLog("error", `[canvas] 剧本 Markdown 导出失败: node=${nodeKey}, ${message}`);
       }
     },
     [canvasNodesNow, setNodeStartError],
-  );
-
-  /** 工业级分镜对话：V5.0 完整技能由后端每轮重新载入，节点全部历史逐条注入。 */
-  const handleRunStoryboardNode = useCallback(
-    (nodeKey: string) => {
-      if (startingNodeKeys.has(nodeKey)) return;
-      const node = canvasNodesNow("storyboard").find((item) => item.key === nodeKey);
-      if (!node) return;
-      const failWith = (message: string) => setNodeStartError(nodeKey, message);
-      if (!isDesktopRuntime()) {
-        failWith("工业级分镜模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
-        return;
-      }
-      const connected = canvasInputsFor(nodeKey);
-      const userPrompt =
-        node.config.composer.trim() ||
-        (connected.texts.length || connected.media.length
-          ? "请将已连接的剧本转换为工业级分镜脚本。"
-          : "");
-      if (!userPrompt) {
-        failWith("请连接参考文本或素材、粘贴剧本，或输入本轮分镜要求。");
-        return;
-      }
-      const provider = providerCatalog.find(
-        (entry) =>
-          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
-      );
-      const model = provider?.models.find(
-        (item) =>
-          item.definitionId === node.config.modelSelection.modelDefinitionId &&
-          isTextGenerationModel(item),
-      );
-      if (!provider || !model) {
-        failWith("请先在当前分镜节点中选择可用的文本模型。");
-        return;
-      }
-      const contextHistory: PromptOptimizationContextEntry[] = connected.texts.map((input) => ({
-        role: `已连接的上游 Markdown 剧本 · ${input.name}`,
-        content: input.text,
-      }));
-      contextHistory.push(
-        ...node.config.conversation.map((entry, index) => ({
-          role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "storyboard")}`,
-          content: entry.content,
-        })),
-      );
-      if (node.config.currentDocument.trim()) {
-        contextHistory.push({
-          role: DOCUMENT_SKILL_NODE_COPY.storyboard.currentDocumentLabel,
-          content: node.config.currentDocument,
-        });
-      }
-      setNodeStartError(nodeKey, null);
-      setStartingNodeKeys((current) => new Set(current).add(nodeKey));
-      frontendLog(
-        "info",
-        `[generation] 发起工业级分镜多轮对话: node=${nodeKey}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${userPrompt.length} 字符`,
-      );
-      void promptNodeClient
-        .run({
-          canvasId: canvasId,
-          sourceNodeId: nodeKey,
-          providerConnectionId: provider.provider.id,
-          modelDefinitionId: model.definitionId,
-          mode: "storyboard",
-          task: "generate",
-          userPrompt,
-          contextHistory,
-          referenceInputs: connected.media.map((input) => ({
-            target: input.target,
-            displayName: input.name,
-          })),
-        })
-        .then((result) => {
-          patchNode("storyboard", nodeKey, (item) => ({
-            ...item,
-            config: {
-              ...item.config,
-              composer: "",
-              currentDocument: result.optimizedPrompt,
-              conversation: [
-                ...item.config.conversation,
-                { id: screenplayMessageId(), role: "user", content: userPrompt },
-                {
-                  id: screenplayMessageId(),
-                  role: "assistant",
-                  content: result.optimizedPrompt,
-                },
-              ],
-            },
-          }));
-          frontendLog(
-            "info",
-            `[generation] 工业级分镜多轮对话完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符`,
-          );
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          setNodeStartError(nodeKey, message);
-          frontendLog("error", `[generation] 工业级分镜多轮对话失败: node=${nodeKey}, ${message}`);
-        })
-        .finally(() => {
-          // 完整结果已写入节点（或已失败），流式草稿不再需要。
-          clearStreamingText(nodeKey);
-          setStartingNodeKeys((current) => {
-            const next = new Set(current);
-            next.delete(nodeKey);
-            return next;
-          });
-        });
-    },
-    [
-      canvasId,
-      patchNode,
-      providerCatalog,
-      canvasInputsFor,
-      setNodeStartError,
-      startingNodeKeys,
-      canvasNodesNow,
-      clearStreamingText,
-    ],
-  );
-
-  const handleExportStoryboard = useCallback(
-    async (nodeKey: string) => {
-      const node = canvasNodesNow("storyboard").find((item) => item.key === nodeKey);
-      if (!node?.config.currentDocument.trim()) return;
-      const content = `${node.config.currentDocument.trimEnd()}\n`;
-      const fileName = markdownDocumentExportName(content, nodeKey, "工业级分镜脚本");
-      try {
-        if (isDesktopRuntime()) {
-          const filePath = await saveMarkdownDocumentToDesktop(
-            content,
-            fileName,
-            "Markdown 分镜脚本文档",
-          );
-          if (!filePath) return;
-          frontendLog(
-            "info",
-            `[canvas] 分镜脚本 Markdown 已导出: node=${nodeKey}, path=${filePath}`,
-          );
-        } else {
-          const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-          const url = URL.createObjectURL(blob);
-          const anchor = document.createElement("a");
-          anchor.href = url;
-          anchor.download = fileName;
-          anchor.click();
-          URL.revokeObjectURL(url);
-        }
-        setNodeStartError(nodeKey, null);
-      } catch (error) {
-        const message = `导出 Markdown 失败：${formatRawBackendError(error)}`;
-        setNodeStartError(nodeKey, message);
-        frontendLog("error", `[canvas] 分镜脚本 Markdown 导出失败: node=${nodeKey}, ${message}`);
-      }
-    },
-    [setNodeStartError, canvasNodesNow],
-  );
-
-  /** 爆款视频复刻：本地密集抽帧生成联系表，再把联系表与纯复刻技能交给多模态模型。 */
-  const handleRunViralRemixNode = useCallback(
-    (nodeKey: string) => {
-      if (startingNodeKeys.has(nodeKey)) return;
-      const node = canvasNodesNow("viralRemix").find((item) => item.key === nodeKey);
-      const resolved = canvasInputsFor(nodeKey);
-      const inputs = resolved.media.filter((input) => input.kind === "video");
-      if (!node) return;
-      const failWith = (message: string) => setNodeStartError(nodeKey, message);
-      if (!isDesktopRuntime()) {
-        failWith("爆款视频复刻只能在桌面应用中运行。请通过 Tauri 桌面端使用。");
-        return;
-      }
-      if (inputs.length === 0 || inputs.some((input) => !input.src)) {
-        failWith("当前上游没有可读取的视频。请提供视频来源，或先完成上游视频生成、下载。");
-        return;
-      }
-      const provider = providerCatalog.find(
-        (entry) =>
-          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
-      );
-      const model = provider?.models.find(
-        (item) =>
-          item.definitionId === node.config.modelSelection.modelDefinitionId &&
-          isTextGenerationModel(item),
-      );
-      if (!provider || !model) {
-        failWith("请先在当前复刻节点中选择可用的多模态文本模型。");
-        return;
-      }
-      setNodeStartError(nodeKey, null);
-      setStartingNodeKeys((current) => new Set(current).add(nodeKey));
-      frontendLog(
-        "info",
-        `[viral-remix] 开始本地密集抽帧: node=${nodeKey}, inputs=${inputs.length}`,
-      );
-      void import("../../lib/videoFrameSampler")
-        .then(async ({ buildVideoContactSheets }) => {
-          const documents: string[] = [];
-          for (const [index, input] of inputs.entries()) {
-            const contactSheets = await buildVideoContactSheets(input.src!);
-            const instructions = node.config.instructions.trim();
-            const userPrompt = [
-              `输入视频 ${index + 1}/${inputs.length}：${input.name}`,
-              `已验证时长：${contactSheets.duration.toFixed(3)} 秒`,
-              `全片抽帧：${contactSheets.overviewFrameCount} 帧；结尾 5 秒加密：${contactSheets.tailFrameCount} 帧；联系表：${contactSheets.sheets.length} 张。`,
-              instructions
-                ? `用户补充方向：${instructions}`
-                : "用户未指定额外方向，请执行技能默认复刻合同。",
-              ...resolved.texts.map((text) => `上游文档（${text.name}）：\n${text.text}`),
-              "静态联系表不包含可听声音；任何对白、音乐或音效判断都必须标记为待听觉确认。",
-            ].join("\n");
-            const result = await promptNodeClient.run({
-              canvasId: canvasId,
-              sourceNodeId: nodeKey,
-              providerConnectionId: provider.provider.id,
-              modelDefinitionId: model.definitionId,
-              mode: "viral_remix",
-              task: "generate",
-              userPrompt,
-              visionImages: contactSheets.sheets.map((sheet) => ({
-                dataUrl: sheet.dataUrl,
-                displayName: `${input.name} · ${sheet.displayName}`,
-              })),
-            });
-            documents.push(
-              inputs.length === 1
-                ? result.optimizedPrompt
-                : `# 视频 ${index + 1}：${input.name}\n\n${result.optimizedPrompt}`,
-            );
-            patchNode("viralRemix", nodeKey, (item) => ({
-              ...item,
-              config: { ...item.config, currentDocument: documents.join("\n\n---\n\n") },
-            }));
-          }
-          frontendLog(
-            "info",
-            `[viral-remix] 全部复刻方案完成: node=${nodeKey}, inputs=${inputs.length}`,
-          );
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          setNodeStartError(nodeKey, message);
-          frontendLog("error", `[viral-remix] 复刻失败: node=${nodeKey}, ${message}`);
-        })
-        .finally(() => {
-          // 完整结果已写入节点（或已失败），流式草稿不再需要。
-          clearStreamingText(nodeKey);
-          setStartingNodeKeys((current) => {
-            const next = new Set(current);
-            next.delete(nodeKey);
-            return next;
-          });
-        });
-    },
-    [
-      canvasId,
-      providerCatalog,
-      canvasInputsFor,
-      setNodeStartError,
-      startingNodeKeys,
-      canvasNodesNow,
-      patchNode,
-      clearStreamingText,
-    ],
-  );
-
-  const handleExportViralRemix = useCallback(
-    async (nodeKey: string) => {
-      const node = canvasNodesNow("viralRemix").find((item) => item.key === nodeKey);
-      if (!node?.config.currentDocument.trim()) return;
-      const content = `${node.config.currentDocument.trimEnd()}\n`;
-      const fileName = markdownDocumentExportName(content, nodeKey, "爆款视频复刻方案");
-      try {
-        if (isDesktopRuntime()) {
-          const filePath = await saveMarkdownDocumentToDesktop(
-            content,
-            fileName,
-            "Markdown 复刻方案",
-          );
-          if (!filePath) return;
-          frontendLog("info", `[canvas] 爆款视频复刻方案已导出: node=${nodeKey}, path=${filePath}`);
-        } else {
-          const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-          const url = URL.createObjectURL(blob);
-          const anchor = document.createElement("a");
-          anchor.href = url;
-          anchor.download = fileName;
-          anchor.click();
-          URL.revokeObjectURL(url);
-        }
-        setNodeStartError(nodeKey, null);
-      } catch (error) {
-        const message = `导出 Markdown 失败：${formatRawBackendError(error)}`;
-        setNodeStartError(nodeKey, message);
-        frontendLog("error", `[canvas] 爆款视频复刻方案导出失败: node=${nodeKey}, ${message}`);
-      }
-    },
-    [setNodeStartError, canvasNodesNow],
   );
 
   /** Add a new canvas projection for an asset; repeated additions always create a new instance. */
@@ -5943,37 +5338,15 @@ export function WorkspaceApp({
       );
       const screenplaySource = canvasNodesNow("screenplay").find((node) => node.key === fromKey);
       const outputSource = canvasNodesNow("output").find((node) => node.key === fromKey);
-      const downloaderSource = canvasNodesNow("videoDownloader").find(
-        (node) => node.key === fromKey,
-      );
       const generationTarget = canvasNodesNow("gen").find((node) => node.key === toKey);
-      const composerTarget = canvasNodesNow("videoComposer").find((node) => node.key === toKey);
-      const viralRemixTarget = canvasNodesNow("viralRemix").find((node) => node.key === toKey);
-      const frameExtractorTarget = canvasNodesNow("frameExtractor").find(
-        (node) => node.key === toKey,
-      );
-      const workflowTarget = canvasNodesNow("knowledgeVideoWorkflow").some(
-        (node) => node.key === toKey,
-      );
-      const storyboardTarget = canvasNodesNow("storyboard").find((node) => node.key === toKey);
       const result = connectCanvasStateNodes(fromKey, toKey);
       if (result.status !== "connected") return;
       const targetLabel = generationTarget
         ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}节点`
-        : composerTarget
-          ? "视频拼接与合成节点"
-          : viralRemixTarget
-            ? "爆款视频复刻节点"
-            : frameExtractorTarget
-              ? "视频抽帧节点"
-              : storyboardTarget
-                ? "剧本转工业级分镜脚本节点"
-                : workflowTarget
-                  ? "工作流节点"
-                  : `素材节点 ${toKey}`;
+        : `素材节点 ${toKey}`;
       frontendLog(
         "info",
-        `[canvas] ${promptSource ? "提示词" : screenplaySource ? "剧本" : downloaderSource ? "网络爆款视频下载" : outputSource ? `${outputSource.mediaType === "image" ? "图片" : "视频"}产物` : "素材"}连线建立: ${fromKey} → ${targetLabel}`,
+        `[canvas] ${promptSource ? "提示词" : screenplaySource ? "剧本" : outputSource ? `${outputSource.mediaType === "image" ? "图片" : "视频"}产物` : "素材"}连线建立: ${fromKey} → ${targetLabel}`,
       );
     },
     [connectCanvasStateNodes, canvasNodesNow],
@@ -5984,15 +5357,14 @@ export function WorkspaceApp({
     (groupId: string, toKey: string) => {
       if (assetGroupIdFromFlowId(toKey) != null) return;
       const snapshot = canvasStore.getState();
-      const group = assetGroupsFromNodes([
-        ...canvasNodesOfState(snapshot, "asset"),
-        ...canvasNodesOfState(snapshot, "output"),
-      ]).find((item) => item.groupId === groupId);
-      if (group == null) return;
+      const group = assetGroupsFromNodes(
+        Object.values(snapshot.nodesById).map((entry) => entry.data),
+      ).find((item) => item.groupId === groupId);
+      if (group == null || !group.members.every(isMediaGroupMember)) return;
       for (const member of group.members) connectCanvasNodes(member.key, toKey);
       frontendLog(
         "info",
-        `[canvas] 素材组连线: group=${groupId}, count=${group.members.length}, target=${toKey}, order=${group.members.map((member) => member.libraryPickOrder ?? "-").join(",")}`,
+        `[canvas] 素材组连线: group=${groupId}, count=${group.members.length}, target=${toKey}`,
       );
     },
     [connectCanvasNodes, canvasStore],
@@ -6133,78 +5505,42 @@ export function WorkspaceApp({
     [removeCanvasNode],
   );
 
-  const removeStoryboardNode = useCallback(
-    (key: string) => {
-      removeCanvasNode(key);
-      setGenNodeSizes((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setStartErrorsByNode((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setStartingNodeKeys((current) => {
-        if (!current.has(key)) return current;
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
-    },
-    [removeCanvasNode],
-  );
-
-  const removeViralRemixNode = useCallback(
-    (key: string) => {
-      removeCanvasNode(key);
-      setGenNodeSizes((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setStartErrorsByNode((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setStartingNodeKeys((current) => {
-        if (!current.has(key)) return current;
-        const next = new Set(current);
-        next.delete(key);
-        return next;
-      });
-    },
-    [removeCanvasNode],
-  );
-
-  /** 删除视频合成节点（保留已经生成的独立产物卡片）。 */
-  const removeVideoComposerNode = useCallback(
-    (key: string) => {
-      videoComposerAbortControllersRef.current.get(key)?.abort();
-      videoComposerAbortControllersRef.current.delete(key);
-      removeCanvasNode(key);
-      setVideoComposerRuns((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [removeCanvasNode, setVideoComposerRuns],
-  );
-
   /** 删除结果节点。 */
   const removeResultNode = useCallback(
     (key: string) => {
       removeCanvasNode(key);
     },
     [removeCanvasNode],
+  );
+
+  /** 删除智能剪辑节点（连同它的提示词内容与在途状态）。 */
+  const removeVideoClipNode = useCallback(
+    (key: string) => {
+      removeCanvasNode(key);
+      // 智能剪辑的提示词住在提示词模块里，不随节点删除清理就会残留；
+      // 存进 deletedPromptContentsRef 才能被撤销恢复。
+      const document = promptContents.remove(key);
+      if (document != null) {
+        deletedPromptContentsRef.current.set(key, document);
+        if (deletedPromptContentsRef.current.size > 200) {
+          const oldest = deletedPromptContentsRef.current.keys().next().value;
+          if (oldest != null) deletedPromptContentsRef.current.delete(oldest);
+        }
+      }
+      setStartErrorsByNode((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      setStartingVideoClipKeys((current) => {
+        if (!current.has(key)) return current;
+        const next = new Set(current);
+        next.delete(key);
+        return next;
+      });
+    },
+    [promptContents, removeCanvasNode],
   );
 
   /** 删除产物卡片（连同其与来源生成节点的虚线连线）。 */
@@ -6300,7 +5636,7 @@ export function WorkspaceApp({
           description: "请在绿幕流程中将它明确选为原视频或绿幕前景。",
         });
       } catch (error) {
-        toast.error("导入视频失败", { description: formatRawBackendError(error) });
+        toast.error("导入视频失败", { description: backendErrorMessage(error) });
       }
     },
     [snapshotV2, insertSubgraph],
@@ -6320,7 +5656,7 @@ export function WorkspaceApp({
         const greenScreen = node.config.greenScreen;
         const task = greenScreen.preparationTasks.find((entry) => entry.taskId === output.taskId);
         const prompt = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
-        if (!task || task.signature !== greenScreenWorkflowSignature(node.config, prompt))
+        if (!task || task.signature !== greenScreenNodeSignature(node.config, prompt))
           throw new Error(
             "绿幕制作设置或提示词已变化，请重新制作；旧视频仍保留在画布中，也可作为已有绿幕手动选用。",
           );
@@ -6376,7 +5712,7 @@ export function WorkspaceApp({
           description: "设置新场景并点击生成融合成片；制作阶段的原视频会保留在画布中。",
         });
       } catch (error) {
-        setNodeStartError(nodeKey, formatRawBackendError(error));
+        setNodeStartError(nodeKey, backendErrorMessage(error));
       }
     },
     [
@@ -6385,282 +5721,6 @@ export function WorkspaceApp({
       providerCatalog,
       insertSubgraph,
       updateVideoNodeConfig,
-      setNodeStartError,
-    ],
-  );
-
-  const openWhiteModelStudio = useCallback(
-    (nodeKey: string) => {
-      const current = snapshotV2({});
-      const node = current.genNodes.find((candidate) => candidate.key === nodeKey);
-      if (node?.kind === "video") {
-        if (!node.config.whiteModelStudio) {
-          updateVideoNodeConfig(nodeKey, {
-            ...node.config,
-            whiteModelStudio: createWhiteModelStudioDraft(),
-          });
-        }
-        setWhiteModelStudioNodeKey(nodeKey);
-        return;
-      }
-      if (node?.kind !== "image") return;
-      const images = studioImageInputsFromMedia(
-        createCanvasInputResolver(
-          canvasNodesByKeyFromDocument(current),
-          current.assetEdges,
-        )(nodeKey).media,
-      );
-      const base = node.config.whiteModelStudio ?? createWhiteModelBlockingDraft();
-      const first = images[0];
-      const next =
-        base.environment || !first
-          ? base
-          : {
-              ...base,
-              environment: { key: first.key, name: first.name, target: first.target },
-            };
-      if (!node.config.whiteModelStudio || next !== base) {
-        updateImageNodeConfig(nodeKey, { ...node.config, whiteModelStudio: next });
-      }
-      setWhiteModelStudioNodeKey(nodeKey);
-    },
-    [snapshotV2, updateVideoNodeConfig, updateImageNodeConfig],
-  );
-
-  const updateWhiteModelStudioDraft = useCallback(
-    (draft: WhiteModelStudioDraft) => {
-      if (!whiteModelStudioNodeKey) return;
-      patchNode("gen", whiteModelStudioNodeKey, (node) =>
-        node.kind === "video" || node.kind === "image"
-          ? { ...node, config: { ...node.config, whiteModelStudio: draft } }
-          : node,
-      );
-    },
-    [patchNode, whiteModelStudioNodeKey],
-  );
-
-  const useWhiteModelVideo = useCallback(
-    async (requestedJob: BlenderRenderJob) => {
-      const nodeKey = whiteModelStudioNodeKey;
-      if (!nodeKey) throw new Error("请重新打开白模工作台。");
-      const job = await getBlenderRender(requestedJob.jobId);
-      if (job.status !== "succeeded" || !job.videoPath)
-        throw new Error("白模动画尚未成功导出，请重新渲染。");
-      const current = snapshotV2({});
-      const target = current.genNodes.find((node) => node.key === nodeKey);
-      if (target?.kind !== "video") throw new Error("视频节点已移除；已导出文件仍保留在本地。");
-      const draft = target.config.whiteModelStudio;
-      if (
-        draft?.jobId !== job.jobId ||
-        draft.jobInputSignature !== whiteModelRenderSignature(draft)
-      ) {
-        throw new Error("制作设置已改变，请先重新渲染，再使用新的白模视频。");
-      }
-      const selection = resolveGenerationSelection(
-        "video",
-        target.config.modelSelection,
-        providerCatalog,
-      );
-      if (!selection) throw new Error("请先选择可用的 Seedance 2.5 模型；已导出文件保留在本地。");
-      const capabilities = modelParameterCapabilities(
-        selection.model.operationSchema,
-        "video_generation",
-        selection.model.remoteModelId,
-      );
-      const control = target.config.whiteModelControl ?? createWhiteModelControlConfig();
-      const previousSource = current.outputNodes?.find(
-        (output) => output.key === control.source?.key && output.origin === "white_model",
-      );
-      const existingOutput = current.outputNodes?.find(
-        (output) =>
-          output.origin === "white_model" &&
-          output.taskId === job.jobId &&
-          output.finalPath === job.videoPath,
-      );
-      const key = existingOutput?.key ?? outputNodeKey();
-      const name = existingOutput?.name ?? `白模动画 · ${job.jobId.slice(0, 8)}.mp4`;
-      const media = {
-        key,
-        name,
-        kind: "video" as const,
-        target: {
-          kind: "local_file" as const,
-          path: job.videoPath,
-          canvasNodeKey: key,
-          mediaType: "video" as const,
-        },
-      };
-      const oldEdges = current.assetEdges.filter(
-        (edge) =>
-          edge.toKey === nodeKey && edge.fromKey === previousSource?.key && edge.fromKey !== key,
-      );
-      const remainingEdges = current.assetEdges.filter(
-        (edge) => !oldEdges.some((old) => old.id === edge.id),
-      );
-      const inputs = createCanvasInputResolver(
-        canvasNodesByKeyFromDocument(current),
-        remainingEdges,
-      )(nodeKey).media.filter((input) => input.key !== key);
-      const nextConfig = selectSeedanceTask(
-        selection.model.remoteModelId,
-        capabilities,
-        target.config,
-        [...inputs, media],
-        "reference",
-        selection.model.operationSchema,
-      );
-      const task = resolveSeedanceTask(
-        selection.model.remoteModelId,
-        capabilities,
-        nextConfig,
-        [...inputs, media],
-        selection.model.operationSchema,
-      );
-      if (!task.enabled || task.issue)
-        throw new Error(task.issue ?? "当前模型不支持 Seedance 2.5 白模参考视频。");
-      const edges = remainingEdges.some((edge) => edge.fromKey === key && edge.toKey === nodeKey)
-        ? []
-        : [{ id: `white-model-${key}-${nodeKey}`, fromKey: key, toKey: nodeKey }];
-      insertSubgraph(
-        existingOutput
-          ? []
-          : [
-              {
-                type: "output",
-                data: {
-                  key,
-                  resultKey: null,
-                  sourceNodeId: `blender-${job.jobId}`,
-                  taskId: job.jobId,
-                  mediaType: "video",
-                  origin: "white_model",
-                  finalPath: job.videoPath,
-                  name,
-                  aspectRatio: job.width / job.height,
-                  x: target.x - 360,
-                  y: target.y + inputs.length * 24,
-                },
-              },
-            ],
-        edges,
-        { selectNodeKey: nodeKey },
-      );
-      oldEdges.forEach((edge) => removeAssetEdge(edge.id));
-      updateVideoNodeConfig(nodeKey, {
-        ...nextConfig,
-        whiteModelControl: {
-          ...control,
-          enabled: true,
-          source: { key, name, target: media.target },
-        },
-      });
-      setNodeStartError(nodeKey, null);
-      setWhiteModelStudioNodeKey(null);
-      toast.success("白模动画已连接", {
-        description: "检查角色映射与画面要求后，点击开始生成即可渲染成片。",
-      });
-    },
-    [
-      whiteModelStudioNodeKey,
-      snapshotV2,
-      providerCatalog,
-      insertSubgraph,
-      removeAssetEdge,
-      updateVideoNodeConfig,
-      setNodeStartError,
-    ],
-  );
-
-  const useWhiteModelBlocking = useCallback(
-    (capture: WhiteModelBlockingCapture) => {
-      const nodeKey = whiteModelStudioNodeKey;
-      if (!nodeKey) throw new Error("请重新打开白模导演台。");
-      const current = snapshotV2({});
-      const target = current.genNodes.find((node) => node.key === nodeKey);
-      if (target?.kind !== "image") throw new Error("图片节点已移除；站位图仍保留在本地。");
-      const draft = target.config.whiteModelStudio ?? createWhiteModelBlockingDraft();
-      const existingOutput = current.outputNodes?.find(
-        (output) => output.origin === "white_model_still" && output.finalPath === capture.path,
-      );
-      const key = existingOutput?.key ?? outputNodeKey();
-      const name = existingOutput?.name ?? capture.name;
-      const still = {
-        key,
-        name,
-        target: {
-          kind: "local_file" as const,
-          path: capture.path,
-          canvasNodeKey: key,
-          mediaType: "image" as const,
-        },
-      };
-      const prompt = buildBlockingPromptDocument(still, capture.environment, capture.assignments);
-      if (prompt.issue) throw new Error(prompt.issue);
-      const needed = [
-        ...new Set(
-          [
-            still.key,
-            capture.environment?.key,
-            ...capture.assignments.map((assignment) => assignment.character.key),
-          ].filter((fromKey): fromKey is string => Boolean(fromKey) && fromKey !== nodeKey),
-        ),
-      ];
-      const edges = needed
-        .filter(
-          (fromKey) =>
-            !current.assetEdges.some((edge) => edge.fromKey === fromKey && edge.toKey === nodeKey),
-        )
-        .map((fromKey) => ({
-          id: `white-model-still-${fromKey}-${nodeKey}`,
-          fromKey,
-          toKey: nodeKey,
-        }));
-      insertSubgraph(
-        existingOutput
-          ? []
-          : [
-              {
-                type: "output",
-                data: {
-                  key,
-                  resultKey: null,
-                  sourceNodeId: nodeKey,
-                  taskId: `white-model-still-${key}`,
-                  mediaType: "image",
-                  origin: "white_model_still",
-                  finalPath: capture.path,
-                  name,
-                  aspectRatio: capture.width / Math.max(1, capture.height),
-                  x: target.x - 360,
-                  y: target.y,
-                },
-              },
-            ],
-        edges,
-        { selectNodeKey: nodeKey },
-      );
-      updateImageNodeConfig(nodeKey, {
-        ...target.config,
-        panoramaEnabled: false,
-        whiteModelStudio: {
-          ...draft,
-          blockingImagePath: capture.path,
-          blockingImageSignature: whiteModelBlockingSignature(draft),
-        },
-      });
-      promptContents.restoreDocument(nodeKey, prompt.document);
-      setNodeStartError(nodeKey, null);
-      setWhiteModelStudioNodeKey(null);
-      toast.success("站位图已接入", {
-        description: "已连上场景、站位和角色参考，并按假人编号写好多参考提示词。",
-      });
-    },
-    [
-      whiteModelStudioNodeKey,
-      snapshotV2,
-      insertSubgraph,
-      updateImageNodeConfig,
-      promptContents,
       setNodeStartError,
     ],
   );
@@ -7031,22 +6091,6 @@ export function WorkspaceApp({
       resolvePendingGenerationNodeConfig(node, catalog, mediaInputTargetKeysRef.current),
     );
     patchNodes("screenplay", (node) => resolvePendingDocumentNodeConfig(node, catalog));
-    patchNodes("storyboard", (node) => resolvePendingDocumentNodeConfig(node, catalog));
-    patchNodes("knowledgeVideoWorkflow", (node) =>
-      resolvePendingKnowledgeVideoWorkflowConfig(node, catalog),
-    );
-    patchNodes("viralRemix", (node) =>
-      node.config.catalogResolved
-        ? node
-        : {
-            ...node,
-            config: {
-              ...node.config,
-              modelSelection: reconcileTextModelSelection(node.config.modelSelection, catalog),
-              catalogResolved: true,
-            },
-          },
-    );
     setProviderCatalogLoaded(true);
   }, [patchNodes]);
 
@@ -7111,22 +6155,6 @@ export function WorkspaceApp({
           resolvePendingGenerationNodeConfig(node, catalog, mediaInputTargetKeysRef.current),
         );
         patchNodes("screenplay", (node) => resolvePendingDocumentNodeConfig(node, catalog));
-        patchNodes("storyboard", (node) => resolvePendingDocumentNodeConfig(node, catalog));
-        patchNodes("knowledgeVideoWorkflow", (node) =>
-          resolvePendingKnowledgeVideoWorkflowConfig(node, catalog),
-        );
-        patchNodes("viralRemix", (node) =>
-          node.config.catalogResolved
-            ? node
-            : {
-                ...node,
-                config: {
-                  ...node.config,
-                  modelSelection: reconcileTextModelSelection(node.config.modelSelection, catalog),
-                  catalogResolved: true,
-                },
-              },
-        );
         setProviderCatalogLoaded(true);
       })
       .catch(() => undefined);
@@ -7410,6 +6438,27 @@ export function WorkspaceApp({
           );
         }
       }
+      if (eventName === "generation:polling-stopped") {
+        /*
+         * 自动查询已停止：任务状态仍是 running，所以必须显式记一笔，
+         * 否则卡片永远转圈、用户既等不到结果也看不出该去手动查询。
+         */
+        const info = payload as { taskId?: string; reason?: unknown } | null;
+        const taskId = info?.taskId;
+        if (taskId) {
+          setPollingStoppedTaskIds((current) => {
+            if (current.has(taskId)) return current;
+            const next = new Set(current);
+            next.add(taskId);
+            return next;
+          });
+          toast.info("自动查询已停止", {
+            description:
+              "这次生成已查询 10 分钟仍未拿到结果，自动查询已停止。可在任务历史里点「重新查询」继续获取结果。",
+          });
+        }
+        return;
+      }
       if (eventName === "generation:retry") {
         const info = payload as {
           taskId?: string;
@@ -7485,6 +6534,25 @@ export function WorkspaceApp({
     for (const task of generationTasks) map.set(task.id, task);
     return map;
   }, [generationTasks]);
+
+  /**
+   * 后端已停止轮询的任务（`queryHealth === "degraded"`）。
+   *
+   * 与 `pollingStoppedTaskIds`（事件瞬时信号）合并使用：事件能立刻生效，
+   * 持久化状态能跨重启兜底。两者取并集才是完整判据。
+   */
+  const degradedQueryTaskIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const task of generationTasks) {
+      if (task.queryHealth === "degraded") ids.add(task.id);
+    }
+    return ids;
+  }, [generationTasks]);
+  /** 「自动查询已停止」的完整判据：事件 ∪ 后端持久化状态。 */
+  const isPollingStopped = useCallback(
+    (taskId: string) => pollingStoppedTaskIds.has(taskId) || degradedQueryTaskIds.has(taskId),
+    [degradedQueryTaskIds, pollingStoppedTaskIds],
+  );
 
   // 生成结果补发（兜底）：任务已经成功，但卡片始终没拿到本地文件路径。成因只有两类——
   // 事件通道漏掉了那一次 result-saved（监听重建窗口、应用切后台、页面重载都会造成），
@@ -7599,23 +6667,50 @@ export function WorkspaceApp({
   }, [outputCardSignature, canvasNodesNow, taskById, taskResults, rawResponses, loadRawResponse]);
 
   const handleStartGeneration = useCallback(
-    (nodeKey: string, agentContext?: AgentToolContext) => {
+    (nodeKey: string) => {
       if (startingNodeKeys.has(nodeKey)) return;
       const liveCanvas = snapshotV2({});
       const genNode = liveCanvas.genNodes.find((node) => node.key === nodeKey);
       if (!genNode) return;
       // 提示词节点通过自身的文本模型按钮执行，不创建媒体生成任务。
       if (genNode.kind === "prompt") return;
-      if (
-        genNode.kind === "video" &&
-        genNode.config.greenScreen?.enabled &&
-        generationTasks.some(
-          (task) => task.sourceNodeId === nodeKey && !isTerminalTaskStatus(task.status),
-        )
-      ) {
+      /*
+       * 该节点已有在途任务时拒绝再次提交。
+       *
+       * 这道检查原来只对「绿幕视频」生效，图片节点与普通视频节点在任务跑着的
+       * 时候还能再提交一次 —— 后端 start 不按 sourceNodeId 去重，于是第二次就是
+       * **第二个付费任务**：两个任务各自计费、界面上多出一张产物卡片。
+       * 按钮的 disabled 只是第一道防线，这里是第二道（快捷键、直接调用等路径
+       * 都会绕过按钮）。
+       */
+      /*
+       * 在途守卫：**不放宽**「自动查询已停止」的任务。
+       *
+       * 曾经把「自动查询已停止」的任务排除出在途集合，理由是「后端不再轮询它了，
+       * 让用户能重新生成」。那是错的 —— 后端不轮询 ≠ 上游不跑了：
+       *
+       *  - `ObservationPollingExpired`（PixVerse 达 10 分钟上限）：上游任务**可能
+       *    还在跑、还在计费**，后端只是不再自动查了；
+       *  - `ObservationDegraded`（自动重试耗尽）：同样，上游任务可能还在跑。
+       *
+       * 两种情况下放开提交，就是给用户开了一条**并发付费任务**的路：上游在跑着
+       * 第一个，用户看到卡片不转圈、又点一次生成 → 两个任务各自计费。
+       *
+       * 正确做法不是放宽守卫，而是给用户**能自己解开**的路：任务历史里已有
+       * 「重新查询」（拿到结果）与「取消这个任务」（变终态、不再挡路）。
+       * 所以这里挡住，并把「怎么办」写清楚。
+       */
+      const blockingTask = generationTasks.find(
+        (task) => task.sourceNodeId === nodeKey && !isTerminalTaskStatus(task.status),
+      );
+      if (blockingTask != null) {
         setNodeStartError(
           nodeKey,
-          "绿幕流程已有任务正在生成，请完成后检查选用，或在任务历史中取消后重做。",
+          isPollingStopped(blockingTask.id)
+            ? "这次生成的自动查询已停止，上游可能仍在执行并计费。请先到任务历史里「重新查询」看结果，或「取消这个任务」后再重新生成。"
+            : genNode.kind === "video" && genNode.config.greenScreen?.enabled
+              ? "绿幕流程已有任务正在生成，请完成后检查选用，或在任务历史中取消后重做。"
+              : "该节点已有任务正在生成，请等待完成，或在任务历史中取消后重做。",
         );
         return;
       }
@@ -7720,7 +6815,7 @@ export function WorkspaceApp({
       if (greenScreenPreparation) connections = [...greenScreenPreparation.connections];
       const greenScreenSignature =
         greenScreen && genNode.kind === "video" && greenScreen.phase === "prepare"
-          ? greenScreenWorkflowSignature(genNode.config, promptDocument)
+          ? greenScreenNodeSignature(genNode.config, promptDocument)
           : null;
       const seedanceTask =
         genNode.kind === "video"
@@ -7916,8 +7011,7 @@ export function WorkspaceApp({
                 }));
               }
             };
-            if (agentContext) agentContext.mutate(publish);
-            else publish();
+            publish();
             frontendLog(
               "info",
               `[canvas] 已创建生成占位产物卡片: task=${taskId}, 数量=${placeholderCount}`,
@@ -7925,7 +7019,7 @@ export function WorkspaceApp({
             return refreshTasks();
           })
           .catch((error: unknown) => {
-            startErrors.push(formatRawBackendError(error));
+            startErrors.push(backendErrorMessage(error));
           })
           .finally(settleOne);
         submissions.push(submission);
@@ -7940,6 +7034,7 @@ export function WorkspaceApp({
       snapshotV2,
       patchNode,
       generationTasks,
+      isPollingStopped,
       providerCatalog,
       promptContents,
       refreshTasks,
@@ -8079,6 +7174,26 @@ export function WorkspaceApp({
     const map = new Map<string, GenerationTaskSummary>();
     for (const task of generationTasks) {
       if (isTerminalTaskStatus(task.status)) continue;
+      /*
+       * 自动查询已停止的任务不算「在途」。
+       *
+       * 后端停止轮询（PixVerse 达 10 分钟上限 / 自动重试耗尽）但**任务状态仍是
+       * running**（`ChangeQueryHealth` 只改 query_health 不改 status），于是卡片会
+       * 永远转圈、用户等不到结果也看不出该去手动查询。这里把它排除出「在途」，
+       * 卡片改按「查询已停止」渲染。
+       *
+       * 判据是「事件 ∪ 后端持久化的 degraded」—— 只靠事件的话，重启应用后
+       * 事件集合是空的，任务会被重新当成在途，卡片又开始永久转圈。
+       */
+      if (isPollingStopped(task.id)) continue;
+      if (!map.has(task.sourceNodeId)) map.set(task.sourceNodeId, task);
+    }
+    return map;
+  }, [generationTasks, isPollingStopped]);
+
+  const latestTaskByNode = useMemo(() => {
+    const map = new Map<string, GenerationTaskSummary>();
+    for (const task of generationTasks) {
       if (!map.has(task.sourceNodeId)) map.set(task.sourceNodeId, task);
     }
     return map;
@@ -8104,1220 +7219,22 @@ export function WorkspaceApp({
   const registerPromptInput = useCallback(
     (nodeKey: string, session: PromptContentEditorSession | null) => {
       promptContents.adoptEditor(nodeKey, session);
+      // 提示内容住在提示词模块里，不进画布 store，因此内容变化不会触发 store 订阅里的落盘。
+      // 节点卡里的编辑器靠 input 事件冒泡到画布视口触发排期，而独立编辑区（视口之外）
+      // 的冒泡到不了视口——只靠那一条会丢掉独立编辑区里改的字。这里显式订阅内容变化，
+      // 无论在哪个编辑区改字都排一次落盘。
+      promptSaveSubscriptionsRef.current.get(nodeKey)?.();
+      promptSaveSubscriptionsRef.current.delete(nodeKey);
+      if (session != null) {
+        promptSaveSubscriptionsRef.current.set(
+          nodeKey,
+          promptContents.subscribe(nodeKey, () => {
+            scheduleCanvasSaveRef.current();
+          }),
+        );
+      }
     },
     [promptContents],
-  );
-
-  /** 所有上游节点中的可读取视频，按节点保存的顺序排列。 */
-  const videoCompositionFormat = useMemo(
-    () => preferredVideoCompositionFormat()?.extension.toUpperCase() ?? null,
-    [],
-  );
-
-  const moveVideoComposerInput = useCallback(
-    (nodeKey: string, inputKey: string, direction: -1 | 1) => {
-      const node = canvasNodesNow("videoComposer").find((candidate) => candidate.key === nodeKey);
-      const inputs = composerInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
-      if (!node) return;
-      const order = inputs.map((input) => input.key);
-      const index = order.indexOf(inputKey);
-      const nextIndex = index + direction;
-      if (index < 0 || nextIndex < 0 || nextIndex >= order.length) return;
-      [order[index], order[nextIndex]] = [order[nextIndex]!, order[index]!];
-      updateVideoComposerConfig(nodeKey, { ...node.config, inputOrder: order });
-    },
-    [updateVideoComposerConfig, canvasNodesNow, canvasStore],
-  );
-
-  /**
-   * 桌面端 FFmpeg 合成路径：交给 Rust 后端确定性完成（不再实时重放录制），
-   * 启动后轮询任务进度；引擎缺失时后端会先自动下载官方构建。
-   */
-  const runFfmpegComposition = useCallback(
-    async (
-      nodeKey: string,
-      node: VideoComposerNodeData,
-      inputs: readonly VideoComposerInput[],
-      abortController: AbortController,
-    ): Promise<void> => {
-      const job = await videoComposerClient.startComposition(
-        inputs.map((input) => ({
-          key: input.key,
-          name: input.name,
-          source: input.ffmpegSource ?? "",
-        })),
-        node.config.outputName,
-      );
-      const handleAbort = () => {
-        void videoComposerClient.cancelJob(job.jobId).catch(() => undefined);
-      };
-      abortController.signal.addEventListener("abort", handleAbort, { once: true });
-      try {
-        let record = job;
-        while (record.status === "preparing_engine" || record.status === "processing") {
-          await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
-          record = await videoComposerClient.getJob(record.jobId);
-          const progress = record.progress;
-          if (progress != null) {
-            setVideoComposerRuns((current) => {
-              const previous = current[nodeKey];
-              if (previous?.status !== "running" || previous.progress === progress) return current;
-              return { ...current, [nodeKey]: { ...previous, progress } };
-            });
-          }
-        }
-        if (record.status === "cancelled" || abortController.signal.aborted) {
-          throw new DOMException("视频合成已取消。", "AbortError");
-        }
-        if (record.status !== "completed" || record.finalPath == null) {
-          throw new Error(record.error ?? "视频合成失败。");
-        }
-        const finalPath = record.finalPath;
-        const fileName = record.fileName ?? fileNameFromPath(finalPath);
-        const taskId = `composition:${Date.now()}:${nodeKey}`;
-        const outputKey = outputNodeKey();
-        const aspectRatio =
-          record.width != null && record.height != null && record.height > 0
-            ? record.width / record.height
-            : 16 / 9;
-        const outputBase: Omit<OutputNodeData, "x" | "y"> = {
-          key: outputKey,
-          resultKey: `${taskId}#0`,
-          sourceNodeId: nodeKey,
-          taskId,
-          mediaType: "video",
-          origin: "composition",
-          finalPath,
-          previewSrc: toMediaSrc(finalPath),
-          name: fileName,
-          aspectRatio,
-        };
-        addOutput((current, nodesById) => ({
-          ...outputBase,
-          ...nextVideoComposerOutputSlot(
-            currentOutputSource(nodesById, "videoComposer", node),
-            current,
-            outputPlacementOptionsFor(nodesById, node.key),
-          ),
-        }));
-        setVideoComposerRuns((current) => ({
-          ...current,
-          [nodeKey]: { status: "done", progress: 100, error: null },
-        }));
-        frontendLog(
-          "info",
-          `[composition] FFmpeg 合成完成: node=${nodeKey}, duration=${(record.durationSeconds ?? 0).toFixed(2)}s, output=${finalPath}`,
-        );
-      } finally {
-        abortController.signal.removeEventListener("abort", handleAbort);
-      }
-    },
-    [addOutput, setVideoComposerRuns, outputPlacementOptionsFor],
-  );
-
-  const handleComposeVideos = useCallback(
-    (nodeKey: string) => {
-      const node = canvasNodesNow("videoComposer").find((candidate) => candidate.key === nodeKey);
-      const inputs = composerInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
-      if (!node || videoComposerRuns[nodeKey]?.status === "running") return;
-      if (canvasInputsFor(nodeKey).media.some((input) => input.kind === "video" && !input.src)) {
-        setVideoComposerRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            status: "error",
-            progress: 0,
-            error: "部分上游视频尚无可读取的地址，请先完成生成或保存视频。",
-          },
-        }));
-        return;
-      }
-      if (inputs.length < 2) {
-        setVideoComposerRuns((current) => ({
-          ...current,
-          [nodeKey]: { status: "error", progress: 0, error: "至少连接 2 段视频后才能合成。" },
-        }));
-        return;
-      }
-      setVideoComposerRuns((current) => ({
-        ...current,
-        [nodeKey]: { status: "running", progress: 0, error: null },
-      }));
-      const abortController = new AbortController();
-      videoComposerAbortControllersRef.current.set(nodeKey, abortController);
-      frontendLog("info", `[composition] 开始视频合成: node=${nodeKey}, inputs=${inputs.length}`);
-      // 桌面端且全部输入可交给 ffmpeg（本地文件/远程地址）时走 Rust 合成；
-      // 含会话内 blob 预览的输入回退 WebView MediaRecorder 实时录制。
-      if (isDesktopRuntime() && inputs.every((input) => input.ffmpegSource != null)) {
-        void runFfmpegComposition(nodeKey, node, inputs, abortController)
-          .catch((error: unknown) => {
-            if (error instanceof DOMException && error.name === "AbortError") {
-              frontendLog("info", `[composition] 视频合成已取消: node=${nodeKey}`);
-              return;
-            }
-            const message = formatRawBackendError(error);
-            setVideoComposerRuns((current) => ({
-              ...current,
-              [nodeKey]: { status: "error", progress: 0, error: message },
-            }));
-            frontendLog("error", `[composition] FFmpeg 合成失败: node=${nodeKey}, ${message}`);
-          })
-          .finally(() => {
-            if (videoComposerAbortControllersRef.current.get(nodeKey) === abortController) {
-              videoComposerAbortControllersRef.current.delete(nodeKey);
-            }
-          });
-        return;
-      }
-      let objectUrls: readonly string[] = [];
-      void materializeCompositionInputs(inputs)
-        .then((materialized) => {
-          objectUrls = materialized.objectUrls;
-          return composeVideosInOrder(materialized.inputs, {
-            signal: abortController.signal,
-            onProgress: (progress) => {
-              setVideoComposerRuns((current) => {
-                const previous = current[nodeKey];
-                if (previous?.status !== "running" || previous.progress === progress)
-                  return current;
-                return { ...current, [nodeKey]: { ...previous, progress } };
-              });
-            },
-          });
-        })
-        .then(async (result) => {
-          if (abortController.signal.aborted)
-            throw new DOMException("视频合成已取消。", "AbortError");
-          const fileName = composedVideoFileName(node.config.outputName, result.format.extension);
-          const saved = await saveComposedVideoBlob(result.blob, fileName);
-          if (abortController.signal.aborted) {
-            if (saved.previewSrc?.startsWith("blob:")) URL.revokeObjectURL(saved.previewSrc);
-            throw new DOMException("视频合成已取消。", "AbortError");
-          }
-          const taskId = `composition:${Date.now()}:${nodeKey}`;
-          const savedFileName = saved.finalPath ? fileNameFromPath(saved.finalPath) : fileName;
-          const outputKey = outputNodeKey();
-          const outputBase: Omit<OutputNodeData, "x" | "y"> = {
-            key: outputKey,
-            resultKey: `${taskId}#0`,
-            sourceNodeId: nodeKey,
-            taskId,
-            mediaType: "video",
-            origin: "composition",
-            finalPath: saved.finalPath,
-            previewSrc: saved.previewSrc,
-            name: savedFileName,
-            aspectRatio: result.width / result.height,
-          };
-          addOutput((current, nodesById) => ({
-            ...outputBase,
-            ...nextVideoComposerOutputSlot(
-              currentOutputSource(nodesById, "videoComposer", node),
-              current,
-              outputPlacementOptionsFor(nodesById, node.key),
-            ),
-          }));
-          setVideoComposerRuns((current) => ({
-            ...current,
-            [nodeKey]: { status: "done", progress: 100, error: null },
-          }));
-          frontendLog(
-            "info",
-            `[composition] 视频合成完成: node=${nodeKey}, duration=${result.duration.toFixed(2)}s, output=${saved.finalPath ?? fileName}`,
-          );
-        })
-        .catch((error: unknown) => {
-          if (error instanceof DOMException && error.name === "AbortError") {
-            frontendLog("info", `[composition] 视频合成已取消: node=${nodeKey}`);
-            return;
-          }
-          const message = formatRawBackendError(error);
-          setVideoComposerRuns((current) => ({
-            ...current,
-            [nodeKey]: { status: "error", progress: 0, error: message },
-          }));
-          frontendLog("error", `[composition] 视频合成失败: node=${nodeKey}, ${message}`);
-        })
-        .finally(() => {
-          for (const url of objectUrls) URL.revokeObjectURL(url);
-          if (videoComposerAbortControllersRef.current.get(nodeKey) === abortController) {
-            videoComposerAbortControllersRef.current.delete(nodeKey);
-          }
-        });
-    },
-    [
-      canvasInputsFor,
-      canvasNodesNow,
-      videoComposerRuns,
-      runFfmpegComposition,
-      addOutput,
-      outputPlacementOptionsFor,
-      setVideoComposerRuns,
-      canvasStore,
-    ],
-  );
-
-  // ---------- 网络爆款视频下载（内置 yt-dlp 引擎） ----------
-
-  const refreshDownloaderEngineStatus = useCallback(() => {
-    if (!isDesktopRuntime()) return;
-    videoDownloaderClient
-      .getEngine()
-      .then((status) => setDownloaderEngineStatus(status))
-      .catch((error: unknown) => {
-        frontendLog("error", `[downloader] 引擎状态获取失败: ${formatRawBackendError(error)}`);
-      });
-  }, []);
-
-  const hasVideoLinkWorkflow = useCanvas((state) =>
-    state.nodes.knowledgeVideoWorkflow.some(
-      (node) => node.config.reverseVideo != null || node.config.reelbench != null,
-    ),
-  );
-  // 第一次出现下载节点或链接工作流时加载引擎状态；之后由操作结果直接更新。
-  useEffect(() => {
-    if (
-      (videoDownloaderNodeKeys.length === 0 && !hasVideoLinkWorkflow) ||
-      downloaderEngineLoadedRef.current
-    )
-      return;
-    downloaderEngineLoadedRef.current = true;
-    refreshDownloaderEngineStatus();
-  }, [refreshDownloaderEngineStatus, videoDownloaderNodeKeys.length, hasVideoLinkWorkflow]);
-
-  const runDownloaderEngineOperation = useCallback(
-    (operation: "install" | "update") => {
-      if (downloaderEngineBusy) return;
-      setDownloaderEngineBusy(true);
-      frontendLog(
-        "info",
-        `[downloader] 开始${operation === "install" ? "安装" : "更新"} yt-dlp 引擎…`,
-      );
-      const request =
-        operation === "install"
-          ? videoDownloaderClient.installEngine()
-          : videoDownloaderClient.updateEngine();
-      request
-        .then((status) => {
-          setDownloaderEngineStatus(status);
-          frontendLog(
-            "info",
-            `[downloader] 引擎${operation === "install" ? "安装" : "更新"}${status.state === "ready" ? "完成" : "未完成"}: state=${status.state}, version=${status.version ?? "未知"}`,
-          );
-        })
-        .catch((error: unknown) => {
-          frontendLog("error", `[downloader] 引擎操作失败: ${formatRawBackendError(error)}`);
-          refreshDownloaderEngineStatus();
-        })
-        .finally(() => setDownloaderEngineBusy(false));
-    },
-    [downloaderEngineBusy, refreshDownloaderEngineStatus],
-  );
-
-  const prepareDownloaderEngine = useCallback(
-    () => runDownloaderEngineOperation("install"),
-    [runDownloaderEngineOperation],
-  );
-
-  const updateDownloaderEngine = useCallback(
-    () => runDownloaderEngineOperation("update"),
-    [runDownloaderEngineOperation],
-  );
-
-  const importDownloaderCookies = useCallback(() => {
-    void (async () => {
-      if (downloaderCookieBusy) return;
-      setDownloaderCookieBusy(true);
-      try {
-        const { open } = await import("@tauri-apps/plugin-dialog");
-        const selection = await open({
-          multiple: false,
-          directory: false,
-          title: "选择浏览器导出的 cookies.txt",
-          filters: [{ name: "Cookies 文件", extensions: ["txt"] }],
-        });
-        if (typeof selection !== "string" || selection.length === 0) return;
-        const status = await videoDownloaderClient.importCookies(selection);
-        setDownloaderEngineStatus(status);
-        toast.success("下载登录凭据已导入，可以重试下载步骤");
-        frontendLog("info", "[downloader] Cookies 文件已导入，后续下载将使用该文件");
-      } catch (error: unknown) {
-        frontendLog("error", `[downloader] Cookies 导入失败: ${formatRawBackendError(error)}`);
-        toast.error("下载登录凭据导入失败", { description: formatWorkflowError(error) });
-      } finally {
-        setDownloaderCookieBusy(false);
-      }
-    })();
-  }, [downloaderCookieBusy]);
-
-  const selectDownloaderCookieBrowser = useCallback(
-    (browser: VideoDownloaderCookieBrowser | null) => {
-      if (downloaderCookieBusy) return;
-      setDownloaderCookieBusy(true);
-      void videoDownloaderClient
-        .setCookieBrowser(browser)
-        .then((status) => {
-          setDownloaderEngineStatus(status);
-          toast.success(
-            browser === "auto"
-              ? "已开启自动来源：按站点尝试已导入文件、浏览器与无 Cookies 访问"
-              : browser
-                ? `已选择 ${browser}，下载时会尝试读取该浏览器的 Cookies`
-                : "已关闭浏览器 Cookies 来源",
-          );
-        })
-        .catch((error: unknown) => {
-          frontendLog(
-            "error",
-            `[downloader] 浏览器 Cookies 来源设置失败: ${formatRawBackendError(error)}`,
-          );
-          toast.error("浏览器 Cookies 来源设置失败", { description: formatWorkflowError(error) });
-          refreshDownloaderEngineStatus();
-        })
-        .finally(() => setDownloaderCookieBusy(false));
-    },
-    [downloaderCookieBusy, refreshDownloaderEngineStatus],
-  );
-
-  const clearDownloaderCookies = useCallback(() => {
-    if (downloaderCookieBusy) return;
-    setDownloaderCookieBusy(true);
-    videoDownloaderClient
-      .clearCookies()
-      .then((status) => {
-        setDownloaderEngineStatus(status);
-        frontendLog("info", "[downloader] 手动 Cookies 文件已清除");
-        toast.success("已清除手动 Cookies 文件");
-      })
-      .catch((error: unknown) => {
-        frontendLog("error", `[downloader] Cookies 清除失败: ${formatRawBackendError(error)}`);
-        toast.error("清除下载登录凭据失败", { description: formatWorkflowError(error) });
-      })
-      .finally(() => setDownloaderCookieBusy(false));
-  }, [downloaderCookieBusy]);
-
-  /** 打开该节点最近一次下载产物所在文件夹。 */
-  const revealDownloaderResult = useCallback(
-    (nodeKey: string) => {
-      const latest = canvasNodesNow("output")
-        .filter((node) => node.sourceNodeId === nodeKey && node.finalPath != null)
-        .at(-1);
-      if (latest?.finalPath && isDesktopRuntime()) {
-        void revealDesktopItem(latest.finalPath).catch(() => undefined);
-      }
-    },
-    [canvasNodesNow],
-  );
-
-  const submitNextVideoDownload = useCallback(
-    (nodeKey: string) => {
-      const queue = videoDownloadQueuesRef.current.get(nodeKey);
-      const source = queue?.sources.shift();
-      if (!queue || !source) return;
-      queue.activeJobId = "";
-      setVideoDownloaderRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: "",
-          status: "running",
-          preparingEngine: false,
-          progress: null,
-          qualityHint: null,
-          watermarkRemoved: false,
-          error: null,
-        },
-      }));
-      void videoDownloaderClient
-        .startDownload(source)
-        .then((record) => {
-          if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) {
-            void videoDownloaderClient.cancelJob(record.jobId).catch(() => undefined);
-            return;
-          }
-          queue.activeJobId = record.jobId;
-          setVideoDownloaderRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId: record.jobId,
-              status: "running",
-              preparingEngine: false,
-              progress: null,
-              qualityHint: null,
-              watermarkRemoved: false,
-              credentialSource: record.credentialSource ?? null,
-              probeStatus: record.probeStatus ?? null,
-              error: null,
-            },
-          }));
-        })
-        .catch((error: unknown) => {
-          if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) return;
-          videoDownloadQueuesRef.current.delete(nodeKey);
-          setVideoDownloaderRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId: "",
-              status: "error",
-              preparingEngine: false,
-              progress: null,
-              qualityHint: null,
-              watermarkRemoved: false,
-              error: formatRawBackendError(error),
-            },
-          }));
-        });
-    },
-    [setVideoDownloaderRuns],
-  );
-
-  // 活动下载任务（运行中且已拿到 jobId）：查询 key 随该集合变化，任务到达
-  // 终态后离开集合，轮询随之停止；定时与清理由 React Query 管理。
-  const activeDownloadJobs = useMemo(
-    () =>
-      Object.entries(videoDownloaderRuns)
-        .filter(([, run]) => run.status === "running" && run.jobId.length > 0)
-        .map(([nodeKey, run]) => ({ nodeKey, jobId: run.jobId })),
-    [videoDownloaderRuns],
-  );
-  // 查询仅负责拉取与定时；终态处理通过下方对 Query 缓存的订阅完成。
-  useQuery({
-    queryKey: ["video-download-jobs", activeDownloadJobs],
-    queryFn: async (): Promise<
-      readonly {
-        nodeKey: string;
-        jobId: string;
-        job: VideoDownloadJobRecord | null;
-        error: string | null;
-      }[]
-    > =>
-      Promise.all(
-        activeDownloadJobs.map(async ({ nodeKey, jobId }) => {
-          try {
-            return { nodeKey, jobId, job: await videoDownloaderClient.getJob(jobId), error: null };
-          } catch (error: unknown) {
-            return { nodeKey, jobId, job: null, error: formatRawBackendError(error) };
-          }
-        }),
-      ),
-    enabled: isDesktopRuntime(),
-    // 结果只经缓存订阅消费，无需触发任何重渲染。
-    notifyOnChangeProps: [],
-    refetchInterval: activeDownloadJobs.length > 0 ? DOWNLOAD_POLL_INTERVAL_MS : false,
-  });
-
-  // 下载任务的终态只能处理一次：产物卡片落卡、运行状态收尾都在这里完成。
-  // 订阅 Query 缓存而非在 effect 体里同步 setState；若某次终态事件恰好落在
-  // 依赖变化导致的重订阅间隙，下一轮轮询会携带同一份终态数据再次触发兜底。
-  const handledDownloadJobIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const cache = queryClient.getQueryCache();
-    return cache.subscribe((event) => {
-      if (event.type !== "updated") return;
-      const [cacheKey] = event.query.queryKey as readonly unknown[];
-      if (typeof cacheKey !== "string" || cacheKey !== "video-download-jobs") return;
-      const results = event.query.state.data as
-        | readonly {
-            nodeKey: string;
-            jobId: string;
-            job: VideoDownloadJobRecord | null;
-            error: string | null;
-          }[]
-        | undefined;
-      if (results == null) return;
-      for (const { nodeKey, jobId, job, error } of results) {
-        const queue = videoDownloadQueuesRef.current.get(nodeKey);
-        if (queue?.activeJobId !== jobId) continue;
-        // 运行中：推进进度（updater 内用 jobId 守卫，节点换任务后旧结果不写入）。
-        if (job != null && (job.status === "preparing_engine" || job.status === "downloading")) {
-          const preparingEngine = job.status === "preparing_engine";
-          setVideoDownloaderRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            if (
-              previous.status === "running" &&
-              previous.preparingEngine === preparingEngine &&
-              previous.progress === job.progress &&
-              previous.credentialSource === (job.credentialSource ?? null) &&
-              previous.probeStatus === (job.probeStatus ?? null)
-            ) {
-              return current;
-            }
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: "running",
-                preparingEngine,
-                progress: job.progress,
-                qualityHint: job.qualityHint,
-                watermarkRemoved: job.watermarkRemoved,
-                credentialSource: job.credentialSource ?? null,
-                probeStatus: job.probeStatus ?? null,
-                error: null,
-              },
-            };
-          });
-          continue;
-        }
-        // 终态（完成/取消/失败/查询失败）：每个 job 只处理一次。
-        if (handledDownloadJobIdsRef.current.has(jobId)) continue;
-        handledDownloadJobIdsRef.current.add(jobId);
-        if (job != null && job.status === "completed" && job.finalPath != null) {
-          const fileName = job.fileName ?? fileNameFromPath(job.finalPath);
-          const outputKey = outputNodeKey();
-          const startNode =
-            videoDownloaderStartNodesRef.current.get(nodeKey) ??
-            canvasNodesNow("videoDownloader").find((node) => node.key === nodeKey);
-          if (startNode == null) {
-            // 会话内快照与运行状态总是成对创建；此分支仅防御性兜底。
-            frontendLog("error", `[downloader] 下载完成但节点快照缺失，跳过落卡: node=${nodeKey}`);
-          } else {
-            addOutput((current, nodesById) => ({
-              key: outputKey,
-              resultKey: null,
-              sourceNodeId: nodeKey,
-              taskId: queue.batchId,
-              mediaType: "video",
-              origin: "download",
-              finalPath: job.finalPath,
-              previewSrc: null,
-              name: fileName,
-              ...nextVideoDownloaderOutputSlot(
-                currentOutputSource(nodesById, "videoDownloader", startNode),
-                current,
-                outputPlacementOptionsFor(nodesById, startNode.key),
-              ),
-            }));
-          }
-          if (queue.sources.length > 0) {
-            submitNextVideoDownload(nodeKey);
-            continue;
-          }
-          videoDownloadQueuesRef.current.delete(nodeKey);
-          setVideoDownloaderRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: "done",
-                preparingEngine: false,
-                progress: 100,
-                qualityHint: job.qualityHint,
-                watermarkRemoved: job.watermarkRemoved,
-                credentialSource: job.credentialSource ?? null,
-                probeStatus: null,
-                error: null,
-              },
-            };
-          });
-          frontendLog("info", `[downloader] 视频下载完成: node=${nodeKey}, 文件=${fileName}`);
-          continue;
-        }
-        videoDownloadQueuesRef.current.delete(nodeKey);
-        if (job != null && job.status === "cancelled") {
-          setVideoDownloaderRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: "cancelled",
-                preparingEngine: false,
-                progress: null,
-                qualityHint: null,
-                watermarkRemoved: false,
-                credentialSource: job.credentialSource ?? null,
-                probeStatus: null,
-                error: null,
-              },
-            };
-          });
-          frontendLog("info", `[downloader] 视频下载已取消: node=${nodeKey}`);
-          continue;
-        }
-        const message =
-          job == null
-            ? (error ?? "下载失败，请稍后重试。")
-            : (job.error ?? "下载失败，请稍后重试。");
-        setVideoDownloaderRuns((current) => {
-          const previous = current[nodeKey];
-          if (previous?.jobId !== jobId) return current;
-          return {
-            ...current,
-            [nodeKey]: {
-              jobId,
-              status: "error",
-              preparingEngine: false,
-              progress: null,
-              qualityHint: job?.qualityHint ?? null,
-              watermarkRemoved: job?.watermarkRemoved ?? false,
-              credentialSource: job?.credentialSource ?? null,
-              probeStatus: null,
-              error: message,
-            },
-          };
-        });
-        frontendLog("error", `[downloader] 视频下载失败: node=${nodeKey}, ${message}`);
-      }
-    });
-  }, [
-    addOutput,
-    queryClient,
-    canvasNodesNow,
-    submitNextVideoDownload,
-    outputPlacementOptionsFor,
-    setVideoDownloaderRuns,
-  ]);
-
-  const handleStartVideoDownload = useCallback(
-    (nodeKey: string) => {
-      const node = canvasNodesNow("videoDownloader").find((candidate) => candidate.key === nodeKey);
-      if (!node || videoDownloadQueuesRef.current.has(nodeKey)) return;
-      const sources = downloaderSourcesFor(
-        canvasReadModelOfState(canvasStore.getState()),
-        nodeKey,
-        node.config.url,
-      );
-      if (sources.length === 0) {
-        setVideoDownloaderRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            qualityHint: null,
-            watermarkRemoved: false,
-            error: "请填写视频链接，或从上游文本、视频传入 HTTP(S) 地址。",
-          },
-        }));
-        return;
-      }
-      videoDownloaderStartNodesRef.current.set(nodeKey, node);
-      videoDownloadQueuesRef.current.set(nodeKey, {
-        sources: [...sources],
-        batchId: `download-batch:${Date.now()}:${nodeKey}`,
-        activeJobId: "",
-      });
-      submitNextVideoDownload(nodeKey);
-    },
-    [canvasNodesNow, submitNextVideoDownload, setVideoDownloaderRuns, canvasStore],
-  );
-
-  const handleCancelVideoDownload = useCallback(
-    (nodeKey: string) => {
-      const queue = videoDownloadQueuesRef.current.get(nodeKey);
-      if (!queue) return;
-      videoDownloadQueuesRef.current.delete(nodeKey);
-      setVideoDownloaderRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: queue.activeJobId,
-          status: "cancelled",
-          preparingEngine: false,
-          progress: null,
-          qualityHint: null,
-          watermarkRemoved: false,
-          error: null,
-        },
-      }));
-      if (queue.activeJobId)
-        void videoDownloaderClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
-          frontendLog("error", `[downloader] 取消请求失败: ${formatRawBackendError(error)}`);
-        });
-    },
-    [setVideoDownloaderRuns],
-  );
-
-  /** 删除视频下载节点（保留已经生成的产物卡片）。 */
-  const removeVideoDownloaderNode = useCallback(
-    (key: string) => {
-      videoDownloaderStartNodesRef.current.delete(key);
-      videoDownloadQueuesRef.current.delete(key);
-      const run = videoDownloaderRuns[key];
-      if (run?.status === "running" && run.jobId.length > 0) {
-        void videoDownloaderClient.cancelJob(run.jobId).catch(() => undefined);
-      }
-      removeCanvasNode(key);
-      setVideoDownloaderRuns((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [removeCanvasNode, videoDownloaderRuns, setVideoDownloaderRuns],
-  );
-
-  // ---- 视频抽帧：任务轮询与终态落卡 ----
-
-  const persistFrameExtractionCheckpoint = useCallback(
-    (nodeKey: string, checkpoint: VideoFrameExtractorNodeData["config"]["checkpoint"]) => {
-      patchNode("frameExtractor", nodeKey, (node) => {
-        const { checkpoint: previous, ...config } = node.config;
-        void previous;
-        const persisted = checkpoint
-          ? {
-              batchId: checkpoint.batchId,
-              activeJobId: checkpoint.activeJobId,
-              sources: [...checkpoint.sources],
-              timestamps: [...checkpoint.timestamps],
-              ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
-            }
-          : undefined;
-        return { ...node, config: persisted ? { ...config, checkpoint: persisted } : config };
-      });
-    },
-    [patchNode],
-  );
-
-  const submitNextFrameExtraction = useCallback(
-    (nodeKey: string) => {
-      const queue = frameExtractionQueuesRef.current.get(nodeKey);
-      const source = queue?.sources.shift();
-      if (!queue || !source) return;
-      queue.activeJobId = "";
-      queue.requestId ??= crypto.randomUUID();
-      persistFrameExtractionCheckpoint(nodeKey, { ...queue, sources: [source, ...queue.sources] });
-      setFrameExtractorRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: "",
-          status: "running",
-          preparingEngine: false,
-          progress: null,
-          error: null,
-        },
-      }));
-      void flushCanvasDocument()
-        .then(() => {
-          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue)
-            throw new Error("抽帧批次已关闭。");
-          return videoFrameExtractionClient.startExtraction(
-            source,
-            queue.timestamps,
-            undefined,
-            queue.requestId,
-          );
-        })
-        .then((record) => {
-          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) {
-            void videoFrameExtractionClient.cancelJob(record.jobId).catch(() => undefined);
-            return;
-          }
-          queue.activeJobId = record.jobId;
-          persistFrameExtractionCheckpoint(nodeKey, { ...queue, sources: [...queue.sources] });
-          void flushCanvasDocument().catch((error: unknown) =>
-            toast.error(`抽帧检查点保存失败：${formatRawBackendError(error)}`),
-          );
-          if (queue.cancelRequested) {
-            void videoFrameExtractionClient
-              .cancelJob(record.jobId)
-              .catch((error: unknown) =>
-                toast.error(`取消抽帧失败：${formatRawBackendError(error)}`),
-              );
-          }
-          setFrameExtractorRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId: record.jobId,
-              status: record.status === "paused" ? "paused" : "running",
-              preparingEngine: false,
-              progress: null,
-              error: null,
-            },
-          }));
-        })
-        .catch((error: unknown) => {
-          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
-          frameExtractionQueuesRef.current.delete(nodeKey);
-          setFrameExtractorRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId: "",
-              status: "error",
-              preparingEngine: false,
-              progress: null,
-              error: formatRawBackendError(error),
-            },
-          }));
-        });
-    },
-    [setFrameExtractorRuns, persistFrameExtractionCheckpoint, flushCanvasDocument],
-  );
-
-  // 活动抽帧任务：查询 key 随运行任务集合变化，任务到终态后离开集合停止轮询。
-  const activeFrameExtractionJobs = useMemo(
-    () =>
-      Object.entries(frameExtractorRuns)
-        .filter(([, run]) => run.status === "running" && run.jobId.length > 0)
-        .map(([nodeKey, run]) => ({ nodeKey, jobId: run.jobId })),
-    [frameExtractorRuns],
-  );
-  useQuery({
-    queryKey: ["video-frame-extraction-jobs", activeFrameExtractionJobs],
-    queryFn: async (): Promise<
-      readonly {
-        nodeKey: string;
-        jobId: string;
-        job: VideoFrameExtractionJobRecord | null;
-        error: string | null;
-      }[]
-    > =>
-      Promise.all(
-        activeFrameExtractionJobs.map(async ({ nodeKey, jobId }) => {
-          try {
-            return {
-              nodeKey,
-              jobId,
-              job: await videoFrameExtractionClient.getJob(jobId),
-              error: null,
-            };
-          } catch (error: unknown) {
-            return { nodeKey, jobId, job: null, error: formatRawBackendError(error) };
-          }
-        }),
-      ),
-    enabled: isDesktopRuntime(),
-    // 结果只经缓存订阅消费，无需触发任何重渲染（非活跃画布尤其不该被 700ms 轮询重绘）。
-    notifyOnChangeProps: [],
-    refetchInterval: activeFrameExtractionJobs.length > 0 ? DOWNLOAD_POLL_INTERVAL_MS : false,
-  });
-
-  // 抽帧终态只处理一次：每帧落一张 origin=frame_extract 的图片产物卡片。
-  const handledFrameExtractionJobIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const cache = queryClient.getQueryCache();
-    return cache.subscribe((event) => {
-      if (event.type !== "updated") return;
-      const [cacheKey] = event.query.queryKey as readonly unknown[];
-      if (typeof cacheKey !== "string" || cacheKey !== "video-frame-extraction-jobs") return;
-      const results = event.query.state.data as
-        | readonly {
-            nodeKey: string;
-            jobId: string;
-            job: VideoFrameExtractionJobRecord | null;
-            error: string | null;
-          }[]
-        | undefined;
-      if (results == null) return;
-      for (const { nodeKey, jobId, job, error } of results) {
-        const queue = frameExtractionQueuesRef.current.get(nodeKey);
-        if (queue?.activeJobId !== jobId) continue;
-        // 读取失败保留任务和批次，下一次轮询继续；不能把暂时 IPC 错误当成终态。
-        if (job == null) continue;
-        if (job.status === "paused") {
-          setFrameExtractorRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId,
-              status: "paused",
-              preparingEngine: false,
-              progress: job.progress,
-              error: job.error,
-            },
-          }));
-          continue;
-        }
-        if (job != null && (job.status === "preparing_engine" || job.status === "processing")) {
-          const preparingEngine = job.status === "preparing_engine";
-          setFrameExtractorProgress((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            if (
-              previous.status === "running" &&
-              previous.preparingEngine === preparingEngine &&
-              previous.progress === job.progress
-            ) {
-              return current;
-            }
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: "running",
-                preparingEngine,
-                progress: job.progress,
-                error: null,
-              },
-            };
-          });
-          continue;
-        }
-        if (handledFrameExtractionJobIdsRef.current.has(jobId)) continue;
-        handledFrameExtractionJobIdsRef.current.add(jobId);
-        if (job != null && job.status === "completed") {
-          const startNode =
-            frameExtractorStartNodesRef.current.get(nodeKey) ??
-            canvasNodesNow("frameExtractor").find((candidate) => candidate.key === nodeKey);
-          if (startNode == null) {
-            frontendLog(
-              "error",
-              `[frame-extractor] 抽帧完成但节点快照缺失，跳过落卡: node=${nodeKey}`,
-            );
-          } else {
-            for (const frame of job.frames) {
-              if (
-                canvasNodesNow("output").some(
-                  (node) =>
-                    node.origin === "frame_extract" &&
-                    node.sourceNodeId === nodeKey &&
-                    node.finalPath === frame.path,
-                )
-              )
-                continue;
-              addOutput((current, nodesById) => ({
-                key: outputNodeKey(),
-                resultKey: null,
-                sourceNodeId: nodeKey,
-                taskId: queue.batchId,
-                mediaType: "image",
-                origin: "frame_extract",
-                finalPath: frame.path,
-                previewSrc: null,
-                name: fileNameFromPath(frame.path),
-                ...nextFrameExtractorOutputSlot(
-                  currentOutputSource(nodesById, "frameExtractor", startNode),
-                  current,
-                  outputPlacementOptionsFor(nodesById, startNode.key),
-                ),
-              }));
-            }
-          }
-          if (queue.sources.length > 0 && !queue.cancelRequested) {
-            delete queue.requestId;
-            submitNextFrameExtraction(nodeKey);
-            continue;
-          }
-          frameExtractionQueuesRef.current.delete(nodeKey);
-          const interruptedBatch = queue.cancelRequested && queue.sources.length > 0;
-          persistFrameExtractionCheckpoint(
-            nodeKey,
-            interruptedBatch
-              ? {
-                  batchId: queue.batchId,
-                  activeJobId: "",
-                  sources: [...queue.sources],
-                  timestamps: queue.timestamps,
-                }
-              : undefined,
-          );
-          setFrameExtractorRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: interruptedBatch ? "cancelled" : "done",
-                preparingEngine: false,
-                progress: interruptedBatch ? null : 100,
-                error: null,
-              },
-            };
-          });
-          frontendLog(
-            "info",
-            `[frame-extractor] 视频抽帧完成: node=${nodeKey}, 帧数=${job.frames.length}`,
-          );
-          continue;
-        }
-        frameExtractionQueuesRef.current.delete(nodeKey);
-        if (job != null && job.status === "cancelled") {
-          setFrameExtractorRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.jobId !== jobId) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                jobId,
-                status: "cancelled",
-                preparingEngine: false,
-                progress: null,
-                error: null,
-              },
-            };
-          });
-          frontendLog("info", `[frame-extractor] 视频抽帧已取消: node=${nodeKey}`);
-          continue;
-        }
-        const message =
-          job == null
-            ? (error ?? "抽帧失败，请稍后重试。")
-            : (job.error ?? "抽帧失败，请稍后重试。");
-        setFrameExtractorRuns((current) => {
-          const previous = current[nodeKey];
-          if (previous?.jobId !== jobId) return current;
-          return {
-            ...current,
-            [nodeKey]: {
-              jobId,
-              status: "error",
-              preparingEngine: false,
-              progress: null,
-              error: message,
-            },
-          };
-        });
-        frontendLog("error", `[frame-extractor] 视频抽帧失败: node=${nodeKey}, ${message}`);
-      }
-    });
-  }, [
-    addOutput,
-    queryClient,
-    canvasNodesNow,
-    submitNextFrameExtraction,
-    outputPlacementOptionsFor,
-    setFrameExtractorRuns,
-    persistFrameExtractionCheckpoint,
-    setFrameExtractorProgress,
-  ]);
-
-  // 画布与后端各自保存检查点；水合后先查询原任务，用户显式继续暂停任务。
-  const recoveredFrameCheckpointsRef = useRef(new Set<string>());
-  useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
-    for (const node of canvasNodesNow("frameExtractor")) {
-      const checkpoint = node.config.checkpoint;
-      if (!checkpoint || frameExtractionQueuesRef.current.has(node.key)) continue;
-      const recoveryKey = `${node.key}:${checkpoint.batchId}:${checkpoint.activeJobId}`;
-      if (recoveredFrameCheckpointsRef.current.has(recoveryKey)) continue;
-      recoveredFrameCheckpointsRef.current.add(recoveryKey);
-      const queue = { ...checkpoint, sources: [...checkpoint.sources] };
-      frameExtractionQueuesRef.current.set(node.key, queue);
-      frameExtractorStartNodesRef.current.set(node.key, node);
-      setFrameExtractorRuns((current) => ({
-        ...current,
-        [node.key]: {
-          jobId: checkpoint.activeJobId,
-          status: checkpoint.activeJobId ? "running" : "paused",
-          preparingEngine: false,
-          progress: null,
-          error: null,
-        },
-      }));
-    }
-  }, [canvasHydrated, frameExtractorNodeKeys, canvasNodesNow, setFrameExtractorRuns]);
-
-  /** 每个上游视频依次抽帧；同一批次保留所有来源的完整帧产物。 */
-  const handleStartFrameExtraction = useCallback(
-    (nodeKey: string) => {
-      const node = canvasNodesNow("frameExtractor").find((candidate) => candidate.key === nodeKey);
-      if (!node || frameExtractorRuns[nodeKey]?.status === "running") return;
-      const checkpoint = node.config.checkpoint;
-      if (checkpoint) {
-        const queue = { ...checkpoint, sources: [...checkpoint.sources] };
-        frameExtractionQueuesRef.current.set(nodeKey, queue);
-        frameExtractorStartNodesRef.current.set(nodeKey, node);
-        if (!queue.activeJobId) {
-          submitNextFrameExtraction(nodeKey);
-          return;
-        }
-        handledFrameExtractionJobIdsRef.current.delete(queue.activeJobId);
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: queue.activeJobId,
-            status: "running",
-            preparingEngine: false,
-            progress: null,
-            error: null,
-          },
-        }));
-        void videoFrameExtractionClient.retryJob(queue.activeJobId).catch((error: unknown) => {
-          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
-          setFrameExtractorRuns((current) => ({
-            ...current,
-            [nodeKey]: {
-              jobId: queue.activeJobId,
-              status: "error",
-              preparingEngine: false,
-              progress: null,
-              error: formatRawBackendError(error),
-            },
-          }));
-        });
-        return;
-      }
-      if (frameExtractionQueuesRef.current.has(nodeKey)) return;
-      const inputs = extractorInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
-      const sources =
-        inputs.length > 0
-          ? inputs.map((input) => input.finalPath)
-          : node.config.videoPath.trim()
-            ? [node.config.videoPath.trim()]
-            : [];
-      const error =
-        sources.length === 0
-          ? "请提供上游视频或填写视频文件路径。"
-          : sources.some((source) => !source)
-            ? "部分上游视频没有可读取的本地路径或 HTTP(S) 地址，请先保存视频。"
-            : node.config.timestamps.length === 0
-              ? "请先添加至少一个抽帧秒数。"
-              : null;
-      if (error) {
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            error,
-          },
-        }));
-        return;
-      }
-      frameExtractorStartNodesRef.current.set(nodeKey, node);
-      frameExtractionQueuesRef.current.set(nodeKey, {
-        sources: sources as string[],
-        timestamps: node.config.timestamps,
-        batchId: `frame-batch:${Date.now()}:${nodeKey}`,
-        activeJobId: "",
-      });
-      submitNextFrameExtraction(nodeKey);
-    },
-    [
-      canvasNodesNow,
-      submitNextFrameExtraction,
-      setFrameExtractorRuns,
-      canvasStore,
-      frameExtractorRuns,
-    ],
-  );
-
-  const handleCancelFrameExtraction = useCallback((nodeKey: string) => {
-    const queue = frameExtractionQueuesRef.current.get(nodeKey);
-    if (!queue) return;
-    queue.cancelRequested = true;
-    if (queue.activeJobId)
-      void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
-        queue.cancelRequested = false;
-        toast.error(`取消抽帧失败：${formatRawBackendError(error)}`);
-        frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
-      });
-  }, []);
-
-  /** 删除视频抽帧节点（保留已经生成的图片产物卡片）。 */
-  const removeFrameExtractorNode = useCallback(
-    (key: string) => {
-      frameExtractorStartNodesRef.current.delete(key);
-      frameExtractionQueuesRef.current.delete(key);
-      const run = frameExtractorRuns[key];
-      if (run?.status === "running" && run.jobId.length > 0) {
-        void videoFrameExtractionClient.cancelJob(run.jobId).catch(() => undefined);
-      }
-      removeCanvasNode(key);
-      setFrameExtractorRuns((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
-    [removeCanvasNode, frameExtractorRuns, setFrameExtractorRuns],
   );
 
   /** 文本输出可经任意中间节点传入；多个来源按连接顺序合并。签名驱动重建。 */
@@ -9496,7 +7413,7 @@ export function WorkspaceApp({
             }),
           );
         } catch (error) {
-          failures.push(`${name}：${formatRawBackendError(error)}`);
+          failures.push(`${name}：${backendErrorMessage(error)}`);
         }
       }
       if (imported.length > 0) {
@@ -9760,7 +7677,7 @@ export function WorkspaceApp({
             "error",
             `[assets] 预览不可用素材未能重新上传: assetId=${asset.id}, 阶段=${result.reason}, 错误: ${formatted}`,
           );
-          toast.error(`「${asset.name}」预览不可用，重新上传失败`, { description: formatted });
+          toast.error(`「${asset.name}」预览不可用，重新上传失败`, { description: backendErrorMessage(result.error) });
           return;
         }
         if (result.deleted) {
@@ -9785,7 +7702,7 @@ export function WorkspaceApp({
           "error",
           `[assets] 预览不可用素材已重新上传，但删除旧记录失败: assetId=${asset.id}, jobId=${result.jobId}, 错误: ${formatted}`,
         );
-        toast.error(`「${asset.name}」已重新上传，旧素材删除失败`, { description: formatted });
+        toast.error(`「${asset.name}」已重新上传，旧素材删除失败`, { description: backendErrorMessage(result.deleteError) });
       });
     },
     [applyCloudAssetKindDelta, assetProvider],
@@ -9826,7 +7743,7 @@ export function WorkspaceApp({
               "error",
               `[assets] 云端素材删除失败: providerConnectionId=${asset.providerConnectionId}, assetId=${asset.id}, 错误: ${formatted}`,
             );
-            setAssetsError(error instanceof Error ? error.message : formatted);
+            setAssetsError(backendErrorMessage(error));
           },
         );
     },
@@ -9916,37 +7833,6 @@ export function WorkspaceApp({
     }
   }, [canvasHydrated, outputCardSignature, canvasNodesNow, patchNodes]);
 
-  const reconciledAiMediaNamesRef = useRef(new Set<string>());
-  useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
-    const taskIds = new Set(
-      canvasNodesNow("output")
-        .filter((node) => node.origin === "ai_media" && node.finalPath != null)
-        .map((node) => node.taskId),
-    );
-    for (const taskId of taskIds) {
-      if (reconciledAiMediaNamesRef.current.has(taskId)) continue;
-      reconciledAiMediaNamesRef.current.add(taskId);
-      void aiMediaClient
-        .get(taskId)
-        .then((job) => {
-          patchNodes("output", (node) => {
-            if (node.origin !== "ai_media" || node.taskId !== taskId) return node;
-            const output = job.outputs.find((item) =>
-              artifactNameChangeMatches(node, { taskId, finalPath: item.path, name: item.name }),
-            );
-            if (!output || node.name === output.name) return resolveCurrentArtifactName(node);
-            return resolveCurrentArtifactName({
-              ...node,
-              name: output.name,
-              customName: output.name,
-            });
-          });
-        })
-        .catch(() => reconciledAiMediaNamesRef.current.delete(taskId));
-    }
-  }, [canvasHydrated, outputCardSignature, canvasNodesNow, patchNodes]);
-
   const renameOutputNode = useCallback(
     async (key: string, name: string) => {
       const entry = canvasStore.getState().nodesById[key];
@@ -9969,16 +7855,6 @@ export function WorkspaceApp({
         const renamed = await videoPreparationClient.rename(node.taskId, fileName);
         fileName = renamed.output?.name ?? fileName;
       }
-      if (node.origin === "ai_media") {
-        const detail = await aiMediaClient.get(node.taskId);
-        const matches = detail.outputs.filter((output) => output.path === node.finalPath);
-        if (matches.length !== 1)
-          throw new Error("无法唯一定位此 AI 处理产物，请查看视频准备任务。");
-        resultIndex = matches[0]!.resultIndex;
-        const renamed = await aiMediaClient.rename(node.taskId, resultIndex, fileName);
-        fileName =
-          renamed.outputs.find((output) => output.resultIndex === resultIndex)?.name ?? fileName;
-      }
       publishArtifactNameChange({
         taskId: node.taskId,
         finalPath: node.finalPath,
@@ -9991,7 +7867,6 @@ export function WorkspaceApp({
   );
   const openGenerationHistory = useCallback((taskId: string) => {
     setHistoryInitialTaskId(taskId);
-    setHistoryInitialTab("generation");
     setHistoryOpen(true);
   }, []);
 
@@ -10006,7 +7881,7 @@ export function WorkspaceApp({
   };
 
   useEffect(() => {
-    if (!active || !mobilePanel || !window.matchMedia?.("(max-width: 59.999rem)").matches) return;
+    if (!active || !mobilePanel) return;
 
     const closeButton = document.querySelector<HTMLButtonElement>(".mobile-panel-close--assets");
     const animationFrame = window.requestAnimationFrame(() => closeButton?.focus());
@@ -10028,14 +7903,8 @@ export function WorkspaceApp({
     [active, canvasHydrated, settingsOpen, selectEdge, selectNode],
   );
 
-  const undo = useCallback(
-    () => undoCanvasOperation(new Set(workflowSessionRegistry.runningKeys())),
-    [undoCanvasOperation, workflowSessionRegistry],
-  );
-  const redo = useCallback(
-    () => redoCanvasOperation(new Set(workflowSessionRegistry.runningKeys())),
-    [redoCanvasOperation, workflowSessionRegistry],
-  );
+  const undo = useCallback(() => undoCanvasOperation(), [undoCanvasOperation]);
+  const redo = useCallback(() => redoCanvasOperation(), [redoCanvasOperation]);
 
   // 文本输入框内默认不触发这些快捷键，继续使用浏览器原生的文本撤销行为。
   useHotkeys(
@@ -10048,21 +7917,35 @@ export function WorkspaceApp({
     [active, canvasHydrated, settingsOpen, undo, redo],
   );
 
+  /*
+   * 缩放快捷键：面板声明的是 mod+= / mod+- / mod+0（与原站注册表一致）。
+   * 早前这里绑的是裸键 "+" "=" "-" "0"——随手敲一个等号就会缩放；而且 "0"
+   * 分支执行的是「重置到 50%」，不是面板写的「适应画布」，两处对不上。
+   * 现在统一成带 mod 的组合键，并把 0 改成真正的适应画布（fitView）。
+   */
   useHotkeys(
-    ["+", "=", "-", "0"],
+    ["mod+=", "mod+-", "mod+0"],
     (event) => {
-      if (event.key === "+" || event.key === "=") {
-        zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP);
-      } else if (event.key === "-") {
-        zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP);
-      } else {
-        zoomAroundViewportCenter(DEFAULT_ZOOM);
+      const key = event.key;
+      if (key === "0") {
+        event.preventDefault();
+        flowInstanceRef.current?.fitView({ duration: 200 });
+        return;
       }
+      event.preventDefault();
+      zoomAroundViewportCenter(
+        viewRef.current.zoom + (key === "=" ? ZOOM_STEP : -ZOOM_STEP),
+      );
     },
     {
       enabled: active && canvasHydrated && !settingsOpen,
       preventDefault: true,
-      splitKey: "_",
+      /*
+       * useKey 必须为 true：react-hotkeys-hook 默认按 `event.code`（物理键位）匹配，
+       * 而 "=" 的 code 是 "Equal"、"-" 的是 "Minus"——按 code 匹配时这两个热键
+       * 永远匹配不上，缩放快捷键会完全失效。useKey 改用 `event.key`（字符值），
+       * 才与 "=" / "-" / "0" 对得上。
+       */
       useKey: true,
     },
     [active, canvasHydrated, settingsOpen, zoomAroundViewportCenter],
@@ -10083,32 +7966,12 @@ export function WorkspaceApp({
         removeScreenplayNode(key);
         return;
       }
-      if (entry?.type === "storyboard") {
-        removeStoryboardNode(key);
-        return;
-      }
-      if (entry?.type === "viralRemix") {
-        removeViralRemixNode(key);
-        return;
-      }
-      if (entry?.type === "videoComposer") {
-        removeVideoComposerNode(key);
-        return;
-      }
-      if (entry?.type === "videoDownloader") {
-        removeVideoDownloaderNode(key);
-        return;
-      }
-      if (entry?.type === "frameExtractor") {
-        removeFrameExtractorNode(key);
-        return;
-      }
-      if (entry?.type === "knowledgeVideoWorkflow") {
-        sessions.remove(key);
-        return;
-      }
       if (entry?.type === "output") {
         removeOutputNode(key);
+        return;
+      }
+      if (entry?.type === "videoClip") {
+        removeVideoClipNode(key);
         return;
       }
       if (entry?.type === "result") {
@@ -10117,38 +7980,39 @@ export function WorkspaceApp({
     },
     [
       removeAssetNode,
-      removeFrameExtractorNode,
       removeGenNode,
-      sessions,
       removeOutputNode,
       removeResultNode,
       removeScreenplayNode,
-      removeStoryboardNode,
-      removeVideoComposerNode,
-      removeVideoDownloaderNode,
-      removeViralRemixNode,
       canvasStore,
     ],
   );
 
-  const copySelectedCanvasNodes = useCallback((): CanvasNodeClipboard | null => {
-    const captured = captureCanvasNodes(collectCanvasDocument(), selectedCanvasNodeKeys);
-    if (captured.nodes.length === 0) {
-      toast.error(
-        captured.skippedPendingOutputs > 0
-          ? "进行中的产物尚未保存，暂时无法复制"
-          : "请先选择要复制的节点",
-      );
-      return null;
-    }
-    writeCanvasNodeClipboard(captured);
-    toast.success(`已复制 ${captured.nodes.length} 个节点`, {
-      ...(captured.skippedPendingOutputs > 0
-        ? { description: `跳过 ${captured.skippedPendingOutputs} 个尚未保存的产物` }
-        : {}),
-    });
-    return captured;
-  }, [collectCanvasDocument, selectedCanvasNodeKeys]);
+  const copyCanvasNodes = useCallback(
+    (keys: ReadonlySet<string>): CanvasNodeClipboard | null => {
+      const captured = captureCanvasNodes(collectCanvasDocument(), keys);
+      if (captured.nodes.length === 0) {
+        toast.error(
+          captured.skippedPendingOutputs > 0
+            ? "进行中的产物尚未保存，暂时无法复制"
+            : "请先选择要复制的节点",
+        );
+        return null;
+      }
+      writeCanvasNodeClipboard(captured);
+      toast.success(`已复制 ${captured.nodes.length} 个节点`, {
+        ...(captured.skippedPendingOutputs > 0
+          ? { description: `跳过 ${captured.skippedPendingOutputs} 个尚未保存的产物` }
+          : {}),
+      });
+      return captured;
+    },
+    [collectCanvasDocument],
+  );
+  const copySelectedCanvasNodes = useCallback(
+    () => copyCanvasNodes(selectedCanvasNodeKeys),
+    [copyCanvasNodes, selectedCanvasNodeKeys],
+  );
 
   const pasteCopiedCanvasNodes = useCallback(
     (source: CanvasNodeClipboard | null = canvasNodeClipboard) => {
@@ -10176,7 +8040,7 @@ export function WorkspaceApp({
         },
         (entry) => `${entry.type}-${crypto.randomUUID()}`,
       );
-      insertSubgraph(pasted.nodes, pasted.edges, { selectNodeKey: null });
+      insertSubgraph(pasted.nodes, pasted.edges, { selectNodeKey: null, groups: pasted.groups });
       for (const [key, document] of Object.entries(pasted.promptContents)) {
         promptContents.restoreDocument(key, document);
       }
@@ -10200,55 +8064,6 @@ export function WorkspaceApp({
     setMarqueeNodeKeys(new Set());
     toast.success(`已删除 ${keys.length} 个节点`);
   }, [removeSelectedCanvasNode, selectedCanvasNodeKeys]);
-
-  useHotkeys(
-    ["mod+c", "mod+v", "mod+d"],
-    (event, hotkey) => {
-      if (hotkey.hotkey === "mod+v") {
-        if (!canPasteCanvasNodes) return;
-        event.preventDefault();
-        pasteCopiedCanvasNodes();
-        return;
-      }
-      if (selectedCanvasNodeKeys.size === 0) return;
-      event.preventDefault();
-      if (hotkey.hotkey === "mod+c") copySelectedCanvasNodes();
-      else duplicateSelectedCanvasNodes();
-    },
-    {
-      enabled:
-        active &&
-        canvasHydrated &&
-        !settingsOpen &&
-        !historyOpen &&
-        !realPersonDialogOpen &&
-        videoLocalEdit == null &&
-        videoPreparation == null &&
-        whiteModelStudioNodeKey == null &&
-        previewAsset == null &&
-        previewAssetNodeKey == null &&
-        previewOutputNodeKey == null,
-      preventDefault: false,
-    },
-    [
-      active,
-      canvasHydrated,
-      canPasteCanvasNodes,
-      copySelectedCanvasNodes,
-      duplicateSelectedCanvasNodes,
-      historyOpen,
-      pasteCopiedCanvasNodes,
-      previewAsset,
-      previewAssetNodeKey,
-      previewOutputNodeKey,
-      realPersonDialogOpen,
-      selectedCanvasNodeKeys,
-      settingsOpen,
-      videoLocalEdit,
-      videoPreparation,
-      whiteModelStudioNodeKey,
-    ],
-  );
 
   // 输入框 / 可编辑区域默认不触发：避免在提示词里按 Backspace 时把整张卡片删掉。
   useHotkeys(
@@ -10274,7 +8089,6 @@ export function WorkspaceApp({
         !realPersonDialogOpen &&
         videoLocalEdit == null &&
         videoPreparation == null &&
-        whiteModelStudioNodeKey == null &&
         previewAsset == null &&
         previewAssetNodeKey == null &&
         previewOutputNodeKey == null &&
@@ -10300,7 +8114,6 @@ export function WorkspaceApp({
       settingsOpen,
       videoLocalEdit,
       videoPreparation,
-      whiteModelStudioNodeKey,
     ],
   );
 
@@ -10331,7 +8144,7 @@ export function WorkspaceApp({
       );
       if (directory) toast.success(`已交付 ${outputs.length} 个产物`, { description: directory });
     } catch (error) {
-      toast.error(`批量交付失败：${formatRawBackendError(error)}`);
+      toast.error("批量交付失败", { description: backendErrorMessage(error) });
     } finally {
       setArtifactDeliveryBusy(false);
     }
@@ -10412,57 +8225,27 @@ export function WorkspaceApp({
     [canvasStore, selectNode, addOutput, outputPlacementOptionsFor],
   );
 
-  const useAiMediaOutput = useCallback(
-    (output: AiMediaOutput, job: AiMediaJob) => {
-      if (output.kind === "data") throw new Error("深度数据和时间映射请保存为附件。");
-      if (
-        job.status !== "completed" ||
-        !job.outputs.some(
-          (item) => item.path === output.path && item.resultIndex === output.resultIndex,
-        )
-      )
-        throw new Error("请等待 AI 任务完成并选择已验证的产物。");
-      const existing = canvasNodesOfState(canvasStore.getState(), "output").find(
-        (node) =>
-          node.origin === "ai_media" && node.taskId === job.jobId && node.finalPath === output.path,
-      );
-      if (existing) {
-        selectNode(existing.key);
-        toast.success("该产物已在当前画布");
-        return;
-      }
-      const mediaType = output.kind;
-      const sourceKey = job.source.canvasNodeKey ?? "";
-      addOutput((current, nodesById) => {
-        const entry = nodesById[sourceKey];
-        const dimensions =
-          entry?.type === "asset"
-            ? assetNodeDimensions(entry.data)
-            : entry?.type === "output"
-              ? outputNodeDimensions(entry.data)
-              : { width: 320, height: 240 };
-        return resolveCurrentArtifactName({
-          key: outputNodeKey(),
-          resultKey: `${job.jobId}#${output.resultIndex}`,
-          sourceNodeId: sourceKey,
-          taskId: job.jobId,
-          origin: "ai_media",
-          mediaType,
-          finalPath: output.path,
-          name: output.name,
-          previewSrc: null,
-          ...(output.width && output.height ? { aspectRatio: output.width / output.height } : {}),
-          ...nextPreparedMediaOutputSlot(
-            { x: entry?.data.x ?? 80, y: entry?.data.y ?? 80, ...dimensions },
-            current,
-            outputPlacementOptionsFor(nodesById, sourceKey),
-          ),
-        });
-      });
-      toast.success(`已将「${output.name}」加入画布`);
+  const openNodeEditor = useCallback(
+    (key: string) => {
+      setNodeMarquee(false);
+      setMarqueeNodeKeys(new Set());
+      selectEdge(null);
+      selectNode(key);
     },
-    [canvasStore, selectNode, addOutput, outputPlacementOptionsFor],
+    [selectEdge, selectNode],
   );
+  const editingNodeKey = !nodeMarquee && selectedCanvasNodeKeys.size === 1 ? selectedNodeKey : null;
+
+  const closeNodeEditor = useCallback(() => {
+    const nodeKey =
+      document.activeElement?.closest<HTMLElement>(".video-node-editor")?.dataset["nodeKey"];
+    const button = [
+      ...(canvasViewportRef.current?.querySelectorAll<HTMLElement>("[data-open-node-editor]") ??
+        []),
+    ].find((element) => element.dataset["openNodeEditor"] === nodeKey);
+    button?.focus({ preventScroll: true });
+    selectNode(null);
+  }, [selectNode]);
 
   const assetFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
@@ -10629,11 +8412,15 @@ export function WorkspaceApp({
           node.key,
           [
             screenplayNodeLayoutTokens[index] ?? node.key,
+            selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
             streamingTextByNode[node.key] ?? null,
             startErrorsByNode[node.key] ?? null,
             providerCatalog,
+            editingNodeKey === node.key,
+            openNodeEditor,
+            closeNodeEditor,
             selectNode,
             ignoreLegacyNodeDrag,
             removeScreenplayNode,
@@ -10657,6 +8444,9 @@ export function WorkspaceApp({
               content: (
                 <CanvasDocumentNodeCardSlot
                   nodeKey={node.key}
+                  editorOpen={editingNodeKey === node.key}
+                  onEdit={openNodeEditor}
+                  onCloseEditor={closeNodeEditor}
                   selected={selectedCanvasNodeKeys.has(node.key)}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -10684,6 +8474,9 @@ export function WorkspaceApp({
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
+      editingNodeKey,
+      openNodeEditor,
+      closeNodeEditor,
       selectNode,
       ignoreLegacyNodeDrag,
       removeScreenplayNode,
@@ -10694,241 +8487,6 @@ export function WorkspaceApp({
       handleRemoveScreenplayMaterial,
       handleRunScreenplayNode,
       handleExportScreenplay,
-      streamingTextByNode,
-      canvasStore,
-    ],
-  );
-
-  const storyboardFlowNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      canvasNodesOfState(canvasStore.getState(), "storyboard").map((node, index) =>
-        stableCanvasFlowNode(
-          canvasFlowNodeCachesRef.current,
-          "storyboard",
-          node.key,
-          [
-            storyboardNodeLayoutTokens[index] ?? node.key,
-            startingNodeKeys.has(node.key),
-            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
-            streamingTextByNode[node.key] ?? null,
-            startErrorsByNode[node.key] ?? null,
-            providerCatalog,
-            selectNode,
-            ignoreLegacyNodeDrag,
-            removeStoryboardNode,
-            removeAssetEdge,
-            handleGenNodeSizeChange,
-            updateStoryboardNodeConfig,
-            handleRunStoryboardNode,
-            handleExportStoryboard,
-          ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: true,
-              content: (
-                <CanvasDocumentNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  running={startingNodeKeys.has(node.key)}
-                  streamingText={streamingTextByNode[node.key] ?? null}
-                  error={startErrorsByNode[node.key] ?? null}
-                  providerCatalog={providerCatalog}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeStoryboardNode}
-                  onUnlink={removeAssetEdge}
-                  onSizeChange={handleGenNodeSizeChange}
-                  onChange={(config) => updateStoryboardNodeConfig(node.key, config)}
-                  onSend={handleRunStoryboardNode}
-                  onExport={handleExportStoryboard}
-                />
-              ),
-            },
-          }),
-        ),
-      ),
-    [
-      storyboardNodeLayoutTokens,
-      selectedCanvasNodeKeys,
-      startingNodeKeys,
-      startErrorsByNode,
-      providerCatalog,
-      selectNode,
-      ignoreLegacyNodeDrag,
-      removeStoryboardNode,
-      removeAssetEdge,
-      handleGenNodeSizeChange,
-      updateStoryboardNodeConfig,
-      handleRunStoryboardNode,
-      handleExportStoryboard,
-      streamingTextByNode,
-      canvasStore,
-    ],
-  );
-
-  const knowledgeVideoWorkflowFlowNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      canvasNodesOfState(canvasStore.getState(), "knowledgeVideoWorkflow").map((node, index) =>
-        stableCanvasFlowNode(
-          canvasFlowNodeCachesRef.current,
-          "knowledgeVideoWorkflow",
-          node.key,
-          [
-            workflowNodeLayoutTokens[index] ?? node.key,
-            selectedCanvasNodeKeys.has(node.key),
-            knowledgeVideoWorkflowRuns[node.key] ?? null,
-            providerCatalog,
-            removeAssetEdge,
-            patchNode,
-            selectNode,
-            ignoreLegacyNodeDrag,
-            handleGenNodeSizeChange,
-            updateKnowledgeVideoWorkflowConfig,
-            sessions,
-            importDownloaderCookies,
-            downloaderEngineStatus,
-            downloaderCookieBusy,
-            selectDownloaderCookieBrowser,
-            clearDownloaderCookies,
-          ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: !node.config.productScene && !node.config.reelbench,
-              content: (
-                <CanvasWorkflowNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  onUnlink={removeAssetEdge}
-                  onRemoveHistoricalReference={(index) =>
-                    patchNode("knowledgeVideoWorkflow", node.key, (current) => ({
-                      ...current,
-                      config: {
-                        ...current.config,
-                        connectedMaterials: (current.config.connectedMaterials ?? []).filter(
-                          (_, itemIndex) => itemIndex !== index,
-                        ),
-                      },
-                    }))
-                  }
-                  providerCatalog={providerCatalog}
-                  runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onSizeChange={handleGenNodeSizeChange}
-                  onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
-                  onOpenDownloadSettings={importDownloaderCookies}
-                  downloadCookieStatus={downloaderEngineStatus}
-                  downloadCookieBusy={downloaderCookieBusy}
-                  onSelectDownloadCookieBrowser={selectDownloaderCookieBrowser}
-                  onClearDownloadCookies={clearDownloaderCookies}
-                />
-              ),
-            },
-          }),
-        ),
-      ),
-    [
-      workflowNodeLayoutTokens,
-      removeAssetEdge,
-      patchNode,
-      providerCatalog,
-      knowledgeVideoWorkflowRuns,
-      selectedCanvasNodeKeys,
-      selectNode,
-      ignoreLegacyNodeDrag,
-      handleGenNodeSizeChange,
-      updateKnowledgeVideoWorkflowConfig,
-      sessions,
-      importDownloaderCookies,
-      downloaderEngineStatus,
-      downloaderCookieBusy,
-      selectDownloaderCookieBrowser,
-      clearDownloaderCookies,
-      canvasStore,
-    ],
-  );
-
-  const viralRemixFlowNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      canvasNodesOfState(canvasStore.getState(), "viralRemix").map((node, index) =>
-        stableCanvasFlowNode(
-          canvasFlowNodeCachesRef.current,
-          "viralRemix",
-          node.key,
-          [
-            viralRemixNodeLayoutTokens[index] ?? node.key,
-            selectedCanvasNodeKeys.has(node.key),
-            startingNodeKeys.has(node.key),
-            startErrorsByNode[node.key] ?? null,
-            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
-            streamingTextByNode[node.key] ?? null,
-            providerCatalog,
-            selectNode,
-            ignoreLegacyNodeDrag,
-            removeViralRemixNode,
-            removeAssetEdge,
-            handleGenNodeSizeChange,
-            updateViralRemixNodeConfig,
-            handleRunViralRemixNode,
-            handleExportViralRemix,
-          ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: true,
-              content: (
-                <CanvasViralRemixNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  running={startingNodeKeys.has(node.key)}
-                  streamingText={streamingTextByNode[node.key] ?? null}
-                  error={startErrorsByNode[node.key] ?? null}
-                  providerCatalog={providerCatalog}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeViralRemixNode}
-                  onUnlink={removeAssetEdge}
-                  onSizeChange={handleGenNodeSizeChange}
-                  onChange={(config) => updateViralRemixNodeConfig(node.key, config)}
-                  onRun={handleRunViralRemixNode}
-                  onExport={handleExportViralRemix}
-                />
-              ),
-            },
-          }),
-        ),
-      ),
-    [
-      viralRemixNodeLayoutTokens,
-      selectedCanvasNodeKeys,
-      startingNodeKeys,
-      startErrorsByNode,
-      providerCatalog,
-      selectNode,
-      ignoreLegacyNodeDrag,
-      removeViralRemixNode,
-      removeAssetEdge,
-      handleGenNodeSizeChange,
-      updateViralRemixNodeConfig,
-      handleRunViralRemixNode,
-      handleExportViralRemix,
       streamingTextByNode,
       canvasStore,
     ],
@@ -10948,11 +8506,15 @@ export function WorkspaceApp({
             genNodeLayoutTokens[index] ?? node.key,
             nodeDescriptorContext,
             selectedCanvasNodeKeys.has(node.key),
+            editingNodeKey === node.key,
+            openNodeEditor,
+            closeNodeEditor,
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
             streamingTextByNode[node.key] ?? null,
             activeTaskByNode.get(node.key) ?? null,
+            latestTaskByNode.get(node.key) ?? null,
             aliveCanvasNodeKeys,
             providerCatalog,
             selectNode,
@@ -10968,59 +8530,67 @@ export function WorkspaceApp({
             updateImageNodeConfig,
             updateVideoNodeConfig,
             openVideoLocalEdit,
-            openWhiteModelStudio,
             handleUseGreenScreenResult,
             importGreenScreenVideo,
             handleStartGeneration,
             promptContents,
           ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: true,
-              content: (
-                <CanvasGenNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  running={startingNodeKeys.has(node.key)}
-                  streamingText={streamingTextByNode[node.key] ?? null}
-                  error={startErrorsByNode[node.key] ?? null}
-                  activeTask={activeTaskByNode.get(node.key) ?? null}
-                  descriptorContext={nodeDescriptorContext}
-                  providerCatalog={providerCatalog}
-                  promptContents={promptContents}
-                  aliveCanvasNodeKeys={aliveCanvasNodeKeys}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeGenNode}
-                  onUnlink={removeAssetEdge}
-                  onConnectionStart={ignoreLegacyConnectionStart}
-                  onSizeChange={handleGenNodeSizeChange}
-                  onReorderInput={reorderGenerationInput}
-                  registerPromptInput={registerPromptInput}
-                  onPromptChange={updatePromptNodeConfig}
-                  onRunPrompt={handleRunPromptNode}
-                  onImageConfigChange={updateImageNodeConfig}
-                  onRename={renameGenNode}
-                  onVideoConfigChange={updateVideoNodeConfig}
-                  onAnnotateVideo={openVideoLocalEdit}
-                  onOpenWhiteModelStudio={openWhiteModelStudio}
-                  onGreenScreenUseResult={handleUseGreenScreenResult}
-                  onImportGreenScreenVideo={importGreenScreenVideo}
-                  onStartGeneration={handleStartGeneration}
-                />
-              ),
-            },
-          }),
+          () => {
+            const content = (
+              <CanvasGenNodeCardSlot
+                nodeKey={node.key}
+                selected={selectedCanvasNodeKeys.has(node.key)}
+                editorOpen={editingNodeKey === node.key}
+                onCloseEditor={closeNodeEditor}
+                running={startingNodeKeys.has(node.key)}
+                streamingText={streamingTextByNode[node.key] ?? null}
+                error={startErrorsByNode[node.key] ?? null}
+                activeTask={activeTaskByNode.get(node.key) ?? null}
+                latestTask={latestTaskByNode.get(node.key) ?? null}
+                descriptorContext={nodeDescriptorContext}
+                providerCatalog={providerCatalog}
+                promptContents={promptContents}
+                aliveCanvasNodeKeys={aliveCanvasNodeKeys}
+                onSelect={selectNode}
+                onEdit={openNodeEditor}
+                onNodeDragStart={ignoreLegacyNodeDrag}
+                onRemove={removeGenNode}
+                onUnlink={removeAssetEdge}
+                onConnectionStart={ignoreLegacyConnectionStart}
+                onSizeChange={handleGenNodeSizeChange}
+                onReorderInput={reorderGenerationInput}
+                registerPromptInput={registerPromptInput}
+                onPromptChange={updatePromptNodeConfig}
+                onRunPrompt={handleRunPromptNode}
+                onImageConfigChange={updateImageNodeConfig}
+                onRename={renameGenNode}
+                onVideoConfigChange={updateVideoNodeConfig}
+                onAnnotateVideo={openVideoLocalEdit}
+                onGreenScreenUseResult={handleUseGreenScreenResult}
+                onImportGreenScreenVideo={importGreenScreenVideo}
+                onStartGeneration={handleStartGeneration}
+              />
+            );
+            return {
+              id: node.key,
+              type: "canvas",
+              position: { x: node.x, y: node.y },
+              ...measuredFor(node),
+              selected: selectedCanvasNodeKeys.has(node.key),
+              data: {
+                hasSourceHandle: true,
+                hasTargetHandle: true,
+                content,
+              },
+            };
+          },
         );
       }),
     [
       genNodeLayoutTokens,
+      editingNodeKey,
+      openNodeEditor,
+      closeNodeEditor,
       nodeDescriptorContext,
       selectedCanvasNodeKeys,
       startingNodeKeys,
@@ -11037,13 +8607,13 @@ export function WorkspaceApp({
       updatePromptNodeConfig,
       handleRunPromptNode,
       activeTaskByNode,
+      latestTaskByNode,
       aliveCanvasNodeKeys,
       registerPromptInput,
       updateImageNodeConfig,
       renameGenNode,
       updateVideoNodeConfig,
       openVideoLocalEdit,
-      openWhiteModelStudio,
       handleUseGreenScreenResult,
       importGreenScreenVideo,
       handleStartGeneration,
@@ -11052,25 +8622,26 @@ export function WorkspaceApp({
     ],
   );
 
-  const videoComposerFlowNodes = useMemo<CanvasFlowNode[]>(
+  const videoClipFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      canvasNodesOfState(canvasStore.getState(), "videoComposer").map((node, index) =>
+      canvasNodesOfState(canvasStore.getState(), "videoClip").map((node, index) =>
         stableCanvasFlowNode(
           canvasFlowNodeCachesRef.current,
-          "videoComposer",
+          "videoClip",
           node.key,
           [
-            videoComposerNodeLayoutTokens[index] ?? node.key,
+            videoClipNodeLayoutTokens[index] ?? node.key,
             selectedCanvasNodeKeys.has(node.key),
-            videoComposerRuns[node.key],
-            videoCompositionFormat,
+            startingVideoClipKeys.has(node.key),
+            startErrorsByNode[node.key] ?? null,
             selectNode,
             ignoreLegacyNodeDrag,
-            removeVideoComposerNode,
             removeAssetEdge,
-            updateVideoComposerConfig,
-            moveVideoComposerInput,
-            handleComposeVideos,
+            applyVideoClipPreset,
+            changeVideoClipMode,
+            changeVideoClipParams,
+            startVideoClip,
+            registerPromptInput,
           ],
           () => ({
             id: node.key,
@@ -11082,18 +8653,27 @@ export function WorkspaceApp({
               hasSourceHandle: true,
               hasTargetHandle: true,
               content: (
-                <CanvasVideoComposerNodeCardSlot
+                <CanvasVideoClipNodeCardSlot
                   nodeKey={node.key}
                   selected={selectedCanvasNodeKeys.has(node.key)}
-                  runState={videoComposerRuns[node.key]}
-                  recordingFormat={videoCompositionFormat}
+                  editorOpen={editingNodeKey === node.key}
+                  busy={startingVideoClipKeys.has(node.key)}
+                  error={startErrorsByNode[node.key] ?? null}
                   onSelect={selectNode}
                   onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeVideoComposerNode}
+                  onCloseEditor={closeNodeEditor}
+                  onModeChange={changeVideoClipMode}
+                  onParamsChange={changeVideoClipParams}
+                  onSubmit={(nodeKey) => {
+                    // startVideoClip 是 async：包一层把 Promise 显式丢弃，
+                    // 避免把 Promise 交给只期待 void 的回调（no-misused-promises）。
+                    void startVideoClip(nodeKey);
+                  }}
+                  onTryMode={applyVideoClipPreset}
+                  onOpenEditor={handleOpenVideoClipEditor}
+                  onOpenReferencePicker={handleOpenVideoClipReferencePicker}
                   onUnlink={removeAssetEdge}
-                  onConfigChange={updateVideoComposerConfig}
-                  onMoveInput={moveVideoComposerInput}
-                  onCompose={handleComposeVideos}
+                  registerPromptInput={registerPromptInput}
                 />
               ),
             },
@@ -11101,162 +8681,22 @@ export function WorkspaceApp({
         ),
       ),
     [
-      videoComposerNodeLayoutTokens,
-      selectedCanvasNodeKeys,
-      videoComposerRuns,
-      videoCompositionFormat,
-      selectNode,
+      applyVideoClipPreset,
+      changeVideoClipMode,
+      changeVideoClipParams,
+      closeNodeEditor,
+      editingNodeKey,
+      handleOpenVideoClipEditor,
+      handleOpenVideoClipReferencePicker,
       ignoreLegacyNodeDrag,
-      removeVideoComposerNode,
+      registerPromptInput,
       removeAssetEdge,
-      updateVideoComposerConfig,
-      moveVideoComposerInput,
-      handleComposeVideos,
-      canvasStore,
-    ],
-  );
-
-  const videoDownloaderFlowNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      canvasNodesOfState(canvasStore.getState(), "videoDownloader").map((node, index) =>
-        stableCanvasFlowNode(
-          canvasFlowNodeCachesRef.current,
-          "videoDownloader",
-          node.key,
-          [
-            videoDownloaderNodeLayoutTokens[index] ?? node.key,
-            selectedCanvasNodeKeys.has(node.key),
-            videoDownloaderRuns[node.key],
-            downloaderEngineStatus,
-            downloaderEngineBusy,
-            downloaderCookieBusy,
-            selectNode,
-            ignoreLegacyNodeDrag,
-            removeVideoDownloaderNode,
-            updateVideoDownloaderConfig,
-            handleStartVideoDownload,
-            handleCancelVideoDownload,
-            prepareDownloaderEngine,
-            updateDownloaderEngine,
-            importDownloaderCookies,
-            selectDownloaderCookieBrowser,
-            clearDownloaderCookies,
-            revealDownloaderResult,
-            ignoreLegacyConnectionStart,
-          ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: true,
-              content: (
-                <CanvasVideoDownloaderNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  runState={videoDownloaderRuns[node.key]}
-                  engineStatus={downloaderEngineStatus}
-                  enginePreparing={downloaderEngineBusy || downloaderCookieBusy}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeVideoDownloaderNode}
-                  onConfigChange={updateVideoDownloaderConfig}
-                  onStartDownload={handleStartVideoDownload}
-                  onCancelDownload={handleCancelVideoDownload}
-                  onPrepareEngine={prepareDownloaderEngine}
-                  onUpdateEngine={updateDownloaderEngine}
-                  onImportCookies={importDownloaderCookies}
-                  onSelectCookieBrowser={selectDownloaderCookieBrowser}
-                  onClearCookies={clearDownloaderCookies}
-                  onRevealResult={revealDownloaderResult}
-                  onConnectionStart={ignoreLegacyConnectionStart}
-                />
-              ),
-            },
-          }),
-        ),
-      ),
-    [
-      videoDownloaderNodeLayoutTokens,
-      selectedCanvasNodeKeys,
-      videoDownloaderRuns,
-      downloaderEngineStatus,
-      downloaderEngineBusy,
-      downloaderCookieBusy,
       selectNode,
-      ignoreLegacyNodeDrag,
-      removeVideoDownloaderNode,
-      updateVideoDownloaderConfig,
-      handleStartVideoDownload,
-      handleCancelVideoDownload,
-      prepareDownloaderEngine,
-      updateDownloaderEngine,
-      importDownloaderCookies,
-      selectDownloaderCookieBrowser,
-      clearDownloaderCookies,
-      revealDownloaderResult,
-      ignoreLegacyConnectionStart,
-      canvasStore,
-    ],
-  );
-
-  const frameExtractorFlowNodes = useMemo<CanvasFlowNode[]>(
-    () =>
-      canvasNodesOfState(canvasStore.getState(), "frameExtractor").map((node, index) =>
-        stableCanvasFlowNode(
-          canvasFlowNodeCachesRef.current,
-          "frameExtractor",
-          node.key,
-          [
-            frameExtractorNodeLayoutTokens[index] ?? node.key,
-            selectedCanvasNodeKeys.has(node.key),
-            frameExtractorRuns[node.key],
-            selectNode,
-            ignoreLegacyNodeDrag,
-            removeFrameExtractorNode,
-            updateFrameExtractorConfig,
-            handleStartFrameExtraction,
-            handleCancelFrameExtraction,
-          ],
-          () => ({
-            id: node.key,
-            type: "canvas",
-            position: { x: node.x, y: node.y },
-            ...measuredFor(node),
-            selected: selectedCanvasNodeKeys.has(node.key),
-            data: {
-              hasSourceHandle: true,
-              hasTargetHandle: true,
-              content: (
-                <CanvasVideoFrameExtractorNodeCardSlot
-                  nodeKey={node.key}
-                  selected={selectedCanvasNodeKeys.has(node.key)}
-                  runState={frameExtractorRuns[node.key]}
-                  onSelect={selectNode}
-                  onNodeDragStart={ignoreLegacyNodeDrag}
-                  onRemove={removeFrameExtractorNode}
-                  onConfigChange={updateFrameExtractorConfig}
-                  onStartExtraction={handleStartFrameExtraction}
-                  onCancelExtraction={handleCancelFrameExtraction}
-                />
-              ),
-            },
-          }),
-        ),
-      ),
-    [
-      frameExtractorNodeLayoutTokens,
       selectedCanvasNodeKeys,
-      frameExtractorRuns,
-      selectNode,
-      ignoreLegacyNodeDrag,
-      removeFrameExtractorNode,
-      updateFrameExtractorConfig,
-      handleStartFrameExtraction,
-      handleCancelFrameExtraction,
+      startErrorsByNode,
+      startVideoClip,
+      startingVideoClipKeys,
+      videoClipNodeLayoutTokens,
       canvasStore,
     ],
   );
@@ -11369,13 +8809,14 @@ export function WorkspaceApp({
     if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
   }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
 
-  // 分组随 asset/output 的成员/分组指纹重建；内容补丁不再触发。
-  // 分组相关字段的窄签名：成员 key/分组/名称/取用顺序/落盘路径变化时才重建分组。
+  // 只订阅组织、几何与展示字段，后台进度和正文补丁不重建分组。
+  const canvasGroupMetadata = useCanvas((state) => state.groups);
   const canvasAssetGroupSignature = useCanvas(
     useShallow((state) =>
-      [...state.nodes.asset, ...state.nodes.output].map((node) => {
-        const group = (node as { readonly assetGroupId?: unknown }).assetGroupId;
-        return `${node.key}:${typeof group === "string" ? group : ""}:${node.name ?? ""}:${
+      CANVAS_NODE_TYPE_KEYS.flatMap(
+        (type) => state.nodes[type] as readonly CanvasGroupMember[],
+      ).map((node) => {
+        return `${node.key}:${node.assetGroupId ?? ""}:${canvasGroupMemberName(node)}:${node.x}:${node.y}:${node.measured?.width ?? ""}:${node.measured?.height ?? ""}:${
           "libraryPickOrder" in node ? (node.libraryPickOrder ?? "") : ""
         }:${"finalPath" in node ? (node.finalPath ?? "") : ""}`;
       }),
@@ -11383,27 +8824,37 @@ export function WorkspaceApp({
   );
   const canvasAssetGroups = useMemo(() => {
     void canvasAssetGroupSignature;
-    return assetGroupsFromNodes([
-      ...canvasNodesOfState(canvasStore.getState(), "asset"),
-      ...canvasNodesOfState(canvasStore.getState(), "output"),
-    ]);
+    return assetGroupsFromNodes(
+      Object.values(canvasStore.getState().nodesById).map((entry) => entry.data),
+    );
   }, [canvasAssetGroupSignature, canvasStore]);
+  const collapsedGroupByNode = useMemo(
+    () =>
+      new Map(
+        canvasAssetGroups.flatMap((group) =>
+          canvasGroupMetadata[group.groupId]?.collapsed
+            ? group.members.map((member) => [member.key, assetGroupFlowId(group.groupId)] as const)
+            : [],
+        ),
+      ),
+    [canvasAssetGroups, canvasGroupMetadata],
+  );
+  const selectCanvasGroup = useCallback(
+    (groupId: string) => {
+      const keys = Object.values(canvasStore.getState().nodesById)
+        .filter((entry) => entry.data.assetGroupId === groupId)
+        .map((entry) => entry.data.key);
+      setMarqueeNodeKeys(new Set(keys));
+      selectNode(null);
+      selectEdge(null);
+    },
+    [canvasStore, selectNode, selectEdge],
+  );
   const dissolveCanvasAssetGroup = useCallback(
     (groupId: string) => {
-      const snapshot = canvasStore.getState();
-      const nextAssets = dissolveAssetGroupNodes(canvasNodesOfState(snapshot, "asset"), groupId);
-      const nextOutputs = dissolveAssetGroupNodes(canvasNodesOfState(snapshot, "output"), groupId);
-      if (nextAssets == null && nextOutputs == null) return;
-      if (nextAssets != null) {
-        const byKey = new Map(nextAssets.map((node) => [node.key, node]));
-        patchNodes("asset", (node) => byKey.get(node.key) ?? node);
-      }
-      if (nextOutputs != null) {
-        const byKey = new Map(nextOutputs.map((node) => [node.key, node]));
-        patchNodes("output", (node) => byKey.get(node.key) ?? node);
-      }
+      dissolveGroup(groupId);
     },
-    [patchNodes, canvasStore],
+    [dissolveGroup],
   );
   const uploadCanvasGroupToLibrary = useCallback(
     (groupId: string) => {
@@ -11423,11 +8874,23 @@ export function WorkspaceApp({
   const assetGroupFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
       canvasAssetGroups.map((group) => {
-        const bounds = assetGroupBounds(group.members);
+        const metadata = canvasGroupMetadata[group.groupId] ?? {
+          id: group.groupId,
+          name: "未命名分组",
+          collapsed: false,
+        };
+        const fullBounds = assetGroupBounds(group.members);
+        const bounds = {
+          ...fullBounds,
+          width: metadata.collapsed ? 460 : Math.max(460, fullBounds.width),
+          height: metadata.collapsed ? 112 : fullBounds.height,
+        };
+        const mediaOnly = group.members.every(isMediaGroupMember);
+        const selected = group.members.every((member) => selectedCanvasNodeKeys.has(member.key));
         const memberSignature = group.members
           .map(
             (member) =>
-              `${member.key}:${member.name ?? ""}:${member.libraryPickOrder ?? ""}:${"finalPath" in member ? (member.finalPath ?? "") : ""}`,
+              `${member.key}:${canvasGroupMemberName(member)}:${"libraryPickOrder" in member ? (member.libraryPickOrder ?? "") : ""}:${"finalPath" in member ? (member.finalPath ?? "") : ""}`,
           )
           .join("|");
         const uploadLabel =
@@ -11447,6 +8910,12 @@ export function WorkspaceApp({
             bounds.width,
             bounds.height,
             memberSignature,
+            metadata,
+            selected,
+            mediaOnly,
+            selectCanvasGroup,
+            updateGroup,
+            copyCanvasNodes,
             dissolveCanvasAssetGroup,
             canUpload,
             uploadLabel,
@@ -11462,24 +8931,27 @@ export function WorkspaceApp({
             height: bounds.height,
             style: { width: bounds.width, height: bounds.height },
             zIndex: 0,
-            selectable: false,
-            draggable: false,
+            selectable: metadata.collapsed,
+            draggable: true,
+            dragHandle: ".canvas-asset-group__chip",
             focusable: false,
-            connectable: true,
+            connectable: mediaOnly,
             data: {
-              hasSourceHandle: true,
-              hasTargetHandle: false,
-              sourceHandleLabel: "连接素材组内的全部素材",
+              groupMemberKeys: group.members.map((member) => member.key),
+              hasSourceHandle: mediaOnly || metadata.collapsed,
+              hasTargetHandle: metadata.collapsed,
+              sourceHandleLabel: mediaOnly ? "连接素材组内的全部素材" : "组内节点的输出连线",
               content: (
                 <AssetGroupFrame
+                  group={metadata}
                   members={group.members}
-                  onDissolve={() => dissolveCanvasAssetGroup(group.groupId)}
-                  {...(canUpload
-                    ? {
-                        onUpload: () => uploadCanvasGroupToLibrary(group.groupId),
-                        uploadLabel,
-                      }
-                    : {})}
+                  selected={selected}
+                  onSelect={() => selectCanvasGroup(group.groupId)}
+                  onRename={(name) => updateGroup(group.groupId, { name })}
+                  onContextMenu={(position) => {
+                    selectCanvasGroup(group.groupId);
+                    setGroupContextMenu({ ...position, groupId: group.groupId });
+                  }}
                 />
               ),
             },
@@ -11489,11 +8961,48 @@ export function WorkspaceApp({
     [
       assetLibrarySource,
       canvasAssetGroups,
+      canvasGroupMetadata,
+      selectedCanvasNodeKeys,
+      selectCanvasGroup,
+      updateGroup,
+      copyCanvasNodes,
       cloudCollection,
       dissolveCanvasAssetGroup,
       uploadCanvasGroupToLibrary,
       canvasStore,
     ],
+  );
+
+  /*
+   * 素材节点选中时浮出的工具条（liblib 的 .node-floating-ui）。
+   *
+   * 所有素材节点共用同一个元素引用：内容完全一致，没必要每个节点建一份；
+   * 共享引用还能保住 per-node 引用稳定性（见 stableCanvasFlowNode 的注释），
+   * 否则每次渲染都会让节点视图整体重渲染。
+   */
+  const handleNodeFloatingToolbarAction = useCallback((id: string) => {
+    const item = CANVAS_NODE_FLOATING_TOOLBAR_ITEMS.find((entry) => entry.id === id);
+    toast.error(`${item?.label ?? "该能力"}后端暂未接入`, {
+      description:
+        "原站这组图像编辑能力（全景 / 多角度 / 打光 / 九宫格 / 高清 / 元素编辑 / 图层分离 / 宫格切分）依赖本项目后端尚未提供的图像编辑服务。界面结构与交互已按原站对齐，服务接入后即可启用。",
+    });
+  }, []);
+  const assetFloatingToolbar = useMemo(
+    () => (
+      <CanvasNodeFloatingToolbar
+        label="素材节点工具"
+        items={CANVAS_NODE_FLOATING_TOOLBAR_ITEMS.map((item) => ({
+          ...item,
+          available: false,
+          onSelect: handleNodeFloatingToolbarAction,
+        }))}
+      />
+    ),
+    [handleNodeFloatingToolbarAction],
+  );
+  const assetNodeIds = useMemo(
+    () => new Set(assetFlowNodes.map((node) => node.id)),
+    [assetFlowNodes],
   );
 
   const flowNodes = useMemo<CanvasFlowNode[]>(() => {
@@ -11514,13 +9023,8 @@ export function WorkspaceApp({
       ...assetFlowNodes,
       ...outputFlowNodes,
       ...screenplayFlowNodes,
-      ...storyboardFlowNodes,
-      ...knowledgeVideoWorkflowFlowNodes,
-      ...viralRemixFlowNodes,
       ...genFlowNodes,
-      ...videoComposerFlowNodes,
-      ...videoDownloaderFlowNodes,
-      ...frameExtractorFlowNodes,
+      ...videoClipFlowNodes,
       ...resultFlowNodes,
     ];
     const projected = baseNodes.map((baseNode) => {
@@ -11536,12 +9040,15 @@ export function WorkspaceApp({
         canvasFlowNodeCachesRef.current,
         "final",
         baseNode.id,
-        [baseNode, highlightTarget],
+        [baseNode, highlightTarget, collapsedGroupByNode.has(baseNode.id)],
         () => ({
           ...baseNode,
+          hidden: collapsedGroupByNode.has(baseNode.id),
           data: {
             ...baseNode.data,
             highlightTarget,
+            // 素材节点选中时浮出 liblib 式工具条；其他节点类型原站没有这一层。
+            floatingToolbar: assetNodeIds.has(baseNode.id) ? assetFloatingToolbar : undefined,
           },
         }),
       );
@@ -11557,15 +9064,13 @@ export function WorkspaceApp({
     assetFlowNodes,
     outputFlowNodes,
     screenplayFlowNodes,
-    storyboardFlowNodes,
-    knowledgeVideoWorkflowFlowNodes,
-    viralRemixFlowNodes,
     genFlowNodes,
-    videoComposerFlowNodes,
-    videoDownloaderFlowNodes,
-    frameExtractorFlowNodes,
+    videoClipFlowNodes,
     resultFlowNodes,
     connectionSourceKey,
+    collapsedGroupByNode,
+    assetFloatingToolbar,
+    assetNodeIds,
   ]);
 
   // 每条边的稳定缓存：内容输入（端点、名称、类名、序号、选中态、回调）不变时
@@ -11589,12 +9094,16 @@ export function WorkspaceApp({
     const nextEdges = state.graph.edges.map((edge, index) => {
       const descriptor = canvasFlowEdgeDescriptor(state, edge);
       const isSelected = state.selection.edgeId === edge.id;
+      const source = collapsedGroupByNode.get(edge.fromKey) ?? edge.fromKey;
+      const target = collapsedGroupByNode.get(edge.toKey) ?? edge.toKey;
       return stableCachedItem(
         cache,
         edge.id,
         [
           edge.fromKey,
           edge.toKey,
+          source,
+          target,
           flowEdgeTokens[index] ?? edge.id,
           selectEdge,
           selectNode,
@@ -11605,8 +9114,9 @@ export function WorkspaceApp({
           ({
             id: edge.id,
             type: "canvas",
-            source: edge.fromKey,
-            target: edge.toKey,
+            source,
+            target,
+            hidden: source === target,
             sourceHandle: "source",
             targetHandle: "target",
             selected: isSelected,
@@ -11634,7 +9144,186 @@ export function WorkspaceApp({
       }
     }
     return nextEdges;
-  }, [flowEdgeTokens, selectEdge, selectNode, removeAssetEdge, canvasStore]);
+  }, [flowEdgeTokens, selectEdge, selectNode, removeAssetEdge, canvasStore, collapsedGroupByNode]);
+
+  /*
+   * 「隐藏节点连线」只改可见性，不动图数据：连线仍在图里、仍可被选中与
+   * 删除，重新打开开关就回来。hidden 是 React Flow 的原生开关，交给它
+   * 处理裁剪，比自己过滤数组更省一次渲染。
+   */
+  const visibleFlowEdges = useMemo<CanvasFlowEdge[]>(
+    () => (edgesVisible ? flowEdges : flowEdges.map((edge) => ({ ...edge, hidden: true }))),
+    [edgesVisible, flowEdges],
+  );
+
+  /*
+   * 整理画布：把散落的顶层节点按网格重排（对应原站 Alt+Shift+F）。
+   *
+   * 只重排顶层节点：组内成员的位置由组框决定，移动组根时由
+   * expandCanvasGroupPositionChanges 展开成整组位移，单独挪成员会把组
+   * 拆散。排序沿用当前的上→下、左→右阅读顺序，用户看到的相对次序不变。
+   */
+  const formatCanvasLayout = useCallback(() => {
+    const movable = flowNodes.filter(
+      (node) => !node.hidden && assetGroupIdFromFlowId(node.id) == null,
+    );
+    if (movable.length === 0) {
+      toast.error("画布没有可整理的节点");
+      return;
+    }
+    const ordered = [...movable].sort(
+      (left, right) => left.position.y - right.position.y || left.position.x - right.position.x,
+    );
+    const cellWidth =
+      Math.max(...ordered.map((node) => node.measured?.width ?? node.width ?? 320)) + 64;
+    const cellHeight =
+      Math.max(...ordered.map((node) => node.measured?.height ?? node.height ?? 240)) + 64;
+    const columns = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+    const originX = Math.min(...ordered.map((node) => node.position.x));
+    const originY = Math.min(...ordered.map((node) => node.position.y));
+    applyNodeChanges(
+      ordered.map((node, index) => ({
+        type: "position" as const,
+        key: node.id,
+        position: {
+          x: originX + (index % columns) * cellWidth,
+          y: originY + Math.floor(index / columns) * cellHeight,
+        },
+      })),
+    );
+  }, [applyNodeChanges, flowNodes]);
+
+  /*
+   * 节点右键菜单（原站 liblib 的画布上下文菜单）。
+   *
+   * 画布**空白处**的右键仍是本项目既有的「快速添加节点」菜单（既有契约与测试
+   * 都在它上面）；原站的上下文菜单是**节点级**的——复制节点 / 复制图片 / 成组 /
+   * 整理画布那一组，所以挂在节点上。
+   *
+   * 左下控件组按原站收敛成六项后，节点动作（复制 / 粘贴 / 成组 / 删除 / 交付）
+   * 的按钮入口一并消失，按原站的分工它们留在**右键菜单**与键盘快捷键里。
+   */
+  /*
+   * 分组右键菜单（原站 liblib 的组操作入口）。
+   *
+   * 原站的分组只有「彩色框 + 小标签」两件东西，框上没有工具条；组动作
+   * （复制整组 / 折叠 / 添加到素材库 / 解散）因此收在这里。
+   */
+  const handleGroupContextMenuAction = useCallback(
+    (action: string) => {
+      const target = groupContextMenu;
+      setGroupContextMenu(null);
+      if (target == null) return;
+      const group = canvasAssetGroups.find((item) => item.groupId === target.groupId);
+      if (group == null) return;
+      const metadata = canvasGroupMetadata[group.groupId];
+      switch (action) {
+        case "copyGroup":
+          copyCanvasNodes(new Set(group.members.map((member) => member.key)));
+          return;
+        case "toggleCollapsed":
+          updateGroup(target.groupId, { collapsed: !(metadata?.collapsed ?? false) });
+          return;
+        case "uploadGroup":
+          uploadCanvasGroupToLibrary(target.groupId);
+          return;
+        case "dissolveGroup":
+          dissolveCanvasAssetGroup(target.groupId);
+          return;
+        default:
+          return;
+      }
+    },
+    [
+      canvasAssetGroups,
+      canvasGroupMetadata,
+      copyCanvasNodes,
+      dissolveCanvasAssetGroup,
+      groupContextMenu,
+      updateGroup,
+      uploadCanvasGroupToLibrary,
+    ],
+  );
+
+  const groupContextMenuItems: readonly CanvasContextMenuItem[] = useMemo(() => {
+    const target = groupContextMenu;
+    if (target == null) return [];
+    const group = canvasAssetGroups.find((item) => item.groupId === target.groupId);
+    if (group == null) return [];
+    const metadata = canvasGroupMetadata[group.groupId];
+    return [
+      { id: "copyGroup", label: "复制整组", hint: "复制组内全部节点" },
+      {
+        id: "toggleCollapsed",
+        label: metadata?.collapsed === true ? "展开分组" : "折叠分组",
+      },
+      ...(group.members.some(isUploadableOutput)
+        ? [{ id: "uploadGroup", label: "添加到素材库" as const }]
+        : []),
+      { id: "dissolveGroup", label: "解散分组", danger: true },
+    ];
+  }, [canvasAssetGroups, canvasGroupMetadata, groupContextMenu]);
+
+  const handleNodeContextMenuAction = useCallback(
+    (action: string) => {
+      const target = nodeContextMenu;
+      setNodeContextMenu(null);
+      if (target == null) return;
+      switch (action) {
+        case "copyNode":
+        case "copyExpanded":
+          void copyCanvasNodes(new Set([target.nodeKey]));
+          return;
+        case "duplicate": {
+          const captured = copyCanvasNodes(new Set([target.nodeKey]));
+          if (captured != null) pasteCopiedCanvasNodes(captured);
+          return;
+        }
+        case "paste":
+          if (!canPasteCanvasNodes) {
+            toast.error("请先复制画布节点");
+            return;
+          }
+          pasteCopiedCanvasNodes();
+          return;
+        case "group":
+          selectNode(target.nodeKey);
+          toast.error("成组需要选中至少两个节点", {
+            description: "先在画布上框选多个节点，再按 ⌘G（Ctrl+G）。",
+          });
+          return;
+        case "remove":
+          selectNode(target.nodeKey);
+          deleteSelectedCanvasNodes();
+          return;
+        case "exportArtifacts":
+          if (artifactDeliveryBusy) {
+            toast.error("正在交付中，请稍候");
+            return;
+          }
+          void exportSelectedArtifacts();
+          return;
+        case "formatLayout":
+          formatCanvasLayout();
+          return;
+        default:
+          toast.error("该能力后端暂未接入", {
+            description: "原站这条上下文操作依赖本项目后端尚未提供的服务；入口与文案已按原站保留。",
+          });
+      }
+    },
+    [
+      artifactDeliveryBusy,
+      canPasteCanvasNodes,
+      copyCanvasNodes,
+      deleteSelectedCanvasNodes,
+      exportSelectedArtifacts,
+      formatCanvasLayout,
+      nodeContextMenu,
+      pasteCopiedCanvasNodes,
+      selectNode,
+    ],
+  );
 
   const handleFlowNodesChange = useCallback(
     (changes: NodeChange<CanvasFlowNode>[]) => {
@@ -11760,6 +9449,18 @@ export function WorkspaceApp({
 
   const handleConnectionQuickAdd = (kind: CanvasQuickAddKind) => {
     if (!connectionQuickAdd) return;
+    /*
+     * 原站有、本项目后端尚未提供的节点类型（导演台 / 逐帧拉片 / 音频 / 参考节点）：
+     * 条目与文案按原站保留，点击给出明确说明，不静默失败。
+     */
+    const choice = CANVAS_QUICK_ADD_CHOICES.find((item) => item.kind === kind);
+    if (choice?.available === false) {
+      closeConnectionQuickAdd();
+      toast.error(`${choice.label}后端暂未接入`, {
+        description: "原站 liblib 画布有这一类节点，本项目的后端服务尚未提供；入口按原站保留。",
+      });
+      return;
+    }
     const { connection, boardPosition } = connectionQuickAdd;
     const sourceGroupId =
       connection?.handleType === "source" ? assetGroupIdFromFlowId(connection.nodeKey) : null;
@@ -11797,62 +9498,160 @@ export function WorkspaceApp({
     );
   };
 
+  /**
+   * 空画布快捷入口：在画布中心建一个对应类型的节点。
+   *
+   * 原站空画布上的五个入口（图片生成 / 视频生成 / 音频生成 / 剧本生成 / 智能剪辑）
+   * 就是这么用的；未接入的类型按约定给出明确说明，不静默失败。
+   */
+  const createNodeFromEmptyCanvas = useCallback(
+    (kind: CanvasQuickAddKind) => {
+      const choice = CANVAS_QUICK_ADD_CHOICES.find((item) => item.kind === kind);
+      if (choice?.available === false) {
+        toast.error(`${choice.label}后端暂未接入`, {
+          description: "原站 liblib 画布有这一类节点，本项目的后端服务尚未提供；入口按原站保留。",
+        });
+        return;
+      }
+      const center = viewportCenterBoardCoordinates();
+      const entry = createQuickAddEntry(kind, center.x, center.y);
+      insertSubgraph([entry], [], { selectNodeKey: entry.data.key });
+      selectEdge(null);
+      frontendLog("info", `[canvas] 空画布入口创建节点: key=${entry.data.key}, kind=${kind}`);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- createQuickAddEntry 是普通函数，放进依赖会让回调每次渲染都变
+    [insertSubgraph, selectEdge],
+  );
+
   const canvasNodeKeySetRef = useRef<ReadonlySet<string>>(new Set());
-  canvasNodeKeySetRef.current = canvasNodeKeys;
+  canvasNodeKeySetRef.current = new Set([
+    ...canvasNodeKeys,
+    ...new Set(collapsedGroupByNode.values()),
+  ]);
   const readNodeSelectionRef = useRef<() => readonly string[]>(() => []);
   const handleNodeSelectionEnd = useCallback(() => {
-    setMarqueeNodeKeys(new Set(readNodeSelectionRef.current()));
+    const selected = readNodeSelectionRef.current();
+    const entries = Object.values(canvasStore.getState().nodesById);
+    setMarqueeNodeKeys(
+      new Set(
+        selected.flatMap((key) => {
+          const groupId = assetGroupIdFromFlowId(key);
+          return groupId == null
+            ? [key]
+            : entries
+                .filter((entry) => entry.data.assetGroupId === groupId)
+                .map((entry) => entry.data.key);
+        }),
+      ),
+    );
     selectNode(null);
     selectEdge(null);
-  }, [selectEdge, selectNode]);
+  }, [canvasStore, selectEdge, selectNode]);
   const groupSelectedCanvasNodes = useCallback(() => {
     if (!canGroupSelectedNodes) return;
     const keys = selectedGroupableNodeKeys;
-    const next = regroupAssetNodes(
-      [
-        ...canvasNodesOfState(canvasStore.getState(), "asset"),
-        ...canvasNodesOfState(canvasStore.getState(), "output"),
-      ],
-      keys,
-      assetGroupKey(),
-    );
-    if (next == null) {
-      toast.info("所选素材或产物已在同一组");
+    if (groupNodes(keys, assetGroupKey()) !== "applied") {
+      toast.info("所选节点已在同一组");
       return;
     }
-    const byKey = new Map(next.map((node) => [node.key, node]));
-    patchNodes("asset", (node) => {
-      const updated = byKey.get(node.key);
-      return updated != null && "assetId" in updated ? updated : node;
-    });
-    patchNodes("output", (node) => {
-      const updated = byKey.get(node.key);
-      return updated != null && !("assetId" in updated) ? updated : node;
-    });
     setNodeMarquee(false);
     setMarqueeNodeKeys(new Set());
     selectNode(null);
     selectEdge(null);
     setMarqueeSelectionEpoch((epoch) => epoch + 1);
-    const assetKeySet = new Set(canvasNodesNow("asset").map((node) => node.key));
-    const assetCount = keys.filter((key) => assetKeySet.has(key)).length;
-    const outputCount = keys.length - assetCount;
-    toast.success(
-      outputCount === 0
-        ? `已成组，共 ${assetCount} 个素材`
-        : assetCount === 0
-          ? `已成组，共 ${outputCount} 个产物`
-          : `已成组，共 ${assetCount} 个素材、${outputCount} 个产物`,
-    );
-  }, [
-    canvasNodesNow,
-    canvasStore,
-    canGroupSelectedNodes,
-    patchNodes,
-    selectEdge,
-    selectedGroupableNodeKeys,
-    selectNode,
-  ]);
+    toast.success(`已成组，共 ${keys.length} 个节点`);
+  }, [groupNodes, canGroupSelectedNodes, selectEdge, selectedGroupableNodeKeys, selectNode]);
+
+  /*
+   * 解组（mod+shift+g）：原站注册表是 canvas.ungroup = mod+shift+g / alt+shift+g。
+   * 成组有 mod+g，解组此前只在右键菜单里有——快捷键面板声明了解组，照着按没反应。
+   * 语义：所选节点同属一个组时才解散；跨组、未选或不是组员时不动作。
+   */
+  const dissolveSelectedCanvasGroup = useCallback(() => {
+    const state = canvasStore.getState();
+    const groupIds = new Set<string>();
+    for (const key of selectedCanvasNodeKeys) {
+      const groupId = state.nodesById[key]?.data.assetGroupId;
+      if (groupId == null || groupId === "") continue;
+      groupIds.add(groupId);
+    }
+    if (groupIds.size !== 1) return;
+    const groupId = [...groupIds][0]!;
+    if (dissolveGroup(groupId) !== "applied") return;
+    toast.success("已解散分组");
+  }, [canvasStore, dissolveGroup, selectedCanvasNodeKeys]);
+
+  /*
+   * 节点快捷键：复制 / 粘贴 / 创建副本 / 成组。
+   *
+   * 放在 groupSelectedCanvasNodes 之后声明：成组要用它，而它自己依赖后面的
+   * 分组命令，提前声明会撞上 TDZ。
+   */
+  useHotkeys(
+    ["mod+c", "mod+v", "mod+d", "mod+g", "mod+shift+g"],
+    (event, hotkey) => {
+      if (hotkey.hotkey === "mod+v") {
+        if (!canPasteCanvasNodes) return;
+        event.preventDefault();
+        pasteCopiedCanvasNodes();
+        return;
+      }
+      /*
+       * 成组（⌘G）：原站 liblib 画布的快捷键注册表里就是 canvas.group=mod+g，
+       * 它的成组入口也在右键菜单里。左下控件组按原站收敛成六项后，成组没有
+       * 独立按钮了，这条快捷键就是它剩下的入口。
+       */
+      if (hotkey.hotkey === "mod+g") {
+        if (!canGroupSelectedNodes) return;
+        event.preventDefault();
+        groupSelectedCanvasNodes();
+        return;
+      }
+      if (hotkey.hotkey === "mod+shift+g") {
+        event.preventDefault();
+        dissolveSelectedCanvasGroup();
+        return;
+      }
+      if (selectedCanvasNodeKeys.size === 0) return;
+      event.preventDefault();
+      if (hotkey.hotkey === "mod+c") copySelectedCanvasNodes();
+      else duplicateSelectedCanvasNodes();
+    },
+    {
+      enabled:
+        active &&
+        canvasHydrated &&
+        !settingsOpen &&
+        !historyOpen &&
+        !realPersonDialogOpen &&
+        videoLocalEdit == null &&
+        videoPreparation == null &&
+        previewAsset == null &&
+        previewAssetNodeKey == null &&
+        previewOutputNodeKey == null,
+      preventDefault: false,
+    },
+    [
+      active,
+      canGroupSelectedNodes,
+      canvasHydrated,
+      canPasteCanvasNodes,
+      copySelectedCanvasNodes,
+      dissolveSelectedCanvasGroup,
+      duplicateSelectedCanvasNodes,
+      groupSelectedCanvasNodes,
+      historyOpen,
+      pasteCopiedCanvasNodes,
+      previewAsset,
+      previewAssetNodeKey,
+      previewOutputNodeKey,
+      realPersonDialogOpen,
+      selectedCanvasNodeKeys,
+      settingsOpen,
+      videoLocalEdit,
+      videoPreparation,
+    ],
+  );
 
   const handleFlowConnect = (connection: Connection) => {
     if (!connection.source || !connection.target) return;
@@ -11913,1566 +9712,860 @@ export function WorkspaceApp({
         ? (assetGroups.find((group) => group.id === selectedAssetGroupId)?.name ?? null)
         : null;
 
-  // Bind every action to this canvas session. The controller checks the live signature again
-  // before each write; asynchronous calls never fall back to whichever canvas is now active.
-  useLayoutEffect(() => {
-    // Prompt-node text is already canonical in config; its mounted editor is a UI mirror.
-    // Use the same filtered prompt documents as persistence so mounting an editor is not an edit.
-    const readDocument = collectCanvasDocument;
-    const context = () =>
-      agentCanvasContext(readDocument(), providerCatalog, [...selectedCanvasNodeKeys]);
-    const requireNode = (nodeKey: string) => {
-      const node = snapshotV2({}).genNodes.find((item) => item.key === nodeKey);
-      if (!node) throw new Error("目标创作节点已不存在，请重新读取画布。");
-      return node;
-    };
-    const reconcilePrompts = () => {
-      const document = snapshotV2({});
-      const resolve = createCanvasInputResolver(
-        canvasNodesByKeyFromDocument(document),
-        document.assetEdges,
-      );
-      const sources = new Map<string, ReturnType<typeof canvasInputsFor>["texts"]>();
-      for (const node of document.genNodes) {
-        if (node.kind === "prompt") continue;
-        const texts = resolve(node.key).texts;
-        if (texts.length) sources.set(node.key, texts);
-      }
-      synchronizePromptSources(sources, (key) =>
-        resolve(key).media.map(generationInputMentionCandidate),
-      );
-    };
-    const setPrompt = (nodeKey: string, text: string) => {
-      const node = requireNode(nodeKey);
-      if (node.kind === "prompt") {
-        patchNode("gen", nodeKey, (item) =>
-          item.kind === "prompt"
-            ? {
-                ...item,
-                config: {
-                  ...item.config,
-                  sourcePrompt: text,
-                  generatedPrompt: text,
-                  cinematicDialogueValidated: false,
-                  conversation: [],
-                },
-              }
-            : item,
-        );
-        reconcilePrompts();
-      } else {
-        promptContents.restoreDocument(nodeKey, {
-          schema: "prompt-content",
-          version: 1,
-          items: text ? [{ kind: "text", text }] : [],
-        });
-      }
-    };
-    const canvasTools = createAgentCanvasTools({
-      context,
-      createNode: (kind, text) => {
-        const center = viewportCenterBoardCoordinates();
-        if (kind === "screenplay" || kind === "storyboard") {
-          const node =
-            kind === "screenplay"
-              ? createScreenplayNode(center.x, center.y)
-              : createStoryboardNode(center.x, center.y);
-          addNode(kind, node, { select: true });
-          if (text)
-            patchNode(kind, node.key, (item) => ({
-              ...item,
-              config: { ...item.config, currentDocument: text },
-            }));
-          return node.key;
-        }
-        if (kind === "video_composer") {
-          const node = createVideoComposerNode(center.x, center.y);
-          addNode("videoComposer", node, { select: true });
-          return node.key;
-        }
-        if (kind === "frame_extractor") {
-          const node = createFrameExtractorNode(center.x, center.y);
-          addNode("frameExtractor", node, { select: true });
-          return node.key;
-        }
-        const node = createGenNode(kind, center.x, center.y);
-        addNode("gen", node, { select: true });
-        setPrompt(node.key, text);
-        return node.key;
-      },
-      setPrompt,
-      setModel: (nodeKey, modelSelection) => {
-        const node = requireNode(nodeKey);
-        const model = providerCatalog
-          .find(
-            (entry) => entry.provider.enabled && entry.provider.id === modelSelection.providerId,
-          )
-          ?.models.find((item) => item.definitionId === modelSelection.modelDefinitionId);
-        const compatible =
-          model &&
-          (node.kind === "prompt"
-            ? isTextGenerationModel(model)
-            : node.kind === "video"
-              ? isVideoGenerationModel(model)
-              : model.operations.some(
-                  (operation) => operation === "text_to_image" || operation === "image_to_image",
-                ));
-        if (!compatible)
-          throw new Error("所选模型不可用或不支持这个节点，请从实际模型目录重新选择。");
-        const selection = {
-          providerId: modelSelection.providerId,
-          modelDefinitionId: modelSelection.modelDefinitionId,
-        };
-        if (node.kind === "prompt")
-          updatePromptNodeConfig(nodeKey, { ...node.config, modelSelection: selection });
-        else if (node.kind === "video")
-          updateVideoNodeConfig(nodeKey, {
-            ...node.config,
-            modelSelection: selection,
-            parameterValues: {},
-            seedanceTaskMode: "auto",
-            mediaRoles: {},
-          });
-        else
-          updateImageNodeConfig(nodeKey, {
-            ...node.config,
-            modelSelection: selection,
-            parameterValues: {},
-          });
-      },
-      setParameters: (nodeKey, values) => {
-        const node = requireNode(nodeKey);
-        if (node.kind === "prompt")
-          throw new Error("提示词节点没有模型参数；创作文字请用 canvas.set_prompt 写入。");
-        const resolved = agentGenNodeParameterCapabilities(
-          snapshotV2({}),
-          providerCatalog,
-          nodeKey,
-          canvasInputsFor(nodeKey).media.length > 0,
-        );
-        if (!resolved)
-          throw new Error("节点尚未选择可用模型；请先用 canvas.set_model 选择模型，再设置参数。");
-        const byKey = new Map(resolved.capabilities.map((item) => [item.key, item]));
-        const next = { ...node.config.parameterValues };
-        for (const [parameterKey, value] of Object.entries(values)) {
-          const capability = byKey.get(parameterKey);
-          if (!capability)
-            throw new Error(
-              resolved.capabilities.length
-                ? `当前模型不支持参数「${parameterKey}」；可用参数：${resolved.capabilities
-                    .map((item) => `${item.key}（${item.label}）`)
-                    .join("、")}。`
-                : `当前模型没有任何可设置参数。`,
-            );
-          const issue = parameterValueIssue(capability, value);
-          if (issue)
-            throw new Error(`参数「${parameterKey}」（${capability.label}）取值无效：${issue}`);
-          next[parameterKey] = value;
-        }
-        if (node.kind === "video")
-          updateVideoNodeConfig(nodeKey, { ...node.config, parameterValues: next });
-        else updateImageNodeConfig(nodeKey, { ...node.config, parameterValues: next });
-      },
-      connect: (fromKey, toKey) => {
-        const result = connectCanvasStateNodes(fromKey, toKey);
-        if (result.status === "rejected") throw new Error(`连线失败：${result.reason}`);
-        reconcilePrompts();
-      },
-      disconnect: (fromKey, toKey) => {
-        const edge = snapshotV2({}).assetEdges.find(
-          (item) => item.fromKey === fromKey && item.toKey === toKey,
-        );
-        if (!edge) throw new Error("这两个节点之间没有连线，请重新读取画布。");
-        if (disconnectCanvasEdge(edge.id) === "missing")
-          throw new Error("连线刚刚被移除，请重新读取画布。");
-        reconcilePrompts();
-      },
-      removeNode: (nodeKey) => {
-        const document = snapshotV2({});
-        const nodes = canvasNodesByKeyFromDocument(document);
-        if (
-          !(Object.keys(nodes) as (keyof typeof nodes)[]).some((type) => nodes[type].has(nodeKey))
-        )
-          throw new Error("要删除的节点已不存在，请重新读取画布。");
-        const removedEdges = document.assetEdges.filter(
-          (edge) => edge.fromKey === nodeKey || edge.toKey === nodeKey,
-        ).length;
-        if (!removeCanvasNode(nodeKey)) throw new Error("要删除的节点已不存在，请重新读取画布。");
-        reconcilePrompts();
-        return { removedEdges };
-      },
-      setGenerationCount: (nodeKey, count) => {
-        const node = requireNode(nodeKey);
-        if (node.kind === "prompt") throw new Error("提示词节点没有生成数量。");
-        if (node.kind === "video")
-          updateVideoNodeConfig(nodeKey, { ...node.config, generationCount: count });
-        else updateImageNodeConfig(nodeKey, { ...node.config, generationCount: count });
-      },
-      history: async (nodeKey, limit) => {
-        const page = await generationClient.list({ canvasId, sourceNodeId: nodeKey, limit });
-        return page.items;
-      },
-      move: (nodeKey, x, y) => {
-        const nodes = canvasNodesByKeyFromDocument(snapshotV2({}));
-        if (
-          !(Object.keys(nodes) as (keyof typeof nodes)[]).some((type) => nodes[type].has(nodeKey))
-        )
-          throw new Error("要移动的节点已不存在。");
-        applyNodeChanges([{ type: "position", key: nodeKey, position: { x, y } }]);
-      },
-      generate: async (nodeKey, toolContext) => {
-        const node = requireNode(nodeKey);
-        if (node.kind === "prompt")
-          throw new Error("文字创作可直接在对话中完成，再写入提示词节点。此工具只提交图片或视频。");
-        if (node.config.generationCount !== 1)
-          throw new Error("首版助手每次只提交一次生成，请把节点生成数量设为 1 后重新确认。");
-        const running = await generationClient.list({
-          canvasId,
-          sourceNodeId: nodeKey,
-          statuses: [
-            "created",
-            "submitting",
-            "retry_wait",
-            "queued",
-            "running",
-            "unknown",
-            "interrupted",
-          ],
-          limit: 1,
-        });
-        toolContext.assertCurrent();
-        if (running.items.length)
-          throw new Error(
-            "该节点已有进行中或结果未确认的生成任务，请先在任务历史中查询或恢复，避免重复提交。",
-          );
-        const submitted = handleStartGeneration(nodeKey, toolContext);
-        if (!submitted) throw new Error("未提交生成，请检查节点上显示的模型、提示词或素材错误。");
-        const result = await submitted;
-        if (result.errors.length)
-          throw new Error(
-            `生成提交遇到问题；已创建任务 ${result.taskIds.join("、") || "无"}：${result.errors.join("；")}。请先检查任务历史，不要重复提交。`,
-          );
-        return {
-          nodeKey,
-          submittedTaskIds: result.taskIds,
-          status: "submitted",
-          message: "已提交，生成结果请查看画布或历史。",
-        };
-      },
-    });
-    const blenderTools = createAgentBlenderTools({
-      getDraft: (nodeKey) => {
-        const node = requireNode(nodeKey);
-        if (node.kind === "prompt") throw new Error("请使用图片或视频节点承载白模方案。");
-        return node.config.whiteModelStudio ?? null;
-      },
-      setDraft: async (nodeKey, draft) => {
-        canvasAgent.mutate(() => {
-          const node = requireNode(nodeKey);
-          if (node.kind === "prompt") throw new Error("提示词节点不能承载白模方案。");
-          patchNode("gen", nodeKey, (item) =>
-            item.kind !== "prompt"
-              ? {
-                  ...item,
-                  config: { ...item.config, whiteModelStudio: draft },
-                }
-              : item,
-          );
-        });
-        await canvasPersistence.flush();
-      },
-      attachVideo: async (nodeKey, job) => {
-        const result = canvasAgent.mutate(() => {
-          const node = requireNode(nodeKey);
-          if (node.kind === "prompt" || !job.videoPath || job.status !== "succeeded")
-            throw new Error("白模结果尚不可用。");
-          const draft = node.config.whiteModelStudio;
-          if (
-            draft?.jobId !== job.jobId ||
-            draft.jobInputSignature !== whiteModelRenderSignature(draft)
-          )
-            throw new Error("白模方案已改变，请重新渲染。");
-          const document = snapshotV2({});
-          const existing = document.outputNodes?.find(
-            (output) =>
-              output.origin === "white_model" &&
-              output.taskId === job.jobId &&
-              output.finalPath === job.videoPath,
-          );
-          const key = existing?.key ?? outputNodeKey();
-          const name = existing?.name ?? `白模动画 · ${job.jobId.slice(0, 8)}.mp4`;
-          if (!existing)
-            addOutput({
-              key,
-              resultKey: null,
-              sourceNodeId: `blender-${job.jobId}`,
-              taskId: job.jobId,
-              origin: "white_model",
-              mediaType: "video",
-              finalPath: job.videoPath,
-              name,
-              aspectRatio: job.width / job.height,
-              x: node.x - 360,
-              y: node.y,
-            });
-          const connected = connectCanvasStateNodes(key, nodeKey);
-          if (connected.status === "rejected")
-            throw new Error("白模结果已保留，但连接目标节点失败。");
-          if (node.kind === "video") {
-            const control = node.config.whiteModelControl ?? createWhiteModelControlConfig();
-            const media = {
-              key,
-              name,
-              kind: "video" as const,
-              target: {
-                kind: "local_file" as const,
-                path: job.videoPath,
-                canvasNodeKey: key,
-                mediaType: "video" as const,
-              },
-            };
-            const prior = document.outputNodes?.find(
-              (output) => output.key === control.source?.key && output.origin === "white_model",
-            );
-            if (prior && prior.key !== key)
-              document.assetEdges
-                .filter((edge) => edge.fromKey === prior.key && edge.toKey === nodeKey)
-                .forEach((edge) => disconnectCanvasEdge(edge.id));
-            const selection = resolveGenerationSelection(
-              "video",
-              node.config.modelSelection,
-              providerCatalog,
-            );
-            let nextConfig = node.config;
-            let enabled = false;
-            if (selection) {
-              const capabilities = modelParameterCapabilities(
-                selection.model.operationSchema,
-                "video_generation",
-                selection.model.remoteModelId,
-              );
-              const current = snapshotV2({});
-              const inputs = createCanvasInputResolver(
-                canvasNodesByKeyFromDocument(current),
-                current.assetEdges,
-              )(nodeKey).media;
-              const proposed = selectSeedanceTask(
-                selection.model.remoteModelId,
-                capabilities,
-                node.config,
-                inputs,
-                "reference",
-                selection.model.operationSchema,
-              );
-              const task = resolveSeedanceTask(
-                selection.model.remoteModelId,
-                capabilities,
-                proposed,
-                inputs,
-                selection.model.operationSchema,
-              );
-              if (task.enabled && !task.issue) {
-                nextConfig = proposed;
-                enabled = true;
-              }
-            }
-            updateVideoNodeConfig(nodeKey, {
-              ...nextConfig,
-              whiteModelControl: {
-                ...control,
-                enabled,
-                source: { key, name, target: media.target },
-              },
-            });
-          }
-          return { nodeKey, outputNodeKey: key, jobId: job.jobId, name, status: "succeeded" };
-        });
-        await canvasPersistence.flush();
-        return result;
-      },
-      openStudio: (nodeKey) => {
-        const node = requireNode(nodeKey);
-        if (node.kind === "prompt" || !node.config.whiteModelStudio)
-          throw new Error("请先设置白模场景，再打开导演台。");
-        setWhiteModelStudioNodeKey(nodeKey);
-      },
-    });
-    const downloadTools = createAgentVideoDownloadTools({
-      client: videoDownloaderClient,
-      engineStatus: async () => {
-        if (!isDesktopRuntime())
-          throw new Error("请在桌面应用中使用视频下载；浏览器预览不连接下载引擎。");
-        const status = await videoDownloaderClient.getEngine();
-        return {
-          state: status.state,
-          cookiesInstalled: status.cookiesInstalled,
-          bilibiliLoggedIn: status.bilibiliLoggedIn,
-          cookieBrowser: status.cookieBrowser ?? null,
-        };
-      },
-      attachDownload: async (job: VideoDownloadJobRecord, connectToNodeKey: string | null) => {
-        const anchor = connectToNodeKey ? requireNode(connectToNodeKey) : null;
-        const center = anchor ? null : viewportCenterBoardCoordinates();
-        const result = canvasAgent.mutate(() => {
-          const key = outputNodeKey();
-          const name = job.fileName ?? fileNameFromPath(job.finalPath ?? "");
-          addOutput({
-            key,
-            resultKey: null,
-            sourceNodeId: `agent-download-${job.jobId}`,
-            taskId: `agent-download:${job.jobId}`,
-            mediaType: "video",
-            origin: "download",
-            finalPath: job.finalPath,
-            previewSrc: null,
-            name,
-            ...(anchor ? { x: anchor.x - 360, y: anchor.y } : { x: center!.x, y: center!.y }),
-          });
-          let connected = false;
-          let connectionNote: string | null = null;
-          if (anchor) {
-            const connection = connectCanvasStateNodes(key, anchor.key);
-            if (connection.status === "rejected") connectionNote = connection.reason;
-            else connected = true;
-          }
-          return { outputNodeKey: key, connected, connectionNote };
-        });
-        await canvasPersistence.flush();
-        return result;
-      },
-      probeVideo: async (path) => {
-        try {
-          const probe = await videoPreparationClient.probe({
-            kind: "local_file",
-            path,
-            mediaType: "video",
-          });
-          return {
-            durationSeconds: probe.durationSeconds,
-            width: probe.width,
-            height: probe.height,
-          };
-        } catch {
-          // 元数据探测失败不影响下载成果；模型按无时长信息继续。
-          return { durationSeconds: null, width: null, height: null };
-        }
-      },
-    });
-    const workflowTools = createAgentWorkflowNodeTools({
-      setDocument: (nodeKey, markdown) => {
-        const document = snapshotV2({});
-        const isScreenplay = (document.screenplayNodes ?? []).some((item) => item.key === nodeKey);
-        const isStoryboard = (document.storyboardNodes ?? []).some((item) => item.key === nodeKey);
-        if (!isScreenplay && !isStoryboard)
-          throw new Error("只有剧本或分镜节点有文档；请重新读取画布确认节点身份。");
-        patchNode(isScreenplay ? "screenplay" : "storyboard", nodeKey, (item) => ({
-          ...item,
-          config: { ...item.config, currentDocument: markdown },
-        }));
-      },
-      setExtractorTimestamps: (nodeKey, timestamps) => {
-        const node = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
-        if (!node) throw new Error("抽帧节点已不存在，请重新读取画布。");
-        updateFrameExtractorConfig(nodeKey, { ...node.config, timestamps: [...timestamps] });
-      },
-      extractionSource: (nodeKey) => {
-        if (!isDesktopRuntime())
-          throw new Error("请在桌面应用中使用视频抽帧；浏览器预览不连接 FFmpeg 引擎。");
-        const node = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
-        if (!node) throw new Error("抽帧节点已不存在，请重新读取画布。");
-        if (node.config.checkpoint)
-          throw new Error("这个抽帧节点还有未完成的批次，请先在节点上完成或取消后重试。");
-        const video = canvasInputsFor(nodeKey).media.find(
-          (item) => item.kind === "video" && item.finalPath,
-        );
-        const videoPath = video?.finalPath ?? (node.config.videoPath.trim() || null);
-        if (!videoPath)
-          throw new Error(
-            "没有可抽帧的视频：请先用 canvas.connect 把视频素材或视频产物连到抽帧节点。",
-          );
-        if (!node.config.timestamps.length)
-          throw new Error("抽帧节点还没有配置秒数；请在 timestamps 参数里提供。");
-        return { videoPath, timestamps: node.config.timestamps };
-      },
-      attachFrames: async (job, nodeKey) => {
-        const startNode = canvasNodesNow("frameExtractor").find((item) => item.key === nodeKey);
-        if (!startNode) throw new Error("抽帧节点已不存在，帧图片无法落卡；请重新读取画布。");
-        const outputNodeKeys = canvasAgent.mutate(() => {
-          const keys: string[] = [];
-          for (const frame of job.frames) {
-            const exists = snapshotV2({}).outputNodes?.some(
-              (output) =>
-                output.origin === "frame_extract" &&
-                output.sourceNodeId === nodeKey &&
-                output.finalPath === frame.path,
-            );
-            if (exists) continue;
-            const key = outputNodeKey();
-            addOutput((current, nodesById) => ({
-              key,
-              resultKey: null,
-              sourceNodeId: nodeKey,
-              taskId: `agent-extract:${job.jobId}`,
-              mediaType: "image",
-              origin: "frame_extract",
-              finalPath: frame.path,
-              previewSrc: null,
-              name: fileNameFromPath(frame.path),
-              ...nextFrameExtractorOutputSlot(
-                currentOutputSource(nodesById, "frameExtractor", startNode),
-                current,
-                outputPlacementOptionsFor(nodesById, startNode.key),
-              ),
-            }));
-            keys.push(key);
-          }
-          return keys;
-        });
-        await canvasPersistence.flush();
-        return { outputNodeKeys };
-      },
-      compositionInputs: (nodeKey) => {
-        if (!isDesktopRuntime())
-          throw new Error("请在桌面应用中使用视频合成；浏览器预览不连接 FFmpeg 引擎。");
-        const node = canvasNodesNow("videoComposer").find((item) => item.key === nodeKey);
-        if (!node) throw new Error("合成节点已不存在，请重新读取画布。");
-        const inputs = composerInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
-        if (inputs.length < 2)
-          throw new Error(
-            "至少连接 2 段视频后才能合成；请先用 canvas.connect 连接视频素材或视频产物。",
-          );
-        if (inputs.some((input) => input.ffmpegSource == null))
-          throw new Error(
-            "部分上游视频还没有可交给合成引擎的本地文件；请等生成或下载完成并保存后再合成。",
-          );
-        return {
-          inputs: inputs.flatMap((input) =>
-            input.ffmpegSource == null
-              ? []
-              : [{ key: input.key, name: input.name, source: input.ffmpegSource }],
-          ),
-          outputName: node.config.outputName,
-        };
-      },
-      attachComposition: async (job, nodeKey) => {
-        const node = canvasNodesNow("videoComposer").find((item) => item.key === nodeKey);
-        if (!node) return { outputNodeKey: null };
-        const createdKey = canvasAgent.mutate(() => {
-          const key = outputNodeKey();
-          const taskId = `agent-composition:${job.jobId}`;
-          const aspectRatio =
-            job.width != null && job.height != null && job.height > 0
-              ? job.width / job.height
-              : 16 / 9;
-          addOutput((current, nodesById) => ({
-            key,
-            resultKey: `${taskId}#0`,
-            sourceNodeId: nodeKey,
-            taskId,
-            mediaType: "video",
-            origin: "composition",
-            finalPath: job.finalPath,
-            previewSrc: toMediaSrc(job.finalPath ?? ""),
-            name: job.fileName ?? fileNameFromPath(job.finalPath ?? ""),
-            aspectRatio,
-            ...nextVideoComposerOutputSlot(
-              currentOutputSource(nodesById, "videoComposer", node),
-              current,
-              outputPlacementOptionsFor(nodesById, node.key),
-            ),
-          }));
-          return key;
-        });
-        await canvasPersistence.flush();
-        return { outputNodeKey: createdKey };
-      },
-    });
-    canvasAgent.configure({
-      tools: [...canvasTools, ...blenderTools, ...downloadTools, ...workflowTools],
-      context,
-      review: (actions) =>
-        agentPlanReview(readDocument(), providerCatalog, nodeModelSelections, actions),
-      previewScenes: (actions) =>
-        previewAgentBlenderScenes(actions, (nodeKey) => {
-          const node = requireNode(nodeKey);
-          return node.kind === "prompt" ? null : (node.config.whiteModelStudio ?? null);
-        }),
-      signature: () => agentCanvasSignature(readDocument(), providerCatalog),
-      available: () => active && canvasHydrated,
-      save: canvasPersistence.flush,
-      ask: async (model, userPrompt) => {
-        if (!isDesktopRuntime())
-          throw new Error("请在桌面应用中使用创作助手；浏览器预览不提交模型请求。");
-        const provider = providerCatalog.find(
-          (entry) => entry.provider.enabled && entry.provider.id === model.providerId,
-        );
-        if (
-          !provider?.models.some(
-            (item) => item.definitionId === model.modelDefinitionId && isTextGenerationModel(item),
-          )
-        )
-          throw new Error("助手文本模型已不可用，请重新选择。");
-        const result = await promptNodeClient.run({
-          canvasId,
-          sourceNodeId: `canvas-agent:${canvasId}`,
-          providerConnectionId: model.providerId,
-          modelDefinitionId: model.modelDefinitionId,
-          mode: "canvas_agent",
-          task: "generate",
-          userPrompt,
-        });
-        return result.optimizedPrompt;
-      },
-    });
-  });
-  useEffect(() => {
-    if (!active && canvasAgent.getState().status !== "idle") canvasAgent.stop();
-  }, [active, canvasAgent]);
-  useEffect(
-    () => () => {
-      if (canvasAgent.getState().status !== "idle") canvasAgent.stop();
-    },
-    [canvasAgent],
-  );
-
   if (!active) return null;
 
   return (
-    <WorkflowSessionsProvider value={sessions}>
-      <main className="workspace-shell">
-        <Suspense
-          fallback={
-            <div className="canvas-load-notice" role="status">
-              <strong>正在加载画布助手…</strong>
-            </div>
-          }
-        >
-          <CanvasAgentPanel
-            controller={canvasAgent}
-            catalog={providerCatalog}
-            disabled={!canvasHydrated}
-            onFocusNodeKey={focusCanvasNodeKey}
-          />
-        </Suspense>
-        {!canvasHydrated ? (
-          <div className="canvas-load-notice" role="status">
-            <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
-            {canvasPersistence.error ? (
-              <>
-                <p>{canvasPersistence.error}</p>
-                <button type="button" onClick={canvasPersistence.retry}>
-                  重试读取画布
-                </button>
-              </>
-            ) : null}
-          </div>
-        ) : null}
-        <div
-          className="workspace-content"
-          inert={settingsOpen || !canvasHydrated ? true : undefined}
-        >
-          <a className="skip-link" href="#canvas-workspace">
-            跳到画布
-          </a>
-          <header className="workspace-header">
-            <div className="brand-lockup" aria-label="无限画布">
-              <span className="brand-mark" aria-hidden="true">
-                <Icon name="bounding-box" size="2xl" />
-              </span>
-              <span className="brand-name">无限画布</span>
-            </div>
-            <div
-              className={`save-state${canvasPersistence.error ? " save-state--error" : ""}`}
-              title={canvasPersistence.error ?? undefined}
-              role="status"
-            >
-              {canvasPersistence.error ? (
-                <Icon name="warning-circle" aria-hidden="true" size="sm" />
-              ) : (
-                <Icon name="check-circle" aria-hidden="true" size="sm" />
-              )}
-              {canvasPersistence.status === "saved"
-                ? "已保存"
-                : canvasPersistence.status === "saving"
-                  ? "正在保存…"
-                  : canvasPersistence.status === "pending"
-                    ? "待保存"
-                    : canvasPersistence.status === "loading"
-                      ? "正在读取…"
-                      : "保存失败"}
-              {canvasPersistence.error && canvasHydrated ? (
-                <button type="button" onClick={canvasPersistence.retry}>
-                  重试保存
-                </button>
-              ) : null}
-            </div>
-            <div className="workspace-header__navigation">
-              {canvasNavigation}
-              <WorkflowRepository
-                expanded={workflowRepositoryExpanded}
-                onToggle={toggleWorkflowRepository}
-                onInsert={(kind) => void insertWorkflow(kind)}
-              />
-              <button
-                ref={setNodeMenuTriggerElement}
-                type="button"
-                className="canvas-add-node-trigger"
-                aria-label="添加节点"
-                aria-haspopup="menu"
-                aria-expanded={connectionQuickAdd !== null}
-                title="添加节点（也可右键画布空白处）"
-                onClick={(event) => {
-                  if (connectionQuickAdd) {
-                    closeConnectionQuickAdd();
-                    return;
-                  }
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  setConnectionQuickAdd({
-                    connection: null,
-                    position: { x: bounds.left, y: bounds.bottom + 8 },
-                    boardPosition: viewportCenterBoardCoordinates(),
-                  });
-                }}
-              >
-                <Icon name="plus" aria-hidden="true" size="lg" />
-                <span>节点</span>
+    <main className="workspace-shell workspace-shell--immersive">
+      {!canvasHydrated ? (
+        <div className="canvas-load-notice" role="status">
+          <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
+          {canvasPersistence.error ? (
+            <>
+              <p>{canvasPersistence.error}</p>
+              <button type="button" onClick={canvasPersistence.retry}>
+                重试读取画布
               </button>
-            </div>
-            <div className="header-actions">
-              <button
-                type="button"
-                className="mobile-panel-trigger"
-                aria-label="打开素材库侧板"
-                aria-controls="asset-panel"
-                aria-expanded={mobilePanel === "assets"}
-                onClick={(event) => toggleMobilePanel("assets", event.currentTarget)}
-              >
-                <Icon name="stack-simple" aria-hidden="true" size="lg" />
-                <span>素材</span>
-              </button>
-              <button
-                type="button"
-                className="header-icon"
-                aria-label="打开历史记录"
-                aria-controls="generation-history-dialog"
-                aria-expanded={historyOpen}
-                data-tooltip="历史记录"
-                onMouseEnter={preloadHistoryDialog}
-                onFocus={preloadHistoryDialog}
-                onClick={() => {
-                  setHistoryInitialTab("generation");
-                  setHistoryInitialWorkflowId(null);
-                  setHistoryOpen(true);
-                }}
-              >
-                <Icon name="clock" aria-hidden="true" size="lg" />
-              </button>
-              <button
-                type="button"
-                className="header-icon"
-                aria-label="清空画布"
-                data-tooltip="清空画布上的节点与连线"
-                onClick={openClearCanvasDialog}
-              >
-                <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
-              </button>
-              <button
-                ref={settingsTriggerRef}
-                type="button"
-                className="header-icon"
-                aria-label="打开全局设置"
-                aria-controls="global-settings-dialog"
-                aria-expanded={settingsOpen}
-                data-tooltip="全局设置"
-                onMouseEnter={preloadProviderSettingsDialog}
-                onFocus={preloadProviderSettingsDialog}
-                onClick={() => {
-                  setMobilePanel(null);
-                  setSettingsOpen(true);
-                }}
-              >
-                <Icon name="gear-six" aria-hidden="true" size="lg" />
-              </button>
-              <button
-                type="button"
-                className="header-icon"
-                aria-label="反馈问题与错误诊断"
-                data-tooltip="反馈与诊断"
-                onClick={() => openFeedback()}
-              >
-                <Icon name="paper-plane-right" aria-hidden="true" size="lg" />
-              </button>
-              {isDesktopRuntime() ? (
-                <button
-                  type="button"
-                  className="header-icon"
-                  aria-label="管理功能组件"
-                  aria-controls="runtime-components-dialog"
-                  aria-expanded={runtimeComponentsOpen}
-                  data-tooltip="功能组件"
-                  onClick={() => {
-                    setRuntimeComponentFeatureId(null);
-                    setRuntimeComponentsOpen(true);
-                  }}
-                >
-                  <Icon name="download-simple" aria-hidden="true" size="lg" />
-                </button>
-              ) : null}
-            </div>
-          </header>
-
-          <AssetPanel
-            mobileOpen={mobilePanel === "assets"}
-            onCloseMobilePanel={closeMobilePanel}
-            uploadActionLabel={uploadActionLabel}
-            onImportLocalAssets={() => {
-              void handleImportLocalAssets(undefined, {
-                destination:
-                  assetLibrarySource === "local"
-                    ? "local"
-                    : cloudCollection === "object_storage"
-                      ? "object_storage"
-                      : "cloud",
-              });
-            }}
-            isOffline={isOffline}
-            source={assetLibrarySource}
-            cloudCollection={cloudCollection}
-            onCloudCollectionChange={(next) => {
-              if (next === cloudCollection) return;
-              setAssetSearch("");
-              committedAssetSearchRef.current = "";
-              setCommittedAssetSearch("");
-              setPickedAssets([]);
-              setCloudCollection(next);
-            }}
-            onSourceChange={(next) => {
-              setAssetLibrarySource(next);
-              persistWorkspaceUi(activeAssetProviderId, next);
-              setAssetSearch("");
-              if (!isDesktopRuntime()) return;
-              if (next === "local") refreshLocalAssets("initial");
-              else setAssetsLoading(Boolean(assetProvider));
-            }}
-            providerId={assetProvider?.id ?? null}
-            availableProviders={availableAssetProviders}
-            onProviderChange={(nextId) => {
-              const nextProvider = availableAssetProviders.find(
-                (provider) => provider.id === nextId,
-              );
-              if (nextProvider) handleAssetProviderChanged(nextProvider.id);
-            }}
-            onOpenRealPersonDialog={() => setRealPersonDialogOpen(true)}
-            assetsLoading={selectedAssetsLoading}
-            libraryError={selectedLibraryError}
-            assetsError={selectedAssetsError}
-            onRetryLocal={() => refreshLocalAssets("manual")}
-            onRetryCloud={() => {
-              if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
-            }}
-            onRetryObjectStorage={() => refreshObjectStorageAssets("manual")}
-            pullingBucket={pullingBucket}
-            onPullBucket={() => {
-              void handlePullObjectStorageBucket();
-            }}
-            uploads={assetUploads}
-            onDismissUpload={dismissAssetUpload}
-            groups={assetGroups}
-            groupsLoading={groupsLoading}
-            groupsError={groupsError}
-            selectedGroupId={selectedAssetGroupId}
-            onGroupChange={handleAssetGroupChanged}
-            onRefreshGroups={refreshAssetGroups}
-            onCreateGroup={() => setNewGroupDialogOpen(true)}
-            onDeleteGroup={(groupId) => {
-              if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
-            }}
-            localGroups={localAssetGroups}
-            localGroupsLoading={localGroupsLoading}
-            localGroupsError={localGroupsError}
-            selectedLocalGroupId={selectedLocalAssetGroupId}
-            onLocalGroupChange={handleLocalAssetGroupChanged}
-            onRefreshLocalGroups={refreshLocalAssetGroups}
-            onCreateLocalGroup={() => setNewLocalGroupDialogOpen(true)}
-            onDeleteLocalGroup={handleDeleteLocalAssetGroup}
-            onMovePickedLocalAssets={(groupId) => {
-              handleMoveLocalAssets(pickedAssets, groupId);
-            }}
-            onDeletePickedLocalAssets={() => {
-              setDeletingPickedLocalAssets(true);
-              void handleDeleteLocalAssets(pickedAssets).finally(() =>
-                setDeletingPickedLocalAssets(false),
-              );
-            }}
-            deletingPickedLocalAssets={deletingPickedLocalAssets}
-            kind={assetKind}
-            getKindCount={(tabKind) =>
-              // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
-              // 云端：面板打开时扫一次全库得到的类型计数（上传/删除按增量维护）。
-              !isDesktopRuntime()
-                ? libraryAssets.filter((asset) => asset.kind === tabKind).length
-                : assetLibrarySource === "local"
-                  ? localAssetKindTotals[tabKind]
-                  : cloudCollection === "object_storage"
-                    ? objectStorageKindTotals[tabKind]
-                    : (cloudAssetKindTotals?.[tabKind] ?? null)
-            }
-            onKindChange={(tabKind) => {
-              setAssetKind(tabKind);
-              setAssetSearch("");
-            }}
-            search={assetSearch}
-            onSearchChange={setAssetSearch}
-            searchPending={assetSearchPending}
-            uploadGroupName={uploadGroupName}
-            resultSummary={
-              !isDesktopRuntime()
-                ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                : assetLibrarySource === "local"
-                  ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                  : cloudCollection === "object_storage"
-                    ? `找到 ${objectStorageTotal} 个${ASSET_KIND_LABELS[assetKind]}对象`
-                    : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
-            }
-            visibleAssets={visibleAssets}
-            onPreviewAsset={handlePreviewAsset}
-            onDropAssetToCanvas={handleDropAssetToCanvas}
-            {...(cloudCollection === "library"
-              ? { onPreviewUnavailable: handleUnavailableCloudAsset }
-              : {})}
-            multiSelect={assetMultiSelect}
-            pickedCount={pickedAssets.length}
-            pickOrderByKey={pickOrderByKey}
-            onToggleMultiSelect={toggleAssetMultiSelect}
-            onTogglePickedAsset={togglePickedAsset}
-            onPlacePickedAssets={handlePlacePickedAssets}
-            onClearPickedAssets={() => setPickedAssets([])}
-            localPage={localAssetPageNumber}
-            localTotalPages={localAssetTotalPages}
-            localTotal={localAssetTotal}
-            cloudPage={
-              cloudCollection === "object_storage" ? objectStoragePageNumber : cloudAssetPageNumber
-            }
-            cloudTotalPages={
-              cloudCollection === "object_storage" ? objectStorageTotalPages : cloudAssetTotalPages
-            }
-            cloudTotal={cloudCollection === "object_storage" ? objectStorageTotal : cloudAssetTotal}
-            cloudHasMore={
-              cloudCollection === "object_storage"
-                ? objectStoragePageNumber < objectStorageTotalPages
-                : cloudAssetHasMore
-            }
-            onLocalPageChange={goToLocalAssetPage}
-            onCloudPageChange={
-              cloudCollection === "object_storage" ? goToObjectStoragePage : goToCloudAssetPage
-            }
-          />
-
-          <section
-            id="canvas-workspace"
-            className="canvas-stage"
-            aria-label="无限画布工作区"
-            tabIndex={-1}
-          >
-            <AppUpdateBanner />
-            <div
-              className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}`}
-              ref={canvasViewportRef}
-            >
-              {externalMediaDropHover ? (
-                <div className="canvas-external-media-drop-hint" role="status">
-                  松开以将素材放入画布并保存到本地素材库
-                </div>
-              ) : null}
-              <LiveCanvasFlow
-                className="canvas-react-flow"
-                nodes={flowNodes}
-                edges={flowEdges}
-                onlyRenderVisibleElements={canvasViewportMeasured}
-                nodeTypes={CANVAS_FLOW_NODE_TYPES}
-                edgeTypes={CANVAS_FLOW_EDGE_TYPES}
-                minZoom={MIN_ZOOM / 100}
-                maxZoom={MAX_ZOOM / 100}
-                panOnDrag={nodeMarquee ? [1] : [0, 1]}
-                selectionOnDrag={nodeMarquee}
-                selectionMode={nodeMarquee ? SelectionMode.Partial : SelectionMode.Full}
-                {...(nodeMarquee ? { onSelectionEnd: handleNodeSelectionEnd } : {})}
-                zoomOnScroll
-                zoomOnPinch
-                zoomOnDoubleClick={false}
-                preventScrolling
-                connectionRadius={CANVAS_CONNECTION_RADIUS}
-                deleteKeyCode={null}
-                onInit={handleFlowInit}
-                onNodesChange={handleFlowNodesChange}
-                onNodeDragStop={handleFlowNodeDragStop}
-                onEdgesChange={handleFlowEdgesChange}
-                onConnect={handleFlowConnect}
-                onConnectStart={handleConnectStart}
-                onConnectEnd={handleConnectEnd}
-                onMoveStart={() => {
-                  closeConnectionQuickAdd();
-                  setIsPanning(true);
-                }}
-                onMoveEnd={handleFlowMoveEnd}
-                onPaneClick={() => {
-                  selectNode(null);
-                  selectEdge(null);
-                  setMarqueeNodeKeys(new Set());
-                }}
-                onPaneContextMenu={(event) => {
-                  event.preventDefault();
-                  const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
-                  if (!boardPosition) return;
-                  setConnectionQuickAdd({
-                    connection: null,
-                    position: { x: event.clientX, y: event.clientY },
-                    boardPosition,
-                  });
-                }}
-                onNodeClick={(event, node) => {
-                  if (nodeMarquee) {
-                    if (!canvasNodeKeySetRef.current.has(node.id)) return;
-                    setMarqueeNodeKeys((current) => {
-                      if (!event.shiftKey && !event.ctrlKey && !event.metaKey)
-                        return new Set([node.id]);
-                      const next = new Set(current);
-                      if (next.has(node.id)) next.delete(node.id);
-                      else next.add(node.id);
-                      return next;
-                    });
-                    selectNode(null);
-                    selectEdge(null);
-                    return;
-                  }
-                  setMarqueeNodeKeys(new Set());
-                  selectNode(node.id);
-                  selectEdge(null);
-                }}
-                onEdgeClick={(_, edge) => {
-                  if (nodeMarquee) return;
-                  if (edge.selectable !== false) {
-                    selectEdge(edge.id);
-                    selectNode(null);
-                  }
-                }}
-                aria-label="无限画布节点编辑器"
-                attributionPosition="bottom-left"
-              >
-                {nodeMarquee ? (
-                  <CanvasMarqueeSelectionReader
-                    selectableKeysRef={canvasNodeKeySetRef}
-                    readSelectionRef={readNodeSelectionRef}
-                  />
-                ) : null}
-                {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
-                <Background
-                  id="canvas-grid-minor"
-                  variant={BackgroundVariant.Lines}
-                  gap={40}
-                  lineWidth={1}
-                  className="canvas-flow-bg canvas-flow-bg--minor"
-                />
-                <Background
-                  id="canvas-grid-major"
-                  variant={BackgroundVariant.Lines}
-                  gap={200}
-                  lineWidth={1}
-                  className="canvas-flow-bg canvas-flow-bg--major"
-                />
-              </LiveCanvasFlow>
-
-              {connectionQuickAdd && quickAddEndpointExists ? (
-                <ConnectionQuickAddMenu
-                  position={connectionQuickAdd.position}
-                  connectionMode={connectionQuickAdd.connection !== null}
-                  triggerElement={nodeMenuTriggerElement}
-                  onSelect={handleConnectionQuickAdd}
-                  onClose={closeConnectionQuickAdd}
-                />
-              ) : null}
-
-              {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
-              {!hasCanvasNodes ? (
-                <div className="canvas-empty-hint">
-                  <div className="canvas-empty-hint__art" aria-hidden="true">
-                    <Icon name="bounding-box" size="3xl" />
-                  </div>
-                  <strong>画布为空</strong>
-                  <span>
-                    右键画布空白处或点击顶部「节点」添加节点；本机素材可从素材库上传，再拖入画布。
-                  </span>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="canvas-viewport-dock">
-              <div
-                className="canvas-node-selection-control"
-                role="group"
-                aria-label="选择与编辑画布节点"
-              >
-                <button
-                  type="button"
-                  aria-pressed={nodeMarquee}
-                  aria-label={nodeMarquee ? "退出节点框选" : "框选节点"}
-                  data-tooltip={nodeMarquee ? "拖拽框选节点；中键拖动画布" : "框选节点"}
-                  onClick={() => {
-                    setNodeMarquee((enabled) => !enabled);
-                    setMarqueeNodeKeys(new Set());
-                    selectNode(null);
-                    selectEdge(null);
-                  }}
-                >
-                  <Icon name="bounding-box" aria-hidden="true" size="md" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`将选中素材或产物成组，当前 ${selectedCanvasNodeKeys.size} 个`}
-                  data-tooltip={
-                    selectedCanvasNodeKeys.size > 0 && !canGroupSelectedNodes
-                      ? "仅支持至少两个素材或产物成组"
-                      : "将选中素材或产物成组"
-                  }
-                  disabled={!canGroupSelectedNodes}
-                  onClick={groupSelectedCanvasNodes}
-                >
-                  <Icon name="stack-simple" aria-hidden="true" size="md" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`复制选中节点到剪贴板，当前 ${selectedCanvasNodeKeys.size} 个`}
-                  aria-keyshortcuts="Control+C"
-                  data-tooltip="复制到剪贴板 · Ctrl+C"
-                  disabled={selectedCanvasNodeKeys.size === 0}
-                  onClick={copySelectedCanvasNodes}
-                >
-                  <Icon name="copy-simple" aria-hidden="true" size="md" />
-                </button>
-                {isDesktopRuntime() ? (
-                  <button
-                    type="button"
-                    aria-label="按名称批量交付选中产物"
-                    data-tooltip="按名称批量交付 · 附任务清单"
-                    disabled={artifactDeliveryBusy || selectedCanvasNodeKeys.size === 0}
-                    onClick={() => void exportSelectedArtifacts()}
-                  >
-                    <Icon name="download-simple" aria-hidden="true" size="md" />
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  aria-label="粘贴已复制节点"
-                  aria-keyshortcuts="Control+V"
-                  data-tooltip={canPasteCanvasNodes ? "粘贴 · Ctrl+V" : "请先复制画布节点"}
-                  disabled={!canPasteCanvasNodes}
-                  onClick={() => pasteCopiedCanvasNodes()}
-                >
-                  <Icon name="clipboard" aria-hidden="true" size="md" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`删除选中节点，当前 ${selectedCanvasNodeKeys.size} 个`}
-                  aria-keyshortcuts="Delete"
-                  data-tooltip="删除选中节点 · Delete"
-                  disabled={selectedCanvasNodeKeys.size === 0}
-                  onClick={deleteSelectedCanvasNodes}
-                >
-                  <Icon name="trash-simple" aria-hidden="true" size="md" />
-                </button>
-              </div>
-              <div className="canvas-home-control" role="group" aria-label="画布视图归位">
-                <button
-                  type="button"
-                  aria-label="回到画布起始位置"
-                  data-tooltip="回到内容"
-                  onClick={resetCanvasViewport}
-                >
-                  <Icon name="crosshair-simple" aria-hidden="true" size="md" />
-                </button>
-              </div>
-
-              <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
-                <button
-                  type="button"
-                  aria-label="撤销画布操作"
-                  aria-keyshortcuts="Control+Z"
-                  data-tooltip="撤销 · Ctrl+Z"
-                  disabled={pastCount === 0}
-                  onClick={undo}
-                >
-                  <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
-                </button>
-                <button
-                  type="button"
-                  aria-label="重做画布操作"
-                  aria-keyshortcuts="Control+Shift+Z"
-                  data-tooltip="重做 · Ctrl+Shift+Z"
-                  disabled={futureCount === 0}
-                  onClick={redo}
-                >
-                  <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
-                </button>
-              </div>
-
-              <div className="zoom-control" role="group" aria-label="画布缩放控制">
-                <button
-                  type="button"
-                  aria-label="缩小画布"
-                  aria-keyshortcuts="-"
-                  data-tooltip="缩小画布 · -"
-                  onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
-                >
-                  <Icon name="minus" aria-hidden="true" size="md" />
-                </button>
-                <button
-                  type="button"
-                  className="zoom-control__reset"
-                  aria-label={`重置画布缩放为 ${DEFAULT_ZOOM}%`}
-                  aria-keyshortcuts="0"
-                  data-tooltip="重置缩放 · 0"
-                  onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
-                >
-                  <Icon name="corners-out" aria-hidden="true" size="sm" />
-                  <output aria-live="polite">{zoom}%</output>
-                </button>
-                <button
-                  type="button"
-                  aria-label="放大画布"
-                  aria-keyshortcuts="+"
-                  data-tooltip="放大画布 · +"
-                  onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
-                >
-                  <Icon name="plus" aria-hidden="true" size="md" />
-                </button>
-              </div>
-            </div>
-          </section>
-
-          {mobilePanel ? (
-            <button
-              type="button"
-              className="mobile-panel-backdrop"
-              aria-label="关闭侧板"
-              onClick={closeMobilePanel}
-            />
+            </>
           ) : null}
         </div>
-        {runtimeComponentsOpen ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="runtime-components-dialog"
-                label="功能组件"
-                onClose={() => setRuntimeComponentsOpen(false)}
-              />
-            }
+      ) : null}
+      <div className="workspace-content" inert={settingsOpen || !canvasHydrated ? true : undefined}>
+        <a className="skip-link" href="#canvas-workspace">
+          跳到画布
+        </a>
+        <header className="workspace-header">
+          <div className="brand-lockup" aria-label="无限画布">
+            <span className="brand-mark" aria-hidden="true">
+              <Icon name="bounding-box" size="2xl" />
+            </span>
+            <span className="brand-name">无限画布</span>
+          </div>
+          <div
+            className={`save-state${canvasPersistence.error ? " save-state--error" : ""}`}
+            title={canvasPersistence.error ?? undefined}
+            role="status"
           >
-            <RuntimeComponentsPanel
-              initialFeatureId={runtimeComponentFeatureId}
-              onClose={() => setRuntimeComponentsOpen(false)}
-            />
-          </Suspense>
-        ) : null}
-        {settingsOpen ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="global-settings-dialog"
-                label="全局设置"
-                onClose={closeSettings}
-              />
-            }
-          >
-            <ProviderSettingsDialog
-              open
-              onClose={closeSettings}
-              onCatalogChanged={refreshProviderCatalog}
-              activeAssetProviderId={assetProvider?.id ?? null}
-              onAssetProviderChanged={handleAssetProviderChanged}
-              onAssetLibraryLoaded={handleAssetLibraryLoaded}
-              onAssetLibraryLoading={handleAssetLibraryLoading}
-              onAssetLibraryLoadFailed={handleAssetLibraryLoadFailed}
-            />
-          </Suspense>
-        ) : null}
-        {historyOpen ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="generation-history-dialog"
-                label="历史记录"
-                onClose={closeHistory}
-              />
-            }
-          >
-            <HistoryDialog
-              open
-              onClose={closeHistory}
-              canvasId={canvasId}
-              initialTab={historyInitialTab}
-              initialWorkflowId={historyInitialWorkflowId}
-              initialTaskId={historyInitialTaskId}
-              onResumeWorkflow={sessions.resumeHistory}
-              onRestartWorkflow={sessions.restartHistory}
-              onLocateWorkflow={sessions.locateHistory}
-              onRegenerateGeneration={regenerateGenerationFromHistory}
-              onPromoteSeedanceDraft={promoteSeedanceDraftFromHistory}
-              activeWorkflowIds={activeWorkflowHistoryIds}
-            />
-          </Suspense>
-        ) : null}
-        {previewAsset ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="asset-source-dialog"
-                label="媒体预览"
-                onClose={() => setPreviewAsset(null)}
-              />
-            }
-          >
-            <AssetSourceDialog
-              asset={previewAsset}
-              onClose={() => setPreviewAsset(null)}
-              onDelete={
-                previewAsset.source === "cloud" && previewAsset.providerConnectionId
-                  ? () => handleDeleteAsset(previewAsset)
-                  : previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                    ? () => void handleDeleteLocalAssets([previewAsset])
-                    : null
-              }
-              localGroups={
-                previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                  ? localAssetGroups
-                  : undefined
-              }
-              onMoveToGroup={
-                previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
-                  ? (groupId) => {
-                      handleMoveLocalAssets([previewAsset], groupId);
-                      // 弹窗保持打开：立即反映新分组，列表由处理器后台重查。
-                      setPreviewAsset({ ...previewAsset, groupId });
-                    }
-                  : null
-              }
-              onRename={
-                previewAsset.source === "cloud" &&
-                previewAsset.providerConnectionId &&
-                renamingAssetId == null
-                  ? (name) => handleRenameAsset(previewAsset, name)
-                  : null
-              }
-            />
-          </Suspense>
-        ) : null}
-        {realPersonDialogOpen && assetProvider ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="real-person-asset-dialog"
-                label="明星真人素材"
-                onClose={() => setRealPersonDialogOpen(false)}
-              />
-            }
-          >
-            <RealPersonAssetDialog
-              providerConnectionId={assetProvider.id}
-              providerDisplayName={assetProvider.displayName}
-              onClose={() => setRealPersonDialogOpen(false)}
-              onUploadToGroup={handleImportLocalAssets}
-            />
-          </Suspense>
-        ) : null}
-        {newGroupDialogOpen && assetProvider ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="asset-group-create-dialog"
-                label="新建素材分组"
-                onClose={() => setNewGroupDialogOpen(false)}
-              />
-            }
-          >
-            <AssetGroupCreateDialog
-              providerDisplayName={assetProvider.displayName}
-              busy={creatingGroup}
-              onClose={() => setNewGroupDialogOpen(false)}
-              onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
-            />
-          </Suspense>
-        ) : null}
-        {newLocalGroupDialogOpen ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="local-asset-group-create-dialog"
-                label="新建本地素材分组"
-                onClose={() => setNewLocalGroupDialogOpen(false)}
-              />
-            }
-          >
-            <AssetGroupCreateDialog
-              scope="local"
-              busy={creatingLocalGroup}
-              onClose={() => setNewLocalGroupDialogOpen(false)}
-              onCreate={handleCreateLocalAssetGroup}
-            />
-          </Suspense>
-        ) : null}
-        {previewOutputNode ? (
-          <CanvasOutputLightbox
-            node={previewOutputNode}
-            onClose={() => setPreviewOutputNodeKey(null)}
-          />
-        ) : null}
-        {previewAssetNode ? (
-          <CanvasAssetLightbox
-            node={previewAssetNode}
-            onClose={() => setPreviewAssetNodeKey(null)}
-          />
-        ) : null}
-        {active &&
-        whiteModelStudioNodeKey &&
-        whiteModelStudioEntry?.type === "gen" &&
-        (whiteModelStudioEntry.data.kind === "video" || whiteModelStudioEntry.data.kind === "image")
-          ? (() => {
-              const studioNode = whiteModelStudioEntry.data;
-              if (
-                !studioNode ||
-                (studioNode.kind !== "video" && studioNode.kind !== "image") ||
-                !studioNode.config.whiteModelStudio
-              )
-                return null;
-              const purpose = studioNode.kind === "image" ? "blocking" : "video";
-              return (
-                <Suspense
-                  fallback={
-                    <DeferredDialogFallback
-                      id="white-model-studio"
-                      label={purpose === "blocking" ? "白模站位导演台" : "Blender 白模工作台"}
-                      onClose={() => setWhiteModelStudioNodeKey(null)}
-                    />
-                  }
-                >
-                  <WhiteModelStudioDialog
-                    purpose={purpose}
-                    draft={studioNode.config.whiteModelStudio}
-                    imageInputs={studioImageInputsFromMedia(canvasInputsFor(studioNode.key).media)}
-                    onDraftChange={updateWhiteModelStudioDraft}
-                    onClose={() => setWhiteModelStudioNodeKey(null)}
-                    onUse={useWhiteModelVideo}
-                    onExportBlocking={useWhiteModelBlocking}
-                  />
-                </Suspense>
-              );
-            })()
-          : null}
-        {active && videoPreparation ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="video-preparation"
-                label="视频准备"
-                onClose={() => setVideoPreparation(null)}
-              />
-            }
-          >
-            <VideoPreparationDialog
-              source={videoPreparation}
-              onClose={() => setVideoPreparation(null)}
-              onUseOutput={usePreparedVideoOutput}
-              onUseAiOutput={useAiMediaOutput}
-            />
-          </Suspense>
-        ) : null}
-        {active && videoLocalEdit ? (
-          <Suspense
-            fallback={
-              <DeferredDialogFallback
-                id="video-local-edit"
-                label="视频局部编辑"
-                onClose={() => setVideoLocalEdit(null)}
-              />
-            }
-          >
-            <VideoLocalEditDialog
-              source={videoLocalEdit.source}
-              candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
-              canUploadToLibrary={assetProvider != null}
-              resolveFrame={resolveVideoLocalEditFrame}
-              onClose={() => setVideoLocalEdit(null)}
-              onApply={applyVideoLocalEdit}
-            />
-          </Suspense>
-        ) : null}
-        <dialog
-          ref={clearCanvasDialogRef}
-          className="confirm-dialog"
-          aria-labelledby="clear-canvas-dialog-title"
-          aria-describedby="clear-canvas-dialog-desc"
+            {canvasPersistence.error ? (
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
+            ) : (
+              <Icon name="check-circle" aria-hidden="true" size="sm" />
+            )}
+            {canvasPersistence.status === "saved"
+              ? "已保存"
+              : canvasPersistence.status === "saving"
+                ? "正在保存…"
+                : canvasPersistence.status === "pending"
+                  ? "待保存"
+                  : canvasPersistence.status === "loading"
+                    ? "正在读取…"
+                    : "保存失败"}
+            {/*
+             * 保存时间戳：光说「已保存」只说明「上次保存成功了」，不说明
+             * 「内容有多新」。崩溃会丢掉防抖窗口里的编辑，磁盘上是旧版本，
+             * 界面却照样写「已保存」—— 用户无从判断眼前这份画布有多旧。
+             * 把时间摆出来，用户一眼就知道该信不信这份内容。
+             */}
+            {canvasPersistence.status === "saved" && canvasPersistence.savedAt != null ? (
+              <span
+                className="save-state__time"
+                title={`最近保存于 ${formatSavedAtFull(canvasPersistence.savedAt)}`}
+              >
+                {formatSavedAt(canvasPersistence.savedAt)}
+              </span>
+            ) : null}
+            {canvasPersistence.error && canvasHydrated ? (
+              <button type="button" onClick={canvasPersistence.retry}>
+                重试保存
+              </button>
+            ) : null}
+          </div>
+          {/*
+           * 崩溃恢复提示。
+           *
+           * 上次退出是**崩溃**而不是正常关闭（草稿比存档新），那些差点丢掉的
+           * 改动已经被恢复。这件事必须明确告诉用户 —— 静默恢复会让人以为那些
+           * 内容一直好好地存在（其实它们差点就消失了），也让人不知道上次到底
+           * 发生过什么。
+           */}
+          {canvasPersistence.recoveredAt != null ? (
+            <div className="workspace-recovered-notice" role="status">
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
+              <span>
+                上次退出时应用意外中断，未保存的改动已恢复（恢复于 {formatSavedAt(canvasPersistence.recoveredAt)}）。
+              </span>
+            </div>
+          ) : null}
+          <div className="workspace-header__navigation">{canvasNavigation}</div>
+          <div className="header-actions">
+            <button
+              type="button"
+              className="header-icon"
+              aria-label="打开素材库侧板"
+              aria-controls="asset-panel"
+              aria-expanded={mobilePanel === "assets"}
+              data-tooltip="素材库"
+              onClick={(event) => {
+                toggleMobilePanel("assets", event.currentTarget);
+              }}
+            >
+              <Icon name="stack-simple" aria-hidden="true" size="lg" />
+            </button>
+            <button
+              type="button"
+              className="header-icon"
+              aria-label="清空画布"
+              data-tooltip="清空画布上的节点与连线"
+              onClick={openClearCanvasDialog}
+            >
+              <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
+            </button>
+            <button
+              ref={settingsTriggerRef}
+              type="button"
+              className="header-icon"
+              aria-label="打开全局设置"
+              aria-controls="global-settings-dialog"
+              aria-expanded={settingsOpen}
+              data-tooltip="全局设置"
+              onMouseEnter={preloadProviderSettingsDialog}
+              onFocus={preloadProviderSettingsDialog}
+              onClick={() => {
+                setMobilePanel(null);
+                setSettingsOpen(true);
+              }}
+            >
+              <Icon name="gear-six" aria-hidden="true" size="lg" />
+            </button>
+          </div>
+        </header>
+
+        <AssetPanel
+          mobileOpen={mobilePanel === "assets"}
+          onCloseMobilePanel={closeMobilePanel}
+          uploadActionLabel={uploadActionLabel}
+          onImportLocalAssets={() => {
+            void handleImportLocalAssets(undefined, {
+              destination:
+                assetLibrarySource === "local"
+                  ? "local"
+                  : cloudCollection === "object_storage"
+                    ? "object_storage"
+                    : "cloud",
+            });
+          }}
+          isOffline={isOffline}
+          source={assetLibrarySource}
+          cloudCollection={cloudCollection}
+          onCloudCollectionChange={(next) => {
+            if (next === cloudCollection) return;
+            setAssetSearch("");
+            committedAssetSearchRef.current = "";
+            setCommittedAssetSearch("");
+            setPickedAssets([]);
+            setCloudCollection(next);
+          }}
+          onSourceChange={(next) => {
+            setAssetLibrarySource(next);
+            persistWorkspaceUi(activeAssetProviderId, next);
+            setAssetSearch("");
+            if (!isDesktopRuntime()) return;
+            if (next === "local") refreshLocalAssets("initial");
+            else setAssetsLoading(Boolean(assetProvider));
+          }}
+          providerId={assetProvider?.id ?? null}
+          availableProviders={availableAssetProviders}
+          onProviderChange={(nextId) => {
+            const nextProvider = availableAssetProviders.find((provider) => provider.id === nextId);
+            if (nextProvider) handleAssetProviderChanged(nextProvider.id);
+          }}
+          onOpenRealPersonDialog={() => setRealPersonDialogOpen(true)}
+          assetsLoading={selectedAssetsLoading}
+          libraryError={selectedLibraryError}
+          assetsError={selectedAssetsError}
+          onRetryLocal={() => refreshLocalAssets("manual")}
+          onRetryCloud={() => {
+            if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
+          }}
+          onRetryObjectStorage={() => refreshObjectStorageAssets("manual")}
+          pullingBucket={pullingBucket}
+          onPullBucket={() => {
+            void handlePullObjectStorageBucket();
+          }}
+          uploads={assetUploads}
+          onDismissUpload={dismissAssetUpload}
+          groups={assetGroups}
+          groupsLoading={groupsLoading}
+          groupsError={groupsError}
+          selectedGroupId={selectedAssetGroupId}
+          onGroupChange={handleAssetGroupChanged}
+          onRefreshGroups={refreshAssetGroups}
+          onCreateGroup={() => setNewGroupDialogOpen(true)}
+          onDeleteGroup={(groupId) => {
+            if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
+          }}
+          localGroups={localAssetGroups}
+          localGroupsLoading={localGroupsLoading}
+          localGroupsError={localGroupsError}
+          selectedLocalGroupId={selectedLocalAssetGroupId}
+          onLocalGroupChange={handleLocalAssetGroupChanged}
+          onRefreshLocalGroups={refreshLocalAssetGroups}
+          onCreateLocalGroup={() => setNewLocalGroupDialogOpen(true)}
+          onDeleteLocalGroup={handleDeleteLocalAssetGroup}
+          onMovePickedLocalAssets={(groupId) => {
+            handleMoveLocalAssets(pickedAssets, groupId);
+          }}
+          onDeletePickedLocalAssets={() => {
+            setDeletingPickedLocalAssets(true);
+            void handleDeleteLocalAssets(pickedAssets).finally(() =>
+              setDeletingPickedLocalAssets(false),
+            );
+          }}
+          deletingPickedLocalAssets={deletingPickedLocalAssets}
+          kind={assetKind}
+          getKindCount={(tabKind) =>
+            // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
+            // 云端：面板打开时扫一次全库得到的类型计数（上传/删除按增量维护）。
+            !isDesktopRuntime()
+              ? libraryAssets.filter((asset) => asset.kind === tabKind).length
+              : assetLibrarySource === "local"
+                ? localAssetKindTotals[tabKind]
+                : cloudCollection === "object_storage"
+                  ? objectStorageKindTotals[tabKind]
+                  : (cloudAssetKindTotals?.[tabKind] ?? null)
+          }
+          onKindChange={(tabKind) => {
+            setAssetKind(tabKind);
+            setAssetSearch("");
+          }}
+          search={assetSearch}
+          onSearchChange={setAssetSearch}
+          searchPending={assetSearchPending}
+          uploadGroupName={uploadGroupName}
+          resultSummary={
+            !isDesktopRuntime()
+              ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+              : assetLibrarySource === "local"
+                ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                : cloudCollection === "object_storage"
+                  ? `找到 ${objectStorageTotal} 个${ASSET_KIND_LABELS[assetKind]}对象`
+                  : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+          }
+          visibleAssets={visibleAssets}
+          onPreviewAsset={handlePreviewAsset}
+          onDropAssetToCanvas={handleDropAssetToCanvas}
+          {...(cloudCollection === "library"
+            ? { onPreviewUnavailable: handleUnavailableCloudAsset }
+            : {})}
+          multiSelect={assetMultiSelect}
+          pickedCount={pickedAssets.length}
+          pickOrderByKey={pickOrderByKey}
+          onToggleMultiSelect={toggleAssetMultiSelect}
+          onTogglePickedAsset={togglePickedAsset}
+          onPlacePickedAssets={handlePlacePickedAssets}
+          onClearPickedAssets={() => setPickedAssets([])}
+          localPage={localAssetPageNumber}
+          localTotalPages={localAssetTotalPages}
+          localTotal={localAssetTotal}
+          cloudPage={
+            cloudCollection === "object_storage" ? objectStoragePageNumber : cloudAssetPageNumber
+          }
+          cloudTotalPages={
+            cloudCollection === "object_storage" ? objectStorageTotalPages : cloudAssetTotalPages
+          }
+          cloudTotal={cloudCollection === "object_storage" ? objectStorageTotal : cloudAssetTotal}
+          cloudHasMore={
+            cloudCollection === "object_storage"
+              ? objectStoragePageNumber < objectStorageTotalPages
+              : cloudAssetHasMore
+          }
+          onLocalPageChange={goToLocalAssetPage}
+          onCloudPageChange={
+            cloudCollection === "object_storage" ? goToObjectStoragePage : goToCloudAssetPage
+          }
+        />
+
+        <section
+          id="canvas-workspace"
+          className="canvas-stage"
+          aria-label="无限画布工作区"
+          tabIndex={-1}
         >
-          <form
-            method="dialog"
-            className="confirm-dialog__form"
-            onSubmit={(event) => {
-              // 表单提交（按 Enter 或点「确认清空」）时阻止默认关闭，由 confirmClearCanvas
-              // 显式 close()，确保先清空再关闭（避免 close 触发后 setState 在已卸载 dialog 上）。
-              event.preventDefault();
+          <AppUpdateBanner />
+          <div
+            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}`}
+            ref={canvasViewportRef}
+            onDoubleClick={(event) => {
+              if (
+                !(event.target instanceof Element) ||
+                !event.target.classList.contains("react-flow__pane")
+              )
+                return;
+              const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
+              if (!boardPosition) return;
+              setConnectionQuickAdd({
+                connection: null,
+                position: { x: event.clientX, y: event.clientY },
+                boardPosition,
+              });
             }}
           >
-            <header className="confirm-dialog__header">
-              <span className="confirm-dialog__badge" aria-hidden="true">
-                <Icon name="warning" size="xl" />
-              </span>
-              <div>
-                <p className="confirm-dialog__eyebrow">危险操作 · 不可撤销</p>
-                <h2 id="clear-canvas-dialog-title" className="confirm-dialog__title">
-                  确认清空画布？
-                </h2>
+            {externalMediaDropHover ? (
+              <div className="canvas-external-media-drop-hint" role="status">
+                松开以将素材放入画布并保存到本地素材库
               </div>
-            </header>
-            <div className="confirm-dialog__body">
-              <p id="clear-canvas-dialog-desc" className="confirm-dialog__desc">
-                将移除画布上所有节点与连线，任务历史会保留。此操作不可撤销。
-              </p>
-              <ul className="confirm-dialog__facts">
-                <li className="confirm-dialog__fact confirm-dialog__fact--removed">
-                  <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                    <Icon name="trash-simple" size="sm" />
-                  </span>
-                  <span className="confirm-dialog__fact-label">画布节点与连线</span>
-                  <span className="confirm-dialog__fact-state">将被移除</span>
-                </li>
-                <li className="confirm-dialog__fact confirm-dialog__fact--kept">
-                  <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                    <Icon name="check-circle" size="sm" />
-                  </span>
-                  <span className="confirm-dialog__fact-label">任务历史</span>
-                  <span className="confirm-dialog__fact-state">保留 · 可复现审计</span>
-                </li>
-              </ul>
+            ) : null}
+            <LiveCanvasFlow
+              className="canvas-react-flow"
+              nodes={flowNodes}
+              edges={visibleFlowEdges}
+              onlyRenderVisibleElements={canvasViewportMeasured}
+              nodeTypes={CANVAS_FLOW_NODE_TYPES}
+              edgeTypes={CANVAS_FLOW_EDGE_TYPES}
+              defaultViewport={DEFAULT_CANVAS_FLOW_VIEWPORT}
+              minZoom={MIN_ZOOM / 100}
+              maxZoom={MAX_ZOOM / 100}
+              snapToGrid={snapToGrid}
+              snapGrid={[24, 24]}
+              panOnDrag={nodeMarquee ? [1] : [0, 1]}
+              selectionOnDrag={nodeMarquee}
+              selectionMode={nodeMarquee ? SelectionMode.Partial : SelectionMode.Full}
+              {...(nodeMarquee ? { onSelectionEnd: handleNodeSelectionEnd } : {})}
+              zoomOnScroll
+              zoomOnPinch
+              zoomOnDoubleClick={false}
+              preventScrolling
+              connectionRadius={CANVAS_CONNECTION_RADIUS}
+              deleteKeyCode={null}
+              onInit={handleFlowInit}
+              onNodesChange={handleFlowNodesChange}
+              onNodeDragStop={handleFlowNodeDragStop}
+              onEdgesChange={handleFlowEdgesChange}
+              onConnect={handleFlowConnect}
+              onConnectStart={handleConnectStart}
+              onConnectEnd={handleConnectEnd}
+              onMoveStart={() => {
+                closeConnectionQuickAdd();
+                setIsPanning(true);
+              }}
+              onMoveEnd={handleFlowMoveEnd}
+              onPaneClick={() => {
+                selectNode(null);
+                selectEdge(null);
+                setMarqueeNodeKeys(new Set());
+              }}
+              onPaneContextMenu={(event) => {
+                event.preventDefault();
+                const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
+                if (!boardPosition) return;
+                setConnectionQuickAdd({
+                  connection: null,
+                  position: { x: event.clientX, y: event.clientY },
+                  boardPosition,
+                });
+              }}
+              onNodeContextMenu={(event, node) => {
+                event.preventDefault();
+                setNodeContextMenu({ x: event.clientX, y: event.clientY, nodeKey: node.id });
+              }}
+              onNodeClick={(event, node) => {
+                const groupId = assetGroupIdFromFlowId(node.id);
+                if (groupId != null) {
+                  selectCanvasGroup(groupId);
+                  return;
+                }
+                if (nodeMarquee) {
+                  if (!canvasNodeKeySetRef.current.has(node.id)) return;
+                  setMarqueeNodeKeys((current) => {
+                    if (!event.shiftKey && !event.ctrlKey && !event.metaKey)
+                      return new Set([node.id]);
+                    const next = new Set(current);
+                    if (next.has(node.id)) next.delete(node.id);
+                    else next.add(node.id);
+                    return next;
+                  });
+                  selectNode(null);
+                  selectEdge(null);
+                  return;
+                }
+                setMarqueeNodeKeys(new Set());
+                selectNode(node.id);
+                selectEdge(null);
+              }}
+              onEdgeClick={(_, edge) => {
+                if (nodeMarquee) return;
+                if (edge.selectable !== false) {
+                  selectEdge(edge.id);
+                  selectNode(null);
+                }
+              }}
+              aria-label="无限画布节点编辑器"
+              attributionPosition="bottom-left"
+            >
+              {nodeMarquee ? (
+                <CanvasMarqueeSelectionReader
+                  selectableKeysRef={canvasNodeKeySetRef}
+                  readSelectionRef={readNodeSelectionRef}
+                />
+              ) : null}
+              {/* 点阵随原生视口移动，给媒体留出安静的背景。 */}
+              <Background
+                id="canvas-grid-minor"
+                variant={BackgroundVariant.Dots}
+                gap={24}
+                size={2}
+                lineWidth={1}
+                className="canvas-flow-bg canvas-flow-bg--minor"
+              />
+              {minimapVisible ? (
+                <MiniMap
+                  className="canvas-minimap"
+                  ariaLabel="画布小地图"
+                  bgColor="var(--minimap-bg)"
+                  maskColor="var(--minimap-mask)"
+                  nodeColor="var(--minimap-node)"
+                  nodeStrokeColor="var(--minimap-node)"
+                  nodeBorderRadius={2}
+                  pannable
+                  zoomable
+                />
+              ) : null}
+            </LiveCanvasFlow>
+
+            <div className="video-node-editor-layer">
+              {[...genFlowNodes, ...screenplayFlowNodes, ...videoClipFlowNodes].map((node) => (
+                <RetainedNodeEditor key={node.id} open={editingNodeKey === node.id}>
+                  {cloneElement(
+                    node.data.content as ReactElement<{ presentation: "card" | "editor" }>,
+                    { presentation: "editor" },
+                  )}
+                </RetainedNodeEditor>
+              ))}
             </div>
-            <div className="confirm-dialog__actions">
-              <button
-                type="button"
-                className="confirm-dialog__btn"
-                onClick={closeClearCanvasDialog}
-              >
-                取消
-              </button>
-              <button
-                type="button"
-                className="confirm-dialog__btn confirm-dialog__btn--danger"
-                onClick={confirmClearCanvas}
-              >
-                <Icon name="trash-simple" aria-hidden="true" size="sm" />
-                确认清空
-              </button>
+
+            {connectionQuickAdd && quickAddEndpointExists ? (
+              <ConnectionQuickAddMenu
+                position={connectionQuickAdd.position}
+                connectionMode={connectionQuickAdd.connection !== null}
+                triggerElement={nodeMenuTriggerElement}
+                onSelect={handleConnectionQuickAdd}
+                onClose={closeConnectionQuickAdd}
+              />
+            ) : null}
+
+            {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
+            {!hasCanvasNodes ? (
+              <div className="canvas-empty-hint">
+                {/*
+                  原站 liblib 的空画布就是一行提示 + 一排创建入口（实测截图与
+                  i18n：guideDoubleClickCanvas「双击画布」+ guideFreelyCreateNodes
+                  「自由生成节点」，下面五个入口是图片生成 / 视频生成 / 音频生成 /
+                  剧本生成 / 智能剪辑）。
+                */}
+                <p className="canvas-empty-hint__guide">
+                  <CanvasChromeIcon name="move" size={18} />
+                  <span>双击画布</span>
+                  <span>自由生成节点</span>
+                </p>
+                <div className="canvas-empty-hint__actions">
+                  {EMPTY_CANVAS_SHORTCUTS.map(({ kind, label, icon }) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={`canvas-empty-hint__action canvas-empty-hint__action--${kind}`}
+                      onClick={() => createNodeFromEmptyCanvas(kind)}
+                    >
+                      <span className="canvas-empty-hint__action-icon" aria-hidden="true">
+                        <Icon name={icon} size="md" />
+                      </span>
+                      <span className="canvas-empty-hint__action-label">{label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+
+          <CanvasBottomDock
+            addNodeOpen={connectionQuickAdd !== null}
+            addNodeTriggerRef={setNodeMenuTriggerElement}
+            onAddNode={(trigger) => {
+              if (connectionQuickAdd) {
+                closeConnectionQuickAdd();
+                return;
+              }
+              const bounds = trigger.getBoundingClientRect();
+              setConnectionQuickAdd({
+                connection: null,
+                position: { x: bounds.left, y: bounds.top },
+                boardPosition: viewportCenterBoardCoordinates(),
+              });
+            }}
+            marqueeActive={nodeMarquee}
+            onToggleMarquee={() => {
+              setNodeMarquee((enabled) => !enabled);
+              setMarqueeNodeKeys(new Set());
+              selectNode(null);
+              selectEdge(null);
+            }}
+            onOpenHistory={() => {
+              setHistoryOpen(true);
+            }}
+            onPreloadHistory={preloadHistoryDialog}
+            onOpenShortcuts={() => {
+              setShortcutsOpen(true);
+            }}
+            onOpenGuide={() => {
+              setGuideOpen(true);
+            }}
+            onOpenStudio={() => {
+              void openCreateStudio().catch((failure: unknown) => {
+                toast.error("无法打开创作台", {
+                  description: backendErrorMessage(failure),
+                });
+              });
+            }}
+          />
+
+          <div className="canvas-viewport-dock">
+            <CanvasChromeControls
+              onOpenAssets={() => {
+                setAssetDrawerOpen(true);
+              }}
+              assetsOpen={assetDrawerOpen}
+              onFormatLayout={formatCanvasLayout}
+              minimapVisible={minimapVisible}
+              onToggleMinimap={() => {
+                setMinimapVisible((visible) => !visible);
+              }}
+              edgesVisible={edgesVisible}
+              onToggleEdges={() => {
+                setEdgesVisible((visible) => !visible);
+              }}
+              snapToGrid={snapToGrid}
+              onToggleSnap={() => {
+                setSnapToGrid((enabled) => !enabled);
+              }}
+              zoomControl={
+                <CanvasZoomMenu
+                  zoom={zoom}
+                  step={ZOOM_STEP}
+                  minZoom={MIN_ZOOM}
+                  maxZoom={MAX_ZOOM}
+                  onZoomChange={(next) => {
+                    zoomAroundViewportCenter(next);
+                  }}
+                  onFitView={() => {
+                    resetCanvasViewport();
+                  }}
+                  open={zoomMenuOpen}
+                  onOpenChange={setZoomMenuOpen}
+                />
+              }
+            />
+          </div>
+        </section>
+
+        {mobilePanel ? (
+          <button
+            type="button"
+            className="mobile-panel-backdrop"
+            aria-label="关闭侧板"
+            onClick={closeMobilePanel}
+          />
+        ) : null}
+      </div>
+      <CanvasAssetDrawerHost
+        open={assetDrawerOpen}
+        onClose={() => {
+          setAssetDrawerOpen(false);
+        }}
+        canvases={canvasCatalog ?? []}
+        activeCanvasId={canvasId}
+        onSelectCanvas={(id) => {
+          onSelectCanvas?.(id);
+          setAssetDrawerOpen(false);
+        }}
+      />
+      {/* 原站 liblib 首次进入画布时的 4 步引导（浮坞「教程」格可以再次打开）。 */}
+      <CanvasOnboardingGuide
+        ready={active && canvasHydrated}
+        open={guideOpen}
+        onClose={() => {
+          setGuideOpen(false);
+        }}
+      />{" "}
+      <CanvasShortcutsDialog
+        open={shortcutsOpen}
+        onClose={() => {
+          setShortcutsOpen(false);
+        }}
+      />
+      <CanvasContextMenu
+        open={nodeContextMenu !== null}
+        position={nodeContextMenu}
+        items={CANVAS_NODE_CONTEXT_MENU_ITEMS}
+        onClose={() => {
+          setNodeContextMenu(null);
+        }}
+        onSelect={handleNodeContextMenuAction}
+      />
+      <CanvasContextMenu
+        open={groupContextMenu !== null}
+        position={groupContextMenu}
+        items={groupContextMenuItems}
+        onClose={() => {
+          setGroupContextMenu(null);
+        }}
+        onSelect={handleGroupContextMenuAction}
+      />
+      {settingsOpen ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="global-settings-dialog"
+              label="全局设置"
+              onClose={closeSettings}
+            />
+          }
+        >
+          <ProviderSettingsDialog
+            open
+            onClose={closeSettings}
+            onCatalogChanged={refreshProviderCatalog}
+            activeAssetProviderId={assetProvider?.id ?? null}
+            onAssetProviderChanged={handleAssetProviderChanged}
+            onAssetLibraryLoaded={handleAssetLibraryLoaded}
+            onAssetLibraryLoading={handleAssetLibraryLoading}
+            onAssetLibraryLoadFailed={handleAssetLibraryLoadFailed}
+          />
+        </Suspense>
+      ) : null}
+      {historyOpen ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="generation-history-dialog"
+              label="历史记录"
+              onClose={closeHistory}
+            />
+          }
+        >
+          <HistoryDialog
+            open
+            onClose={closeHistory}
+            canvasId={canvasId}
+            initialTaskId={historyInitialTaskId}
+            onRegenerateGeneration={regenerateGenerationFromHistory}
+            onPromoteSeedanceDraft={promoteSeedanceDraftFromHistory}
+          />
+        </Suspense>
+      ) : null}
+      {previewAsset ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="asset-source-dialog"
+              label="媒体预览"
+              onClose={() => setPreviewAsset(null)}
+            />
+          }
+        >
+          <AssetSourceDialog
+            asset={previewAsset}
+            onClose={() => setPreviewAsset(null)}
+            onDelete={
+              previewAsset.source === "cloud" && previewAsset.providerConnectionId
+                ? () => handleDeleteAsset(previewAsset)
+                : previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                  ? () => void handleDeleteLocalAssets([previewAsset])
+                  : null
+            }
+            localGroups={
+              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                ? localAssetGroups
+                : undefined
+            }
+            onMoveToGroup={
+              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                ? (groupId) => {
+                    handleMoveLocalAssets([previewAsset], groupId);
+                    // 弹窗保持打开：立即反映新分组，列表由处理器后台重查。
+                    setPreviewAsset({ ...previewAsset, groupId });
+                  }
+                : null
+            }
+            onRename={
+              previewAsset.source === "cloud" &&
+              previewAsset.providerConnectionId &&
+              renamingAssetId == null
+                ? (name) => handleRenameAsset(previewAsset, name)
+                : null
+            }
+          />
+        </Suspense>
+      ) : null}
+      {realPersonDialogOpen && assetProvider ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="real-person-asset-dialog"
+              label="明星真人素材"
+              onClose={() => setRealPersonDialogOpen(false)}
+            />
+          }
+        >
+          <RealPersonAssetDialog
+            providerConnectionId={assetProvider.id}
+            providerDisplayName={assetProvider.displayName}
+            onClose={() => setRealPersonDialogOpen(false)}
+            onUploadToGroup={handleImportLocalAssets}
+          />
+        </Suspense>
+      ) : null}
+      {newGroupDialogOpen && assetProvider ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="asset-group-create-dialog"
+              label="新建素材分组"
+              onClose={() => setNewGroupDialogOpen(false)}
+            />
+          }
+        >
+          <AssetGroupCreateDialog
+            providerDisplayName={assetProvider.displayName}
+            busy={creatingGroup}
+            onClose={() => setNewGroupDialogOpen(false)}
+            onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
+          />
+        </Suspense>
+      ) : null}
+      {newLocalGroupDialogOpen ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="local-asset-group-create-dialog"
+              label="新建本地素材分组"
+              onClose={() => setNewLocalGroupDialogOpen(false)}
+            />
+          }
+        >
+          <AssetGroupCreateDialog
+            scope="local"
+            busy={creatingLocalGroup}
+            onClose={() => setNewLocalGroupDialogOpen(false)}
+            onCreate={handleCreateLocalAssetGroup}
+          />
+        </Suspense>
+      ) : null}
+      {previewOutputNode ? (
+        <CanvasOutputLightbox
+          node={previewOutputNode}
+          onClose={() => setPreviewOutputNodeKey(null)}
+        />
+      ) : null}
+      {previewAssetNode ? (
+        <CanvasAssetLightbox node={previewAssetNode} onClose={() => setPreviewAssetNodeKey(null)} />
+      ) : null}
+      {active && videoPreparation ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="video-preparation"
+              label="视频准备"
+              onClose={() => setVideoPreparation(null)}
+            />
+          }
+        >
+          <VideoPreparationDialog
+            source={videoPreparation}
+            onClose={() => setVideoPreparation(null)}
+            onUseOutput={usePreparedVideoOutput}
+          />
+        </Suspense>
+      ) : null}
+      {active && videoLocalEdit ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="video-local-edit"
+              label="视频局部编辑"
+              onClose={() => setVideoLocalEdit(null)}
+            />
+          }
+        >
+          <VideoLocalEditDialog
+            source={videoLocalEdit.source}
+            candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
+            canUploadToLibrary={assetProvider != null}
+            resolveFrame={resolveVideoLocalEditFrame}
+            onClose={() => setVideoLocalEdit(null)}
+            onApply={applyVideoLocalEdit}
+          />
+        </Suspense>
+      ) : null}
+      <dialog
+        ref={clearCanvasDialogRef}
+        className="confirm-dialog"
+        aria-labelledby="clear-canvas-dialog-title"
+        aria-describedby="clear-canvas-dialog-desc"
+      >
+        <form
+          method="dialog"
+          className="confirm-dialog__form"
+          onSubmit={(event) => {
+            // 表单提交（按 Enter 或点「确认清空」）时阻止默认关闭，由 confirmClearCanvas
+            // 显式 close()，确保先清空再关闭（避免 close 触发后 setState 在已卸载 dialog 上）。
+            event.preventDefault();
+          }}
+        >
+          <header className="confirm-dialog__header">
+            <span className="confirm-dialog__badge" aria-hidden="true">
+              <Icon name="warning" size="xl" />
+            </span>
+            <div>
+              <p className="confirm-dialog__eyebrow">危险操作 · 不可撤销</p>
+              <h2 id="clear-canvas-dialog-title" className="confirm-dialog__title">
+                确认清空画布？
+              </h2>
             </div>
-          </form>
-        </dialog>
-      </main>
-    </WorkflowSessionsProvider>
+          </header>
+          <div className="confirm-dialog__body">
+            <p id="clear-canvas-dialog-desc" className="confirm-dialog__desc">
+              将移除画布上所有节点与连线，任务历史会保留。此操作不可撤销。
+            </p>
+            <ul className="confirm-dialog__facts">
+              <li className="confirm-dialog__fact confirm-dialog__fact--removed">
+                <span className="confirm-dialog__fact-icon" aria-hidden="true">
+                  <Icon name="trash-simple" size="sm" />
+                </span>
+                <span className="confirm-dialog__fact-label">画布节点与连线</span>
+                <span className="confirm-dialog__fact-state">将被移除</span>
+              </li>
+              <li className="confirm-dialog__fact confirm-dialog__fact--kept">
+                <span className="confirm-dialog__fact-icon" aria-hidden="true">
+                  <Icon name="check-circle" size="sm" />
+                </span>
+                <span className="confirm-dialog__fact-label">任务历史</span>
+                <span className="confirm-dialog__fact-state">保留 · 可复现审计</span>
+              </li>
+            </ul>
+          </div>
+          <div className="confirm-dialog__actions">
+            <button type="button" className="confirm-dialog__btn" onClick={closeClearCanvasDialog}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="confirm-dialog__btn confirm-dialog__btn--danger"
+              onClick={confirmClearCanvas}
+            >
+              <Icon name="trash-simple" aria-hidden="true" size="sm" />
+              确认清空
+            </button>
+          </div>
+        </form>
+      </dialog>
+    </main>
   );
 }

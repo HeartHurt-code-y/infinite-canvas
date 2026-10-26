@@ -6,8 +6,8 @@
 #   1. Gatekeeper：包带 com.apple.quarantine 属性 → 提示「无法验证开发者」或「已损坏」。
 #   2. Apple Silicon 内核：arm64 可执行文件必须有有效签名才会被执行，
 #      否则被直接杀掉（"Killed: 9"）。注意 Tauri 在没有签名身份时**什么都不签**
-#      （不是退回 ad-hoc，而是整段跳过），随包分发的 FFmpeg / Blender 也可能未签名。
-# 旧的未签名完整包需要 ad-hoc 重签；带组件目录的联网版必须保留构建时的签名和文件摘要。
+#      （不是退回 ad-hoc，而是整段跳过），随包分发的 FFmpeg 也可能未签名。
+# 旧的未签名完整包需要 ad-hoc 重签；带内置运行时资源的联网版必须保留构建时的签名和文件摘要。
 #
 # 用法（把 <文件> 换成 DMG 或 .app 的路径）：
 #   sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
@@ -140,13 +140,15 @@ case "$source_path" in
 esac
 
 # 联网版源包先验证，再覆盖已安装应用。损坏的新下载不能删除仍然可用的旧版。
+# 内置运行时资源（FFmpeg 清单）存在即说明这个包带着构建期固定的摘要，
+# 重新签名会改变二进制字节、让应用侧的资源校验失败，所以必须保留原签名。
 preserve_pinned_signature=0
-component_catalog="$source_app/Contents/Resources/component-catalog.json"
-if [ -e "$component_catalog" ] || [ -L "$component_catalog" ]; then
+runtime_manifest="$source_app/Contents/Resources/ffmpeg/manifest.json"
+if [ -e "$runtime_manifest" ] || [ -L "$runtime_manifest" ]; then
   preserve_pinned_signature=1
-  log "联网版组件目录存在，校验源包构建时的原始签名…"
+  log "内置运行时资源存在，校验源包构建时的原始签名…"
   codesign --verify --deep --strict "$source_app" >/dev/null 2>&1 ||
-    fail "联网版原有签名校验失败；重新签名会破坏组件信任摘要，请重新下载可信安装包。"
+    fail "联网版原有签名校验失败；重新签名会破坏资源信任摘要，请重新下载可信安装包。"
 fi
 
 # ---- 2. 决定最终位置 ---------------------------------------------------------
@@ -219,7 +221,7 @@ if codesign --verify --deep --strict "$dest_app" >/dev/null 2>&1; then
   log "签名校验通过。"
 else
   if [ "$preserve_pinned_signature" -eq 1 ]; then
-    fail "联网版签名校验未通过；请重新下载可信安装包，不能通过重签绕过组件信任校验。"
+    fail "联网版签名校验未通过；请重新下载可信安装包，不能通过重签绕过内置资源信任校验。"
   fi
   warn "codesign --verify 未通过；app 可能仍能启动，但若打不开请把完整输出发给开发者。"
 fi

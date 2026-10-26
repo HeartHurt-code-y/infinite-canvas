@@ -6,7 +6,7 @@ use std::{
 };
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, params, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -25,9 +25,10 @@ use super::{
         GenerationTaskProgress, GenerationTaskStatus, GenerationTaskSummary, MediaType,
         ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
         ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingJobRecord,
-        StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
-        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
+        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget,
+        StagingCleanupCandidate, StagingJobRecord, StagingStatus, TextGenerationOutputRecord,
+        TokenUsage, TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
+        WorkspaceUiPrefs,
     },
 };
 
@@ -43,12 +44,6 @@ mod history_query;
 /// 未到终态的上传不受该窗口限制（见 [`Storage::list_asset_import_outputs`]）。
 const ASSET_IMPORT_OUTPUT_RECOVERY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
-#[path = "storage/workflow_history.rs"]
-pub mod workflow_history;
-
-#[path = "storage/reverse_video_cases.rs"]
-mod reverse_video_cases;
-
 #[path = "storage/remote_video_tasks.rs"]
 mod remote_video_tasks;
 
@@ -58,8 +53,6 @@ mod brand_models;
 #[path = "storage/local_base64_assets.rs"]
 mod local_base64_assets;
 
-#[path = "storage/ai_media.rs"]
-mod ai_media;
 #[path = "storage/video_preparation.rs"]
 mod video_preparation;
 
@@ -215,6 +208,13 @@ CREATE TABLE IF NOT EXISTS provider_calls (
   phase TEXT NOT NULL,
   request_json TEXT NOT NULL,
   sent_at INTEGER,
+  -- dispatch_failed = 1：请求在**连接层**就失败了（DNS 解析失败、连接被拒、TLS 握手失败），
+  -- 根本没有送达上游，不可能被供应商计费。
+  -- 「sent_at 非空」只说明「本机在那一刻发起了这次请求」，不等于「供应商已经收到」：
+  -- 请求是在 send() 之前写 sent_at 的，所以连接层失败也会留下 sent_at。
+  -- 只有 dispatch_failed = 0 才算真正送达（可能计费），判定口径见下面两处守卫 SQL。
+  -- 旧库按 DEFAULT 0 补齐：历史记录一律按「已送达」处理，不让旧草稿突然可重复提交。
+  dispatch_failed INTEGER NOT NULL DEFAULT 0,
   response_received_at INTEGER,
   duration_ms INTEGER,
   http_status INTEGER,
@@ -296,7 +296,10 @@ CREATE TABLE IF NOT EXISTS staging_jobs (
   updated_at INTEGER NOT NULL,
   adjustment TEXT,
   overseas_db_id INTEGER,
-  overseas_submitted_at INTEGER
+  overseas_submitted_at INTEGER,
+  cleanup_retry_count INTEGER NOT NULL DEFAULT 0,
+  cleanup_next_at INTEGER,
+  cleanup_done_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
@@ -455,9 +458,6 @@ impl Storage {
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
-        connection.execute_batch(workflow_history::SCHEMA)?;
-        workflow_history::migrate_summaries(&connection)?;
-        connection.execute_batch(reverse_video_cases::SCHEMA)?;
         connection.execute_batch(brand_models::SCHEMA)?;
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
@@ -468,8 +468,10 @@ impl Storage {
         migrate_staging_jobs_adjustment(&connection)?;
         migrate_staging_jobs_overseas_db_id(&connection)?;
         migrate_staging_jobs_overseas_submitted_at(&connection)?;
+        migrate_staging_jobs_cleanup_retry(&connection)?;
         migrate_remove_panqu_provider_connections(&connection)?;
         migrate_local_base64_asset_groups(&connection)?;
+        migrate_provider_calls_dispatch_failed(&connection)?;
 
         let storage = Self {
             connection: Mutex::new(connection),
@@ -1193,12 +1195,44 @@ impl Storage {
         {
             let existing: Option<String> = transaction
                 .query_row(
+                    /*
+                     * 阻断条件分两种「已发出请求」：
+                     *   - 未取消的**在途**任务 → 一律阻断；
+                     *   - 意外中断（interrupted）且已发出 → 阻断（自动流程不该再发一次）；
+                     *   - **用户主动取消**且已发出 → 也阻断。
+                     *
+                     * 最后一条是本轮补的：取消只停**本机**的轮询与落盘，供应商侧的
+                     * 任务仍在跑、仍会计费（应用自己的取消提示就写着「供应商侧可能仍计费」）。
+                     * 若把已取消的一律放行，用户再点一次「提升为正片」就会**再提交一次**
+                     * → 双倍扣费，而且第一个任务的产物再也回不来（取消后不再轮询）。
+                     *
+                     * 反过来，「取消但从未发出」的（发送前就取消）不阻断 —— 那没有任何
+                     * 计费顾虑，重发是安全且必要的（否则用户陷入死路）。
+                     *
+                     * 「已发出」的判据是「sent_at 非空 **且** dispatch_failed = 0」：
+                     * sent_at 是在 request.send() **之前**就写库的，所以 DNS 解析失败、
+                     * 连接被拒这类**根本没送达上游**的请求同样带着 sent_at。只看 sent_at
+                     * 会把「先失败、后被取消」的窄窗口任务误判成「供应商侧还在跑并计费」，
+                     * 于是用户被永久挡死：提示「该草稿已有正片任务 X，请查询原任务」，
+                     * 而那个任务既失败又被取消，永远不会有结果。
+                     * dispatch_failed 只在**连接层**失败时置 1；「已送达上游但响应体读取
+                     * 失败 / 返回 4xx / 返回 5xx」不算未发出（那些请求可能已经计费，
+                     * 必须继续阻断）。
+                     */
                     "SELECT id FROM generation_tasks
                  WHERE json_extract(logical_request_json, '$.seedanceDraftSourceTaskId') = ?1
                    AND status != 'failed'
+                   AND (
+                        status != 'cancelled'
+                        OR remote_task_id IS NOT NULL
+                        OR EXISTS (
+                            SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
+                              AND c.sent_at IS NOT NULL AND COALESCE(c.dispatch_failed, 0) = 0
+                        )
+                   )
                    AND (status != 'interrupted' OR remote_task_id IS NOT NULL OR EXISTS (
                        SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
-                         AND c.sent_at IS NOT NULL
+                         AND c.sent_at IS NOT NULL AND COALESCE(c.dispatch_failed, 0) = 0
                    )) LIMIT 1",
                     params![source_task_id],
                     |row| row.get(0),
@@ -1243,7 +1277,6 @@ impl Storage {
                 timestamp
             ],
         )?;
-        workflow_history::associate_task(&transaction, &task)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1252,15 +1285,31 @@ impl Storage {
         &self,
         source_task_id: &str,
     ) -> BackendResult<Option<String>> {
+        /*
+         * 「草稿对应的正片任务」——口径与上面的阻断条件**必须一致**：
+         * 取消但已发出请求的正片仍然算「存在」（供应商侧还在跑并计费），
+         * 否则会出现「查不到原任务、却也不阻断新提交」的组合 → 双倍扣费。
+         *
+         * 「已发出」同样按「sent_at 非空 且 dispatch_failed = 0」判定：连接层就失败、
+         * 根本没送达上游的调用不算已发出（不可能计费），否则用户会被永久挡死。
+         */
         Ok(self
             .lock()?
             .query_row(
                 "SELECT id FROM generation_tasks
              WHERE json_extract(logical_request_json, '$.seedanceDraftSourceTaskId') = ?1
                AND status != 'failed'
+               AND (
+                    status != 'cancelled'
+                    OR remote_task_id IS NOT NULL
+                    OR EXISTS (
+                        SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
+                          AND c.sent_at IS NOT NULL AND COALESCE(c.dispatch_failed, 0) = 0
+                    )
+               )
                AND (status != 'interrupted' OR remote_task_id IS NOT NULL OR EXISTS (
                    SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
-                     AND c.sent_at IS NOT NULL
+                     AND c.sent_at IS NOT NULL AND COALESCE(c.dispatch_failed, 0) = 0
                )) ORDER BY created_at DESC LIMIT 1",
                 params![source_task_id],
                 |row| row.get(0),
@@ -1407,14 +1456,20 @@ impl Storage {
         if let Some(expected_revision) = command.expected_revision {
             let expected_revision = checked_sql_integer(expected_revision, "expectedRevision")?;
             if expected_revision != current_revision {
+                /*
+                 * 冲突文案必须是中文人话：这条会直接显示在画布的状态栏上，
+                 * 英文 + 内部画布 id 对用户没有意义（画布 id 是机器内部标识）。
+                 * 也要说清「怎么办」——多半是另一个实例同时改了同一张画布。
+                 */
                 return Err(BackendError::Conflict(format!(
-                    "canvas {} changed since revision {}; current revision is {}",
-                    command.id, expected_revision, current_revision
+                    "画布已在别处被修改（预期版本 {expected_revision}，当前版本 {current_revision}）。\
+                     请关闭另一个正在打开这张画布的窗口后重试；若要保留本窗口的改动，\
+                     请先复制画布内容再重新载入。"
                 )));
             }
         }
         let revision = current_revision.checked_add(1).ok_or_else(|| {
-            BackendError::Conflict(format!("canvas {} revision overflow", command.id))
+            BackendError::Conflict("画布版本号已超出上限，无法继续保存。".to_string())
         })?;
         let timestamp = now_ms();
         let created_at = existing
@@ -1474,10 +1529,36 @@ impl Storage {
     }
 
     pub fn delete_canvas_document(&self, id: &str) -> BackendResult<()> {
-        // Task history, workflow checkpoints, and generated files outlive their canvas.
-        self.lock()?
-            .execute("DELETE FROM canvas_documents WHERE id = ?1", params![id])?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        // 画布没了，在途生成任务不能继续向供应商轮询、继续把产物写进磁盘：
+        // 同一个事务里把这些任务收敛成 cancelled 终态。
+        // 已成功/已失败/已中断的历史任务保持原样，历史不能丢。
+        cancel_canvas_generation_tasks(&transaction, id, now_ms())?;
+        transaction.execute("DELETE FROM canvas_documents WHERE id = ?1", params![id])?;
+        transaction.commit()?;
         Ok(())
+    }
+
+    /// 某个画布下仍在进行中的生成任务 ID。
+    ///
+    /// 画布删除时先用它置运行时取消位（让轮询尽快停下），
+    /// 再由 [`Storage::delete_canvas_document`] 在同一个事务里落终态。
+    pub fn list_nonterminal_task_ids_for_canvas(
+        &self,
+        canvas_id: &str,
+    ) -> BackendResult<Vec<String>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id FROM generation_tasks
+             WHERE canvas_id = ?1
+               AND status IN ('created','submitting','retry_wait','queued','running')
+             ORDER BY created_at",
+        )?;
+        let ids = statement
+            .query_map(params![canvas_id], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids)
     }
 
     pub fn get_task_detail(&self, task_id: &str) -> BackendResult<GenerationTaskDetail> {
@@ -1694,11 +1775,25 @@ impl Storage {
 
     pub fn save_workspace_ui_prefs(&self, prefs: &WorkspaceUiPrefs) -> BackendResult<()> {
         let mut merged = self.get_workspace_ui_prefs()?;
+        /*
+         * 合并语义：字段为 None 表示「不改这一项」。
+         *
+         * 前端把要清空的偏好显式发成 null，而 null 在 Rust 侧就是 None，
+         * 于是「清空已选供应商」这条路走不通（要新增显式清空通道才能支持）。
+         * 这里保持既有语义不变，只把新增的两个字段一并接上——它们与另外两项
+         * 的行为必须一致，否则创作台「记住上次创作类型/模型」会静默失效。
+         */
         if prefs.active_asset_provider_id.is_some() {
             merged.active_asset_provider_id = prefs.active_asset_provider_id.clone();
         }
         if prefs.asset_library_source.is_some() {
             merged.asset_library_source = prefs.asset_library_source.clone();
+        }
+        if prefs.creation_mode.is_some() {
+            merged.creation_mode = prefs.creation_mode.clone();
+        }
+        if prefs.creation_model_definition_id.is_some() {
+            merged.creation_model_definition_id = prefs.creation_model_definition_id.clone();
         }
         self.lock()?.execute(
             "INSERT INTO application_settings(key, value_json, updated_at)
@@ -2045,43 +2140,9 @@ impl Storage {
     }
 
     /// 按对象键查找本地素材（拉取存储桶素材时按对象键去重）。
-    #[cfg(test)]
-    pub fn find_local_asset_job_by_object_key(
-        &self,
-        object_key: &str,
-    ) -> BackendResult<Option<StagingJobRecord>> {
-        self.lock()?
-            .query_row(
-                "SELECT id, local_path, purpose, media_type, object_key, status,
-                        bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at, adjustment, overseas_db_id
-                 FROM staging_jobs
-                 WHERE purpose = 'local_asset'
-                   AND import_target_json IS NULL
-                   AND status = 'staged'
-                   AND object_key = ?1
-                 LIMIT 1",
-                params![object_key],
-                staging_job_from_row,
-            )
-            .optional()
-            .map_err(Into::into)
-    }
 
     /// 整桶同步去重：任何应用创建的暂存任务都拥有该对象键时，不能再把对象
     /// 当成用户自行放入桶的新素材。包括入库中转、生成输入与尚在上传的 TOS-only 任务。
-    #[cfg(test)]
-    pub fn has_staging_job_by_object_key(&self, object_key: &str) -> BackendResult<bool> {
-        if object_key.trim().is_empty() {
-            return Ok(false);
-        }
-        let exists: i64 = self.lock()?.query_row(
-            "SELECT EXISTS(SELECT 1 FROM staging_jobs WHERE object_key = ?1)",
-            params![object_key],
-            |row| row.get(0),
-        )?;
-        Ok(exists != 0)
-    }
 
     pub fn list_staging_jobs_by_object_key(
         &self,
@@ -2205,12 +2266,95 @@ impl Storage {
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
                     error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
-             WHERE status IN ('validating','authorizing','uploading','staged','importing','cleaning')
+             WHERE status IN ('validating','authorizing','uploading','staged','importing','cleaning','interrupted')
                 OR (overseas_db_id IS NOT NULL AND asset_id IS NULL AND status != 'failed')
              ORDER BY created_at",
         )?;
         let rows = statement.query_map([], staging_job_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 列出待回收的暂存对象行（启动回收器用）。
+    ///
+    /// 只回收**中转用途**的暂存对象：
+    /// - `generation_input`：交给供应商请求用的一次性中转对象；
+    /// - `asset_import`：喂给云端素材库导入的一次性中转对象。
+    ///
+    /// `local_asset` 是用户自己对象存储桶里的长期素材（对象存储素材库），
+    /// 它就躺在同一个桶里但**不是垃圾**——删掉等于删用户的数据，因此不在回收范围。
+    ///
+    /// 回收条件：状态已经是死路（`interrupted` / `in_use` / `failed`）、对象键还在、
+    /// 对象尚未确认删除、还没到重试上限、且退避时间已到。
+    pub fn list_staging_cleanup_candidates(
+        &self,
+        max_retry_count: u32,
+        limit: u32,
+    ) -> BackendResult<Vec<StagingCleanupCandidate>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, purpose, object_key, status, cleanup_retry_count
+             FROM staging_jobs
+             WHERE status IN ('interrupted','in_use','failed')
+               AND purpose IN ('generation_input','asset_import')
+               AND object_key IS NOT NULL
+               AND cleanup_done_at IS NULL
+               AND cleanup_retry_count < ?1
+               AND (cleanup_next_at IS NULL OR cleanup_next_at <= ?2)
+             ORDER BY created_at
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![i64::from(max_retry_count), now_ms(), i64::from(limit)],
+            staging_cleanup_candidate_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// 记录一次回收失败：累计尝试次数并安排下一次重试时间。
+    ///
+    /// `next_at` 传 `None` 表示进入终态（不再重试），调用方负责记终态日志。
+    pub fn record_staging_cleanup_failure(
+        &self,
+        id: &str,
+        retry_count: u32,
+        next_at: Option<i64>,
+    ) -> BackendResult<()> {
+        self.lock()?.execute(
+            "UPDATE staging_jobs SET cleanup_retry_count = ?2, cleanup_next_at = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![id, i64::from(retry_count), next_at, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 对象已确认删除（或本来就不在桶里）：标记该行回收完成，不再进入回收队列。
+    ///
+    /// **保留** `object_key`：云端素材的预览兜底要靠对象键找回导入时的原始文件
+    /// （见 `resolve_staging_local_source`），把键清掉等于连兜底一起弄丢。
+    /// 「是否已回收」由 `cleanup_done_at` 表达，因此回收依然是幂等的——
+    /// 已清理的行不会被再捞出来，也不会重复发 DELETE。
+    pub fn mark_staging_object_deleted(&self, id: &str) -> BackendResult<()> {
+        self.lock()?.execute(
+            "UPDATE staging_jobs SET cleanup_done_at = ?2, cleanup_retry_count = 0,
+                    cleanup_next_at = NULL, updated_at = ?3
+             WHERE id = ?1",
+            params![id, now_ms(), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// 重新上传了对象：清掉回收记账，让新对象重新受回收管辖。
+    ///
+    /// 对象键是每次上传新生成的（`build_object_key` 用新 UUID），旧对象的回收结论
+    /// 不能套到新对象上。
+    pub fn reset_staging_cleanup_state(&self, id: &str) -> BackendResult<()> {
+        self.lock()?.execute(
+            "UPDATE staging_jobs SET cleanup_done_at = NULL, cleanup_retry_count = 0,
+                    cleanup_next_at = NULL
+             WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
     }
 
     /// 产物上传到云端素材库的入库记录，供应用重启后重建「jobId → 产物节点」映射与在途上传行。
@@ -2248,6 +2392,77 @@ impl Storage {
 
 pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+/// 把某个画布下所有非终态生成任务收敛成 `cancelled` 终态。
+///
+/// 画布被删除后，这些任务如果继续跑，就会变成没人认领的"幽灵任务"：
+/// 继续向供应商轮询、继续消耗额度、继续把产物写进磁盘。
+/// 终态任务（已成功/已失败/已中断/已取消）保持原样，历史不能丢。
+///
+/// 必须与删除画布行放在同一个 transaction 里：要么两者都生效，要么都不生效。
+fn cancel_canvas_generation_tasks(
+    transaction: &Transaction<'_>,
+    canvas_id: &str,
+    timestamp: i64,
+) -> BackendResult<usize> {
+    let tasks = {
+        let mut statement = transaction.prepare(
+            "SELECT id, status, query_health, progress FROM generation_tasks
+             WHERE canvas_id = ?1
+               AND status IN ('created','submitting','retry_wait','queued','running')
+             ORDER BY created_at",
+        )?;
+        let rows = statement.query_map(params![canvas_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+    let reason = json!({
+        "kind": "generation_cancelled",
+        "message": "画布已删除，任务随之取消，不再继续查询供应商或保存产物。",
+    });
+    let reason_json = serde_json::to_string(&reason)?;
+    let mut cancelled = 0;
+    for (task_id, from_status, from_query_health, progress) in tasks {
+        // 再带一次状态条件：任务可能刚好在读取之后跑完了，终态历史不能被改写。
+        let updated = transaction.execute(
+            "UPDATE generation_tasks
+             SET status = 'cancelled', final_error_json = ?2, updated_at = ?3, completed_at = ?3
+             WHERE id = ?1
+               AND status IN ('created','submitting','retry_wait','queued','running')",
+            params![task_id, reason_json, timestamp],
+        )?;
+        if updated != 1 {
+            continue;
+        }
+        transaction.execute(
+            "INSERT INTO generation_task_events(task_id, event_type, payload_json, created_at)
+             VALUES (?1, 'state_changed', ?2, ?3)",
+            params![
+                task_id,
+                serde_json::to_string(&json!({
+                    "fromStatus": from_status,
+                    "status": "cancelled",
+                    "fromQueryHealth": from_query_health,
+                    "queryHealth": from_query_health,
+                    "progress": progress,
+                    "error": reason.clone(),
+                }))?,
+                timestamp
+            ],
+        )?;
+        cancelled += 1;
+    }
+    Ok(cancelled)
 }
 
 const DEFAULT_TOS_REGION: &str = "cn-beijing";
@@ -2398,6 +2613,59 @@ fn migrate_local_base64_asset_groups(connection: &Connection) -> BackendResult<(
          ON local_base64_assets(group_id)",
         [],
     )?;
+    Ok(())
+}
+
+/// 为旧数据库补齐「请求未送达上游」标记列：`provider_calls.dispatch_failed`。
+///
+/// 旧库没有这一列，CREATE TABLE IF NOT EXISTS 也不会给已存在的表补列，因此启动时
+/// 检测并 ALTER TABLE 补齐。补出来的值一律是 0（= 已送达），这样历史记录的行为
+/// 与加列之前完全一致：旧草稿不会被突然变成「可重复提交」，也不会凭空多出一次
+/// 可能计费的供应商调用。
+fn migrate_provider_calls_dispatch_failed(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(provider_calls)")?;
+    let has_dispatch_failed_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| {
+            result
+                .map(|name| name == "dispatch_failed")
+                .unwrap_or(false)
+        });
+    drop(statement);
+    if !has_dispatch_failed_column {
+        connection.execute(
+            "ALTER TABLE provider_calls
+             ADD COLUMN dispatch_failed INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// 为旧数据库补齐暂存对象回收的记账列。
+///
+/// - `cleanup_retry_count`：删除失败次数，达到上限后该行进入终态（不再重试），
+///   否则每次启动都会重试同一行，永远清不掉也永远不放手；
+/// - `cleanup_next_at`：下一次允许重试的时间戳（毫秒），用来做退避；
+/// - `cleanup_done_at`：对象已确认删除的时间戳；非空表示这一行不再需要回收。
+fn migrate_staging_jobs_cleanup_retry(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(staging_jobs)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|name| name == "cleanup_retry_count") {
+        connection.execute(
+            "ALTER TABLE staging_jobs ADD COLUMN cleanup_retry_count INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|name| name == "cleanup_next_at") {
+        connection.execute("ALTER TABLE staging_jobs ADD COLUMN cleanup_next_at INTEGER", [])?;
+    }
+    if !columns.iter().any(|name| name == "cleanup_done_at") {
+        connection.execute("ALTER TABLE staging_jobs ADD COLUMN cleanup_done_at INTEGER", [])?;
+    }
     Ok(())
 }
 
@@ -2703,6 +2971,18 @@ fn staging_job_from_row(row: &Row<'_>) -> rusqlite::Result<StagingJobRecord> {
     })
 }
 
+/// 回收候选行的行映射：只取回收需要的列，避开 `staging_job_from_row` 的全量列。
+fn staging_cleanup_candidate_from_row(row: &Row<'_>) -> rusqlite::Result<StagingCleanupCandidate> {
+    let status: String = row.get(3)?;
+    Ok(StagingCleanupCandidate {
+        id: row.get(0)?,
+        purpose: row.get(1)?,
+        object_key: row.get(2)?,
+        status: parse_staging_status(status)?,
+        cleanup_retry_count: u32::try_from(nonnegative_integer(row, 4)?).unwrap_or(u32::MAX),
+    })
+}
+
 fn canvas_document_from_row(row: &Row<'_>) -> rusqlite::Result<CanvasDocumentRecord> {
     let document: String = row.get(2)?;
     Ok(CanvasDocumentRecord {
@@ -2752,6 +3032,16 @@ fn parse_media_type(value: String) -> rusqlite::Result<MediaType> {
         "image" => Ok(MediaType::Image),
         "video" => Ok(MediaType::Video),
         "audio" => Ok(MediaType::Audio),
+        /*
+         * "text" 必须认：生成结果表里存着文本产物（Context-IR 等，保存为 .txt），
+         * 写入侧 `generation_lifecycle.rs` 用 `result.media_type.as_str()` 落库。
+         * 这里若不认，读取任务详情 / 结果列表时整条 SQL 映射失败 → 用户看到
+         * 「unknown media type: text」，该任务的所有结果都读不出来。
+         *
+         * 注意别与「素材库 / 暂存只收三媒体」混淆：那条约束在素材侧的
+         * `parse_media_type`（asset_library.rs）里，两者是不同的函数。
+         */
+        "text" => Ok(MediaType::Text),
         _ => Err(text_sql_error(format!("unknown media type: {value}"))),
     }
 }
@@ -2825,2348 +3115,4 @@ fn text_sql_error(error: String) -> rusqlite::Error {
         rusqlite::types::Type::Text,
         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
     )
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn seedance_draft_final_identity_survives_restart_and_blocks_duplicate_paid_tasks() {
-        let directory = tempfile::TempDir::new().unwrap();
-        let path = directory.path().join("draft.sqlite");
-        let storage = super::Storage::open(&path).unwrap();
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        let logical = serde_json::json!({
-            "seedanceDraftSourceTaskId": "local-draft",
-            "parameters": {"draft_task_id": "remote-draft"}
-        });
-        let create = |storage: &super::Storage, id: &str| {
-            storage.insert_task(super::NewTask {
-                id,
-                canvas_id: "canvas-original",
-                source_node_id: "node-original",
-                operation: super::GenerationOperation::VideoGeneration,
-                provider: &provider,
-                api_key_ref: "original-sd2-asset-credential",
-                model_definition_id: "model-original",
-                remote_model_id: Some("doubao-seedance-2-5-260628"),
-                logical_request: &logical,
-            })
-        };
-        create(&storage, "final-1").unwrap();
-        assert!(create(&storage, "final-duplicate").is_err());
-        drop(storage);
-        let reopened = super::Storage::open(&path).unwrap();
-        assert_eq!(
-            reopened
-                .seedance_draft_final_task_id("local-draft")
-                .unwrap()
-                .as_deref(),
-            Some("final-1")
-        );
-        let task = reopened.get_task_execution("final-1").unwrap();
-        assert_eq!(task.api_key_ref_snapshot, "original-sd2-asset-credential");
-        assert_eq!(task.logical_request, logical);
-        reopened
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE generation_tasks SET status='interrupted' WHERE id='final-1'",
-                [],
-            )
-            .unwrap();
-        assert!(
-            reopened
-                .seedance_draft_final_task_id("local-draft")
-                .unwrap()
-                .is_none()
-        );
-        create(&reopened, "final-after-unsent-interruption").unwrap();
-        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='interrupted', remote_task_id='remote-final' WHERE id='final-after-unsent-interruption'", []).unwrap();
-        assert!(create(&reopened, "final-with-remote-duplicate").is_err());
-        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='unknown' WHERE id='final-after-unsent-interruption'", []).unwrap();
-        assert!(create(&reopened, "final-after-ambiguous").is_err());
-        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='failed' WHERE id='final-after-unsent-interruption'", []).unwrap();
-        create(&reopened, "final-explicit-retry").unwrap();
-        assert_eq!(
-            reopened
-                .seedance_draft_final_task_id("local-draft")
-                .unwrap()
-                .as_deref(),
-            Some("final-explicit-retry")
-        );
-    }
-
-    use std::sync::Arc;
-
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::backend::types::ProviderModelSelection;
-
-    #[test]
-    fn legacy_local_assets_keep_upgrade_bucket_without_relabeling_known_other_bucket() {
-        let directory = TempDir::new().unwrap();
-        let database = directory.path().join("legacy.sqlite3");
-        let storage = Storage::open(&database).unwrap();
-        let config = TosStagingConfig {
-            bucket: "current-bucket".into(),
-            region: "cn-beijing".into(),
-            endpoint: "tos-cn-beijing.volces.com".into(),
-            object_prefix: "staging".into(),
-            credential_ref: Some("tos-ak-sk".into()),
-            enabled: true,
-        };
-        storage.save_tos_config(&config).unwrap();
-        let current_scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
-        let current_hash = hex::encode(Sha256::digest(current_scope.as_bytes()));
-        let old_scope = format!("{}:{}:{}", "old-bucket", config.region, config.endpoint);
-        let old_hash = hex::encode(Sha256::digest(old_scope.as_bytes()));
-        let uuid = "99abbecc-0123-4567-89ab-cdef01234567";
-        for (id, object_key) in [
-            ("unscoped", "pictures/photo.png".to_string()),
-            (
-                "current",
-                format!("staging/{}/2026/09/01/{uuid}.png", &current_hash[..16]),
-            ),
-            (
-                "other",
-                format!("staging/{}/2026/09/01/{uuid}.png", &old_hash[..16]),
-            ),
-        ] {
-            storage
-                .insert_staging_job(&StagingJobRecord {
-                    id: id.into(),
-                    local_path: "photo.png".into(),
-                    purpose: "local_asset".into(),
-                    media_type: MediaType::Image,
-                    object_key: Some(object_key),
-                    status: StagingStatus::Staged,
-                    bytes_total: Some(4),
-                    bytes_uploaded: 4,
-                    asset_id: None,
-                    overseas_db_id: None,
-                    import_target: None,
-                    adjustment: None,
-                    error: None,
-                    created_at: 0,
-                    updated_at: 0,
-                })
-                .unwrap();
-        }
-        drop(storage);
-        Connection::open(&database)
-            .unwrap()
-            .execute("DELETE FROM schema_migrations WHERE version = 2", [])
-            .unwrap();
-        let reopened = Storage::open(&database).unwrap();
-        assert_eq!(
-            reopened
-                .get_staging_object_target("unscoped")
-                .unwrap()
-                .unwrap()
-                .bucket,
-            config.bucket
-        );
-        assert_eq!(
-            reopened
-                .get_staging_object_target("current")
-                .unwrap()
-                .unwrap()
-                .bucket,
-            config.bucket
-        );
-        assert!(
-            reopened
-                .get_staging_object_target("other")
-                .unwrap()
-                .is_none()
-        );
-        let mut changed = config.clone();
-        changed.bucket = "next-bucket".into();
-        reopened.save_tos_config(&changed).unwrap();
-        drop(reopened);
-        let switched = Storage::open(&database).unwrap();
-        assert_eq!(
-            switched
-                .get_staging_object_target("unscoped")
-                .unwrap()
-                .unwrap()
-                .bucket,
-            config.bucket
-        );
-        assert!(
-            switched
-                .get_staging_object_target("other")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn accepted_overseas_upload_db_id_survives_reopen_and_stale_job_update() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).unwrap();
-        let job = StagingJobRecord {
-            id: "overseas-pending".into(),
-            local_path: "C:/media/portrait.png".into(),
-            purpose: "asset_import".into(),
-            media_type: MediaType::Image,
-            object_key: Some("staging/portrait.png".into()),
-            status: StagingStatus::Importing,
-            bytes_total: Some(100),
-            bytes_uploaded: 100,
-            asset_id: None,
-            overseas_db_id: None,
-            import_target: Some(StagingAssetImportTarget {
-                provider_connection_id: "provider-overseas".into(),
-                name: Some("portrait.png".into()),
-                group_id: None,
-            }),
-            adjustment: None,
-            error: None,
-            created_at: now_ms(),
-            updated_at: now_ms(),
-        };
-        storage.insert_staging_job(&job).unwrap();
-        storage.set_staging_overseas_db_id(&job.id, 1351).unwrap();
-        let submitted_at = storage
-            .get_staging_overseas_submitted_at(&job.id)
-            .unwrap()
-            .unwrap();
-        storage.set_staging_overseas_db_id(&job.id, 1351).unwrap();
-        assert_eq!(
-            storage.get_staging_overseas_submitted_at(&job.id).unwrap(),
-            Some(submitted_at),
-            "repeated callback must not restart the 20-minute deadline"
-        );
-        // 上传调用栈手中的 job 副本仍未见到回调写入的 db_id，状态更新不可覆盖它。
-        let mut interrupted_during_cleanup = job.clone();
-        interrupted_during_cleanup.status = StagingStatus::Cleaned;
-        storage
-            .update_staging_job(&interrupted_during_cleanup)
-            .unwrap();
-        assert_eq!(
-            storage.get_staging_job(&job.id).unwrap().overseas_db_id,
-            Some(1351)
-        );
-        drop(storage);
-
-        let reopened = Storage::open(&path).unwrap();
-        let recovered = reopened.list_asset_import_outputs().unwrap();
-        assert_eq!(recovered.len(), 1);
-        assert_eq!(recovered[0].id, job.id);
-        assert_eq!(recovered[0].overseas_db_id, Some(1351));
-        assert_eq!(
-            reopened.get_staging_overseas_submitted_at(&job.id).unwrap(),
-            Some(submitted_at)
-        );
-        assert!(recovered[0].asset_id.is_none());
-        assert!(matches!(recovered[0].status, StagingStatus::Importing));
-        assert!(reopened.set_staging_overseas_db_id(&job.id, 1352).is_err());
-        let mut timed_out = recovered[0].clone();
-        timed_out.status = StagingStatus::Failed;
-        timed_out.error = Some(json!({ "kind": "asset_import_timeout" }));
-        reopened.update_staging_job(&timed_out).unwrap();
-        let tombstones = reopened.list_asset_import_outputs().unwrap();
-        assert_eq!(tombstones.len(), 1);
-        assert_eq!(tombstones[0].overseas_db_id, Some(1351));
-    }
-
-    #[test]
-    fn history_pagination_keeps_all_tasks_with_identical_creation_times() {
-        let directory = TempDir::new().unwrap();
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        for id in ["task-c", "task-a", "task-b"] {
-            storage
-                .insert_task(NewTask {
-                    id,
-                    canvas_id: "same-time-canvas",
-                    source_node_id: "same-time-node",
-                    operation: GenerationOperation::TextToImage,
-                    provider: &provider,
-                    api_key_ref: &provider.api_key_ref,
-                    model_definition_id: "gpt-image-2",
-                    remote_model_id: Some("gpt-image-2"),
-                    logical_request: &json!({}),
-                })
-                .unwrap();
-        }
-        storage
-            .lock()
-            .unwrap()
-            .execute("UPDATE generation_tasks SET created_at = 2000", [])
-            .unwrap();
-        let mut query: GenerationTaskListQuery = serde_json::from_value(json!({
-            "canvasId": "same-time-canvas", "limit": 2
-        }))
-        .unwrap();
-        let first = storage.list_tasks(&query).unwrap();
-        assert_eq!(
-            first
-                .items
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            ["task-a", "task-b"]
-        );
-        query.cursor = first.next_cursor;
-        let second = storage.list_tasks(&query).unwrap();
-        assert_eq!(
-            second
-                .items
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<Vec<_>>(),
-            ["task-c"]
-        );
-        assert!(second.next_cursor.is_none());
-    }
-
-    #[test]
-    fn history_composite_cursor_preserves_order_and_filters_at_every_page_size() {
-        let directory = TempDir::new().unwrap();
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        for (id, timestamp, canvas, node, status, name) in [
-            ("task-c", 2000, "canvas", "node", "created", "keep"),
-            ("task-new", 3000, "canvas", "node", "created", "keep"),
-            ("task-old", 1000, "canvas", "node", "created", "keep"),
-            ("task-b", 2000, "canvas", "node", "created", "keep"),
-            ("task-a", 2000, "canvas", "node", "created", "keep"),
-            (
-                "task-b-other-canvas",
-                2000,
-                "other",
-                "node",
-                "created",
-                "keep",
-            ),
-            (
-                "task-b-other-node",
-                2000,
-                "canvas",
-                "other",
-                "created",
-                "keep",
-            ),
-            ("task-b-failed", 2000, "canvas", "node", "failed", "keep"),
-            (
-                "task-b-other-name",
-                2000,
-                "canvas",
-                "node",
-                "created",
-                "omit",
-            ),
-            ("task-too-old", 999, "canvas", "node", "created", "keep"),
-            ("task-too-new", 3001, "canvas", "node", "created", "keep"),
-        ] {
-            storage
-                .insert_task(NewTask {
-                    id,
-                    canvas_id: canvas,
-                    source_node_id: node,
-                    operation: GenerationOperation::TextToImage,
-                    provider: &provider,
-                    api_key_ref: &provider.api_key_ref,
-                    model_definition_id: "gpt-image-2",
-                    remote_model_id: Some("gpt-image-2"),
-                    logical_request: &json!({"outputName": name}),
-                })
-                .unwrap();
-            storage
-                .lock()
-                .unwrap()
-                .execute(
-                    "UPDATE generation_tasks SET created_at = ?1, status = ?2 WHERE id = ?3",
-                    params![timestamp, status, id],
-                )
-                .unwrap();
-        }
-        let expected = ["task-new", "task-a", "task-b", "task-c", "task-old"];
-        for limit in [1, 2, 3, 5, 6] {
-            let mut query: GenerationTaskListQuery = serde_json::from_value(json!({
-                "canvasId": "canvas", "sourceNodeId": "node", "statuses": ["created"],
-                "search": "keep", "createdFrom": 1000, "createdTo": 3000, "limit": limit
-            }))
-            .unwrap();
-            let mut ids = Vec::new();
-            for _ in 0..=expected.len() {
-                let page = storage.list_tasks(&query).unwrap();
-                assert!(page.items.len() <= limit as usize);
-                if let Some(cursor) = page.next_cursor.as_ref() {
-                    let last = page.items.last().unwrap();
-                    assert_eq!(cursor.created_at, last.created_at);
-                    assert_eq!(cursor.id, last.id);
-                }
-                ids.extend(page.items.into_iter().map(|item| item.id));
-                query.cursor = page.next_cursor;
-                if query.cursor.is_none() {
-                    break;
-                }
-            }
-            assert!(query.cursor.is_none(), "pagination did not end: {limit}");
-            assert_eq!(ids, expected, "page size: {limit}");
-        }
-    }
-
-    #[test]
-    fn history_date_range_filters_before_pagination_and_validates_bounds() {
-        let directory = TempDir::new().unwrap();
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        // The previous bounded scan skipped old matches once enough newer records existed.
-        for index in 0..45 {
-            let id = format!("history-date-{index}");
-            storage
-                .insert_task(NewTask {
-                    id: &id,
-                    canvas_id: "date-canvas",
-                    source_node_id: "date-node",
-                    operation: GenerationOperation::TextToImage,
-                    provider: &provider,
-                    api_key_ref: &provider.api_key_ref,
-                    model_definition_id: "gpt-image-2",
-                    remote_model_id: Some("gpt-image-2"),
-                    logical_request: &json!({}),
-                })
-                .unwrap();
-            storage
-                .lock()
-                .unwrap()
-                .execute(
-                    "UPDATE generation_tasks SET created_at = ?1 WHERE id = ?2",
-                    params![index * 1000, id],
-                )
-                .unwrap();
-        }
-        let query: GenerationTaskListQuery = serde_json::from_value(json!({
-            "canvasId": "date-canvas", "sourceNodeId": "date-node", "statuses": ["created"],
-            "createdFrom": 1000, "createdTo": 3000, "limit": 2
-        }))
-        .unwrap();
-        let first = storage.list_tasks(&query).unwrap();
-        assert_eq!(
-            first
-                .items
-                .iter()
-                .map(|item| item.created_at)
-                .collect::<Vec<_>>(),
-            vec![3000, 2000]
-        );
-        assert_eq!(first.next_cursor.as_ref().unwrap().created_at, 2000);
-        assert_eq!(first.next_cursor.as_ref().unwrap().id, "history-date-2");
-        let second = storage
-            .list_tasks(&GenerationTaskListQuery {
-                cursor: first.next_cursor,
-                ..query.clone()
-            })
-            .unwrap();
-        assert_eq!(
-            second
-                .items
-                .iter()
-                .map(|item| item.created_at)
-                .collect::<Vec<_>>(),
-            vec![1000]
-        );
-        assert!(second.next_cursor.is_none());
-        for (from, to) in [(Some(3001), Some(3000)), (Some(-1), None), (None, Some(-1))] {
-            assert!(
-                storage
-                    .list_tasks(&GenerationTaskListQuery {
-                        created_from: from,
-                        created_to: to,
-                        ..query.clone()
-                    })
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn named_history_search_and_result_rename_survive_restart_without_moving_media() {
-        let directory = TempDir::new().unwrap();
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).unwrap();
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        for index in 0..45 {
-            let id = format!("named-task-{index}");
-            storage
-                .insert_task(NewTask {
-                    id: &id,
-                    canvas_id: "names-canvas",
-                    source_node_id: "names-node",
-                    operation: GenerationOperation::TextToImage,
-                    provider: &provider,
-                    api_key_ref: &provider.api_key_ref,
-                    model_definition_id: "gpt-image-2",
-                    remote_model_id: Some("gpt-image-2"),
-                    logical_request: &json!({"outputName": format!("第{index:02}集")}),
-                })
-                .unwrap();
-            storage
-                .lock()
-                .unwrap()
-                .execute(
-                    "UPDATE generation_tasks SET created_at = ?1 WHERE id = ?2",
-                    params![index * 1000, id],
-                )
-                .unwrap();
-        }
-        storage.lock().unwrap().execute(
-            "INSERT INTO generation_results(task_id, result_index, media_type, source_json, save_status, final_path) VALUES ('named-task-0', 1, 'image', '{}', 'succeeded', 'C:/outputs/original.png')", [],
-        ).unwrap();
-        let query = |search: &str| {
-            serde_json::from_value::<GenerationTaskListQuery>(
-                json!({"canvasId": "names-canvas", "search": search, "limit": 1}),
-            )
-            .unwrap()
-        };
-        assert_eq!(
-            storage.list_tasks(&query("第00集")).unwrap().items[0].id,
-            "named-task-0"
-        );
-        storage
-            .rename_generation_result("named-task-0", 1, "镜头003_选用.png")
-            .unwrap();
-        assert!(
-            storage
-                .rename_generation_result("named-task-0", 2, "不存在")
-                .is_err()
-        );
-        assert!(
-            storage
-                .rename_generation_result("named-task-0", 1, "  ")
-                .is_err()
-        );
-        // Simulate a later lifecycle write of the archived source; the naming overlay remains.
-        storage
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE generation_results SET source_json = '{}' WHERE task_id = 'named-task-0'",
-                [],
-            )
-            .unwrap();
-        drop(storage);
-        let storage = Storage::open(&path).unwrap();
-        let detail = storage.get_task_detail("named-task-0").unwrap();
-        assert_eq!(detail.summary.output_name.as_deref(), Some("第00集"));
-        assert_eq!(
-            detail.results[0].display_name.as_deref(),
-            Some("镜头003_选用.png")
-        );
-        assert_eq!(detail.results[0].source, json!({}));
-        assert_eq!(
-            detail.results[0].final_path.as_deref(),
-            Some("C:/outputs/original.png")
-        );
-        for search in ["镜头003", "original.png", "named-task-0", "第00集"] {
-            assert_eq!(
-                storage.list_tasks(&query(search)).unwrap().items[0].id,
-                "named-task-0"
-            );
-        }
-        assert!(
-            storage
-                .list_tasks(&query("%' OR 1=1 --"))
-                .unwrap()
-                .items
-                .is_empty()
-        );
-        let other_canvas = serde_json::from_value::<GenerationTaskListQuery>(
-            json!({"canvasId": "other", "search": "镜头003"}),
-        )
-        .unwrap();
-        assert!(storage.list_tasks(&other_canvas).unwrap().items.is_empty());
-        let mut pagination = query("第");
-        let first = storage.list_tasks(&pagination).unwrap();
-        assert_eq!(first.items[0].id, "named-task-44");
-        pagination.cursor = first.next_cursor;
-        assert_eq!(
-            storage.list_tasks(&pagination).unwrap().items[0].id,
-            "named-task-43"
-        );
-    }
-
-    #[test]
-    fn local_asset_listing_only_returns_completed_object_storage_uploads() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let make_job =
-            |id: &str,
-             purpose: &str,
-             status: StagingStatus,
-             import_target: Option<StagingAssetImportTarget>| StagingJobRecord {
-                id: id.into(),
-                local_path: format!("C:/media/{id}.png"),
-                purpose: purpose.into(),
-                media_type: MediaType::Image,
-                object_key: Some(format!("assets/{id}.png")),
-                status,
-                bytes_total: Some(128),
-                bytes_uploaded: 128,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target,
-                adjustment: None,
-                error: None,
-                created_at: 1,
-                updated_at: 1,
-            };
-        storage
-            .insert_staging_job(&make_job(
-                "local-ready",
-                "local_asset",
-                StagingStatus::Staged,
-                None,
-            ))
-            .expect("insert local asset");
-        storage
-            .insert_staging_job(&make_job(
-                "cloud-ready",
-                "asset_import",
-                StagingStatus::Active,
-                Some(StagingAssetImportTarget {
-                    provider_connection_id: "company".into(),
-                    name: None,
-                    group_id: None,
-                }),
-            ))
-            .expect("insert cloud asset");
-        storage
-            .insert_staging_job(&make_job(
-                "local-uploading",
-                "local_asset",
-                StagingStatus::Uploading,
-                None,
-            ))
-            .expect("insert unfinished local asset");
-
-        let jobs = storage.list_local_asset_jobs().expect("list local assets");
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].id, "local-ready");
-
-        // 上传前的自动调整说明随任务记录往返读写；未调整的历史记录读回 NULL。
-        let mut cloud_job = storage
-            .get_staging_job("cloud-ready")
-            .expect("read cloud job");
-        assert_eq!(cloud_job.adjustment, None);
-        cloud_job.adjustment = Some("原图 8000×400 已自动等比缩放为 6000×300。".into());
-        storage
-            .update_staging_job(&cloud_job)
-            .expect("write adjustment");
-        assert_eq!(
-            storage
-                .get_staging_job("cloud-ready")
-                .expect("reload cloud job")
-                .adjustment
-                .as_deref(),
-            Some("原图 8000×400 已自动等比缩放为 6000×300。")
-        );
-    }
-
-    #[test]
-    fn asset_import_output_recovery_window_keeps_in_flight_and_recent_successes() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let now = now_ms();
-        let import_target = Some(StagingAssetImportTarget {
-            provider_connection_id: "company".into(),
-            name: Some("night-train.png".into()),
-            group_id: Some("21".into()),
-        });
-        let make_job =
-            |id: &str,
-             purpose: &str,
-             status: StagingStatus,
-             created_at: i64,
-             import_target: Option<StagingAssetImportTarget>| StagingJobRecord {
-                id: id.into(),
-                local_path: format!("C:/generated/{id}.png"),
-                purpose: purpose.into(),
-                media_type: MediaType::Image,
-                object_key: Some(format!("staging/{id}.png")),
-                status,
-                bytes_total: Some(128),
-                bytes_uploaded: 128,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target,
-                adjustment: None,
-                error: None,
-                created_at,
-                updated_at: created_at,
-            };
-
-        // 恢复候选：重启时对象已到对象存储、只差素材库导入（status=staged，无时间窗口限制）。
-        storage
-            .insert_staging_job(&make_job(
-                "in-flight-staged",
-                "asset_import",
-                StagingStatus::Staged,
-                now - 3 * 24 * 60 * 60 * 1000,
-                import_target.clone(),
-            ))
-            .expect("insert staged import");
-        // 恢复候选：刚上传成功，用于点亮绿色小点。
-        storage
-            .insert_staging_job(&make_job(
-                "recent-active",
-                "asset_import",
-                StagingStatus::Active,
-                now - 60_000,
-                import_target.clone(),
-            ))
-            .expect("insert recent active import");
-        // 超出时间窗口的成功上传：不再翻出来。
-        storage
-            .insert_staging_job(&make_job(
-                "stale-active",
-                "asset_import",
-                StagingStatus::Active,
-                now - 3 * 24 * 60 * 60 * 1000,
-                import_target.clone(),
-            ))
-            .expect("insert stale active import");
-        // 已失败/已中断：没有绿色小点要点亮，也不该恢复成在途行。
-        storage
-            .insert_staging_job(&make_job(
-                "failed-import",
-                "asset_import",
-                StagingStatus::Failed,
-                now - 60_000,
-                import_target.clone(),
-            ))
-            .expect("insert failed import");
-        storage
-            .insert_staging_job(&make_job(
-                "interrupted-import",
-                "asset_import",
-                StagingStatus::Interrupted,
-                now - 60_000,
-                import_target.clone(),
-            ))
-            .expect("insert interrupted import");
-        // 其他用途的暂存任务与本命令无关：生成输入中转、本地素材（无素材库导入目标）。
-        storage
-            .insert_staging_job(&make_job(
-                "generation-input",
-                "generation_input",
-                StagingStatus::Uploading,
-                now,
-                None,
-            ))
-            .expect("insert generation input");
-        storage
-            .insert_staging_job(&make_job(
-                "local-asset",
-                "local_asset",
-                StagingStatus::Staged,
-                now,
-                None,
-            ))
-            .expect("insert local asset");
-
-        let recovered = storage
-            .list_asset_import_outputs()
-            .expect("list asset import outputs");
-        assert_eq!(
-            recovered
-                .iter()
-                .map(|job| job.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["in-flight-staged", "recent-active"]
-        );
-    }
-
-    #[test]
-    fn migration_adds_staging_job_adjustment_column_to_existing_databases() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        // 模拟历史版本：staging_jobs 已有除 adjustment 外的全部列。
-        let connection = rusqlite::Connection::open(&path).expect("open raw db");
-        connection
-            .execute(
-                "CREATE TABLE staging_jobs (
-                   id TEXT PRIMARY KEY,
-                   local_path TEXT NOT NULL,
-                   purpose TEXT NOT NULL,
-                   media_type TEXT NOT NULL,
-                   object_key TEXT,
-                   status TEXT NOT NULL,
-                   bytes_total INTEGER,
-                   bytes_uploaded INTEGER NOT NULL DEFAULT 0,
-                   asset_id TEXT,
-                   import_target_json TEXT,
-                   error_json TEXT,
-                   created_at INTEGER NOT NULL,
-                   updated_at INTEGER NOT NULL
-                 )",
-                [],
-            )
-            .expect("create legacy table");
-
-        let columns = |connection: &rusqlite::Connection| {
-            let mut statement = connection
-                .prepare("PRAGMA table_info(staging_jobs)")
-                .expect("pragma");
-            statement
-                .query_map([], |row| row.get::<_, String>(1))
-                .expect("columns")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("collect columns")
-        };
-        assert!(
-            !columns(&connection).contains(&"adjustment".to_string()),
-            "legacy table must not have adjustment yet"
-        );
-
-        migrate_staging_jobs_adjustment(&connection).expect("migration adds adjustment");
-        assert!(
-            columns(&connection).contains(&"adjustment".to_string()),
-            "adjustment column must be added by migration"
-        );
-        // 幂等：再次执行不报错。
-        migrate_staging_jobs_adjustment(&connection).expect("migration is idempotent");
-    }
-
-    #[test]
-    fn migration_creates_a_file_database_and_seeds_models() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).expect("open database");
-
-        assert!(path.exists());
-        let models = storage.list_model_definitions().expect("list models");
-        assert!(models.iter().any(|model| model.id == "gpt-image-2"));
-        assert!(
-            models
-                .iter()
-                .any(|model| model.id == "doubao-seedance-2-5-260628")
-        );
-        let providers = storage
-            .list_provider_connections()
-            .expect("list default providers");
-        assert_eq!(
-            providers
-                .iter()
-                .map(|provider| provider.display_name.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "Grsai",
-                "MAIGateway",
-                "RD API",
-                "SD2.0",
-                "海外平台",
-                "火山引擎",
-                "饭众烟 AI（图片与视频）",
-                "魔芋AI",
-            ]
-        );
-        assert!(providers.iter().all(|provider| !provider.enabled));
-        let encoding: String = storage
-            .lock()
-            .expect("database lock")
-            .query_row("PRAGMA encoding", [], |row| row.get(0))
-            .expect("read encoding");
-        assert_eq!(encoding, "UTF-8");
-    }
-
-    #[test]
-    fn panqu_connections_are_removed_with_bindings_and_token_groups() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        // 旧库残留在三种形态：预置连接本身、用户克隆到同一主机的连接、以及把预置
-        // ID 改接到自己代理上的连接（已不是盘趣上游，必须保留）。绑定与令牌分组
-        // 挂在两条将被删除的连接上；生成任务按快照存历史，不受迁移影响。
-        {
-            let connection = storage.lock().expect("database lock");
-            let timestamp = now_ms();
-            connection
-                .execute(
-                    "INSERT INTO provider_connections
-                     (id, display_name, adapter_id, base_url, api_key_ref, enabled, created_at, updated_at)
-                     VALUES ('provider-panqu-clone', '我克隆的盘趣', 'moyu_v1',
-                             'https://aiapis.panqu.com/v1', 'provider:provider-panqu-clone:api-key',
-                             1, ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("seed panqu clone");
-            connection
-                .execute(
-                    "UPDATE provider_connections
-                        SET base_url = 'https://my-proxy.example.com/', display_name = '我的代理'
-                      WHERE id = 'provider-moyu-ai'",
-                    [],
-                )
-                .expect("repurpose preset connection");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions (id, display_name, operations_json, created_at, updated_at)
-                     VALUES ('remote::provider-panqu-clone::pan-seedance-2.0', '盘趣视频', '{}', ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("seed model definition");
-            connection
-                .execute(
-                    "INSERT INTO provider_model_bindings
-                     (provider_connection_id, model_definition_id, enabled_operations_json,
-                      remote_model_id, enabled, token_group, created_at, updated_at)
-                     VALUES ('provider-panqu-clone', 'remote::provider-panqu-clone::pan-seedance-2.0',
-                             '[]', 'pan-seedance-2.0', 1, NULL, ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("seed binding");
-            connection
-                .execute(
-                    "INSERT INTO provider_token_groups
-                     (id, provider_connection_id, group_name, credential_ref, enabled, created_at, updated_at)
-                     VALUES ('panqu-clone-group', 'provider-panqu-clone', '分组',
-                             'token-group:panqu-clone-group', 1, ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("seed token group");
-            connection
-                .execute(
-                    "INSERT INTO generation_tasks
-                     (id, canvas_id, source_node_id, operation, status, query_health,
-                      provider_connection_id, provider_display_name_snapshot, adapter_id_snapshot,
-                      base_url_snapshot, api_key_ref_snapshot, model_definition_id,
-                      logical_request_json, created_at, updated_at)
-                     VALUES ('task-panqu-history', 'canvas', 'node', 'video_generation', 'succeeded',
-                             'healthy', 'provider-panqu-clone', '我克隆的盘趣', 'moyu_v1',
-                             'https://aiapis.panqu.com/v1', 'provider:provider-panqu-clone:api-key',
-                             'remote::provider-panqu-clone::pan-seedance-2.0', '{}', ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("seed generation task");
-
-            migrate_remove_panqu_provider_connections(&connection).expect("migrate remove");
-            // 幂等：再跑一次不报错也不改变结果。
-            migrate_remove_panqu_provider_connections(&connection).expect("migrate remove twice");
-        }
-
-        let providers = storage
-            .list_provider_connections()
-            .expect("list providers after migration");
-        assert!(
-            providers
-                .iter()
-                .all(|provider| provider.id != "provider-panqu-api"
-                    && provider.id != "provider-panqu-clone"),
-            "panqu upstream connections must be gone"
-        );
-        // 改接到自己代理上的预置连接按用户编辑保留。
-        let repurposed = storage
-            .get_provider_connection("provider-moyu-ai")
-            .expect("repurposed connection");
-        assert_eq!(repurposed.base_url, "https://my-proxy.example.com/");
-        assert_eq!(repurposed.display_name, "我的代理");
-        // 连接删掉后绑定与令牌分组一并清掉。
-        {
-            let connection = storage.lock().expect("database lock");
-            let bindings: i64 = connection
-                .query_row("SELECT COUNT(*) FROM provider_model_bindings", [], |row| {
-                    row.get(0)
-                })
-                .expect("count bindings");
-            assert_eq!(bindings, 0);
-            let token_groups: i64 = connection
-                .query_row("SELECT COUNT(*) FROM provider_token_groups", [], |row| {
-                    row.get(0)
-                })
-                .expect("count token groups");
-            assert_eq!(token_groups, 0);
-            // 生成任务历史按快照保留，不随连接删除。
-            let history: i64 = connection
-                .query_row(
-                    "SELECT COUNT(*) FROM generation_tasks WHERE id = 'task-panqu-history'",
-                    [],
-                    |row| row.get(0),
-                )
-                .expect("count history task");
-            assert_eq!(history, 1);
-        }
-    }
-
-    #[test]
-    fn rd_gateway_connection_seeds_with_the_documented_http_address() {
-        // Seedance 2.5 RD 网关按文档就是明文 HTTP 直连 IP（无域名、无 TLS）；
-        // 预置地址必须与文档一致，且默认停用等待用户填入 API Key。
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let rd = storage
-            .get_provider_connection("provider-rd-api")
-            .expect("rd connection");
-        assert_eq!(rd.base_url, "http://101.34.211.152/");
-        assert_eq!(rd.display_name, "RD API");
-        assert_eq!(rd.adapter_id, "moyu_v1");
-        assert!(!rd.enabled);
-    }
-
-    #[test]
-    fn text_generation_output_roundtrips_through_task_detail() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage =
-            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
-        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
-        let provider = storage
-            .get_provider_connection("provider-sd20")
-            .expect("default provider");
-        let model = storage
-            .list_model_definitions()
-            .expect("models")
-            .into_iter()
-            .next()
-            .expect("seeded model");
-        lifecycle
-            .create(NewTask {
-                id: "text-task-1",
-                canvas_id: "canvas-1",
-                source_node_id: "prompt-1",
-                operation: GenerationOperation::TextGeneration,
-                provider: &provider,
-                api_key_ref: &provider.api_key_ref,
-                model_definition_id: &model.id,
-                remote_model_id: model.remote_model_id.as_deref(),
-                logical_request: &json!({ "userPrompt": "原始创意" }),
-            })
-            .expect("insert task");
-        lifecycle
-            .commit(
-                "text-task-1",
-                GenerationLifecycleFact::BeginTextGeneration {
-                    attempt_id: "text-attempt-1".into(),
-                },
-            )
-            .expect("begin text generation");
-        lifecycle
-            .commit(
-                "text-task-1",
-                GenerationLifecycleFact::ProviderCallPrepared {
-                    call_id: "text-call-1".into(),
-                    attempt_id: "text-attempt-1".into(),
-                    phase: "text_generation".into(),
-                    request: json!({ "method": "POST" }),
-                },
-            )
-            .expect("prepare text call");
-        lifecycle
-            .commit(
-                "text-task-1",
-                GenerationLifecycleFact::ProviderCallSent {
-                    call_id: "text-call-1".into(),
-                    sent_at: 1,
-                },
-            )
-            .expect("send text call");
-        lifecycle
-            .commit(
-                "text-task-1",
-                GenerationLifecycleFact::ProviderCallResponded {
-                    call_id: "text-call-1".into(),
-                    sent_at: 1,
-                    status: 200,
-                    headers: json!({}),
-                    raw_response: "{}".into(),
-                },
-            )
-            .expect("finish text call");
-        lifecycle
-            .commit(
-                "text-task-1",
-                GenerationLifecycleFact::TextGenerationSucceeded {
-                    attempt_id: "text-attempt-1".into(),
-                    call_id: "text-call-1".into(),
-                    tokens: None,
-                    optimized_prompt: "节点实际采用文本".into(),
-                    raw_model_output: "模型完整原始文本".into(),
-                },
-            )
-            .expect("finish text generation");
-
-        let bulky_marker = "PRIVATE_IMAGE_BYTES".repeat(1024);
-        storage
-            .lock()
-            .expect("database lock")
-            .execute(
-                "UPDATE provider_calls SET raw_response = ?1 WHERE id = 'text-call-1'",
-                params![bulky_marker],
-            )
-            .expect("store bulky provider response");
-        storage
-            .lock()
-            .expect("database lock")
-            .execute(
-                "INSERT INTO generation_results
-                 (task_id, result_index, media_type, source_json, save_status, final_path)
-                 VALUES ('text-task-1', 1, 'image', ?1, 'succeeded', 'C:/result.png')",
-                params![json!({ "base64": bulky_marker }).to_string()],
-            )
-            .expect("store bulky result source");
-
-        let detail = storage.get_task_detail("text-task-1").expect("task detail");
-        let output = detail.text_output.expect("text output");
-        assert_eq!(output.optimized_prompt, "节点实际采用文本");
-        assert_eq!(output.raw_model_output, "模型完整原始文本");
-        let progress = storage
-            .get_task_progress("text-task-1")
-            .expect("task progress");
-        assert_eq!(progress.summary.id, "text-task-1");
-        assert_eq!(progress.results.len(), 1);
-        assert_eq!(
-            progress.results[0].final_path.as_deref(),
-            Some("C:/result.png")
-        );
-        assert!(
-            !serde_json::to_string(&progress)
-                .expect("serialize progress")
-                .contains("PRIVATE_IMAGE_BYTES")
-        );
-    }
-
-    #[test]
-    fn provider_updates_keep_a_stable_credential_reference() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let mut command = UpsertProviderConnectionCommand {
-            id: "company-prod".into(),
-            display_name: "公司生产环境".into(),
-            adapter_id: "moyu_v1".into(),
-            base_url: "https://www.moyu.info".into(),
-            enabled: true,
-        };
-        let original = storage
-            .upsert_provider_connection(&command)
-            .expect("insert provider");
-        command.display_name = "已改名".into();
-        command.base_url = "https://example.invalid/".into();
-        let updated = storage
-            .upsert_provider_connection(&command)
-            .expect("update provider");
-
-        assert_eq!(original.api_key_ref, updated.api_key_ref);
-        assert_eq!(updated.display_name, "已改名");
-    }
-
-    #[test]
-    fn reseeding_default_providers_does_not_overwrite_user_edits() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        {
-            let storage = Storage::open(&path).expect("open db");
-            storage
-                .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                    id: "provider-moyu-ai".into(),
-                    display_name: "客户魔芋".into(),
-                    adapter_id: "moyu_v1".into(),
-                    base_url: "https://custom.moyu.example/v1".into(),
-                    enabled: true,
-                })
-                .expect("customize moyu connection");
-        }
-        let storage = Storage::open(&path).expect("reopen must reseed with INSERT OR IGNORE");
-        let moyu = storage
-            .get_provider_connection("provider-moyu-ai")
-            .expect("moyu connection survives upgrade");
-        assert_eq!(moyu.display_name, "客户魔芋");
-        assert_eq!(moyu.base_url, "https://custom.moyu.example/v1");
-        assert!(moyu.enabled);
-        assert_eq!(moyu.api_key_ref, "provider:provider-moyu-ai:api-key");
-    }
-
-    #[test]
-    fn fetched_sp25_model_with_empty_schema_gets_per_use_video_contract_when_selected() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let model_id = "sp2.5-720p-30s-ch5";
-        let definition_id = provider_scoped_model_definition_id("provider-moyu-ai", model_id);
-        let bindings = storage
-            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                provider_connection_id: "provider-moyu-ai".into(),
-                selections: vec![ProviderModelSelection {
-                    model_definition_id: definition_id.clone(),
-                    display_name: "SP2.5 30 秒 CH5".into(),
-                    remote_model_id: model_id.into(),
-                    enabled: true,
-                    enabled_operations: vec![GenerationOperation::VideoGeneration],
-                    token_group: None,
-                    operation_schema: json!({}),
-                }],
-            })
-            .expect("save fetched selection");
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].enabled);
-        assert_eq!(bindings[0].remote_model_id.as_deref(), Some(model_id));
-
-        let definition = storage
-            .list_model_definitions()
-            .expect("list definitions")
-            .into_iter()
-            .find(|item| item.id == definition_id)
-            .expect("saved definition");
-        let video = &definition.operations["video_generation"];
-        assert_eq!(video["requestProfileId"], "sp25_per_use_video_v1");
-        assert_eq!(video["request"]["parameterContainer"], "root");
-        assert_eq!(video["request"]["mediaEncoding"], "sp25_per_use_urls");
-        assert_eq!(video["request"]["maxImages"], 10);
-        assert_eq!(video["request"]["maxAudios"], 10);
-        assert!(video["parameters"].get("generate_audio").is_none());
-    }
-
-    #[test]
-    fn replacing_discovered_models_disables_removed_bindings() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        storage
-            .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                id: "company-prod".into(),
-                display_name: "公司生产环境".into(),
-                adapter_id: "moyu_v1".into(),
-                base_url: "https://example.com/v1".into(),
-                enabled: true,
-            })
-            .expect("insert provider");
-
-        let bindings = storage
-            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                provider_connection_id: "company-prod".into(),
-                selections: vec![ProviderModelSelection {
-                    model_definition_id: "remote::company-prod::company-video-1".into(),
-                    display_name: "公司视频模型".into(),
-                    remote_model_id: "company-video-1".into(),
-                    enabled: true,
-                    enabled_operations: vec![GenerationOperation::VideoGeneration],
-                    token_group: None,
-                    operation_schema: json!({
-                        "video_generation": {
-                            "parameters": {
-                                "frames": {
-                                    "type": "integer",
-                                    "default": 48,
-                                    "requestField": "frame_count"
-                                }
-                            }
-                        }
-                    }),
-                }],
-            })
-            .expect("save selection");
-        assert_eq!(bindings.len(), 1);
-        assert!(bindings[0].enabled);
-        assert_eq!(
-            bindings[0].enabled_operations,
-            [GenerationOperation::VideoGeneration]
-        );
-        let saved_model = storage
-            .list_model_definitions()
-            .expect("list models")
-            .into_iter()
-            .find(|model| model.id == "remote::company-prod::company-video-1")
-            .expect("saved discovered model");
-        assert_eq!(
-            saved_model.operations["video_generation"]["parameters"]["frames"]["requestField"],
-            "frame_count"
-        );
-
-        let bindings = storage
-            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                provider_connection_id: "company-prod".into(),
-                selections: Vec::new(),
-            })
-            .expect("clear selections");
-        assert_eq!(bindings.len(), 1);
-        assert!(!bindings[0].enabled);
-
-        let bindings = storage
-            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                provider_connection_id: "company-prod".into(),
-                selections: vec![ProviderModelSelection {
-                    model_definition_id: "remote::company-prod::declined-image".into(),
-                    display_name: "不启用的推荐图片模型".into(),
-                    remote_model_id: "declined-image".into(),
-                    enabled: false,
-                    enabled_operations: Vec::new(),
-                    token_group: None,
-                    operation_schema: default_model_schema(
-                        "declined-image",
-                        &[GenerationOperation::TextToImage],
-                    ),
-                }],
-            })
-            .expect("remember disabled selection");
-        let disabled = bindings
-            .iter()
-            .find(|binding| binding.model_definition_id.ends_with("declined-image"))
-            .expect("disabled binding");
-        assert!(!disabled.enabled);
-        assert!(disabled.enabled_operations.is_empty());
-    }
-
-    #[test]
-    fn provider_scoped_models_keep_same_remote_id_independent() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        for provider_id in ["provider-image", "provider-video"] {
-            storage
-                .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                    id: provider_id.into(),
-                    display_name: provider_id.into(),
-                    adapter_id: "moyu_v1".into(),
-                    base_url: format!("https://{provider_id}.example/v1"),
-                    enabled: true,
-                })
-                .expect("insert provider");
-        }
-
-        let cases = [
-            (
-                "provider-image",
-                "remote::provider-image::shared-model",
-                GenerationOperation::TextToImage,
-            ),
-            (
-                "provider-video",
-                "remote::provider-video::shared-model",
-                GenerationOperation::VideoGeneration,
-            ),
-        ];
-        for (provider_id, definition_id, operation) in cases {
-            storage
-                .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                    provider_connection_id: provider_id.into(),
-                    selections: vec![ProviderModelSelection {
-                        model_definition_id: definition_id.into(),
-                        display_name: "Shared model".into(),
-                        remote_model_id: "shared-model".into(),
-                        enabled: true,
-                        enabled_operations: vec![operation],
-                        token_group: None,
-                        operation_schema: default_model_schema("shared-model", &[operation]),
-                    }],
-                })
-                .expect("save provider model");
-        }
-
-        let definitions = storage.list_model_definitions().expect("list definitions");
-        let image = definitions
-            .iter()
-            .find(|model| model.id == "remote::provider-image::shared-model")
-            .expect("image definition");
-        let video = definitions
-            .iter()
-            .find(|model| model.id == "remote::provider-video::shared-model")
-            .expect("video definition");
-        assert!(image.operations.get("text_to_image").is_some());
-        assert!(image.operations.get("video_generation").is_none());
-        assert!(video.operations.get("video_generation").is_some());
-        assert!(video.operations.get("text_to_image").is_none());
-    }
-
-    #[test]
-    fn legacy_bare_model_bindings_are_migrated_to_provider_scoped_ids() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        storage
-            .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                id: "company-prod".into(),
-                display_name: "公司生产环境".into(),
-                adapter_id: "moyu_v1".into(),
-                base_url: "https://example.com/v1".into(),
-                enabled: true,
-            })
-            .expect("insert provider");
-
-        // 模拟历史版本写入的裸模型 ID 绑定（旧版允许把远程模型 ID 直接当模型定义 ID 保存）
-        let timestamp = now_ms();
-        {
-            let connection = storage.lock().expect("database lock");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('company-video-1', '公司视频模型', 'company-video-1', '{}', ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("insert legacy definition");
-            connection
-                .execute(
-                    "INSERT INTO provider_model_bindings
-                     (provider_connection_id, model_definition_id, enabled_operations_json,
-                      remote_model_id, enabled, created_at, updated_at)
-                     VALUES ('company-prod', 'company-video-1', '[\"video_generation\"]',
-                             'company-video-1', 1, ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("insert legacy binding");
-        }
-
-        storage.migrate_legacy_model_bindings().expect("migrate");
-
-        let bindings = storage
-            .list_bindings(Some("company-prod"))
-            .expect("list bindings");
-        assert_eq!(bindings.len(), 1);
-        assert_eq!(
-            bindings[0].model_definition_id,
-            "remote::company-prod::company-video-1"
-        );
-        assert_eq!(
-            bindings[0].remote_model_id.as_deref(),
-            Some("company-video-1")
-        );
-        assert!(bindings[0].enabled);
-        assert_eq!(
-            bindings[0].enabled_operations,
-            [GenerationOperation::VideoGeneration]
-        );
-
-        // 作用域 definition 已创建，旧裸 ID definition 保留（避免破坏生成任务快照引用）
-        let definitions = storage.list_model_definitions().expect("list definitions");
-        let scoped = definitions
-            .iter()
-            .find(|model| model.id == "remote::company-prod::company-video-1")
-            .expect("scoped definition created");
-        assert_eq!(scoped.display_name, "公司视频模型");
-        assert!(
-            definitions
-                .iter()
-                .any(|model| model.id == "company-video-1")
-        );
-    }
-
-    #[test]
-    fn malformed_operation_schema_is_repaired_on_open() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        // 先建库（触发 seed/migrate/repair 链路）
-        let storage = Storage::open(&path).expect("open db");
-        let timestamp = now_ms();
-        {
-            let connection = storage.lock().expect("database lock");
-            // 历史版本写入的畸形操作 Schema：只有 resultType，缺 parameters/request
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::company-prod::doubao-seedance-2.5', 'Seedance 2.5',
-                             'doubao-seedance-2.5',
-                             '{\"image_to_image\":{\"resultType\":\"image\"},\"text_to_image\":{\"resultType\":\"image\"},\"video_generation\":{\"resultType\":\"video\"}}',
-                             ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("insert malformed definition");
-            // 非法作用域 ID（缺 provider 段）的孤儿行
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::doubao-seedance-2.5', 'Seedance 2.5', 'doubao-seedance-2.5',
-                             '{}', ?1, ?1)",
-                    params![timestamp],
-                )
-                .expect("insert orphan definition");
-        }
-
-        // 重新打开，触发 repair_malformed_model_definitions
-        drop(storage);
-        let storage = Storage::open(&path).expect("reopen db");
-
-        let definitions = storage.list_model_definitions().expect("list definitions");
-        let malformed = definitions
-            .iter()
-            .find(|model| model.id == "remote::company-prod::doubao-seedance-2.5")
-            .expect("malformed definition repaired");
-        assert!(
-            malformed.operations["image_to_image"]["parameters"].is_object(),
-            "image_to_image parameters must be repaired"
-        );
-        assert!(
-            malformed.operations["video_generation"]["parameters"].is_object(),
-            "video_generation parameters must be repaired"
-        );
-        assert_eq!(
-            malformed.operations["video_generation"]["resultType"],
-            "video"
-        );
-
-        // 非法作用域 ID 的孤儿行应被清理
-        assert!(
-            !definitions
-                .iter()
-                .any(|model| model.id == "remote::doubao-seedance-2.5"),
-            "orphan malformed scoped id must be deleted"
-        );
-    }
-
-    #[test]
-    fn legacy_gpt_image_parameter_defaults_are_migrated_on_open() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).expect("open db");
-        let timestamp = now_ms();
-        // 历史版本持久化的 gpt-image 文生图参数：dall-e 契约（standard/hd）。
-        let legacy_parameters = r#"{"size":{"type":"string","label":"尺寸","default":"1024x1024","enum":["256x256","512x512","1024x1024","1536x1024","1024x1536","1792x1024","1024x1792"]},"quality":{"type":"string","label":"质量","default":"standard","enum":["hd","standard"]}}"#;
-        // 上一版默认契约：显式声明 `response_format`。这份参数逐字节取自真实库里的
-        // gpt-image-2 定义，用于锁定「升级后该键被剔除」——上游（moyu 网关）对它回
-        // HTTP 400 unknown_parameter，见 docs/integrations/result-image-save-failure.md 第 7 节。
-        let with_response_format_parameters = r#"{"n":{"default":1,"label":"生成数量","maximum":10,"minimum":1,"type":"integer"},"quality":{"default":"auto","enum":["auto","high","medium","low"],"label":"质量","type":"string"},"response_format":{"default":"b64_json","enum":["url","b64_json"],"label":"返回格式","order":3,"type":"string"},"size":{"default":"auto","enum":["auto","1024x1024","1536x1024","1024x1536"],"label":"尺寸","type":"string"}}"#;
-        {
-            let connection = storage.lock().expect("database lock");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::company-prod::gpt-image-2', 'GPT Image 2', 'gpt-image-2',
-                             ?2, ?1, ?1)",
-                    params![
-                        timestamp,
-                        format!(r#"{{"text_to_image":{{"resultType":"image","parameters":{legacy_parameters}}}}}"#)
-                    ],
-                )
-                .expect("insert legacy gpt-image definition");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::company-prod::gpt-image-2-with-format', 'GPT Image 2', 'gpt-image-2',
-                             ?2, ?1, ?1)",
-                    params![
-                        timestamp,
-                        format!(r#"{{"text_to_image":{{"resultType":"image","parameters":{with_response_format_parameters}}}}}"#)
-                    ],
-                )
-                .expect("insert previous-contract gpt-image definition");
-        }
-
-        drop(storage);
-        let storage = Storage::open(&path).expect("reopen db");
-
-        let definitions = storage.list_model_definitions().expect("list definitions");
-        let definition = definitions
-            .iter()
-            .find(|model| model.id == "remote::company-prod::gpt-image-2")
-            .expect("legacy gpt-image definition");
-        let parameters = &definition.operations["text_to_image"]["parameters"];
-        assert_eq!(parameters["quality"]["default"], "auto");
-        assert_eq!(
-            parameters["quality"]["enum"],
-            json!(["auto", "high", "medium", "low"])
-        );
-        assert_eq!(parameters["size"]["default"], "auto");
-        assert_eq!(
-            parameters["size"]["enum"],
-            json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
-        );
-
-        // 上一版默认契约（带 `response_format`）同样被刷新，且该键被剔除；
-        // 同批次的 n/size/quality 保持当前默认值。
-        let previous = definitions
-            .iter()
-            .find(|model| model.id == "remote::company-prod::gpt-image-2-with-format")
-            .expect("previous-contract gpt-image definition");
-        let previous_parameters = &previous.operations["text_to_image"]["parameters"];
-        assert!(
-            previous_parameters.get("response_format").is_none(),
-            "response_format must be dropped from persisted gpt-image defaults"
-        );
-        assert_eq!(previous_parameters["n"]["default"], 1);
-        assert_eq!(previous_parameters["size"]["default"], "auto");
-        assert_eq!(previous_parameters["quality"]["default"], "auto");
-    }
-
-    #[test]
-    fn stale_wan_video_definition_is_migrated_on_open() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).expect("open db");
-        let timestamp = now_ms();
-        {
-            let connection = storage.lock().expect("database lock");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::company-prod::wan3.0-video', 'wan3.0-video', 'wan3.0-video',
-                             ?2, ?1, ?1)",
-                    params![
-                        timestamp,
-                        json!({
-                            "video_generation": {
-                                "resultType": "video",
-                                "requestProfileId": "moyu_video_metadata_v1",
-                                "profileVersion": 1,
-                                "request": {
-                                    "path": "/v1/video/generations",
-                                    "encoding": "json",
-                                    "parameterContainer": "metadata"
-                                },
-                                "parameters": {}
-                            }
-                        })
-                        .to_string()
-                    ],
-                )
-                .expect("insert stale Wan definition");
-        }
-
-        drop(storage);
-        let storage = Storage::open(&path).expect("reopen db");
-        let definition = storage
-            .list_model_definitions()
-            .expect("list definitions")
-            .into_iter()
-            .find(|model| model.id == "remote::company-prod::wan3.0-video")
-            .expect("migrated Wan definition");
-        let operation = &definition.operations["video_generation"];
-        assert_eq!(operation["requestProfileId"], "moyu_wan3_video_v1");
-        assert_eq!(operation["request"]["parameterContainer"], "root");
-        assert_eq!(operation["request"]["mediaEncoding"], "wan_media_array");
-        assert_eq!(operation["parameters"]["resolution"]["default"], "1080P");
-        assert_eq!(operation["parameters"]["watermark"]["default"], false);
-    }
-
-    #[test]
-    fn gateway_bound_definition_saved_with_the_ark_native_path_is_repaired_on_open() {
-        // 线上事故回归：`doubao-seedance-*` 曾按模型名被写进方舟原生端点，网关连接于是
-        // 请求 `/v1/contents/generations/tasks` 并拿到 HTTP 404 `Invalid URL`。断言
-        // 打开数据库就把这类已落库的定义改回网关契约，而方舟连接保持原生契约。
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).expect("open db");
-        let timestamp = now_ms();
-        let native_schema = json!({
-            "video_generation": {
-                "resultType": "video",
-                "requestProfileId": "moyu_video_metadata_v1",
-                "profileVersion": 1,
-                "request": {
-                    "path": "/contents/generations/tasks",
-                    "encoding": "json",
-                    "parameterContainer": "root",
-                    "observePath": "/contents/generations/tasks/{task_id}"
-                },
-                "parameters": {
-                    "ratio": { "type": "string", "label": "画幅", "default": "adaptive", "enum": ["16:9", "9:16", "adaptive"] },
-                    "resolution": { "type": "string", "label": "分辨率", "default": "720p", "enum": ["720p", "480p"] },
-                    "duration": { "type": "integer", "label": "时长", "default": -1, "enum": [-1, 5] },
-                    "generate_audio": { "type": "boolean", "label": "生成音频", "default": true },
-                    "output_format": { "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"] },
-                    "omni_reference_task_type": { "type": "string", "label": "任务类型", "default": "auto", "enum": ["auto", "reference", "edit", "extend"] },
-                    "web_search": { "type": "boolean", "label": "联网搜索", "default": false, "requiresNoMedia": true, "requestField": "tools", "transform": "web_search_tool" }
-                }
-            }
-        })
-        .to_string();
-        {
-            let connection = storage.lock().expect("database lock");
-            for (definition_id, provider_id) in [
-                (
-                    "remote::provider-moyu-ai::doubao-seedance-2.5",
-                    "provider-moyu-ai",
-                ),
-                (
-                    "remote::provider-moyu-ai::doubao-seedance-2-5-260628",
-                    "provider-moyu-ai",
-                ),
-                (
-                    "remote::provider-volcengine-ark::doubao-seedance-2.5",
-                    "provider-volcengine-ark",
-                ),
-                (
-                    "remote::provider-volcengine-ark::doubao-seedance-2-5-260628",
-                    "provider-volcengine-ark",
-                ),
-            ] {
-                connection
-                    .execute(
-                        "INSERT INTO model_definitions
-                         (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                         VALUES (?2, 'Seedance 2.5', ?3, ?4, ?1, ?1)",
-                        params![
-                            timestamp,
-                            definition_id,
-                            definition_id.rsplit("::").next().expect("remote model id"),
-                            native_schema,
-                        ],
-                    )
-                    .expect("insert definition");
-                connection
-                    .execute(
-                        "INSERT INTO provider_model_bindings
-                         (provider_connection_id, model_definition_id, enabled_operations_json,
-                          remote_model_id, enabled, token_group, created_at, updated_at)
-                         VALUES (?1, ?2, ?3, ?4, 1, NULL, ?5, ?5)",
-                        params![
-                            provider_id,
-                            definition_id,
-                            json!(["video_generation"]).to_string(),
-                            definition_id.rsplit("::").next().expect("remote model id"),
-                            timestamp,
-                        ],
-                    )
-                    .expect("insert binding");
-            }
-        }
-
-        drop(storage);
-        let storage = Storage::open(&path).expect("reopen db");
-        let definitions = storage.list_model_definitions().expect("list definitions");
-        let request = |id: &str| {
-            definitions
-                .iter()
-                .find(|model| model.id == id)
-                .expect("definition")
-                .operations["video_generation"]["request"]
-                .clone()
-        };
-
-        for model_id in ["doubao-seedance-2.5", "doubao-seedance-2-5-260628"] {
-            // 两个精确型号在网关连接上都迁移到草稿样片合同，保留原型号身份。
-            let gateway_id = format!("remote::provider-moyu-ai::{model_id}");
-            let gateway = request(&gateway_id);
-            assert_eq!(gateway["path"], "/v1/video/generations");
-            assert_eq!(gateway["parameterContainer"], "metadata");
-            assert_eq!(gateway["observePath"], "/v1/video/generations/{task_id}");
-            let gateway_definition = definitions
-                .iter()
-                .find(|model| model.id == gateway_id)
-                .expect("gateway definition");
-            assert_eq!(
-                gateway_definition.remote_model_id.as_deref(),
-                Some(model_id)
-            );
-            assert_eq!(
-                gateway_definition.operations["video_generation"]["requestProfileId"],
-                super::super::gateway_profile::GatewayProfile::SeedanceDraft.profile_id()
-            );
-            let gateway_parameters =
-                &gateway_definition.operations["video_generation"]["parameters"];
-            assert_eq!(
-                gateway_parameters["resolution"]["enum"],
-                json!(["720p", "480p"])
-            );
-            assert_eq!(gateway_parameters["draft"]["default"], false);
-            assert!(gateway_parameters.get("web_search").is_none());
-            assert!(gateway_parameters.get("omni_reference_task_type").is_none());
-
-            // 方舟连接：保持原生端点，参数与 content 平铺在根级并声明原生轮询路径。
-            let ark_id = format!("remote::provider-volcengine-ark::{model_id}");
-            let ark = request(&ark_id);
-            assert_eq!(ark["path"], "/contents/generations/tasks");
-            assert_eq!(ark["parameterContainer"], "root");
-            assert_eq!(ark["contentContainer"], "root");
-            assert_eq!(ark["observePath"], "/contents/generations/tasks/{task_id}");
-            let ark_definition = definitions.iter().find(|model| model.id == ark_id).unwrap();
-            assert_eq!(ark_definition.remote_model_id.as_deref(), Some(model_id));
-            assert!(
-                ark_definition.operations["video_generation"]["parameters"]
-                    .get("draft")
-                    .is_none()
-            );
-        }
-
-        // 幂等：再次打开不会继续改写已经落定的契约。
-        drop(storage);
-        let reopened = Storage::open(&path).expect("reopen db again");
-        let after = reopened
-            .list_model_definitions()
-            .expect("list definitions")
-            .into_iter()
-            .map(|model| (model.id, model.operations))
-            .collect::<BTreeMap<_, _>>();
-        let before = definitions
-            .into_iter()
-            .map(|model| (model.id, model.operations))
-            .collect::<BTreeMap<_, _>>();
-        assert_eq!(after, before);
-    }
-
-    #[test]
-    fn stale_domestic_seedance_25_definition_is_migrated_on_open() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let storage = Storage::open(&path).expect("open db");
-        let timestamp = now_ms();
-        {
-            let connection = storage.lock().expect("database lock");
-            connection
-                .execute(
-                    "INSERT INTO model_definitions
-                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
-                     VALUES ('remote::company-prod::doubao-seedance-2-5-260628', 'Seedance 2.5', 'doubao-seedance-2-5-260628',
-                             ?2, ?1, ?1)",
-                    params![
-                        timestamp,
-                        json!({
-                            "video_generation": {
-                                "resultType": "video",
-                                "requestProfileId": "moyu_video_metadata_v1",
-                                "profileVersion": 1,
-                                "request": {
-                                    "path": "/v1/video/generations",
-                                    "encoding": "json",
-                                    "parameterContainer": "metadata"
-                                },
-                                "parameters": {
-                                    "ratio": { "type": "string", "label": "画幅", "default": "adaptive", "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"] },
-                                    "resolution": { "type": "string", "label": "分辨率", "default": "720p", "enum": ["720p", "480p"] },
-                                    "duration": { "type": "integer", "label": "时长", "default": -1, "enum": [-1] },
-                                    "generate_audio": { "type": "boolean", "label": "生成音频", "default": true },
-                                    "output_format": { "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"] },
-                                    "omni_reference_task_type": { "type": "string", "label": "任务类型", "default": "auto", "enum": ["auto", "reference", "edit", "extend"] }
-                                }
-                            }
-                        })
-                        .to_string()
-                    ],
-                )
-                .expect("insert stale Seedance 2.5 definition");
-        }
-
-        drop(storage);
-        let storage = Storage::open(&path).expect("reopen db");
-        let definition = storage
-            .list_model_definitions()
-            .expect("list definitions")
-            .into_iter()
-            .find(|model| model.id == "remote::company-prod::doubao-seedance-2-5-260628")
-            .expect("migrated Seedance 2.5 definition");
-        let parameters = &definition.operations["video_generation"]["parameters"];
-        assert_eq!(parameters["resolution"]["enum"], json!(["720p", "480p"]));
-        assert!(parameters.get("web_search").is_none());
-        assert_eq!(parameters["duration"]["default"], 5);
-        assert_eq!(parameters["draft"]["default"], false);
-        assert_eq!(
-            definition.operations["video_generation"]["requestProfileId"],
-            "moyu_seedance_25_draft_v1"
-        );
-    }
-
-    #[test]
-    fn canvas_save_uses_optimistic_revisions() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let first = storage
-            .save_canvas_document(&SaveCanvasDocumentCommand {
-                id: "canvas-1".into(),
-                title: "故事板 🎬".into(),
-                document: json!({
-                    "nodes": [{ "id": "prompt-1", "text": "中文与四字节字符：𠮷 😀" }],
-                    "edges": []
-                }),
-                expected_revision: Some(0),
-            })
-            .expect("first save");
-        assert_eq!(first.revision, 1);
-        assert_eq!(first.title, "故事板 🎬");
-        assert_eq!(
-            first
-                .document
-                .pointer("/nodes/0/text")
-                .and_then(Value::as_str),
-            Some("中文与四字节字符：𠮷 😀")
-        );
-
-        let second = storage
-            .save_canvas_document(&SaveCanvasDocumentCommand {
-                id: "canvas-1".into(),
-                title: "故事板".into(),
-                document: json!({ "nodes": [{ "id": "prompt-1" }], "edges": [] }),
-                expected_revision: Some(1),
-            })
-            .expect("second save");
-        assert_eq!(second.revision, 2);
-        assert_eq!(storage.list_canvas_documents().expect("list").len(), 1);
-
-        let stale = storage.save_canvas_document(&SaveCanvasDocumentCommand {
-            id: "canvas-1".into(),
-            title: "过期写入".into(),
-            document: json!({}),
-            expected_revision: Some(1),
-        });
-        assert!(matches!(stale, Err(BackendError::Conflict(_))));
-    }
-
-    #[test]
-    fn canvas_delete_preserves_other_canvases_histories_and_files_after_reopen() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let media_path = directory.path().join("generated.png");
-        std::fs::write(&media_path, b"saved media").expect("write media");
-        let storage = Storage::open(&path).expect("open db");
-        // A quoted ID also checks that deletion binds its target as a SQL parameter.
-        let deleted_id = "canvas-1'; DELETE FROM generation_tasks; --";
-        for id in [deleted_id, "canvas-2"] {
-            storage
-                .save_canvas_document(&SaveCanvasDocumentCommand {
-                    id: id.into(),
-                    title: id.into(),
-                    document: json!({ "nodes": [{ "path": media_path }] }),
-                    expected_revision: None,
-                })
-                .expect("save canvas");
-        }
-        let workflow = storage
-            .save_workflow_history(
-                serde_json::from_value(json!({
-                    "record": {
-                        "id": "run-1", "canvasId": deleted_id, "sourceNodeId": "node-1",
-                        "workflowKind": "knowledge", "title": "知识视频", "status": "planning",
-                        "progress": 10, "message": "制作中", "nodeSnapshot": {
-                            "key": "node-1", "kind": "knowledge_video_workflow",
-                            "config": { "checkpoint": { "phase": "planning", "imagePath": media_path } }
-                        },
-                        "models": [], "attemptCount": 1, "revision": 0, "createdAt": 0, "updatedAt": 0
-                    },
-                    "event": { "phase": "planning", "progress": 10, "message": "制作中" }
-                }))
-                .expect("workflow command"),
-            )
-            .expect("save workflow history");
-        let provider = storage.get_provider_connection("provider-sd20").unwrap();
-        storage
-            .insert_task(NewTask {
-                id: "task-1",
-                canvas_id: deleted_id,
-                source_node_id: "node-1",
-                operation: GenerationOperation::TextToImage,
-                provider: &provider,
-                api_key_ref: &provider.api_key_ref,
-                model_definition_id: "gpt-image-2",
-                remote_model_id: Some("gpt-image-2"),
-                logical_request: &json!({}),
-            })
-            .expect("save generation history");
-
-        storage.delete_canvas_document(deleted_id).expect("delete");
-        storage
-            .delete_canvas_document(deleted_id)
-            .expect("delete missing");
-        drop(storage);
-        let reopened = Storage::open(&path).expect("reopen db");
-        assert!(matches!(
-            reopened.get_canvas_document(deleted_id),
-            Err(BackendError::NotFound(_))
-        ));
-        let canvases = reopened.list_canvas_documents().expect("list");
-        assert_eq!(canvases.len(), 1);
-        assert_eq!(canvases[0].id, "canvas-2");
-        assert_eq!(
-            reopened
-                .get_task_execution("task-1")
-                .expect("task history")
-                .id,
-            "task-1"
-        );
-        let history = reopened
-            .get_workflow_history("run-1")
-            .expect("workflow history");
-        assert_eq!(history.record.node_snapshot, workflow.node_snapshot);
-        assert_eq!(history.events.len(), 1);
-        assert_eq!(
-            std::fs::read(&media_path).expect("read media"),
-            b"saved media"
-        );
-    }
-
-    #[test]
-    fn canvas_delete_failure_keeps_the_saved_document() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        let document = json!({ "nodes": [{ "id": "prompt-1", "text": "保留原稿" }] });
-        storage
-            .save_canvas_document(&SaveCanvasDocumentCommand {
-                id: "canvas-1".into(),
-                title: "故事板".into(),
-                document: document.clone(),
-                expected_revision: None,
-            })
-            .expect("save canvas");
-        storage
-            .lock()
-            .expect("connection")
-            .execute_batch(
-                "CREATE TRIGGER prevent_canvas_delete BEFORE DELETE ON canvas_documents
-                 BEGIN SELECT RAISE(FAIL, 'delete blocked'); END;",
-            )
-            .expect("block deletion");
-
-        assert!(storage.delete_canvas_document("canvas-1").is_err());
-        let retained = storage
-            .get_canvas_document("canvas-1")
-            .expect("retained canvas");
-        assert_eq!(retained.document, document);
-        assert_eq!(retained.revision, 1);
-        assert_eq!(storage.list_canvas_documents().expect("list").len(), 1);
-    }
-
-    #[test]
-    fn provider_token_groups_crud_and_credential_ref_resolution() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        storage
-            .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                id: "company-prod".into(),
-                display_name: "公司生产环境".into(),
-                adapter_id: "moyu_v1".into(),
-                base_url: "https://example.com/v1".into(),
-                enabled: true,
-            })
-            .expect("insert provider");
-
-        // 默认令牌 = 供应商主 API Key，无论是否配置分组都返回主引用。
-        let provider = storage
-            .get_provider_connection("company-prod")
-            .expect("provider");
-        assert_eq!(
-            storage
-                .resolve_binding_credential_ref("company-prod", None)
-                .expect("default token"),
-            provider.api_key_ref
-        );
-        // 分组不存在时报错，而不是静默回退主令牌。
-        assert!(matches!(
-            storage.resolve_binding_credential_ref("company-prod", Some("as分组")),
-            Err(BackendError::Conflict(_))
-        ));
-
-        let group = storage
-            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
-                provider_connection_id: "company-prod".into(),
-                group_name: "as分组".into(),
-                enabled: true,
-                secret: None,
-            })
-            .expect("insert token group");
-        assert_eq!(group.group_name, "as分组");
-        assert!(
-            group
-                .credential_ref
-                .starts_with("provider:company-prod:token:")
-        );
-
-        // 同组再次 upsert 保留原凭据引用（幂等）。
-        let again = storage
-            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
-                provider_connection_id: "company-prod".into(),
-                group_name: "as分组".into(),
-                enabled: false,
-                secret: None,
-            })
-            .expect("upsert same group");
-        assert_eq!(again.credential_ref, group.credential_ref);
-        assert!(!again.enabled);
-
-        let groups = storage
-            .list_provider_token_groups("company-prod")
-            .expect("list groups");
-        assert_eq!(groups.len(), 1);
-        assert_eq!(
-            storage
-                .get_provider_token_group("company-prod", "as分组")
-                .expect("get group")
-                .expect("group exists")
-                .id,
-            group.id
-        );
-
-        // 解析绑定凭据引用：Some 分组名命中该分组的 credential_ref。
-        assert_eq!(
-            storage
-                .resolve_binding_credential_ref("company-prod", Some("as分组"))
-                .expect("resolve as group"),
-            group.credential_ref
-        );
-
-        // 空名 / 超长名被校验拒绝。
-        assert!(matches!(
-            storage.upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
-                provider_connection_id: "company-prod".into(),
-                group_name: "  ".into(),
-                enabled: true,
-                secret: None,
-            }),
-            Err(BackendError::Validation { .. })
-        ));
-
-        // 删除分组返回其凭据引用，之后解析报错。
-        assert_eq!(
-            storage
-                .delete_provider_token_group("company-prod", "as分组")
-                .expect("delete group")
-                .expect("had credential ref"),
-            group.credential_ref
-        );
-        assert!(
-            storage
-                .list_provider_token_groups("company-prod")
-                .expect("list after delete")
-                .is_empty()
-        );
-        assert!(matches!(
-            storage.resolve_binding_credential_ref("company-prod", Some("as分组")),
-            Err(BackendError::Conflict(_))
-        ));
-    }
-
-    #[test]
-    fn model_binding_persists_token_group_and_delete_resets_it_to_default() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        storage
-            .upsert_provider_connection(&UpsertProviderConnectionCommand {
-                id: "company-prod".into(),
-                display_name: "公司生产环境".into(),
-                adapter_id: "moyu_v1".into(),
-                base_url: "https://example.com/v1".into(),
-                enabled: true,
-            })
-            .expect("insert provider");
-        storage
-            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
-                provider_connection_id: "company-prod".into(),
-                group_name: "as分组".into(),
-                enabled: true,
-                secret: None,
-            })
-            .expect("insert token group");
-
-        storage
-            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
-                provider_connection_id: "company-prod".into(),
-                selections: vec![
-                    ProviderModelSelection {
-                        model_definition_id: "remote::company-prod::company-sd".into(),
-                        display_name: "公司 SD".into(),
-                        remote_model_id: "company-sd".into(),
-                        enabled: true,
-                        enabled_operations: vec![GenerationOperation::TextToImage],
-                        token_group: Some("as分组".into()),
-                        operation_schema: default_model_schema(
-                            "company-sd",
-                            &[GenerationOperation::TextToImage],
-                        ),
-                    },
-                    ProviderModelSelection {
-                        model_definition_id: "remote::company-prod::company-image".into(),
-                        display_name: "公司图片".into(),
-                        remote_model_id: "company-image".into(),
-                        enabled: true,
-                        enabled_operations: vec![GenerationOperation::TextToImage],
-                        token_group: None,
-                        operation_schema: default_model_schema(
-                            "company-image",
-                            &[GenerationOperation::TextToImage],
-                        ),
-                    },
-                ],
-            })
-            .expect("save selections with token groups");
-
-        let sd = storage
-            .get_binding("company-prod", "remote::company-prod::company-sd")
-            .expect("sd binding");
-        assert_eq!(sd.token_group.as_deref(), Some("as分组"));
-        let image = storage
-            .get_binding("company-prod", "remote::company-prod::company-image")
-            .expect("image binding");
-        assert_eq!(image.token_group, None);
-
-        // 删除分组后，引用该分组的绑定回退到默认令牌。
-        storage
-            .delete_provider_token_group("company-prod", "as分组")
-            .expect("delete group");
-        let sd = storage
-            .get_binding("company-prod", "remote::company-prod::company-sd")
-            .expect("sd binding after delete");
-        assert_eq!(sd.token_group, None);
-    }
-
-    #[test]
-    fn migration_adds_token_group_column_to_existing_databases() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        // 模拟历史版本：provider_model_bindings 已有除 token_group 外的全部列。
-        let connection = rusqlite::Connection::open(&path).expect("open raw db");
-        connection
-            .execute(
-                "CREATE TABLE provider_model_bindings (
-                   provider_connection_id TEXT NOT NULL,
-                   model_definition_id TEXT NOT NULL,
-                   enabled_operations_json TEXT NOT NULL,
-                   remote_model_id TEXT,
-                   enabled INTEGER NOT NULL,
-                   created_at INTEGER NOT NULL,
-                   updated_at INTEGER NOT NULL,
-                   PRIMARY KEY (provider_connection_id, model_definition_id)
-                 )",
-                [],
-            )
-            .expect("create legacy table");
-        connection
-            .execute(
-                "INSERT INTO provider_model_bindings
-                 (provider_connection_id, model_definition_id, enabled_operations_json,
-                  remote_model_id, enabled, created_at, updated_at)
-                 VALUES ('company-prod', 'remote::company-prod::company-sd',
-                         '[\"text_to_image\"]', 'company-sd', 1, 1, 1)",
-                [],
-            )
-            .expect("insert legacy row");
-
-        let columns = |connection: &rusqlite::Connection| {
-            let mut statement = connection
-                .prepare("PRAGMA table_info(provider_model_bindings)")
-                .expect("pragma");
-            statement
-                .query_map([], |row| row.get::<_, String>(1))
-                .expect("columns")
-                .collect::<Result<Vec<_>, _>>()
-                .expect("collect columns")
-        };
-        assert!(
-            !columns(&connection).contains(&"token_group".to_string()),
-            "legacy table must not have token_group yet"
-        );
-
-        migrate_provider_token_groups(&connection).expect("migration adds token_group");
-        assert!(
-            columns(&connection).contains(&"token_group".to_string()),
-            "token_group column must be added by migration"
-        );
-        // 幂等：再次执行不报错。
-        migrate_provider_token_groups(&connection).expect("migration is idempotent");
-    }
-
-    fn insert_raw_tos_config(storage: &Storage, json: &str) {
-        storage
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO application_settings(key, value_json, updated_at)
-                 VALUES ('tos_staging', ?1, 1)",
-                params![json],
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn tos_config_survives_snake_case_and_legacy_broker_rows() {
-        let directory = TempDir::new().expect("temp dir");
-        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-
-        // 直连 TOS 落地后字段改成了 camelCase；升级前 SQLite 里可能仍是 snake_case。
-        insert_raw_tos_config(
-            &storage,
-            r#"{
-                "region":"cn-beijing",
-                "endpoint":"tos-cn-beijing.volces.com",
-                "bucket":"customer-staging",
-                "credential_ref":"tos-ak-sk",
-                "object_prefix":"staging",
-                "enabled":true
-            }"#,
-        );
-        let recovered = storage
-            .get_tos_config()
-            .expect("read snake_case tos config")
-            .expect("snake_case tos config must not be dropped");
-        assert_eq!(recovered.bucket, "customer-staging");
-        assert_eq!(recovered.object_prefix, "staging");
-        assert_eq!(recovered.credential_ref.as_deref(), Some("tos-ak-sk"));
-        assert!(recovered.enabled);
-
-        storage
-            .lock()
-            .unwrap()
-            .execute(
-                "DELETE FROM application_settings WHERE key = 'tos_staging'",
-                [],
-            )
-            .unwrap();
-
-        // Broker 时代只有中转地址、没有桶名：不能当成「从未配置」丢掉整行，
-        // 否则设置页空白、本地素材列表也会因为缺 TOS 整页失败。
-        insert_raw_tos_config(
-            &storage,
-            r#"{"enabled":true,"brokerUrl":"https://broker.example/presign","credentialRef":"tos-broker"}"#,
-        );
-        let broker = storage
-            .get_tos_config()
-            .expect("read broker tos config")
-            .expect("legacy broker row must still surface a config");
-        assert!(broker.bucket.is_empty());
-        assert!(!broker.enabled);
-        assert_eq!(broker.region, "cn-beijing");
-        assert_eq!(broker.endpoint, "tos-cn-beijing.volces.com");
-        assert_eq!(broker.object_prefix, "staging");
-    }
-
-    #[test]
-    fn tos_config_survives_reopening_the_same_sqlite_file() {
-        // 自动更新只替换安装目录里的程序，用户数据目录的 sqlite 必须原样读回；
-        // 这条用例钉住「升级 ≠ 清空对象存储配置」。
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let original = TosStagingConfig {
-            region: "cn-beijing".into(),
-            endpoint: "tos-cn-beijing.volces.com".into(),
-            bucket: "customer-staging".into(),
-            credential_ref: Some("tos-ak-sk".into()),
-            object_prefix: "staging".into(),
-            enabled: true,
-        };
-        {
-            let storage = Storage::open(&path).expect("open");
-            storage.save_tos_config(&original).expect("save");
-        }
-        let reopened = Storage::open(&path).expect("reopen after upgrade");
-        let loaded = reopened
-            .get_tos_config()
-            .expect("read")
-            .expect("tos config must still be in the same sqlite file");
-        assert_eq!(loaded.bucket, "customer-staging");
-        assert_eq!(loaded.credential_ref.as_deref(), Some("tos-ak-sk"));
-        assert!(loaded.enabled);
-        assert_eq!(loaded.object_prefix, "staging");
-    }
-
-    #[test]
-    fn workspace_ui_prefs_survive_reopening_the_same_sqlite_file() {
-        let directory = TempDir::new().expect("temp dir");
-        let path = directory.path().join("backend.sqlite");
-        let original = WorkspaceUiPrefs {
-            active_asset_provider_id: Some("provider-moyu-ai".into()),
-            asset_library_source: Some("local".into()),
-        };
-        {
-            let storage = Storage::open(&path).expect("open");
-            storage.save_workspace_ui_prefs(&original).expect("save");
-        }
-        let reopened = Storage::open(&path).expect("reopen after upgrade");
-        let loaded = reopened.get_workspace_ui_prefs().expect("read");
-        assert_eq!(
-            loaded.active_asset_provider_id.as_deref(),
-            Some("provider-moyu-ai")
-        );
-        assert_eq!(loaded.asset_library_source.as_deref(), Some("local"));
-
-        reopened
-            .save_workspace_ui_prefs(&WorkspaceUiPrefs {
-                active_asset_provider_id: None,
-                asset_library_source: Some("cloud".into()),
-            })
-            .expect("merge source without dropping provider");
-        let merged = reopened.get_workspace_ui_prefs().expect("read merged");
-        assert_eq!(
-            merged.active_asset_provider_id.as_deref(),
-            Some("provider-moyu-ai")
-        );
-        assert_eq!(merged.asset_library_source.as_deref(), Some("cloud"));
-    }
 }

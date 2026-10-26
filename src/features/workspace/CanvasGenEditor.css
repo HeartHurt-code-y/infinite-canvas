@@ -1,0 +1,641 @@
+/*
+ * 画布「编辑层」样式。
+ *
+ * 结构与数值对齐原站 liblib 画布（实测 2026-10-22，1707×898 视口 / DPR 1.5）：
+ *   面板根    .video-node-editor__form → flex flex-col gap-2 p-2（间隙 8 / 内边距 8）
+ *   工具行    .canvas-gen-node__tool-chips → flex flex-wrap items-center gap-1 pl-1 pt-1
+ *   缩略图行  .node-media-inputs → nopan flex w-full min-w-0 flex-wrap items-start gap-2 pl-1
+ *   提示词区  .prompt-mention__surface → relative flex-1 overflow-hidden rounded-xl p-2 min-h-20
+ *   底栏      .canvas-gen-node__footer → flex w-full items-start gap-1
+ *   底栏左组  模型按钮 · 全能参考按钮 · 1px 分隔线 · 参数汇总按钮
+ *   底栏右组  提交按钮（32×32 白底、圆角 12）
+ */
+
+.canvas-node-preview button:focus-visible,
+.video-node-editor :is(button, input, [role="textbox"]):focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
+}
+
+.video-node-editor-layer,
+.video-node-editor-anchor {
+  position: absolute;
+  z-index: var(--z-modal);
+  inset: 0;
+  pointer-events: none;
+}
+
+/*
+ * 节点上方的头部条（React Flow NodeToolbar）。
+ *
+ * 原站 liblib 实测：类型名 13px / #919191；右侧尺寸 11px / tabular-nums /
+ * opacity .8；类型图标 14px；与节点顶边间距约 4px。
+ */
+.canvas-node-toolbar {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0 var(--space-2xs);
+  /* 正文级（节点工具条文字）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+}
+
+.canvas-node-toolbar__type {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.canvas-node-toolbar__size {
+  margin-inline-start: var(--space-2xs);
+  /* 正文级（尺寸数值）：用 secondary 达到 4.5:1。 */
+  color: var(--nt-text-secondary);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+.video-node-editor {
+  position: absolute;
+  top: var(--space-xs);
+  left: var(--space-xs);
+  display: flex;
+  width: min(660px, calc(100% - 16px));
+  max-height: calc(100% - var(--size-studio-dock-clearance) - 16px);
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  color: var(--color-text);
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-float);
+  pointer-events: auto;
+}
+
+.video-node-editor[hidden] {
+  display: none;
+}
+
+.video-node-editor__heading {
+  position: absolute;
+  z-index: 6;
+  top: var(--space-xs);
+  right: var(--space-xs);
+  display: flex;
+  gap: var(--space-3xs);
+}
+
+.video-node-editor__heading button {
+  width: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.video-node-editor__scroll {
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/* 面板根：原站 flex flex-col gap-2 p-2。 */
+.video-node-editor__form {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  font-size: var(--text-sm);
+}
+
+/*
+ * 工具 chips 行（参考 / 标记 / 角色库 / 运镜）。
+ * 原站：flex flex-wrap items-center gap-1 pl-1 pt-1
+ *       chip 为 rounded-full px-2 py-1，底 white/5%，图标 12px、文字 12px #919191。
+ */
+.canvas-gen-node__tool-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) 0 0 var(--space-2xs);
+}
+
+.canvas-gen-node__tool-chip {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  height: 26px;
+  padding: var(--space-2xs) var(--space-xs);
+  color: var(--nt-text-muted);
+  font-size: var(--text-xs);
+  line-height: 18px;
+  white-space: nowrap;
+  background: var(--canvas-chip-bg);
+  border: 0;
+  border-radius: 9999px;
+  transition: background-color 120ms ease;
+}
+
+.canvas-gen-node__tool-chip:hover {
+  background: var(--canvas-chip-hover);
+}
+
+.canvas-gen-node__tool-chip > span {
+  color: var(--nt-text-muted);
+}
+
+.canvas-gen-node__tool-chip > svg {
+  color: var(--nt-text-muted);
+}
+
+/*
+ * 参考缩略图行：原站是 48×48 的方块瓦片，1px hairline 边框、圆角 8，
+ * 左上角一个 14×14 的序号角标，hover 时右上角出现解除连线按钮。
+ */
+.video-node-editor .node-media-inputs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  max-height: none;
+  margin: 0;
+  padding: 0 0 0 var(--space-2xs);
+  overflow: visible;
+  list-style: none;
+}
+
+.video-node-editor .node-media-chip {
+  position: relative;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  background: var(--nt-bg-float);
+  border: var(--rule-thin) solid var(--border-default);
+  border-radius: 8px;
+}
+
+.video-node-editor .node-media-chip.is-dragging {
+  opacity: 0.6;
+}
+
+.video-node-editor .node-media-chip.is-drop-target {
+  border-color: var(--nt-text-brand);
+}
+
+.video-node-editor .node-media-chip > img,
+.video-node-editor .node-media-chip .media-frame-host,
+.video-node-editor .node-media-chip .node-media-chip__thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/*
+ * 缩略图本身按原始宽高比算尺寸（行内样式），原站的瓦片是方形裁切，
+ * 这里用 !important 盖掉行内宽高，交给瓦片自己的 48×48 方框裁切。
+ */
+.video-node-editor .node-media-chip .auto-size-thumb {
+  width: 100% !important;
+  height: 100% !important;
+  aspect-ratio: auto !important;
+}
+
+.video-node-editor .node-media-chip .auto-size-thumb > img,
+.video-node-editor .node-media-chip .auto-size-thumb > video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.video-node-editor .node-media-chip:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
+}
+
+/* 右下角的 @ 按钮：原站 12×12 圆钮、底 black/65、9px 白字。 */
+.video-node-editor .node-media-chip__mention {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  color: #ffffff;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1;
+  background: rgb(0 0 0 / 0.65);
+  border: 0;
+  border-radius: 9999px;
+}
+
+.video-node-editor .node-media-chip__order {
+  position: absolute;
+  top: var(--space-2xs);
+  left: var(--space-2xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 var(--space-2xs);
+  color: #ffffff;
+  font-size: 9px;
+  line-height: 1;
+  background: rgb(0 0 0 / 0.65);
+  border-radius: 8px;
+}
+
+/* 素材名在原站不显示（只在标题里），这里保留给读屏与 tooltip。 */
+.video-node-editor .node-media-chip__name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* 原站的瓦片只有序号角标、@ 与解除连线；「随提示词 / 产物」这类来源信息
+   原站没有可见角标，这里收进瓦片的 title，不占视觉位。 */
+.video-node-editor .node-media-chip__origin {
+  display: none;
+}
+
+.video-node-editor .node-media-chip__unlink {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  color: #ffffff;
+  background: #333333;
+  border: var(--rule-thin) solid #ffffff;
+  border-radius: 9999px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.video-node-editor .node-media-chip:hover .node-media-chip__unlink,
+.video-node-editor .node-media-chip:focus-within .node-media-chip__unlink {
+  opacity: 1;
+}
+
+/* 原站用拖拽排序，没有上移/下移按钮；这里在编辑层里隐藏它们（键盘排序走瓦片本身）。 */
+.video-node-editor .node-media-chip__reorder,
+.video-node-editor .node-media-chip__drag-handle {
+  display: none;
+}
+
+/* 提示词区：原站 relative flex-1 overflow-hidden rounded-xl p-2 min-h-20 */
+.canvas-gen-node__prompt-area {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 80px;
+  flex: 1 1 auto;
+}
+
+/* 提示词组件是收缩到内容宽的（别处按内容排版），编辑层里要铺满面板宽度。 */
+.video-node-editor .prompt-mention,
+.video-node-editor .prompt-mention__surface,
+.video-node-editor .prompt-mention__field {
+  width: 100%;
+}
+
+.video-node-editor .prompt-mention__surface {
+  min-width: 0;
+  min-height: 80px;
+  padding: var(--space-xs);
+  overflow: hidden;
+  border-radius: var(--radius-ll-float);
+}
+
+.video-node-editor .prompt-mention__field {
+  position: relative;
+}
+
+.video-node-editor .prompt-mention__input {
+  min-height: 80px;
+  max-height: 100px;
+  padding: 0 6px 0 0;
+  font-size: var(--text-prompt);
+  line-height: 1.8;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+}
+
+/*
+ * 原站的提示词区里没有任何按钮：@ 在参考瓦片上，智能引用在「高级设置」里。
+ * 本项目编辑层原来把「识别素材名」「@」摆在提示词区里，按「原站没有的
+ * 直接删掉」的口径整行移除：@ 已挪到参考瓦片上（瓦片右下角 12×12 的 @ 圆钮），
+ * 识别素材名仍留在提示词节点里（那是它的主场）。
+ */
+.video-node-editor .prompt-mention__actions {
+  display: none;
+}
+
+.video-node-editor .prompt-mention__status:not(.is-prominent) {
+  display: none;
+}
+
+/* 底栏：原站 flex w-full items-start gap-1 */
+.video-node-editor .canvas-gen-node__footer {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  flex: 0 0 auto;
+  gap: var(--space-2xs);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.video-node-editor .canvas-gen-node__footer-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+}
+
+/* 提交按钮：原站 32×32 白底、圆角 12 的箭头键。 */
+.video-node-editor .canvas-gen-node__start {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: #171717;
+  background: var(--nt-bg-invert);
+  border: 0;
+  border-radius: 12px;
+  transition: filter 120ms ease;
+}
+
+.video-node-editor .canvas-gen-node__start:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.video-node-editor .canvas-gen-node__start:disabled {
+  opacity: 0.45;
+}
+
+/* 底栏左组：模型 · 全能参考 · 分隔线 · 参数汇总 */
+.video-settings-controls {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.video-settings-control {
+  min-width: 0;
+}
+
+.video-settings-control--model {
+  flex: 0 1 auto;
+  max-width: 240px;
+}
+
+.video-settings-control--parameters {
+  flex: 0 1 auto;
+  max-width: 270px;
+}
+
+.video-settings-controls__divider {
+  width: 1px;
+  height: 14px;
+  flex-shrink: 0;
+  align-self: center;
+  background: var(--border-default);
+}
+
+.video-settings-control__trigger {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  height: 32px;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  transition: background-color 120ms ease;
+}
+
+.video-settings-control__trigger:hover:not(:disabled),
+.video-settings-control__trigger[aria-expanded="true"] {
+  background: var(--canvas-chip-hover);
+}
+
+.video-settings-control__trigger > span:not(.sr-only) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.video-settings-control__trigger > .icon,
+.video-settings-control__trigger > svg {
+  flex-shrink: 0;
+}
+
+/* 全能参考：原站 py-1 pl-2 pr-2.5（左右内边距不对称）。 */
+.video-settings-control__trigger--universal {
+  padding: var(--space-2xs) 10px var(--space-2xs) var(--space-xs);
+}
+
+/*
+ * 设置浮层：贴到触发器上（面板底边 = 触发器顶边 − 8px）。
+ * 挂在编辑层 DOM 内（而不是 body）：编辑层是定位祖先，面板按相对坐标贴靠，
+ * 画布平移缩放时不用重新测量；也不在编辑层的滚动容器里，因此不会被裁掉。
+ */
+.video-settings-panel {
+  position: absolute;
+  z-index: 5;
+  right: auto;
+  max-height: 440px;
+  overflow: auto;
+  color: var(--color-text);
+  background: var(--nt-bg-float);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-ll-float);
+  box-shadow: var(--shadow-ll-menu);
+  overscroll-behavior: contain;
+  pointer-events: auto;
+}
+
+.video-settings-panel[hidden] {
+  display: none;
+}
+
+.video-settings-panel__heading {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-xs) var(--space-sm);
+  background: var(--nt-bg-float);
+  border-bottom: var(--rule-thin) solid var(--canvas-controls-border);
+}
+
+.video-settings-panel .canvas-gen-node__settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  max-height: none;
+  margin: 0;
+  padding: var(--space-sm);
+  overflow: visible;
+}
+
+.video-settings-panel .canvas-gen-node__field {
+  min-width: 0;
+  grid-column: span 1;
+}
+
+.video-settings-panel :is(.canvas-gen-node__field--model, .canvas-gen-node__operation) {
+  grid-column: 1 / -1;
+}
+
+.video-settings-panel .canvas-gen-node__settings > :not(.canvas-gen-node__field) {
+  grid-column: 1 / -1;
+}
+
+.video-node-editor
+  :is(input:not([type="checkbox"]):not([type="range"]):not([type="color"]), textarea) {
+  min-width: 0;
+  max-width: 100%;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.video-settings-panel .canvas-gen-node__operation {
+  flex-wrap: wrap;
+}
+
+/* 高级设置：原站是浮层底部的一根 hairline + 12px 粗体标题，默认收起。 */
+.video-settings-advanced {
+  border-top: var(--rule-thin) solid var(--border-muted);
+}
+
+.video-settings-advanced__toggle {
+  display: block;
+  width: 100%;
+  padding: 12px var(--space-xs) var(--space-2xs);
+  color: #737373;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-align: start;
+  background: transparent;
+  border: 0;
+}
+
+.video-settings-advanced__body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  padding: var(--space-2xs) var(--space-xs) var(--space-xs);
+}
+
+.video-settings-advanced__body[hidden] {
+  display: none;
+}
+
+.video-settings-advanced__body > .canvas-gen-node__field {
+  min-width: 0;
+}
+
+.video-node-editor__backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--color-scrim);
+  pointer-events: auto;
+}
+
+.video-node-editor.is-expanded {
+  top: 50%;
+  left: 50%;
+  width: min(800px, calc(100% - 32px));
+  height: min(600px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  transform: translate(-50%, -50%);
+}
+
+.video-node-editor.is-expanded .video-node-editor__scroll {
+  display: flex;
+  flex: 1;
+}
+
+.video-node-editor.is-expanded .video-node-editor__form,
+.video-node-editor.is-expanded .canvas-gen-node__prompt-area,
+.video-node-editor.is-expanded .prompt-mention,
+.video-node-editor.is-expanded .prompt-mention__surface,
+.video-node-editor.is-expanded .prompt-mention__field {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.video-node-editor.is-expanded .prompt-mention__input {
+  flex: 1;
+  max-height: none;
+}
+
+.video-node-editor.is-expanded .prompt-mention__actions {
+  flex: 0 0 auto;
+}
+
+.video-node-editor.is-expanded .canvas-gen-node__footer {
+  margin-top: auto;
+}
+
+@container creative-stage (max-width: 520px) {
+  .video-settings-controls {
+    gap: 0;
+  }
+
+  .video-settings-control--parameters {
+    max-width: 180px;
+  }
+
+  .video-settings-panel .canvas-gen-node__settings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .video-node-editor .canvas-gen-node__footer {
+    align-items: flex-end;
+  }
+}

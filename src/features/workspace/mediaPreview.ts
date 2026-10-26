@@ -78,6 +78,12 @@ function distanceToPaneCenter(element: Element, pane: DOMRectReadOnly): number {
 }
 
 function watchViewportTransform(): void {
+  /*
+   * 测试环境（jsdom 的 node 变体）里，组件卸载后定时器仍可能触发，
+   * 此时 `document` 已经不存在，直接访问会抛 "document is not defined"，
+   * 让整轮测试以未处理错误收场。判一下环境再往下走。
+   */
+  if (typeof document === "undefined") return;
   const viewport = document.querySelector(VIEWPORT_SELECTOR);
   if (viewport === watchedViewport) return;
   viewportObserver?.disconnect();
@@ -110,6 +116,8 @@ function tearDownIfIdle(): void {
 }
 
 function recomputeVisibility(): void {
+  /* 环境销毁后（测试收尾）没有 document，直接退出，别让未处理错误污染整轮测试。 */
+  if (typeof document === "undefined") return;
   watchViewportTransform();
   const pane = paneElement();
   const paneBox = pane?.getBoundingClientRect() ?? null;

@@ -1,15 +1,19 @@
 {
   "$schema": "./node_modules/knip/schema.json",
-  "entry": ["scripts/*.mjs", "tools/**/*.mjs"],
+  "entry": ["src/main.tsx", "scripts/*.mjs", "tools/**/*.mjs"],
   "project": ["src/**/*.{ts,tsx}"],
-  "ignore": ["**/*.test.ts", "**/*.test.tsx", "**/__fixtures__/**"],
-  "ignoreDependencies": ["@remotion/renderer"],
+  "ignore": [
+    "**/__fixtures__/**",
+    "src/lib/bindings/**",
+    "src/lib/brandModels.ts",
+    "src/lib/brandDesignClient.ts"
+  ],
   "rules": {
     "duplicates": "off",
-    "exports": "off",
+    "exports": "warn",
     "nsExports": "off",
     "nsTypes": "off",
     "types": "off",
-    "files": "off"
+    "files": "error"
   }
 }

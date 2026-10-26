@@ -86,6 +86,17 @@ button:active:focus-visible,
 .workspace-header__navigation {
   gap: var(--space-xs);
   margin-inline: var(--space-xs) 0;
+  /* 原站顶栏在「项目名」与「画布 chip」之间有一根 1px 分隔线。 */
+  padding-inline-start: var(--space-xs);
+  border-inline-start: var(--rule-thin) solid var(--canvas-controls-border);
+}
+
+.workspace-header .save-state {
+  gap: var(--space-2xs);
+  margin-inline-start: 0;
+  color: var(--nt-text-muted);
+  white-space: nowrap;
+  font-size: var(--text-sm);
 }
 
 .workspace-header__navigation .canvas-tabs {
@@ -97,36 +108,39 @@ button:active:focus-visible,
   gap: var(--space-2xs);
 }
 
+/*
+ * 画布切换 chip：按原站 liblib 顶栏的「画布 1 ⌄」规格
+ * （h-8 / 圆角 8 / px-2 / 13px 常规字重 / 名称最长 160px / hover 画布控件底色）。
+ */
 .canvas-tabs .canvas-tabs__item {
-  min-width: 6rem;
+  min-width: 0;
+  max-width: 10rem;
   background: none;
   border-color: var(--color-transparent);
-  border-radius: var(--radius-control);
+  border-radius: 8px;
 }
 
 .canvas-tabs .canvas-tabs__item--active {
-  background: var(--color-brand-wash);
+  background: none;
   border-color: var(--color-transparent);
   box-shadow: none;
 }
 
 .canvas-tabs .canvas-tabs__tab {
-  min-height: var(--size-control-small);
-  padding: var(--space-xs) var(--space-sm);
-  color: var(--color-text-3);
+  min-height: var(--size-ll-topnav-btn);
+  padding: 0 var(--space-xs);
+  color: var(--nt-text-muted);
   font-size: var(--text-sm);
+  font-weight: 400;
+  border-radius: 8px;
 }
 
 .canvas-tabs .canvas-tabs__tab[aria-selected="true"] {
-  color: var(--color-brand);
-  font-weight: 650;
+  color: var(--canvas-controls-text);
+  font-weight: 400;
 }
 
-.canvas-tabs .canvas-tabs__rename,
-.canvas-tabs .canvas-tabs__delete {
-  min-height: var(--size-control-small);
-  padding-inline: var(--space-2xs);
-  flex-basis: var(--icon-2xl);
+.canvas-tabs .canvas-tabs__switcher {
   color: var(--color-text-3);
 }
 
@@ -146,11 +160,29 @@ button:active:focus-visible,
   border-inline-start: var(--rule-thin) solid var(--color-rule-faint);
 }
 
+/*
+ * 顶栏图标按钮按原站 liblib 的规格：32×32、8px 圆角、0.5px 描边
+ * （原站声明 border-[0.5px]，DPR=1.5 下回读 0.667px —— 按 0.5px 写），
+ * 底色是面板色的 80%（color-mix），hover 回到面板色本身。
+ */
 .workspace-header .header-icon {
-  min-width: var(--size-control-small);
-  height: var(--size-control-small);
-  border-color: var(--color-transparent);
-  color: var(--color-text-2);
+  width: var(--size-ll-topnav-btn);
+  min-width: var(--size-ll-topnav-btn);
+  height: var(--size-ll-topnav-btn);
+  padding: 0;
+  color: var(--canvas-controls-text);
+  background: color-mix(in srgb, var(--panel-background) 80%, transparent);
+  border: 0.5px solid var(--topnav-btn-border);
+  border-radius: var(--radius-control);
+  transition:
+    background-color var(--dur-short),
+    color var(--dur-short);
+}
+
+@media (hover: hover) {
+  .workspace-header .header-icon:hover:not(:disabled) {
+    background: var(--panel-background);
+  }
 }
 
 .workspace-header .canvas-add-node-trigger {
@@ -163,28 +195,6 @@ button:active:focus-visible,
   font-size: var(--text-sm);
   font-weight: 600;
   box-shadow: var(--shadow-whisper);
-}
-
-.workspace-header .workflow-repository__toggle {
-  gap: var(--space-xs);
-  min-height: var(--size-control-small);
-  padding: var(--space-2xs) var(--space-xs);
-  background: none;
-  border-color: var(--color-transparent);
-}
-
-.workspace-header .workflow-repository__title {
-  font-weight: 500;
-}
-
-.workspace-header .workflow-repository__toggle-mark {
-  color: var(--color-text-2);
-}
-
-.workspace-header .workflow-repository--expanded .workflow-repository__toggle {
-  color: var(--color-text);
-  background: var(--color-surface-3);
-  border-color: var(--color-rule);
 }
 
 /* Material shelf: remove boxes around boxes; selection is a segmented surface. */
@@ -371,85 +381,6 @@ button:active:focus-visible,
 }
 
 /* Browsing templates is a list of tools, with one calm insertion action per row. */
-.workflow-repository .workflow-repository__content {
-  left: auto;
-  right: 0;
-  width: min(var(--size-workflow-menu), calc(100vw - 2 * var(--space-md)));
-  padding: var(--space-md);
-  background: var(--color-surface-1);
-  border-color: var(--color-rule);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-floating);
-  transform-origin: top right;
-}
-
-.workflow-repository__content .workflow-repository__content-heading {
-  margin-bottom: var(--space-sm);
-  font-size: var(--text-base);
-}
-
-.workflow-repository__content .workflow-repository__card {
-  gap: var(--space-xs) var(--space-sm);
-  align-items: start;
-  padding: var(--space-md);
-  background: var(--color-surface-2);
-  border: var(--rule-thin) solid var(--color-rule-faint);
-  border-radius: var(--radius-card);
-  box-shadow: none;
-}
-
-.workflow-repository__content .workflow-repository__card-mark {
-  width: var(--size-control);
-  height: var(--size-control);
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border-color: var(--color-transparent);
-}
-
-.workflow-repository__content .workflow-repository__card-title {
-  font-size: var(--text-base);
-  font-weight: 600;
-}
-
-.workflow-repository__content .workflow-repository__badge {
-  color: var(--color-text-2);
-  background: var(--color-surface-3);
-  border-radius: var(--radius-xs);
-  font-size: var(--text-xs);
-  font-weight: 400;
-}
-
-.workflow-repository__content .workflow-repository__description {
-  color: var(--color-text-2);
-  font-size: var(--text-sm);
-  line-height: var(--leading-body);
-  text-wrap: pretty;
-}
-
-.workflow-repository__content .workflow-repository__stages {
-  flex-wrap: wrap;
-  overflow: visible;
-}
-
-.workflow-repository__content .workflow-repository__stage {
-  font-size: var(--text-xs);
-}
-
-.workflow-repository__content .workflow-repository__stage-number {
-  color: var(--color-text-3);
-  font-family: var(--font-body);
-  font-weight: 500;
-}
-
-.workflow-repository__content .workflow-repository__insert {
-  min-height: var(--size-control-small);
-  margin-top: var(--space-xs);
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border-color: var(--color-transparent);
-  font-size: var(--text-sm);
-  font-weight: 500;
-}
 
 .connection-quick-add-menu {
   width: var(--size-menu);
@@ -475,15 +406,25 @@ button:active:focus-visible,
   height: var(--icon-lg);
 }
 
-/* Native line patterns follow viewport pan and zoom; dashes stay understated. */
+/* Native line patterns follow viewport pan and zoom; dashes stay understated.
+   点阵取原站 liblib 画布的 --xy-background-pattern-dots-color-default。 */
 .canvas-react-flow .canvas-flow-bg--minor path {
-  stroke: var(--color-grid-minor);
+  stroke: var(--canvas-grid-dot);
   stroke-dasharray: var(--grid-dash-minor);
 }
 
 .canvas-react-flow .canvas-flow-bg--major path {
   stroke: var(--color-grid-major);
   stroke-dasharray: var(--grid-dash-major);
+}
+
+/*
+ * React Flow 的 "React Flow" 署名条：原站 liblib 画布同样用 React Flow，但没有
+ * 这一条。我们的底部浮坞正好压在它上面，窄窗口下只露出一角，像多出来一块。
+ * 按原站隐藏。
+ */
+.react-flow__attribution {
+  display: none;
 }
 
 .canvas-viewport .canvas-empty-hint {
@@ -595,8 +536,7 @@ button:active:focus-visible,
     border-color: var(--color-accent-hover);
   }
 
-  .workspace-header .header-icon:hover,
-  .workspace-header .workflow-repository__toggle:hover {
+  .workspace-header .header-icon:hover {
     background: var(--color-surface-3);
   }
 
@@ -615,11 +555,6 @@ button:active:focus-visible,
     border-color: var(--color-rule-strong);
     background: var(--color-surface-3);
     transform: none;
-  }
-
-  .workflow-repository__content .workflow-repository__insert:hover {
-    color: var(--color-accent-ink);
-    background: var(--color-accent);
   }
 }
 
@@ -647,14 +582,6 @@ button:active:focus-visible,
 
   .workspace-header__navigation {
     margin-inline: 0;
-  }
-
-  .workflow-repository .workflow-repository__content {
-    position: fixed;
-    top: var(--size-header);
-    left: var(--space-md);
-    right: var(--space-md);
-    width: auto;
   }
 }
 
@@ -694,24 +621,14 @@ button:active:focus-visible,
   .canvas-viewport .canvas-empty-hint {
     padding-inline: var(--space-xs);
   }
-
-  .workflow-repository__content .workflow-repository__card {
-    padding: var(--space-sm);
-  }
-
-  .workflow-repository__content .workflow-repository__insert {
-    min-height: var(--size-control-touch);
-  }
 }
 
 @media (pointer: coarse) {
   .workspace-header .header-icon,
   .workspace-header .canvas-add-node-trigger,
-  .workspace-header .workflow-repository__toggle,
   .canvas-tabs .canvas-tabs__create,
   .canvas-tabs .canvas-tabs__tab,
-  .canvas-tabs .canvas-tabs__rename,
-  .canvas-tabs .canvas-tabs__delete,
+  .canvas-tabs .canvas-tabs__switcher,
   .asset-panel .square-action {
     min-width: var(--size-control-touch);
     min-height: var(--size-control-touch);
@@ -724,17 +641,6 @@ button:active:focus-visible,
 }
 
 /* Opacity-only panel response; no animation is introduced on node movement. */
-@media (prefers-reduced-motion: no-preference) {
-  .workflow-repository .workflow-repository__content {
-    transition: opacity var(--dur-short) var(--ease-out);
-  }
-
-  @starting-style {
-    .workflow-repository .workflow-repository__content:not([hidden]) {
-      opacity: 0;
-    }
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   *,

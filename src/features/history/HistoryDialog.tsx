@@ -1,6 +1,6 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { useModalFocusTrap } from "../../components/useModalFocusTrap";
 import {
   useCallback,
   useEffect,
@@ -8,12 +8,14 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
+  backendErrorMessage,
   canvasDocumentClient,
   formatBytes,
   formatRawBackendError,
+  frontendLog,
   generationClient,
   promoteSeedanceDraft,
   isDesktopRuntime,
@@ -32,8 +34,6 @@ import { resultDisplayName } from "../workspace/artifactNames";
 import { subscribeArtifactNameChanges } from "../workspace/artifactNameSync";
 import { VideoMiddleFrame } from "../workspace/VideoMiddleFrame";
 import { useLocalVideoPoster } from "../workspace/localVideoPoster";
-import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
-import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
 import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
 import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
 import type { HistoryDateRange } from "./historyDateRange";
@@ -82,6 +82,7 @@ const TASK_STATUS_LABELS: Record<string, string> = {
   failed: "失败",
   unknown: "结果未知",
   interrupted: "已中断",
+  cancelled: "已取消",
 };
 
 const SAVE_STATUS_LABELS: Record<string, string> = {
@@ -90,6 +91,7 @@ const SAVE_STATUS_LABELS: Record<string, string> = {
   succeeded: "已保存到本机",
   failed: "保存失败",
   interrupted: "保存已中断",
+  cancelled: "已取消",
   local_missing: "本地文件缺失",
   conflict: "文件冲突",
 };
@@ -105,6 +107,7 @@ const ATTEMPT_OUTCOME_LABELS: Record<string, string> = {
   succeeded: "成功",
   failed: "失败",
   interrupted: "已中断",
+  cancelled: "已取消",
 };
 
 const ERROR_KIND_LABELS: Record<string, string> = {
@@ -187,7 +190,8 @@ function formatHistoryPayload(value: unknown, emptyText = "（无内容）"): st
   try {
     return JSON.stringify(normalized, null, 2) ?? String(normalized);
   } catch {
-    return formatRawBackendError(value);
+    // 兜底也只给一句人话：原始 payload 归「展开完整报错」与日志，不往界面上印。
+    return backendErrorMessage(value);
   }
 }
 
@@ -331,7 +335,7 @@ function statusFilterToStatuses(filter: HistoryStatusFilter): GenerationTaskStat
   if (filter === "all") return null;
   if (filter === "running") return ["created", "submitting", "retry_wait", "queued", "running"];
   if (filter === "succeeded") return ["succeeded"];
-  return ["failed", "unknown", "interrupted"];
+  return ["failed", "unknown", "interrupted", "cancelled"];
 }
 
 /** 从任务的逻辑请求（StartGenerationCommand）中提取提示词段。 */
@@ -382,29 +386,26 @@ function HistoryLightbox({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const result = results[index];
 
-  useEffect(() => {
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-
-    window.addEventListener("keydown", handleKeyDown, true);
-    closeButtonRef.current?.focus();
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-  }, [onClose]);
+  // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的历史面板上），Esc 关闭，
+  // 关闭后焦点回到打开预览的那个元素。
+  const trap = useModalFocusTrap({
+    active: true,
+    onEscape: onClose,
+    initialFocusRef: closeButtonRef,
+  });
 
   if (result == null) return null;
   const hasPrev = index > 0;
   const hasNext = index < results.length - 1;
   return (
-    <div className="history-lightbox" role="dialog" aria-modal="true" aria-label="媒体预览">
+    <div
+      className="history-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="媒体预览"
+      ref={trap.ref}
+      {...trap.containerProps}
+    >
       <button
         ref={closeButtonRef}
         type="button"
@@ -480,7 +481,7 @@ function HistoryLightbox({
   );
 }
 
-type HistoryTab = "generation" | "workflow" | "remoteVideo";
+type HistoryTab = "generation" | "remoteVideo";
 
 /** 历史记录生成结果缩略图：宽度 100%，高度按媒体原始比例自适应，object-fit: contain 保证不裁剪。 */
 function HistoryResultVisual({
@@ -568,7 +569,6 @@ function HistoryResultVisual({
 
 const HISTORY_TABS: readonly { readonly id: HistoryTab; readonly label: string }[] = [
   { id: "generation", label: "生成任务" },
-  { id: "workflow", label: "工作流" },
   { id: "remoteVideo", label: "远程视频" },
 ];
 
@@ -596,40 +596,23 @@ export function HistoryDialog({
   open,
   onClose,
   client = generationClient,
-  workflowClient,
   canvasId,
   initialTab = "generation",
-  initialWorkflowId,
   initialTaskId,
-  onResumeWorkflow,
-  onRestartWorkflow,
-  onLocateWorkflow,
   onRegenerateGeneration,
   onPromoteSeedanceDraft,
-  activeWorkflowIds,
 }: {
   readonly open: boolean;
   readonly onClose: () => void;
   readonly client?: GenerationTaskClient;
-  readonly workflowClient?: WorkflowHistoryClient;
   readonly canvasId?: string;
   readonly initialTab?: HistoryTab;
-  readonly initialWorkflowId?: string | null;
   readonly initialTaskId?: string | null;
-  readonly onResumeWorkflow?: (
-    record: WorkflowHistoryRecord,
-    decisionResolution?: string,
-  ) => Promise<void> | void;
-  readonly onRestartWorkflow?: (record: WorkflowHistoryRecord) => Promise<void> | void;
-  readonly onLocateWorkflow?: (record: WorkflowHistoryRecord) => void;
   /** 从历史重新生成时由宿主创建全新任务（并负责画布占位卡片）；缺省时直接调用 client.start。 */
   readonly onRegenerateGeneration?: (command: StartGenerationCommand) => Promise<string>;
   readonly onPromoteSeedanceDraft?: (draft: GenerationTaskDetail) => Promise<string>;
-  readonly activeWorkflowIds?: readonly string[];
 }) {
-  const dialogRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<HistoryTab>(initialTab ?? "generation");
-  const [workflowVisited, setWorkflowVisited] = useState(initialTab === "workflow");
   const [remoteVideoVisited, setRemoteVideoVisited] = useState(initialTab === "remoteVideo");
   const linkedTaskIdRef = useRef<string | null>(initialTaskId ?? null);
   const [searchDraft, setSearchDraft] = useState("");
@@ -644,7 +627,7 @@ export function HistoryDialog({
   // 首页是否已请求完成（含失败）：区分「加载中」与「确实没有任务」。
   const [listLoaded, setListLoaded] = useState(false);
   const [listLoading, setListLoading] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<unknown>(null);
   // 重新生成成功后递增，强制列表回到第一页并选中新任务。
   const [listRevision, setListRevision] = useState(0);
   const [detailRevision, setDetailRevision] = useState(0);
@@ -657,13 +640,13 @@ export function HistoryDialog({
   }, [open]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialTaskId ?? null);
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<unknown>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
   const [regenerateEditorTask, setRegenerateEditorTask] = useState<GenerationTaskDetail | null>(
     null,
   );
   const [regenerateBusy, setRegenerateBusy] = useState(false);
-  const [regenerateError, setRegenerateError] = useState<string | null>(null);
+  const [regenerateError, setRegenerateError] = useState<unknown>(null);
   const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
   const [draftPromotionBusy, setDraftPromotionBusy] = useState(false);
   const [draftPromotionError, setDraftPromotionError] = useState<unknown>(null);
@@ -700,7 +683,9 @@ export function HistoryDialog({
         setTasks([]);
         setCursor(null);
         if (!linkedTaskIdRef.current) setSelectedTaskId(null);
-        setListError(formatRawBackendError(error));
+        // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+        frontendLog("error", `[history] 加载生成任务历史失败: ${formatRawBackendError(error)}`);
+        setListError(error);
         setListLoaded(true);
       });
     return () => {
@@ -771,6 +756,7 @@ export function HistoryDialog({
     if (cursor == null || listLoading || !listLoaded) return;
     const requestId = ++listRequestRef.current;
     setListLoading(true);
+    setListError(null);
     try {
       const page = await client.list({
         ...dateRange,
@@ -785,7 +771,9 @@ export function HistoryDialog({
       setCursor(page.nextCursor);
     } catch (error: unknown) {
       if (requestId !== listRequestRef.current) return;
-      setListError(formatRawBackendError(error));
+      // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+      frontendLog("error", `[history] 加载更多生成任务失败: ${formatRawBackendError(error)}`);
+      setListError(error);
     } finally {
       if (requestId === listRequestRef.current) setListLoading(false);
     }
@@ -807,7 +795,9 @@ export function HistoryDialog({
       .catch((error: unknown) => {
         if (cancelled || requestId !== detailRequestRef.current) return;
         setDetail(null);
-        setDetailError(formatRawBackendError(error));
+        // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+        frontendLog("error", `[history] 加载任务详情失败: ${formatRawBackendError(error)}`);
+        setDetailError(error);
       });
     return () => {
       cancelled = true;
@@ -817,7 +807,6 @@ export function HistoryDialog({
   const selectHistoryTab = (tab: HistoryTab) => {
     setActiveTab(tab);
     setLightboxIndex(null);
-    if (tab === "workflow") setWorkflowVisited(true);
     if (tab === "remoteVideo") setRemoteVideoVisited(true);
   };
 
@@ -829,16 +818,19 @@ export function HistoryDialog({
     selectHistoryTab("generation");
   };
 
-  const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (event.key !== "Escape") return;
-    event.preventDefault();
-    // lightbox 打开时优先关闭 lightbox，其次关闭整个对话框。
+  // Esc：lightbox 打开时优先关闭 lightbox，其次关闭整个对话框。
+  // 焦点陷阱接管键盘之后，Esc 走这里（不再是容器上的 onKeyDown）。
+  const handleEscape = useCallback(() => {
     if (lightboxIndex != null) {
       setLightboxIndex(null);
       return;
     }
     handleClose();
-  };
+  }, [lightboxIndex, handleClose]);
+
+  // 模态焦点陷阱：焦点锁在对话框内（Tab 不会跑到背后的画布上），关闭后焦点回到
+  // 打开历史记录的那个元素。
+  const trap = useModalFocusTrap({ active: open, onEscape: handleEscape });
 
   /** 原任务直接重新生成：按冻结请求创建全新任务，刷新列表并选中新任务。 */
   const submitRegenerate = useCallback(
@@ -857,7 +849,9 @@ export function HistoryDialog({
         linkedTaskIdRef.current = newTaskId;
         setListRevision((value) => value + 1);
       } catch (error: unknown) {
-        setRegenerateError(formatRawBackendError(error));
+        // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+        frontendLog("error", `[history] 重新生成失败: ${formatRawBackendError(error)}`);
+        setRegenerateError(error);
       } finally {
         regenerateBusyRef.current = false;
         setRegenerateBusy(false);
@@ -871,6 +865,35 @@ export function HistoryDialog({
     setRegenerateMessage(null);
     setRegenerateEditorTask(task);
   };
+
+  /*
+   * 取消在途任务。
+   *
+   * 画布上的提示会把用户指向「在任务历史中取消后重做」，但这一条路以前根本走不通：
+   * 后端早就有了 cancel_generation_task，前端却没有调用点——用户点进历史也找不到
+   * 取消入口，只能删整张画布（而在途任务会让删除被拒），等于死路。
+   */
+  const [cancelBusy, setCancelBusy] = useState(false);
+  const [cancelError, setCancelError] = useState<unknown>(null);
+  const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const submitCancel = useCallback(async () => {
+    if (cancelBusy || detail == null) return;
+    setCancelBusy(true);
+    setCancelError(null);
+    setCancelMessage(null);
+    try {
+      await client.cancel(detail.summary.id);
+      setCancelMessage("已取消：本机不再继续查询供应商，也不会保存产物。");
+      setListRevision((value) => value + 1);
+      setDetailRevision((value) => value + 1);
+    } catch (error: unknown) {
+      // 完整原文只进日志；ErrorAlert 收到原始错误对象，由它提摘要。
+      frontendLog("error", `[history] 取消任务失败: ${formatRawBackendError(error)}`);
+      setCancelError(error);
+    } finally {
+      setCancelBusy(false);
+    }
+  }, [cancelBusy, client, detail]);
 
   const submitDraftPromotion = async (draft: GenerationTaskDetail) => {
     if (draftPromotionBusyRef.current || !canPromoteSeedanceDraft(draft)) return;
@@ -917,7 +940,19 @@ export function HistoryDialog({
 
   if (!open) return null;
 
-  return (
+  /*
+   * 模态一律 **portal 到 body**。
+   *
+   * 焦点陷阱的「冻结背景」是按 `document.body` 的**直接子节点**做的：不在弹窗
+   * 自己那条分支上的顶层子树全部置 inert。模态若留在 #root 内部，#root 就在
+   * 「弹窗的祖先链」上 → 整棵 #root（含画布）被豁免 → **背景根本没被冻结**，
+   * 读屏与键盘仍能落到被遮住的画布上。
+   *
+   * portal 到 body 之后，弹窗自己就是 body 的直接子节点，背景（#root）被正常
+   * 冻结，语义才真正成立。`#root` 没有 transform/filter/contain，不构成
+   * containing block，所以 `position: fixed` 的定位不受影响。
+   */
+  return createPortal(
     <div className="history-layer">
       <button
         type="button"
@@ -926,13 +961,13 @@ export function HistoryDialog({
         onClick={handleClose}
       />
       <section
-        ref={dialogRef}
+        ref={trap.ref}
         id="generation-history-dialog"
         className="history-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="generation-history-title"
-        onKeyDown={handleKeyDown}
+        {...trap.containerProps}
       >
         <header className="history-dialog__header">
           <span className="history-dialog__eyebrow">
@@ -940,18 +975,12 @@ export function HistoryDialog({
             历史记录
           </span>
           <h2 id="generation-history-title">
-            {activeTab === "workflow"
-              ? "工作流历史"
-              : activeTab === "remoteVideo"
-                ? "远程任务历史"
-                : "生成任务历史"}
+            {activeTab === "remoteVideo" ? "远程任务历史" : "生成任务历史"}
           </h2>
           <p>
-            {activeTab === "workflow"
-              ? "查看每次工作流的输入、执行过程、交付物，从保存的步骤重试或继续。"
-              : activeTab === "remoteVideo"
-                ? "查询视频任务历史，并为应用异常关闭导致的任务续约远程查询。"
-                : "所有媒体与文本生成任务的调用、token 用量、完整产物与报错。"}
+            {activeTab === "remoteVideo"
+              ? "查询视频任务历史，并为应用异常关闭导致的任务续约远程查询。"
+              : "所有媒体与文本生成任务的调用、token 用量、完整产物与报错。"}
           </p>
           <div className="history-tabs" role="tablist" aria-label="历史记录类型">
             {HISTORY_TABS.map((tab) => (
@@ -1016,23 +1045,6 @@ export function HistoryDialog({
           </button>
         </header>
 
-        {workflowVisited && open ? (
-          <div className="workflow-history__container" hidden={activeTab !== "workflow"}>
-            <div id="workflow-history-panel" role="tabpanel" aria-labelledby="workflow-history-tab">
-              <WorkflowHistoryPanel
-                client={workflowClient}
-                canvasId={scope === "all" ? undefined : canvasId}
-                canvasLabel={canvasLabel}
-                initialWorkflowId={initialWorkflowId}
-                activeWorkflowIds={activeWorkflowIds}
-                {...(onResumeWorkflow ? { onResumeWorkflow } : {})}
-                {...(onRestartWorkflow ? { onRestartWorkflow } : {})}
-                {...(onLocateWorkflow ? { onLocateWorkflow } : {})}
-                onSelectGenerationTask={selectLinkedGenerationTask}
-              />
-            </div>
-          </div>
-        ) : null}
         {remoteVideoVisited && open ? (
           <div
             className="history-dialog__body history-dialog__body--single"
@@ -1064,6 +1076,7 @@ export function HistoryDialog({
               >
                 <input
                   aria-label="搜索任务名称、文件名或任务 ID"
+                  aria-describedby={listError ? "generation-history-list-error" : undefined}
                   placeholder="任务名称 / 文件名 / 任务 ID"
                   value={searchDraft}
                   onChange={(event) => setSearchDraft(event.target.value)}
@@ -1077,6 +1090,7 @@ export function HistoryDialog({
                     type="button"
                     role="tab"
                     aria-selected={statusFilter === filter.id}
+                    aria-describedby={listError ? "generation-history-list-error" : undefined}
                     className={`history-filter${statusFilter === filter.id ? " is-active" : ""}`}
                     onClick={() => {
                       if (filter.id === statusFilter) return;
@@ -1096,7 +1110,30 @@ export function HistoryDialog({
               />
             </div>
             <div className="history-list__scroll">
-              {listError ? <p className="history-list__error">{listError}</p> : null}
+              {listError ? (
+                <div className="history-list__error">
+                  <ErrorAlert
+                    id="generation-history-list-error"
+                    error={listError}
+                    hint={
+                      isDesktopRuntime()
+                        ? "重新读取任务列表即可重试，不会重新提交生成。"
+                        : "请在桌面应用中查看本机任务历史。"
+                    }
+                  />
+                  <button
+                    type="button"
+                    aria-describedby="generation-history-list-error"
+                    onClick={() => {
+                      setListError(null);
+                      setListLoaded(false);
+                      setListRevision((value) => value + 1);
+                    }}
+                  >
+                    重新读取任务列表
+                  </button>
+                </div>
+              ) : null}
               {!listError && !listLoaded ? (
                 <p className="history-list__empty">正在加载任务记录…</p>
               ) : null}
@@ -1120,6 +1157,11 @@ export function HistoryDialog({
                           setSelectedTaskId(task.id);
                         }}
                         aria-current={selectedTaskId === task.id ? "true" : undefined}
+                        aria-describedby={
+                          selectedTaskId === task.id && detailError
+                            ? "generation-history-detail-error"
+                            : undefined
+                        }
                       >
                         <span className="history-item__top">
                           <span
@@ -1129,7 +1171,8 @@ export function HistoryDialog({
                               <Icon name="check-circle" aria-hidden="true" size="sm" />
                             ) : task.status === "failed" ||
                               task.status === "unknown" ||
-                              task.status === "interrupted" ? (
+                              task.status === "interrupted" ||
+                              task.status === "cancelled" ? (
                               <Icon name="warning-circle" aria-hidden="true" size="sm" />
                             ) : (
                               <Icon name="circle-notch" aria-hidden="true" size="sm" />
@@ -1166,6 +1209,7 @@ export function HistoryDialog({
                   type="button"
                   className="history-list__more"
                   disabled={listLoading}
+                  aria-describedby={listError ? "generation-history-list-error" : undefined}
                   onClick={() => {
                     void loadMore();
                   }}
@@ -1183,7 +1227,23 @@ export function HistoryDialog({
                 在左侧选择一个任务查看详情。
               </p>
             ) : detailError != null && detail == null ? (
-              <p className="history-detail__error">{detailError}</p>
+              <div className="history-detail__error">
+                <ErrorAlert
+                  id="generation-history-detail-error"
+                  error={detailError}
+                  hint="重新读取原任务详情；若任务已被删除，请从列表选择其他记录。"
+                />
+                <button
+                  type="button"
+                  aria-describedby="generation-history-detail-error"
+                  onClick={() => {
+                    setDetailError(null);
+                    setDetailRevision((value) => value + 1);
+                  }}
+                >
+                  重新读取任务详情
+                </button>
+              </div>
             ) : detail == null || summary == null ? (
               <p className="history-detail__placeholder">正在读取任务详情…</p>
             ) : (
@@ -1293,6 +1353,56 @@ export function HistoryDialog({
                   </section>
                 ) : null}
 
+                {summary.status === "created" ||
+                summary.status === "submitting" ||
+                summary.status === "retry_wait" ||
+                summary.status === "queued" ||
+                summary.status === "running" ? (
+                  <section className="history-section">
+                    <h3>取消任务</h3>
+                    <div className="history-regenerate">
+                      <button
+                        type="button"
+                        className="history-regenerate__primary"
+                        disabled={cancelBusy}
+                        aria-describedby={cancelError ? "history-cancel-error" : undefined}
+                        title="停止本机对该任务的查询与产物保存；供应商侧的任务仍可能继续执行并计费"
+                        onClick={() => void submitCancel()}
+                      >
+                        <Icon name="x" aria-hidden="true" size="md" />
+                        取消这个任务
+                      </button>
+                    </div>
+                    <p className="history-regenerate__note">
+                      取消后本机不再继续查询供应商，也不会保存产物。供应商侧的任务可能仍在运行并计费，如需彻底停止请到供应商后台处理。
+                    </p>
+                    {cancelMessage ? (
+                      <p role="status" className="history-regenerate__message">
+                        {cancelMessage}
+                      </p>
+                    ) : null}
+                    {cancelError ? (
+                      <ErrorAlert
+                        id="history-cancel-error"
+                        error={cancelError}
+                        /*
+                         * 两种失败要分开说：
+                         *  - 任务**已经结束**（竞态：点取消的同时它成功了/失败了）
+                         *    → 重试没有意义，重试只会再得到同一个冲突；
+                         *  - 其它失败（网络、权限）→ 任务可能仍在执行，可以稍后重试。
+                         * 之前一律说「可能仍在执行，请稍后重试」，对第一种是误导：
+                         * 用户按提示重试，必然再撞同一个冲突，白跑一趟。
+                         */
+                        hint={
+                          /已经结束|无法取消/.test(String(cancelError))
+                            ? "这个任务在取消之前就已经结束了，无需再取消。刷新列表即可看到最终结果。"
+                            : "取消请求没有生效，任务可能仍在执行。请稍后重试或先核对任务状态。"
+                        }
+                      />
+                    ) : null}
+                  </section>
+                ) : null}
+
                 {canRegenerate ? (
                   <section className="history-section">
                     <h3>重新生成</h3>
@@ -1305,6 +1415,9 @@ export function HistoryDialog({
                             type="button"
                             className="history-regenerate__primary"
                             disabled={regenerateBusy}
+                            aria-describedby={
+                              regenerateError ? "history-regenerate-error" : undefined
+                            }
                             title="按原任务冻结的提示词与素材创建一次全新生成"
                             onClick={() => void submitRegenerate(frozenCommand)}
                           >
@@ -1314,6 +1427,9 @@ export function HistoryDialog({
                           <button
                             type="button"
                             disabled={regenerateBusy}
+                            aria-describedby={
+                              regenerateError ? "history-regenerate-error" : undefined
+                            }
                             title="修改原任务的提示词与素材后再重新生成"
                             onClick={() => openRegenerateEditor(detail)}
                           >
@@ -1331,12 +1447,11 @@ export function HistoryDialog({
                       </p>
                     ) : null}
                     {regenerateError ? (
-                      <>
-                        <p role="alert" className="history-regenerate__error">
-                          {regenerateError}
-                        </p>
-                        <ErrorCopyButton text={regenerateError} />
-                      </>
+                      <ErrorAlert
+                        id="history-regenerate-error"
+                        error={regenerateError}
+                        hint="先在历史中核对原任务；提交回执不明确时请查询原任务，再决定是否重新生成。"
+                      />
                     ) : null}
                   </section>
                 ) : null}
@@ -1642,6 +1757,7 @@ export function HistoryDialog({
           }}
         />
       ) : null}
-    </div>
+    </div>,
+    document.body,
   );
 }

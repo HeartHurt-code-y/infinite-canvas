@@ -1,0 +1,2211 @@
+/*
+ * 创作台样式：整页外壳的即梦式视觉 + 底部参数工具条。
+ *
+ * 数值全部来自即梦 AI 创作页 2026-10-21 的实测计算样式与 CSS 分包，
+ * 并且全部走 tokens.css 的 `--color-create-*` / `--size-create-*` /
+ * `--create-text-*` 令牌组——本文件不新增颜色、圆角、间距或动效字面值。
+ *
+ * 实测口径（暗色主题，浏览器视口 1707×876）：
+ *   侧栏 240px / #171717 / padding 14px 12px 12px / flex column / gap 32px
+ *   内容列与浮坞 1012px 居中
+ *   资产库抽屉 320px / #1a1a1a / 等高
+ */
+/*
+ * 创作台样式：整页外壳的即梦式视觉。
+ *
+ * 数值全部来自即梦 AI 创作页 2026-10-21 的实测计算样式与 CSS 分包，
+ * 并且全部走 tokens.css 的 `--color-create-*` / `--size-create-*` 令牌组——
+ * 本文件不新增颜色、圆角、间距或动效字面值。
+ *
+ * 实测口径（暗色主题，浏览器视口 1707×876）：
+ *   侧栏 240px / #171717 / padding 14px 12px 12px / flex column / gap 32px
+ *   内容列与浮坞 1012px 居中
+ *   资产库抽屉 320px / #1a1a1a / 等高
+ */
+
+/* ── 页面骨架 ───────────────────────────────────────────────────────── */
+
+.create-surface {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  /*
+   * 顶栏的定位上下文。
+   * 顶栏挂在整页上（即梦实测 `top-actions-host` 绝对定位在整页容器里），
+   * 资产库抽屉开合时主区变窄但顶栏不动——所以定位基准必须是整页，
+   * 不能是 `.create-main`。
+   */
+  position: relative;
+  background: var(--color-create-canvas);
+  color: var(--color-create-text);
+  /*
+   * 即梦的字体栈：正文 CapCut Sans（字节自研）+ 中文系统字体回退。
+   * 用通用无衬线会一眼看出不是原站（字面宽度与灰度都不同）。
+   */
+  font-family: var(--font-jimeng);
+  font-size: var(--create-text-sm);
+  line-height: var(--leading-body);
+}
+
+.create-main {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 内容列：记录流滚动，浮坞 sticky 在底部。 */
+.create-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}
+
+.create-banner {
+  padding: var(--space-md) var(--space-lg) 0;
+}
+
+/*
+ * 提交失败的横幅：它贴在浮坞正上方（提交键就在下面），下边留一道缝，
+ * 别让它和浮坞糊成一块。
+ */
+.create-banner--submit {
+  padding-bottom: var(--space-sm);
+}
+
+/* ── 侧栏 ───────────────────────────────────────────────────────────── */
+
+.create-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--create-space-wide);
+  width: var(--size-create-sidebar);
+  height: 100%;
+  padding: 14px 12px 12px;
+  overflow: hidden;
+  background: var(--color-create-sidebar);
+  border-right: 1px solid var(--color-create-edge);
+  transition: width var(--dur-short) var(--ease-out);
+}
+
+.create-sidebar[data-collapsed="true"] {
+  width: 4rem;
+}
+
+.create-sidebar[data-collapsed="true"] .create-sidebar__wordmark,
+.create-sidebar[data-collapsed="true"] .create-sidebar__nav-label,
+.create-sidebar[data-collapsed="true"] .create-sidebar__section,
+.create-sidebar[data-collapsed="true"] .create-sidebar__sub-action,
+.create-sidebar[data-collapsed="true"] .create-sidebar__conversation-name {
+  display: none;
+}
+
+.create-sidebar[data-collapsed="true"] .create-sidebar__nav-item {
+  justify-content: center;
+  padding: 0;
+}
+
+.create-sidebar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 2.5rem;
+  flex: 0 0 auto;
+}
+
+.create-sidebar__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-create-text);
+  cursor: pointer;
+}
+
+.create-sidebar__logo {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+}
+
+.create-sidebar__wordmark {
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.create-sidebar__toggle {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--color-create-text-mute);
+  cursor: pointer;
+}
+
+.create-sidebar__toggle:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-sidebar__content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: var(--space-xs);
+  scrollbar-width: none;
+}
+
+.create-sidebar__content::-webkit-scrollbar {
+  display: none;
+}
+
+.create-sidebar__nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
+.create-sidebar__nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 2.25rem;
+  padding: 0 var(--space-xs);
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  font-weight: 500;
+  line-height: 1.375rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-sidebar__nav-item:hover {
+  background: var(--color-create-block);
+}
+
+.create-sidebar__nav-item[data-enabled="false"] {
+  color: var(--color-create-text-mute);
+  cursor: default;
+}
+
+.create-sidebar__nav-item[data-enabled="false"]:hover {
+  background: none;
+}
+
+/*
+ * 当前项（创作）不加底色。
+ *
+ * 即梦的主导航项底色一律透明：当前分区是靠「对话」区里那一项的高亮来表达的，
+ * 导航本身不做选中态。这里保留 aria-current="page" 给读屏软件，
+ * 视觉上跟即梦一致。
+ */
+
+.create-sidebar__projects {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  margin-top: var(--space-md);
+}
+
+.create-sidebar__section {
+  padding: var(--space-xs) var(--space-xs) 5px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--color-create-text-mute);
+  font-size: var(--create-text-md);
+  font-weight: 400;
+  line-height: 1.25rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-sidebar__sub-action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: 2rem;
+  padding: 0 var(--space-2xs);
+  background: none;
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--color-create-text-mute);
+  font-size: var(--create-text-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.create-sidebar__sub-action:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-sidebar__conversation {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  height: 2.5rem;
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+}
+
+.create-sidebar__conversation-thumb {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-xs);
+  background: var(--color-create-block-hover);
+  color: var(--color-create-text-soft);
+}
+
+.create-sidebar__conversation-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 顶栏 ───────────────────────────────────────────────────────────── */
+
+/*
+ * 顶栏。
+ *
+ * 挂在整页上（即梦实测 `top-actions-host` 是 `position: absolute; right: 20px`
+ * 的整页级容器，z=100）。资产库抽屉开合时主区会变窄
+ * （即梦实测：主区 1707 → 1147.3），但**顶栏不动**——
+ * 它锚在整页右缘，不在内容列里。
+ *
+ * 本项目的抽屉是页面第三列，占整页右缘 320px。顶栏若仍贴整页右缘，
+ * 就会压在抽屉上方；所以抽屉打开时让开一段，抽屉收起时贴回整页右缘。
+ * 「顶栏位置不随主区宽度变化」这个语义与即梦一致。
+ */
+.create-topbar {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  transition: right 0.2s ease-out;
+}
+
+/* 抽屉打开时，顶栏让开抽屉宽度。 */
+.create-surface[data-drawer="open"] .create-topbar {
+  right: calc(20px + var(--size-create-drawer));
+}
+
+/*
+ * 图标组：搜索 / 筛选 / 资产库三颗按钮同处一个带描边的圆角容器里。
+ *
+ * 即梦把三颗按钮装进一个 36px 高、圆角 8、底 rgba(18,18,18,.6)、
+ * 1px 描边 rgba(255,255,255,.08) 的胶囊里（用户截图里红框标的就是它）。
+ * 分成三颗独立按钮会丢掉这一层「一组」的观感。
+ *
+ * 实测（2026-10-22）：容器底 rgba(18,18,18,.6)、内边距 4px 6px 4px 4px、
+ * gap 2px，并且带 `backdrop-filter: blur(20px)`——即梦这层胶囊是半透明
+ * 毛玻璃，底下的内容会透出来并被糊掉。
+ */
+.create-topbar__group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: 2.25rem;
+  padding: var(--space-2xs) 6px var(--space-2xs) var(--space-2xs);
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-control);
+  background: rgb(18 18 18 / 0.6);
+  backdrop-filter: blur(20px);
+}
+
+/*
+ * 搜索盒。
+ *
+ * 实测即梦（`container-hIYST1` + `collapsed-pFleT7` / `expanded-cF4Rao`）：
+ *   - 收起态：容器 28×28，input 宽 **4px**（被容器裁掉，只露出放大镜图标）；
+ *   - 展开态：容器 254×28，input 宽 226px；
+ *   - 容器宽度过渡 `width .2s cubic-bezier(.4,0,.2,1)`；
+ *   - input 常驻 DOM，展开/收起不重建节点。
+ * 容器从右往左生长（靠右对齐），所以展开时整组跟着左移，
+ * 后面的分隔线与筛选钮重新排布，而不是被盖住。
+ */
+.create-topbar__search-box {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  width: 1.75rem;
+  height: 1.75rem;
+  overflow: hidden;
+  transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.create-topbar__search-box[data-open="true"] {
+  width: 15.875rem;
+}
+
+.create-topbar__search-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 1.75rem;
+  height: 1.75rem;
+  color: var(--color-create-text-mute);
+  cursor: pointer;
+}
+
+.create-topbar__search-box input {
+  /*
+   * 收起态固定 4px（`flex-basis` 而非 `width`：容器 `justify-content: flex-end`
+   * 把它压到最小，被 `overflow: hidden` 裁掉，只露出放大镜）。
+   */
+  flex: 0 0 4px;
+  width: 4px;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--color-create-text);
+  font-family: inherit;
+  font-size: var(--create-text-sm);
+}
+
+/*
+ * 焦点环。
+ *
+ * 这里把 `outline: none` 写掉了输入框自己的焦点指示，而全局的
+ * `App.css` 里的 `input:focus-visible` 因为**源序更早**被压不住（`outline: none`
+ * 来自后加载的 features/create 样式表）→ 顶栏搜索框**完全没有焦点指示**，
+ * 键盘用户不知道自己在哪。
+ * 所以在这里显式补一道焦点环。
+ */
+.create-topbar__search-box input:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+}
+
+/*
+ * 展开态把输入框放开，占满容器里图标之外的空间
+ * （即梦实测：容器 254 − 图标 28 = 226）。
+ */
+.create-topbar__search-box[data-open="true"] input {
+  flex: 1 1 auto;
+  width: auto;
+  padding: 0 0 0 var(--space-2xs);
+  cursor: text;
+}
+
+.create-topbar__search-box input::placeholder {
+  color: rgb(229 233 250 / 0.4);
+}
+
+/*
+ * 竖分隔线：即梦在「搜索 | 筛选 | 资产库」之间各放一道
+ * 0.7×12 的短线（`.separator-mrCJU8`），把三颗按钮分成两段。
+ */
+.create-topbar__separator {
+  flex: 0 0 auto;
+  width: 0.7px;
+  height: 0.75rem;
+  background: var(--color-create-divider);
+}
+
+.create-topbar__icon-button {
+  display: grid;
+  place-items: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 6px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-pill);
+  color: var(--color-create-text-soft);
+  cursor: pointer;
+}
+
+.create-topbar__icon-button:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-topbar__icon-button--search {
+  border-radius: var(--radius-create-control);
+}
+
+.create-topbar__icon-button[data-active="true"] {
+  color: var(--color-create-brand);
+}
+
+.create-topbar__filter {
+  position: relative;
+}
+
+/*
+ * 筛选浮层的样式已经搬到 `CreateTopBar.css`。
+ *
+ * 原先这里有一份 `.create-topbar__filter-menu` / `.create-topbar__filter-item`
+ * （内联绝对定位、右对齐、三项），现在浮层改成走共享的
+ * `useCreateFloatingLayerAnchor` + portal 到 body，左对齐触发器、缝隙 12px，
+ * 区块按即梦的「日期 / 创作 / 分类 / 编辑 + 清空全部」重建。
+ * 这两条规则留着就是死样式，删掉。
+ */
+
+.create-topbar__provider {
+  display: flex;
+  align-items: center;
+  height: 1.75rem;
+  padding: 0 6px 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+}
+
+.create-topbar__provider-name {
+  color: var(--color-create-brand);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+
+/* ── 记录流 ─────────────────────────────────────────────────────────── */
+
+.create-records {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: var(--size-create-column);
+  margin: 0 auto;
+  padding: 0 var(--space-2xs);
+}
+
+.create-records--empty {
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: 50vh;
+  color: var(--color-create-text-mute);
+}
+
+.create-records__empty-title {
+  font-size: var(--text-lg);
+  font-weight: 500;
+  color: var(--color-create-text);
+}
+
+.create-records__empty-hint {
+  font-size: var(--create-text-sm);
+  color: var(--color-create-text-mute);
+}
+
+.create-records__group {
+  display: flex;
+  flex-direction: column;
+}
+
+.create-records__title {
+  margin: 0;
+  padding: 24px 0 0 6px;
+  color: var(--color-create-text);
+  font-family: var(--font-jimeng);
+  font-size: var(--create-text-lg);
+  font-weight: 700;
+  line-height: 2rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.create-record {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-md) 0 0;
+}
+
+.create-record__labels {
+  display: block;
+  padding-right: 2px;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+/*
+ * 提示词区（即梦 `.prompt-suffix-labels-j3vb4p`）。
+ *
+ * 默认只显示 **2 行**（48px），溢出时鼠标悬停展开成一块可滚动浮层：
+ * 底色 #262626、圆角 8px、投影 `0 4px 12px #0000000f, 0 2px 6px #00000005`、
+ * 最多 10 行（240px）、`overflow-y: auto`、z-index 10。
+ */
+.create-record__prompt-panel {
+  position: relative;
+  box-sizing: border-box;
+  max-height: 48px;
+  padding: 4px 6px;
+  overflow: hidden;
+}
+
+.create-record__prompt-content {
+  display: block;
+}
+
+.create-record__labels[data-hovered="true"] .create-record__prompt-panel {
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: #262626;
+  box-shadow:
+    0 4px 12px rgb(0 0 0 / 0.06),
+    0 2px 6px rgb(0 0 0 / 0.02);
+  z-index: 10;
+  scrollbar-width: auto;
+}
+
+/* 即梦的滚动条：16px 宽，滑块 6px 描边 + 17px 圆角。 */
+.create-record__labels[data-hovered="true"] .create-record__prompt-panel::-webkit-scrollbar {
+  width: 16px;
+}
+
+.create-record__labels[data-hovered="true"] .create-record__prompt-panel::-webkit-scrollbar-thumb {
+  border: 6px solid #262626;
+  border-radius: 17px;
+  background: #5a5a5a;
+}
+
+/*
+ * 「使用提示词」按钮（即梦 `.use-text-VBsrOt` + `.absolute-position-WbEPuP`）。
+ *
+ * 绝对定位在展开层的右下角：文字 rgba(255,255,255,.6)、14px/24px，
+ * 前面一枚 16×16 的图标。点它把这段提示词填进浮坞输入框。
+ */
+.create-record__use-prompt {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0 0 8px;
+  border: none;
+  background: #26282e;
+  color: rgb(255 255 255 / 0.6);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 24px;
+  cursor: pointer;
+}
+
+.create-record__use-prompt:hover {
+  color: rgb(255 255 255 / 0.85);
+}
+
+.create-record__use-prompt:active {
+  color: rgb(255 255 255 / 0.48);
+}
+
+.create-record__use-prompt svg {
+  width: 16px;
+  height: 16px;
+  margin-right: 2px;
+  position: relative;
+  top: 3.3px;
+}
+
+.create-record__prompt {
+  margin-right: var(--space-2xs);
+  min-width: 0;
+  color: var(--color-create-text);
+  font-size: var(--create-text-sm);
+  font-weight: 400;
+  line-height: 1.25rem;
+  user-select: text;
+}
+
+.create-record__label-group {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+}
+
+.create-record__label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-create-text-faint);
+  font-size: var(--create-text-sm);
+  font-weight: 400;
+  line-height: 1.5rem;
+  white-space: nowrap;
+}
+
+.create-record__label:not(:first-child)::before {
+  content: "";
+  display: inline-block;
+  width: 1px;
+  height: 10px;
+  margin: 0 var(--space-2xs);
+  background: var(--color-create-divider);
+}
+
+.create-record__label--detail {
+  cursor: pointer;
+}
+
+.create-record__label--detail:hover {
+  color: var(--color-create-text-soft);
+}
+
+.create-record__media[data-kind="image"] {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+}
+
+.create-record__media[data-kind="video"] {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.create-record__cell {
+  position: relative;
+  overflow: hidden;
+  background: var(--color-create-media);
+}
+
+.create-record__cell--image {
+  aspect-ratio: 1;
+}
+
+.create-record__cell--image img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  cursor: pointer;
+}
+
+/*
+ * 视频格。
+ *
+ * 即梦的**单条**视频占满整块媒体（`.video-card-xSqsby { width:100% }`，
+ * 活体实测 504px = 内容列宽），多条时才并排。所以只有一条时给 100%。
+ */
+.create-record__cell--video {
+  width: calc(50% - 2px);
+  aspect-ratio: 16 / 9;
+}
+
+.create-record__cell--video:only-child {
+  width: 100%;
+}
+
+.create-record__cell--video video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: pointer;
+}
+
+.create-record__cell--empty {
+  aspect-ratio: 1;
+}
+
+.create-record__skeleton {
+  aspect-ratio: 1;
+  background: linear-gradient(
+    90deg,
+    var(--color-create-block) 0%,
+    var(--color-create-block-hover) 50%,
+    var(--color-create-block) 100%
+  );
+  background-size: 200% 100%;
+  animation: create-skeleton 1.4s var(--ease-in-out) infinite;
+}
+
+@keyframes create-skeleton {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.create-record__status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  color: var(--color-create-text-mute);
+  font-size: var(--text-xs);
+}
+
+.create-record__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding-top: var(--space-3xs);
+}
+
+.create-record__action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: 2.25rem;
+  padding: var(--space-2xs) 14px var(--space-2xs) 12px;
+  background: var(--color-create-block);
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+
+.create-record__action:hover {
+  background: var(--color-create-block-hover);
+}
+
+.create-record__action:active {
+  background: var(--color-create-block-press);
+}
+
+.create-record__action--icon {
+  width: 2.25rem;
+  padding: 0;
+  justify-content: center;
+}
+
+.create-records__back-to-bottom {
+  align-self: center;
+  margin: var(--space-md) 0;
+  padding: var(--space-3xs) var(--space-sm);
+  background: var(--color-create-block);
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-soft);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+/* ── 浮坞 ───────────────────────────────────────────────────────────── */
+
+.create-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: var(--z-sticky);
+  width: 100%;
+  /* 即梦的字体栈（浮坞要能独立渲染也保持原站字形）。 */
+  font-family: var(--font-jimeng);
+  max-width: var(--size-create-dock);
+  margin: 0 auto;
+  padding: 0 var(--space-2xs) var(--space-lg);
+}
+
+.create-dock__surface {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-dock);
+  background: linear-gradient(
+    180deg,
+    var(--color-dock-surface-start) 0,
+    var(--color-dock-surface-end) 106.67%
+  );
+  backdrop-filter: blur(80px);
+  box-shadow: var(--shadow-create-input-hover);
+}
+
+.create-dock__content {
+  display: flex;
+  gap: var(--space-sm);
+  min-height: 4.75rem;
+}
+
+.create-dock__references {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2xs);
+  flex: 0 0 auto;
+  min-width: 4rem;
+  max-width: 12rem;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.create-dock__references::-webkit-scrollbar {
+  display: none;
+}
+
+.create-reference {
+  position: relative;
+  flex: 0 0 auto;
+  width: 2.25rem;
+  height: 3rem;
+}
+
+.create-reference__media {
+  display: block;
+  width: 2.25rem;
+  height: 3rem;
+  border-radius: var(--radius-xs);
+  object-fit: cover;
+  background: var(--color-create-media);
+}
+
+.create-reference__media--empty {
+  display: grid;
+  place-items: center;
+  color: var(--color-create-text-mute);
+}
+
+.create-reference__remove {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  display: grid;
+  place-items: center;
+  width: 1rem;
+  height: 1rem;
+  padding: 0;
+  background: var(--color-create-popover);
+  border: none;
+  border-radius: 50%;
+  color: var(--color-create-text-soft);
+  cursor: pointer;
+}
+
+.create-reference-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  flex: 0 0 auto;
+  width: 3.25rem;
+  height: 3.25rem;
+  padding: var(--space-3xs);
+  background: var(--color-create-block);
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-mute);
+  cursor: pointer;
+  transform: rotate(-8deg);
+  transition: background var(--dur-micro) var(--ease-out);
+}
+
+.create-reference-add:hover {
+  background: var(--color-create-block-hover);
+  color: var(--color-create-text-soft);
+}
+
+.create-reference-add__label {
+  font-size: var(--text-2xs);
+  line-height: 1;
+  transform: rotate(8deg);
+}
+
+.create-dock__prompt {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.create-dock__prompt textarea {
+  width: 100%;
+  min-height: 4.75rem;
+  padding: 0 4px 0 0;
+  background: none;
+  border: none;
+  outline: none;
+  resize: none;
+  color: var(--color-create-text);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--create-text-sm);
+  line-height: 1.714rem;
+}
+
+.create-dock__placeholder {
+  position: absolute;
+  inset: 0;
+  padding-right: 4px;
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-sm);
+  line-height: 1.714rem;
+  pointer-events: none;
+}
+
+.create-dock__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--color-create-text-soft);
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.create-dock__chip:hover {
+  color: var(--color-create-text);
+}
+
+/*
+ * 芯片里的文字。
+ *
+ * 「参考内容」是芯片里的可点文字（整块芯片都可点），字色跟芯片一致；
+ * 单独一个类是为了让长文案能收缩而不是把占位文案整段顶歪。
+ */
+.create-dock__chip-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 资产库抽屉 ─────────────────────────────────────────────────────── */
+
+/*
+ * 抽屉是页面网格里的第三列（不是浮层）。
+ *
+ * 即梦的资产库面板就是 flex 兄弟节点：抽屉打开时内容列会变窄，
+ * 底部的提交钮不会被压在抽屉底下。用 position:fixed 的浮层做，
+ * 浮坞右端会被挡住——这是「面板开着就发不了」的直接原因。
+ */
+.create-assets {
+  position: relative;
+  z-index: var(--z-drawer);
+  display: flex;
+  flex-direction: column;
+  width: var(--size-create-drawer);
+  height: 100%;
+  background: var(--color-create-drawer);
+  border-left: 1px solid var(--color-create-edge);
+  animation: create-drawer-in var(--dur-short) var(--ease-out);
+}
+
+/*
+ * 抽屉收起时不能只靠 `hidden` 属性：
+ * `.create-assets` 自己的 `display: flex` 优先级高于 UA 样式表里的
+ * `[hidden] { display: none }`，不补这一条，抽屉会一直挂在页面右侧。
+ */
+.create-assets[hidden] {
+  display: none;
+}
+
+@keyframes create-drawer-in {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.create-assets__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+  padding: 20px 16px 0;
+}
+
+.create-assets__tabs {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--space-3xs);
+  min-width: 0;
+}
+
+.create-assets__tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.25rem;
+  padding: 0 10px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-md);
+  font-weight: 500;
+  line-height: 1.375rem;
+  cursor: pointer;
+}
+
+.create-assets__tab--active {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-assets__close {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text);
+  cursor: pointer;
+}
+
+.create-assets__close:hover {
+  background: var(--color-create-block);
+}
+
+.create-assets__search-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: var(--space-sm) 16px 0;
+}
+
+.create-assets__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 1.75rem;
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: var(--color-create-text-mute);
+}
+
+.create-assets__search input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--color-create-text);
+  font-family: inherit;
+  font-size: var(--create-text-md);
+}
+
+.create-assets__search input::placeholder {
+  color: var(--color-create-text-ghost);
+}
+
+.create-assets__group {
+  flex: 0 0 auto;
+  max-width: 9rem;
+}
+
+.create-assets__categories {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: var(--space-sm) 16px 0;
+}
+
+.create-assets__category {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.25rem;
+  padding: 9.5px var(--space-xs);
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-md);
+  font-weight: 500;
+  line-height: 1.375rem;
+  cursor: pointer;
+}
+
+.create-assets__category[data-active="true"] {
+  color: var(--color-create-text);
+}
+
+.create-assets__category[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  width: 1rem;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-create-text);
+  transform: translateX(-50%);
+}
+
+.create-assets__sources {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: var(--space-sm) 16px 0;
+}
+
+.create-assets__source {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 2.25rem;
+  padding: var(--space-xs) var(--space-md);
+  background: none;
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text-soft);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.25rem;
+  cursor: pointer;
+}
+
+.create-assets__source[data-active="true"] {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-assets__source:disabled {
+  color: var(--color-create-text-off);
+  cursor: not-allowed;
+}
+
+.create-assets__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  /*
+   * 只声明 overflow-y 时，CSS 规范会把 overflow-x 从 visible 计算成 auto
+   * （即「一个轴非 visible 时另一个轴的 visible 也算 auto」）。
+   * 标题溢出到邻列时，横向滚动条会把整条素材名横向拖出来。
+   * 这里显式写 hidden，让溢出被裁掉而不是变成横向滚动。
+   */
+  overflow-x: hidden;
+  padding: var(--space-sm) 16px var(--space-lg);
+}
+
+/*
+ * 4 列素材网格。
+ *
+ * `minmax(0, 1fr)` 而不是 `1fr`：`1fr` 等价于 `minmax(auto, 1fr)`，
+ * auto 最小尺寸取内容的 min-content 宽度。长文件名（nowrap）的
+ * min-content 就是整串名字，会把轨道撑得比容器还宽。
+ * minmax(0, 1fr) 把轨道下限钉死为 0，溢出交给标题自己裁。
+ */
+.create-assets__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2xs);
+}
+
+/*
+ * 素材格。
+ *
+ * 必须显式写 `align-items: stretch`：这是 `<button>`，浏览器 UA 样式表给
+ * button 设了 `align-items: flex-start`，交叉轴不 stretch，标题的宽度会
+ * 退化成 max-content（整串文件名），直接画到隔壁列上——用户看到的就是
+ * 素材名互相压字。
+ * 顺带把 `min-width: 0` 也钉上，防止网格项被内容顶开。
+ */
+.create-assets__tile {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-3xs);
+  min-width: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.create-assets__thumb {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+  color: var(--color-create-text-mute);
+}
+
+.create-assets__thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.create-assets__tile[data-picked="true"] .create-assets__thumb {
+  outline: 2px solid var(--color-create-brand);
+  outline-offset: -2px;
+}
+
+.create-assets__order {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  display: grid;
+  place-items: center;
+  min-width: 1rem;
+  height: 1rem;
+  padding: 0 3px;
+  border-radius: var(--radius-round);
+  background: var(--color-create-brand);
+  color: var(--color-create-canvas);
+  font-size: var(--text-2xs);
+  font-weight: 500;
+}
+
+/*
+ * 素材名。
+ *
+ * `min-width: 0` 与 `max-width: 100%` 是省略号生效的前提：
+ * flex 子项的默认 `min-width: auto` 会让它不肯缩到内容宽度以下，
+ * 于是 overflow:hidden 裁不掉、text-overflow:ellipsis 也不出现。
+ */
+.create-assets__name {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--color-create-text-soft);
+  font-size: var(--create-text-xs);
+  line-height: 1.25rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.create-assets__tile--skeleton {
+  aspect-ratio: 1;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-block);
+}
+
+.create-assets__empty {
+  padding: var(--space-xl) 0;
+  color: var(--color-create-text-mute);
+  font-size: var(--create-text-sm);
+  text-align: center;
+}
+
+.create-assets__count {
+  padding-top: var(--space-sm);
+  color: var(--color-create-text-mute);
+  font-size: var(--text-2xs);
+  text-align: center;
+}
+
+.create-assets__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2xs);
+  padding: var(--space-sm) 16px;
+  border-top: 1px solid var(--color-create-edge);
+}
+
+.create-assets__picked-count {
+  color: var(--color-create-text-soft);
+  font-size: var(--text-xs);
+}
+
+.create-assets__confirm {
+  height: 2rem;
+  padding: 0 var(--space-sm);
+  background: var(--color-create-brand);
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-canvas);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.create-assets__confirm:disabled {
+  background: var(--color-create-block);
+  color: var(--color-create-text-off);
+  cursor: not-allowed;
+}
+
+/* ── 产物预览层 ─────────────────────────────────────────────────────── */
+
+.create-preview {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+}
+
+.create-preview__backdrop {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  background: rgb(0 0 0 / 0.72);
+  border: none;
+  cursor: pointer;
+}
+
+.create-preview__stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  max-width: min(90vw, 64rem);
+  max-height: 86vh;
+}
+
+.create-preview__media {
+  max-width: 100%;
+  max-height: 86vh;
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-media);
+  object-fit: contain;
+}
+
+.create-preview__close {
+  position: absolute;
+  top: var(--space-lg);
+  right: var(--space-lg);
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  background: var(--color-create-block);
+  border: none;
+  border-radius: var(--radius-create-control);
+  color: var(--color-create-text);
+  cursor: pointer;
+}
+
+.create-preview__close:hover {
+  background: var(--color-create-block-hover);
+}
+
+/* 设置入口：即梦那一版没有这一颗按钮，本项目必须有——
+ * 模型列表为空时用户无处可去，入口不能藏。 */
+.create-settings {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: var(--z-base);
+  height: 1.75rem;
+  padding: 0 var(--space-2xs);
+  background: var(--color-create-block);
+  border: none;
+  border-radius: var(--radius-xs);
+  color: var(--color-create-text-soft);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.create-settings:hover {
+  background: var(--color-create-block-hover);
+  color: var(--color-create-text);
+}
+
+/* ── 参数工具条 ───────────────────────────────────────────────────── */
+
+.create-toolbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  height: 32px;
+}
+
+/*
+ * 左半区：参数多时横向滚动，不换行、不把右侧动作挤走。
+ * 46px 高是因为内容区上下各留 7px，让 32px 的控件有呼吸位。
+ */
+.create-toolbar__settings {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 46px;
+  padding: 7px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+/*
+ * 边缘渐隐（即梦 `.content-pSzNV3` 的 mask 口径）。
+ *
+ * 即梦按「还能往哪边滚」给滚动区挂类，再用 mask-image 做渐隐：
+ *   · 只有左侧可滚：linear-gradient(90deg, transparent, #000 32px)
+ *   · 只有右侧可滚：linear-gradient(270deg, transparent, #000 32px)
+ *   · 两边都可滚：linear-gradient(90deg, transparent 32px,
+ *                  #000 calc(100% - 64px), transparent calc(100% - 32px))
+ * hover 工具条时渐隐带整体向内收 32px，边缘留一条实透的带，
+ * 同时两枚滚动按钮浮上来。
+ */
+.create-toolbar__settings[data-scroll-left="true"]:not([data-scroll-right="true"]) {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px);
+  mask-image: linear-gradient(90deg, transparent, #000 32px);
+}
+
+.create-toolbar__settings[data-scroll-right="true"]:not([data-scroll-left="true"]) {
+  -webkit-mask-image: linear-gradient(270deg, transparent, #000 32px);
+  mask-image: linear-gradient(270deg, transparent, #000 32px);
+}
+
+.create-toolbar__settings[data-scroll-left="true"][data-scroll-right="true"] {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 32px,
+    #000 calc(100% - 64px),
+    transparent calc(100% - 32px)
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 32px,
+    #000 calc(100% - 64px),
+    transparent calc(100% - 32px)
+  );
+}
+
+.create-toolbar:hover
+  .create-toolbar__settings[data-scroll-left="true"]:not([data-scroll-right="true"]) {
+  -webkit-mask-image: linear-gradient(90deg, transparent 32px, #000 64px);
+  mask-image: linear-gradient(90deg, transparent 32px, #000 64px);
+}
+
+.create-toolbar:hover
+  .create-toolbar__settings[data-scroll-right="true"]:not([data-scroll-left="true"]) {
+  -webkit-mask-image: linear-gradient(270deg, transparent 32px, #000 64px);
+  mask-image: linear-gradient(270deg, transparent 32px, #000 64px);
+}
+
+.create-toolbar:hover .create-toolbar__settings[data-scroll-left="true"][data-scroll-right="true"] {
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 32px,
+    #000 64px,
+    #000 calc(100% - 64px),
+    transparent calc(100% - 32px)
+  );
+  mask-image: linear-gradient(
+    90deg,
+    transparent 32px,
+    #000 64px,
+    #000 calc(100% - 64px),
+    transparent calc(100% - 32px)
+  );
+}
+
+.create-toolbar__settings::-webkit-scrollbar {
+  display: none;
+}
+
+/* 右半区：动作区不参与收缩。 */
+/*
+ * 工具条按钮的字体：Montserrat 打头。
+ *
+ * 即梦实测 `.toolbar-button-J5Ou4K` 的 font-family 是
+ * `Montserrat, "CapCut Sans", "PingFang SC", …`——拉丁数字与字母用
+ * Montserrat，字面宽度更匀，和原站截图里的观感一致。
+ */
+.create-select,
+.create-param-button,
+.create-toolbar__tool {
+  font-family: var(--font-jimeng-montserrat);
+}
+
+.create-toolbar__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
+/*
+ * 参数放不下时的滚动浮层与按钮（即梦 `.scroll-button-container`）。
+ *
+ * 即梦实测（CSS 分包 `css/async/420`）：
+ *   .scroll-button-container { display:flex; align-items:center; height:100%;
+ *                             position:absolute; top:0; width:64px; z-index:9 }
+ *   .scroll-button-container .scroll-button { opacity:0 }
+ *   .container:hover .scroll-button { opacity:1 }
+ * 两块浮层分别贴在参数区左右缘，按钮默认透明、hover 工具条才显形。
+ */
+.create-toolbar__scroll-zone {
+  position: absolute;
+  top: 0;
+  z-index: 9;
+  display: flex;
+  align-items: center;
+  width: 64px;
+  height: 100%;
+  pointer-events: none;
+}
+
+.create-toolbar__scroll-zone--left {
+  left: 0;
+  justify-content: flex-start;
+}
+
+.create-toolbar__scroll-zone--right {
+  right: 0;
+  justify-content: flex-end;
+}
+
+.create-toolbar__scroll {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: var(--size-control-small);
+  height: var(--size-control-small);
+  margin: 0 var(--space-3xs);
+  border: none;
+  border-radius: 6px;
+  background: var(--color-dock-tile);
+  color: var(--color-text);
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.create-toolbar:hover .create-toolbar__scroll {
+  opacity: 1;
+}
+
+.create-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  height: var(--size-control-small);
+  padding: 0 var(--space-xs);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  /*
+   * 即梦的下拉（`lv-select`）用的是 **Montserrat 打头**的字体栈
+   * （实测：Montserrat, "CapCut Sans", "PingFang SC, …），
+   * 且字号是 **14px**（创作类型按钮 117 宽、技能 60 宽，字号都是 14px）；
+   * 普通按钮（`lv-btn`，如「自动」）才是 12px。
+   * 我们之前一律 12px + CapCut 打头，下拉里的字和数字就都比原站小一档。
+   */
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--create-text-sm);
+  font-weight: 450;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.create-select:hover {
+  background: var(--color-dock-tile);
+  color: var(--color-text);
+}
+
+/*
+ * 没有候选项时的禁用态。
+ *
+ * 之前空选项直接不渲染这个按钮（return null），浮坞按钮会凭空消失、整条工具条
+ * 跟着跳动。现在渲染成禁用按钮并写明「暂无可选项」，位置不跳、原因可见。
+ */
+.create-select--empty,
+.create-select--empty:hover {
+  color: var(--color-text-4);
+  cursor: not-allowed;
+  background: transparent;
+}
+
+/* 创作类型是这一排里唯一带品牌色的项（对应即梦的 #009EFA）。 */
+.create-select--primary {
+  color: var(--color-brand-accent);
+  font-weight: 450;
+}
+
+.create-select--primary:hover {
+  color: var(--color-brand-accent);
+  background: var(--color-dock-tile);
+}
+
+.create-select__icon {
+  flex-shrink: 0;
+  color: var(--color-text-3);
+}
+
+/* 创作类型的模式图标：与文字同色（创作类型是品牌蓝，图标跟着变蓝）。 */
+.create-select__mode-icon {
+  flex-shrink: 0;
+  color: currentColor;
+  /*
+   * 即梦的创作类型图标实测渲染 **16×16**（svg 属性写 1em，但实际盒子 16）。
+   * 写死 16 别跟着字号缩——否则比原站大一档。
+   */
+  width: 1rem;
+  height: 1rem;
+}
+
+.create-select__label {
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 下拉浮层：挂在 document.body 上，按视口定位。
+   不能留在工具条里——工具条是横向滚动容器（overflow-x: auto），
+   浮层朝上弹出时会被祖先裁掉，用户看到的就是「点了没反应」。
+
+   外观对齐即梦的 `lv-select-popup`（实测 2026-10-22）：
+   内边距 4px 0 4px 4px、圆角 12、底 #262626、
+   描边 0.67px rgba(204,221,255,.08)、投影 rgba(0,0,0,.24) 0 8px 56px。 */
+/*
+ * 浮层统一挂即梦的字体栈。
+ *
+ * 这些浮层都 portal 到 `document.body`，**不在** `.create-surface` 里面，
+ * 继承不到整页的字体——不单独写就会回落到全局的 `--font-body`
+ * （IBM Plex Sans），字面宽度与灰度都和原站不同，一眼能看出来。
+ */
+.create-select__popover,
+.create-popover,
+.create-agent-preferences,
+.create-agent-skill-popup,
+.create-agent-subject-popup,
+.create-record-detail,
+.create-record-menu,
+.create-topbar__filter-popover {
+  font-family: var(--font-jimeng);
+  /*
+   * 浮层打开时会把焦点收进来（键盘用户要能直接用上下键走条目），
+   * 浏览器会因此在浮层上画一圈白色 focus 描边——即梦没有这圈白边。
+   */
+  outline: none;
+}
+.create-select__popover {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  /*
+   * 即梦源码 `.lv-select-popup{box-sizing:border-box}`：宽度是**含内边距与
+   * 描边**的整宽（创作类型浮层实测 200）。不写这一条就是 content-box，
+   * 200 会变成 206（200 + 4px 左内边距 + 2px 描边）。
+   */
+  box-sizing: border-box;
+  min-width: 10rem;
+  max-height: 18rem;
+  overflow-y: auto;
+  padding: 4px 0 4px 4px;
+  border: var(--border-create-popup);
+  border-radius: var(--radius-create-popup);
+  background: var(--color-create-popover);
+  box-shadow: var(--shadow-create-popup);
+  overscroll-behavior: contain;
+}
+
+/*
+ * 宽版浮层（即梦的**模型**下拉）。
+ *
+ * 源码：`.trigger-wc2vGe.lv-trigger .lv-select-popup{border-radius:16px}` +
+ * `.trigger-wc2vGe.lv-trigger .lv-select-popup .lv-select-option{border-radius:12px}`，
+ * 模型下拉的触发器宽 440 → 浮层也是 440。
+ * 创作类型下拉保持 200 / 圆角 12。
+ */
+.create-select__popover--wide {
+  border-radius: var(--radius-create-preferences);
+}
+
+.create-select__popover--wide .create-select__option {
+  border-radius: var(--radius-create-control);
+}
+
+/*
+ * 下拉选项（即梦 `.lv-select-option` / `.select-option-label-content`）。
+ *
+ * 源码口径（chunk `420.00b933f54c.css` + `dreamina-commerce-1`）：
+ *   .lv-select-option { border-radius:6px; font-size:var(--lvv-size-body-2);
+ *                        font-weight:500; line-height:36px; overflow:hidden;
+ *                        padding:0 28px 0 8px; text-overflow:ellipsis;
+ *                        white-space:nowrap }
+ *   .trigger-LPRxSr .lv-select-popup .lv-select-option { min-width:0; padding:0 12px }
+ *   .trigger-LPRxSr .lv-select-popup .lv-select-option:not(:first-child) { margin-top:4px }
+ *   .select-option-label-content { font-size:13px; font-weight:400; gap:8px }
+ *
+ * 注意 **可见文字是 13px/400**（li 本身继承 14/500，但 label-content 覆盖成
+ * 13/400）——上一版文档记成「14/36 字重 500」是照抄了 li 的继承值。
+ * 首项没有上边距（`:not(:first-child)` 才加 4px）。
+ */
+.create-select__option {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-height: 2.25rem;
+  margin-top: 4px;
+  padding: 0 var(--space-sm);
+  border: none;
+  border-radius: var(--radius-create-agentic-option);
+  background: transparent;
+  color: var(--color-create-text);
+  font: inherit;
+  font-size: var(--create-text-md);
+  /*
+   * 行高按即梦的 `line-height:36px` 写死（px，不是倍数）——
+   * 写成倍数会随字号变成 33.4px，行高就对不上原站了。
+   */
+  line-height: 36px;
+  font-weight: 400;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.1s linear;
+}
+
+/*
+ * 首项没有上边距。
+ *
+ * 即梦源码：`.lv-select-option-wrapper:not(:first-child){margin-top:4px}`。
+ *
+ * 注意本项目的浮层里**标题是第一个子节点**，选项从第二个子节点开始。
+ * 这里不能用 `:first-of-type`：选项元素曾是 `<button>`、标题是 `<div>`，
+ * `:first-of-type` 才能区分两者；选项按 a11y 规范改成 `<div role="option">`
+ * 之后，类型相同，`:first-of-type` 会误匹配到标题行、导致首个选项丢掉 4px 边距。
+ * 改用「前面没有同类兄弟」的写法，与元素类型无关。
+ */
+.create-select__option:not(.create-select__option ~ .create-select__option) {
+  margin-top: 0;
+}
+
+/*
+ * 选项里的标签文字。
+ *
+ * 即梦源码：`.select-option-label-text{ font-size:13px; overflow:hidden;
+ * text-overflow:ellipsis; white-space:nowrap }`——标签过长时省略，
+ * 不换行（换行会把 36px 的行高顶开）。
+ */
+.create-select__option-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 键盘光标项（↑↓ 移动的那一项）。
+ *
+ * 只是底色一档变化，**不表示已选中**。
+ */
+.create-select__option.is-active {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+/*
+ * 当前选中项。
+ *
+ * 必须与「键盘光标项」区分开：之前两者用**完全相同**的底色与文字色，
+ * 而模型下拉默认不渲染勾（showCheck=false）→ 打开下拉后分不清哪个是当前模型，
+ * 点完一格后旧选中项与新高亮项长得一模一样。
+ * 这里用品牌色文字 + 左侧强调条，与画布侧 CanvasSelect 的口径一致。
+ */
+.create-select__option[aria-selected="true"] {
+  background: var(--color-create-block);
+  color: var(--color-brand-accent);
+  box-shadow: inset var(--rule-active) 0 0 0 var(--color-brand-accent);
+}
+
+/* 模型项的副标题（即梦的「卖点」行）：比名称暗一档，说明这个模型是什么来路。
+   实测即梦：12/20、色 rgba(255,255,255,.35)。 */
+.create-select__option-description {
+  color: var(--color-create-text-ghost);
+  font-size: var(--create-text-xs);
+  line-height: 1.667;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 18rem;
+}
+
+/* 次级按钮：比例 / 分辨率 / 数量 / 时长共用一个外观（透明底）。 */
+.create-param-button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  height: var(--size-control-small);
+  padding: 0 var(--space-xs);
+  border: none;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 450;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/*
+ * 按钮里的分段与分隔点（即梦 `.button-text-qv39K4` + `.divider-OobeV4`）。
+ *
+ * 实测：参数按钮内部是「智能比例」+ 3×3 圆点 + 「2K」，
+ * 圆点底 rgba(255,255,255,.2)、左右各 6px（即梦实测 `.divider-OobeV4`
+ * 的 rect 是 3×3、background rgba(255,255,255,0.2)、margin 0 6px）。
+ */
+.create-param-button__part {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.create-param-button__divider {
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  margin: 0 6px;
+  border-radius: 50%;
+  background: var(--color-create-divider);
+}
+
+.create-param-button {
+  transition:
+    background var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+/*
+ * 即梦给「AI 能力」挂的那枚蓝色 ✦（截图里是「智能比例 · 2K ✦」）。
+ *
+ * 12×12，紧跟参数摘要末尾。
+ */
+.create-param-button__ai {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  margin-left: 4px;
+  color: #2b6cf6;
+}
+
+/*
+ * 提交键左边的消耗位（即梦 `.credit-price-display`）。
+ *
+ * 实测：图标 16×16（蓝色四角星）+ 文字 12px/12px Montserrat 500、
+ * 色 rgba(255,255,255,.6)，整块 flex、gap 4。
+ */
+.create-toolbar__cost {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: rgb(255 255 255 / 0.6);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 12px;
+  cursor: pointer;
+}
+
+.create-toolbar__cost:hover {
+  color: rgb(255 255 255 / 0.85);
+}
+
+.create-toolbar__cost-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: #2b6cf6;
+}
+
+.create-toolbar__cost-value {
+  white-space: nowrap;
+}
+
+.create-param-button:hover {
+  background: var(--color-dock-tile);
+  color: var(--color-text);
+}
+
+/*
+ * 工具条里的纯图标钮（即梦 `.toolbar-button-J5Ou4K` 的 icon-only 形态）。
+ *
+ * 实测：普通浮坞的「文字效果增强」「@主体」都是 32×32 的方钮，
+ * 位于参数滚动区（`.content-pSzNV3`）内，不在右侧动作区。
+ */
+.create-toolbar__tool {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 2rem;
+  height: 2rem;
+  padding: var(--space-2xs);
+  border: none;
+  border-radius: var(--radius-create-control);
+  background: transparent;
+  color: var(--color-create-text-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.create-toolbar__tool:hover {
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+/* 分隔符：3px 圆点。比竖线安静，密度高时不会把一排控件切碎。 */
+.create-divider {
+  flex-shrink: 0;
+  width: 3px;
+  height: 3px;
+  margin: 0 var(--space-xs);
+  border-radius: var(--radius-round);
+  background: var(--color-rule);
+}
+
+/* ── 提交按钮 ─────────────────────────────────────────────────────── */
+
+/*
+ * 圆形提交钮：32×32。
+ *
+ * 激活态是反相的纯白底 + 深墨字；禁用态是半透明白底 + 20% 白字。
+ * 即禁用态也不是「灰掉」——半透明白仍然指向「这里有个按钮」，
+ * 灰掉则容易被读成一块装饰。
+ */
+.create-submit {
+  display: grid;
+  place-items: center;
+  width: var(--size-control-small);
+  height: var(--size-control-small);
+  border: none;
+  border-radius: var(--radius-round);
+  background: var(--color-text);
+  color: var(--color-bg-base);
+  cursor: pointer;
+  transition:
+    background var(--dur-micro) var(--ease-out),
+    transform var(--dur-micro) var(--ease-out);
+}
+
+.create-submit:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.create-submit:active:not(:disabled) {
+  transform: scale(0.94);
+}
+
+.create-submit:disabled {
+  background: rgb(255 255 255 / 0.16);
+  color: rgb(255 255 255 / 0.2);
+  cursor: not-allowed;
+}
+
+/* 收起态浮动提交钮：坞收起时浮在右下角（拇指区）。 */
+.create-submit--floating {
+  position: absolute;
+  right: var(--space-md);
+  bottom: var(--space-md);
+  z-index: var(--z-raised);
+  visibility: hidden;
+  transform: translateY(-1px);
+  transition:
+    transform var(--dur-long) var(--ease-out),
+    visibility var(--dur-long) var(--ease-out);
+}
+
+.create-submit--floating[data-visible="true"] {
+  visibility: visible;
+  transform: translateY(0);
+}
+
+/* ── 参数弹层 ─────────────────────────────────────────────────────── */
+
+/* 参数弹层：同样挂在 document.body 上（原因同下拉浮层）。 */
+.create-popover {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 16rem;
+  padding: var(--space-md);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  background: var(--color-surface-2);
+  box-shadow: var(--shadow-floating);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.create-popover__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.create-popover__title {
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+
+/* 一行放同一个参数的候选项；不同参数各占一行。 */
+.create-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+}
+
+.create-radio-group__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+/*
+ * 「生成数量」的数字磁贴。
+ *
+ * 即梦实测（图片生成档）：数量浮层 320×97 / 圆角 16 / 内边距 16，
+ * 里面是一排 `radiogroup`（287×40），8 个磁贴每个 34×36、间距 1px，
+ * **没有分组标题**（标题只在比例/分辨率那类分组里）。
+ */
+.create-popover__group--tiles {
+  gap: 0;
+}
+
+.create-popover__group--tiles .create-radio-group__row {
+  gap: 1px;
+  flex-wrap: nowrap;
+}
+
+.create-radio--tile {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 36px;
+  padding: 0;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.create-radio--tile[aria-checked="true"] {
+  border-color: var(--color-create-brand);
+  background: var(--color-create-block);
+  color: var(--color-create-text);
+}
+
+.create-radio {
+  padding: var(--space-3xs) var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-2);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition:
+    background var(--dur-short) var(--ease-out),
+    color var(--dur-short) var(--ease-out);
+}
+
+.create-radio:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+.create-radio[aria-checked="true"] {
+  background: var(--color-accent-soft);
+  border-color: var(--color-text-3);
+  color: var(--color-text);
+}
+
+/* 当前取值不在该模型的候选范围内：只展示，不可点。 */
+.create-radio--current {
+  color: var(--color-text-3);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+/* ── 提示条 ───────────────────────────────────────────────────────── */
+
+.create-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+
+.create-hint--busy {
+  color: var(--color-text-2);
+}
+
+@media (max-width: 900px) {
+  /* 窄屏：侧栏收成图标条（等价于手动收起态）。 */
+  .create-sidebar {
+    width: 4rem;
+  }
+
+  .create-sidebar__wordmark,
+  .create-sidebar__nav-label,
+  .create-sidebar__section,
+  .create-sidebar__sub-action,
+  .create-sidebar__conversation-name {
+    display: none;
+  }
+
+  .create-sidebar__nav-item {
+    justify-content: center;
+    padding: 0;
+  }
+}

@@ -1,0 +1,173 @@
+/*
+ * 节点卡与连线的原站对齐（liblib.tv 画布）。
+ *
+ * 证据：2026-10-22 登录态活体实测（1707×898 视口，DPR 1.5）。
+ * 取值全部来自原站计算样式 / SVG 呈现属性，括号内是原站令牌名。
+ *
+ * 下面的字面值待替换为 tokens.css 的令牌（令牌名见交付说明）：
+ *   --canvas-edge / --canvas-edge-hover / --canvas-edge-selected
+ *   --canvas-handle / --canvas-handle-bg / --canvas-handle-icon
+ */
+
+/* ══════════════════════════════════════════════════════════════
+   连线
+   原站结构（实测）：
+     <g class="react-flow__edge …">
+       <path fill="none" stroke="transparent" stroke-width="20"/>   ← 20px 命中区
+       <path fill="none" stroke="var(--canvas-edge)" stroke-width="2"/> ← 可见线
+       <g class="edge-flow-segments" stroke="rgb(100,180,255)">…</g>   ← 流动高亮
+     </g>
+   ══════════════════════════════════════════════════════════════ */
+
+/* 可见连线：常态 #86909c / 2px 实线（原站所有连线同色，不按来源类型分色）。 */
+.react-flow__edge .canvas-flow-edge__line {
+  fill: none;
+  stroke: var(--canvas-edge);
+  stroke-width: 2;
+  stroke-dasharray: none;
+  pointer-events: none;
+}
+
+/* 指针悬停：#c0c8d0（原站 --canvas-edge-hover）。 */
+.react-flow__edge:hover .canvas-flow-edge__line {
+  stroke: var(--canvas-edge-hover);
+}
+
+/* 选中：#e0e4e8（原站 --canvas-edge-selected）。 */
+.react-flow__edge.selected .canvas-flow-edge__line {
+  stroke: var(--canvas-edge-selected);
+}
+
+/*
+ * 流动高亮：原站用 stroke-dashoffset 0 → -300px / 3s 线性循环。
+ * 描边色原站是 rgb(100,180,255)（#64b4ff），待补令牌 --canvas-edge-flow。
+ */
+.canvas-flow-edge__flow {
+  fill: none;
+  stroke: #64b4ff;
+  pointer-events: none;
+  animation: canvas-flow-edge-travel 3s linear infinite;
+}
+
+@keyframes canvas-flow-edge-travel {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -300px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-flow-edge__flow {
+    animation: none;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   连接手柄
+   原站实测：React Flow 手柄本体 0×0（不可见），内含
+     - 80×80 的圆形命中区（透明）
+     - 20×20 的可见旋钮（圆 + 描边 + 十字），默认 opacity 0，
+       节点悬停/选中时 opacity 1；旋钮中心在节点边缘外侧 15px。
+   ══════════════════════════════════════════════════════════════ */
+
+.react-flow__node .canvas-flow-handle {
+  width: 0;
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  cursor: crosshair;
+  pointer-events: auto;
+  z-index: 20;
+}
+
+.react-flow__node .canvas-flow-handle--target {
+  top: 50%;
+  left: 0;
+  transform: translateY(-50%);
+}
+
+.react-flow__node .canvas-flow-handle--source {
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+}
+
+/* 80×80 圆形命中区：贴着节点左右边缘中点，向节点外侧展开。 */
+.canvas-flow-handle__hit {
+  position: absolute;
+  top: 50%;
+  display: flex;
+  width: 80px;
+  height: 80px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: transparent;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.react-flow__node .canvas-flow-handle--target .canvas-flow-handle__hit {
+  right: 0;
+}
+
+.react-flow__node .canvas-flow-handle--source .canvas-flow-handle__hit {
+  left: 0;
+}
+
+/* 可见旋钮：20×20，圆心在节点边缘外侧 15px。 */
+.canvas-flow-handle__knob {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 150ms ease-out;
+}
+
+.react-flow__node .canvas-flow-handle--target .canvas-flow-handle__knob {
+  transform: translate(25px, 0) scale(1);
+}
+
+.react-flow__node .canvas-flow-handle--source .canvas-flow-handle__knob {
+  transform: translate(-25px, 0) scale(1);
+}
+
+.react-flow__node:hover .canvas-flow-handle__knob,
+.react-flow__node.selected .canvas-flow-handle__knob,
+.react-flow__node .canvas-flow-handle--highlight .canvas-flow-handle__knob {
+  opacity: 1;
+}
+
+.canvas-flow-handle__knob-fill {
+  fill: var(--canvas-handle-bg);
+}
+
+.canvas-flow-handle__knob-ring {
+  stroke: var(--canvas-handle-icon);
+  stroke-width: 1.2;
+}
+
+.canvas-flow-handle__knob-plus {
+  stroke: var(--canvas-handle-icon);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+/* 连线中的目标端口高亮：原站没有脉冲动画，只把旋钮显示出来。 */
+.react-flow__node .canvas-flow-handle--highlight {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  animation: none;
+  transform: translateY(-50%);
+}

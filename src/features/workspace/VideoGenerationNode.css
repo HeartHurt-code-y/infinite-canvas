@@ -1,0 +1,452 @@
+/*
+ * 节点卡（生成节点 / 产物节点）的视觉层。
+ *
+ * 证据：2026-10-22 登录态活体实测 liblib.tv 画布（1707×898，DPR 1.5）。
+ * 原站节点根是「裸媒体」：没有卡片底色、没有描边、没有圆角、没有内边距；
+ * 圆角与描边落在媒体容器上（12px 圆角 + 0.5px #363636），选中态只把描边
+ * 换成 #a8a8a8，没有额外的发光或投影。
+ *
+ * 下面写死的字面值待替换为 tokens.css 的令牌（令牌名见交付说明）：
+ *   --canvas-node-border / --canvas-node-border-selected / --canvas-node-media-bg
+ *   --canvas-fg-muted / --canvas-brand-cyan
+ */
+
+/* ══════════════════════════════════════════════════════════════
+   节点卡本体
+   ══════════════════════════════════════════════════════════════ */
+
+.canvas-gen-node.canvas-node-preview,
+.react-flow__node .canvas-gen-node.canvas-node-preview,
+.react-flow__node .canvas-flow-node .canvas-gen-node.canvas-node-preview,
+.react-flow__node.selected > .canvas-flow-node > .canvas-gen-node.canvas-node-preview {
+  position: relative;
+  display: block;
+  width: 622px;
+  height: auto;
+  min-height: 400px;
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  outline: none;
+}
+
+/*
+ * 媒体卡（图片 / 视频生成节点）按原站单独收口：卡片高度完全由媒体决定，
+ * 不再留最小高度（提示词 / 剧本卡片共用 .canvas-node-preview，沿用原样）。
+ */
+.canvas-gen-node--image.canvas-node-preview,
+.canvas-gen-node--video.canvas-node-preview {
+  min-height: 0;
+}
+
+/*
+ * 原站没有「选中时整卡描边 + 投影」这层反馈（选中只改媒体描边色）。
+ * studio-nodes.css / App.css 里给 .canvas-gen-node 选中态加的描边、外框与
+ * 投影在这里一并撤掉；选择器比共享文件更具体，不依赖样式表先后顺序。
+ */
+.react-flow__node.selected > .canvas-flow-node > .canvas-gen-node.canvas-node-preview,
+.react-flow__node .canvas-gen-node.canvas-node-preview.is-selected {
+  border-color: transparent;
+  outline: none;
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   节点上方标题条
+   原站：NodeToolbar 挂在节点上方 4px 处，高 24px；
+        类型图标 14px + 类型名 13px #919191 + 品牌色盾牌 14px；
+        右侧尺寸 11px / tabular-nums / opacity .8。
+   ══════════════════════════════════════════════════════════════ */
+
+.canvas-node-preview .canvas-node-toolbar {
+  bottom: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  color: var(--nt-text-muted);
+  font-size: 13px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.canvas-node-preview .canvas-node-toolbar__type {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 4px;
+  color: var(--nt-text-muted);
+}
+
+.canvas-node-preview .canvas-node-toolbar__icon {
+  flex: 0 0 auto;
+  color: var(--nt-text-muted);
+}
+
+.canvas-node-preview .canvas-node-toolbar__label {
+  overflow: hidden;
+  min-width: 0;
+  max-width: 215px;
+  color: var(--nt-text-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 原站的标题文字本身可改（cursor-text），这里用同样形态的按钮承载。 */
+.canvas-node-preview .canvas-node-toolbar__label--editable {
+  padding: 0;
+  font: inherit;
+  text-align: start;
+  background: transparent;
+  border: 0;
+  cursor: text;
+}
+
+/* 就地编辑标题：输入框 + 保存 / 取消。 */
+.canvas-node-preview .canvas-node-toolbar__editor {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.canvas-node-preview .canvas-node-toolbar__editor input {
+  width: 140px;
+  padding: 0 4px;
+  color: var(--nt-text-default);
+  font-size: 12px;
+  background: var(--panel-background);
+  border: 1px solid var(--canvas-controls-border);
+  border-radius: 4px;
+}
+
+.canvas-node-preview .canvas-node-toolbar__editor button {
+  padding: 0 4px;
+  color: var(--nt-text-muted);
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.canvas-node-preview .canvas-node-toolbar__editor button:hover {
+  color: var(--nt-text-default);
+  background: var(--canvas-controls-hover);
+}
+
+/* 原站图片节点标题末尾的品牌色盾牌徽标（#09CAF5）；待替换为令牌 --canvas-brand-cyan。 */
+.canvas-node-preview .canvas-node-toolbar__shield {
+  flex: 0 0 auto;
+  color: #09caf5;
+}
+
+.canvas-node-preview .canvas-node-toolbar__size {
+  flex: 0 0 auto;
+  margin-inline-start: 0;
+  color: var(--nt-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+/*
+ * 改名入口就在标题文字里（原站标题文字本身可改），这里不再挂额外的改名按钮。
+ */
+
+/* ══════════════════════════════════════════════════════════════
+   媒体区
+   原站：媒体容器 12px 圆角、0.5px #363636 描边、底色 #171717，
+        媒体以 object-cover 铺满，容器比例 = 媒体真实比例。
+   ══════════════════════════════════════════════════════════════ */
+
+/*
+ * 共享的媒体区（提示词 / 剧本卡片也用这个类名，保留它们原有的观感）。
+ * 媒体卡（图片 / 视频生成节点）的容器规格见下面那条。
+ */
+.canvas-node-preview__media {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 350px;
+  overflow: hidden;
+  background: var(--color-field);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-panel);
+}
+
+/*
+ * 原站实测的媒体容器：12px 圆角、0.5px #363636 描边、底色 #171717，
+ * 媒体以 object-cover 铺满，容器比例 = 媒体真实比例。
+ */
+.canvas-gen-node--image .canvas-node-preview__media,
+.canvas-gen-node--video .canvas-node-preview__media {
+  height: 400px;
+  /* 待替换为令牌 --canvas-node-media-bg */
+  background: #171717;
+  /* 待替换为令牌 --canvas-node-border */
+  border: 0.5px solid #363636;
+  border-radius: 12px;
+}
+
+/* 选中态：只换描边色（原站 --canvas-node-border-selected），不加外框与投影。 */
+.canvas-gen-node.canvas-node-preview.is-selected .canvas-node-preview__media {
+  /* 待替换为令牌 --canvas-node-border-selected */
+  border-color: #a8a8a8;
+  outline: none;
+  outline-offset: 0;
+  box-shadow: none;
+}
+
+.canvas-gen-node--image .canvas-node-preview__media > :is(video, img),
+.canvas-gen-node--video .canvas-node-preview__media > :is(video, img),
+.canvas-node-preview__media .media-frame-host {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+}
+
+/*
+ * 「AI生成」标记：原站是位图水印（watermark.png，48×23，媒体左上角 10px/10px，
+ * z-index 10，pointer-events none）。位图资源不能照搬，保留同位置、同权重的
+ * 文字胶囊。
+ */
+.canvas-node-preview__badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  padding: 2px 6px;
+  color: var(--nt-text-default);
+  font-size: 11px;
+  line-height: 1.4;
+  background: var(--nt-bg-overlay);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.canvas-node-preview__empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 16px;
+  color: var(--nt-text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.canvas-node-preview__empty small {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+/*
+ * 媒体右上角的动作按钮：原站同一位置是「替换素材」
+ * （24×24、bg-black/40、backdrop-blur-[10px]、rounded-md、图标 14px、
+ *  hover bg-black/50）。本项目把同一个位置给「编辑」。
+ */
+.canvas-node-preview__media .canvas-node-preview__edit {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  color: var(--nt-text-default);
+  /* 原站 bg-black/40；待替换为令牌 --canvas-node-action-bg */
+  background: rgba(0, 0, 0, 0.4);
+  border: 0;
+  border-radius: 6px;
+  backdrop-filter: blur(10px);
+  cursor: pointer;
+  transition: background-color 150ms ease-out;
+}
+
+.canvas-node-preview__media .canvas-node-preview__edit:hover,
+.canvas-node-preview__media .canvas-node-preview__edit[aria-expanded="true"] {
+  /* 原站 bg-black/50；待替换为令牌 --canvas-node-action-bg-hover */
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.canvas-node-preview__media .canvas-node-preview__edit:focus-visible {
+  outline: 1px solid var(--nt-text-muted);
+  outline-offset: 1px;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   生成状态
+   原站节点卡上没有状态条（状态在编辑层里），但生成进度必须让用户看得见，
+   因此叠在媒体右上角，用画布外壳的灰阶，不喧宾夺主。
+   素材节点卡片里的同名状态条保持原样（见下方共享规则）。
+   ══════════════════════════════════════════════════════════════ */
+
+.video-node-status {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-text-2);
+  font-size: var(--text-xs);
+}
+
+.canvas-node-preview > .video-node-status {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 10;
+  gap: 4px;
+  padding: 2px 6px;
+  color: var(--nt-text-muted);
+  font-size: 11px;
+  background: var(--canvas-handle-bg);
+  border: 1px solid var(--canvas-controls-border);
+  border-radius: 6px;
+  pointer-events: none;
+}
+
+.video-node-status__progress {
+  width: 72px;
+  height: 3px;
+  overflow: hidden;
+  background: var(--color-rule);
+  border-radius: var(--radius-pill);
+}
+
+.video-node-status__progress i {
+  display: block;
+  height: 100%;
+  background: var(--color-video);
+}
+
+.canvas-node-preview > .video-node-status .video-node-status__progress {
+  background: #363636;
+}
+
+.canvas-node-preview > .video-node-status .video-node-status__progress i {
+  background: var(--nt-text-muted);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   共享：提示词 / 剧本卡片（CanvasContentNode / DocumentNodeViews）复用
+   .canvas-gen-node__header / __type / __actions 这批类名，规则保持原样。
+   ══════════════════════════════════════════════════════════════ */
+
+.react-flow__node .canvas-gen-node.canvas-node-preview .canvas-gen-node__header {
+  position: absolute;
+  inset: auto 0 calc(100% + 4px);
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+}
+
+.canvas-node-preview .canvas-gen-node__type-icon {
+  width: auto;
+  height: auto;
+  background: transparent;
+  color: var(--color-text-2);
+}
+
+.canvas-node-preview .canvas-gen-node__type-copy small {
+  display: none;
+}
+
+.canvas-node-preview .canvas-gen-node__type-copy strong {
+  font-size: var(--text-sm);
+}
+
+.canvas-node-preview .canvas-gen-node__actions {
+  opacity: 0;
+}
+
+.canvas-node-preview:is(:hover, :focus-within, .is-selected) .canvas-gen-node__actions {
+  opacity: 1;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   共享：提示词 / 剧本卡片（CanvasContentNode）复用同一批类名，
+   这里保留它们原有的观感，媒体卡自己不再有摘要行。
+   ══════════════════════════════════════════════════════════════ */
+
+.canvas-node-preview__meta {
+  display: flex;
+  height: 50px;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) 0;
+}
+
+.canvas-node-preview__summary {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: var(--space-3xs);
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+}
+
+.canvas-node-preview__summary > span,
+.canvas-node-preview__summary p {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-node-preview__summary p {
+  color: var(--color-text-2);
+}
+
+.canvas-node-preview__footer {
+  flex: 0 0 auto;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   以下三条属于「编辑层」的按钮样式（拆分时留在了本文件）。
+   编辑层归 CanvasGenEditor.css 所有，这里保持原样避免回归；
+   节点卡自己的 .canvas-node-preview__edit 走上面媒体右上角那条规则。
+   ══════════════════════════════════════════════════════════════ */
+
+.canvas-node-preview__edit,
+.video-node-editor__heading button,
+.video-settings-control__trigger,
+.video-settings-panel__heading button {
+  display: inline-flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs) var(--space-xs);
+  color: var(--color-text-2);
+  font-size: var(--text-xs);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+.video-node-editor__heading button:hover,
+.video-settings-control__trigger:hover,
+.video-settings-control__trigger[aria-expanded="true"],
+.video-settings-panel__heading button:hover {
+  background: var(--color-surface-3);
+}

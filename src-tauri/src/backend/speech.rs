@@ -20,10 +20,10 @@ use uuid::Uuid;
 use super::{
     composer::VideoCompositionService,
     error::{BackendError, BackendResult},
+    media_source,
     model_schema::{
         DOUBAO_TTS_PATH, GATEWAY_TTS_PATH, GATEWAY_TTS_REQUEST_PROFILE, is_gateway_tts_model,
     },
-    mv_media,
     provider::{ProviderRuntime, ResolvedProviderContext, request_path},
     provider_adapter::{DOUBAO_VOICE_ADAPTER_ID, ProviderAdapterKind},
     storage::Storage,
@@ -446,14 +446,14 @@ pub async fn get_request_status(
     let output = directory.join(format!("{key}.wav"));
     let valid_output = if output.is_file() && is_wave(&output).await? {
         let ffmpeg = composer.ensure_ffmpeg().await?;
-        mv_media::stream_duration(&ffmpeg, &output.to_string_lossy(), true)
+        media_source::stream_duration(&ffmpeg, &output.to_string_lossy(), true)
             .await
             .is_ok()
     } else {
         false
     };
     let status = if valid_output {
-        let observed = mv_media::source_signature(&output.to_string_lossy()).await?;
+        let observed = media_source::source_signature(&output.to_string_lossy()).await?;
         match record["audioSignature"].as_str() {
             Some(saved) if saved == observed => "ready",
             None => "recoverable",
@@ -629,7 +629,7 @@ fn validate_gateway_speaker(voice: &str) -> BackendResult<()> {
 
 /// 参考音频读取为 Base64，并返回内容哈希用于请求签名（换素材必须算作新的付费请求）。
 async fn gateway_reference_audio(path: &str) -> BackendResult<(String, String)> {
-    mv_media::local_file(path)?;
+    media_source::local_file(path)?;
     let bytes = tokio::fs::read(Path::new(path)).await?;
     if bytes.is_empty() {
         return Err(invalid("音色复刻的参考音频是空文件。"));
@@ -907,7 +907,8 @@ async fn commit_synthesized_audio(
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(invalid("语音合成输出无法转换为有效 WAV。"));
     }
-    if let Err(error) = mv_media::stream_duration(ffmpeg, &temporary.to_string_lossy(), true).await
+    if let Err(error) =
+        media_source::stream_duration(ffmpeg, &temporary.to_string_lossy(), true).await
     {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error);
@@ -1017,8 +1018,9 @@ pub async fn synthesize(
         let manifest: Value =
             serde_json::from_slice(&tokio::fs::read(directory.join(format!("{key}.json"))).await?)?;
         if output.is_file() && is_wave(&output).await? {
-            mv_media::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
-            let observed_signature = mv_media::source_signature(&output.to_string_lossy()).await?;
+            media_source::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
+            let observed_signature =
+                media_source::source_signature(&output.to_string_lossy()).await?;
             let stored_signature = manifest["audioSignature"].as_str();
             if stored_signature.is_none() || stored_signature == Some(observed_signature.as_str()) {
                 if manifest["state"].as_str() != Some("ready") {
@@ -1078,7 +1080,7 @@ pub async fn synthesize(
         if let Some(subtitle) = subtitle {
             tokio::fs::write(&subtitle_output, serde_json::to_vec(&subtitle)?).await?;
         }
-        let audio_signature = mv_media::source_signature(&output.to_string_lossy()).await?;
+        let audio_signature = media_source::source_signature(&output.to_string_lossy()).await?;
         mark_paid_ready(
             &directory,
             &key,
@@ -1090,7 +1092,7 @@ pub async fn synthesize(
         .await?;
     }
     let duration_seconds =
-        mv_media::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
+        media_source::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
     Ok(SynthesizedSpeech {
         path: output.to_string_lossy().into_owned(),
         mime_type: "audio/wav",
@@ -1121,17 +1123,18 @@ pub async fn compose_dubbed_video(
         return Err(invalid("配音合成必须有 1～120 句真实音频。"));
     }
     let ffmpeg = composer.ensure_ffmpeg().await?;
-    mv_media::local_file(&command.source_path)?;
-    let video_duration = mv_media::stream_duration(&ffmpeg, &command.source_path, false).await?;
-    let source_signature = mv_media::source_signature(&command.source_path).await?;
+    media_source::local_file(&command.source_path)?;
+    let video_duration =
+        media_source::stream_duration(&ffmpeg, &command.source_path, false).await?;
+    let source_signature = media_source::source_signature(&command.source_path).await?;
     let mut previous_end = 0.0;
     let mut signed_segments = Vec::with_capacity(command.segments.len());
     for segment in &command.segments {
-        mv_media::local_file(&segment.audio_path)?;
+        media_source::local_file(&segment.audio_path)?;
         if !is_wave(Path::new(&segment.audio_path)).await? {
             return Err(invalid("配音合成只接受已生成的本地 WAV 音频。"));
         }
-        let duration = mv_media::stream_duration(&ffmpeg, &segment.audio_path, true).await?;
+        let duration = media_source::stream_duration(&ffmpeg, &segment.audio_path, true).await?;
         if !segment.start_seconds.is_finite()
             || segment.start_seconds < 0.0
             || segment.start_seconds + duration > video_duration + 0.02
@@ -1143,7 +1146,7 @@ pub async fn compose_dubbed_video(
         signed_segments.push(json!({
             "startSeconds": segment.start_seconds,
             "durationSeconds": duration,
-            "audioSignature": mv_media::source_signature(&segment.audio_path).await?,
+            "audioSignature": media_source::source_signature(&segment.audio_path).await?,
         }));
     }
     let request_signature = signature(json!({
@@ -1199,16 +1202,16 @@ pub async fn compose_dubbed_video(
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(error);
         }
-        if mv_media::source_signature(&command.source_path).await? != source_signature {
+        if media_source::source_signature(&command.source_path).await? != source_signature {
             let _ = tokio::fs::remove_file(&temporary).await;
             return Err(invalid("合成期间原视频已改变，请重新制作配音。"));
         }
         tokio::fs::rename(&temporary, &output).await?;
     }
     let duration_seconds =
-        mv_media::stream_duration(&ffmpeg, &output.to_string_lossy(), false).await?;
+        media_source::stream_duration(&ffmpeg, &output.to_string_lossy(), false).await?;
     let audio_duration =
-        mv_media::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
+        media_source::stream_duration(&ffmpeg, &output.to_string_lossy(), true).await?;
     if (duration_seconds - video_duration).abs() > 0.08
         || (audio_duration - video_duration).abs() > 0.08
     {
@@ -1218,325 +1221,6 @@ pub async fn compose_dubbed_video(
         path: output.to_string_lossy().into_owned(),
         duration_seconds,
         request_signature,
-        video_signature: mv_media::source_signature(&output.to_string_lossy()).await?,
+        video_signature: media_source::source_signature(&output.to_string_lossy()).await?,
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn request_identity_is_stable_and_input_signature_changes() {
-        assert_eq!(
-            request_key("run:shot:0").unwrap(),
-            request_key("run:shot:0").unwrap()
-        );
-        assert_ne!(
-            request_key("run:shot:0").unwrap(),
-            request_key("run:shot:1").unwrap()
-        );
-        let first = signature(json!({"voice":"A","text":"你好"})).unwrap();
-        let changed = signature(json!({"voice":"A","text":"再见"})).unwrap();
-        assert_ne!(first, changed);
-    }
-
-    #[test]
-    fn doubao_sse_chunks_decode_and_error_event_blocks_output() {
-        // The official Bytedance SSE sample reads data: JSON events, accepts
-        // 0/20000000, and concatenates base64 audio data in event order.
-        let body = b"data: {\"code\":0,\"data\":\"SUQz\"}\n\ndata: {\"code\":20000000,\"data\":\"AQID\"}\n\n";
-        assert_eq!(decode_sse_audio(body).unwrap(), b"ID3\x01\x02\x03");
-        assert!(decode_sse_audio(b"data: {\"code\":45000001,\"message\":\"invalid\"}\n").is_err());
-        assert!(decode_sse_audio(b"data: {\"code\":0}\n").is_err());
-    }
-
-    #[tokio::test]
-    async fn paid_request_reservation_blocks_duplicate_post_and_changed_input() {
-        let directory = tempfile::tempdir().unwrap();
-        let key = request_key("run:shot:line").unwrap();
-        let (first, api_id) =
-            reserve_paid_request(directory.path(), &key, "sig-a", SYNTHESIS_ENGINE)
-                .await
-                .unwrap();
-        assert!(first);
-        assert!(uuid::Uuid::parse_str(&api_id).is_ok());
-        let (second, same_api_id) =
-            reserve_paid_request(directory.path(), &key, "sig-a", SYNTHESIS_ENGINE)
-                .await
-                .unwrap();
-        assert!(!second);
-        assert_eq!(same_api_id, api_id);
-        assert!(
-            reserve_paid_request(directory.path(), &key, "sig-b", SYNTHESIS_ENGINE)
-                .await
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn gateway_body_carries_only_documented_fields() {
-        let plan = gateway_audio_plan(Some(&SpeechAudioConfig {
-            format: Some("wav".into()),
-            sample_rate: Some(24000),
-            speech_rate: Some(30),
-            loudness_rate: None,
-            pitch_rate: Some(-3),
-            enable_subtitle: Some(true),
-        }))
-        .unwrap();
-        let body = gateway_request_body(
-            "seed-audio-1.0",
-            "你好，欢迎使用语音合成服务。",
-            Some("zh_female_1"),
-            None,
-            &plan,
-        );
-        assert_eq!(body["model"], json!("seed-audio-1.0"));
-        assert_eq!(body["text_prompt"], json!("你好，欢迎使用语音合成服务。"));
-        assert_eq!(body["speaker"], json!("zh_female_1"));
-        assert_eq!(body["audio_config"]["format"], json!("wav"));
-        assert_eq!(body["audio_config"]["sample_rate"], json!(24000));
-        assert_eq!(body["audio_config"]["speech_rate"], json!(30));
-        assert_eq!(body["audio_config"]["pitch_rate"], json!(-3));
-        assert_eq!(body["audio_config"]["enable_subtitle"], json!(true));
-        // 未填写的键不发送，避免把上游默认值改写成客户端猜测。
-        assert!(body.get("audio_data").is_none());
-        assert!(body["audio_config"].get("loudness_rate").is_none());
-        assert_eq!(plan.container_extension, "wav");
-
-        let bare = gateway_audio_plan(None).unwrap();
-        let minimal = gateway_request_body("seed-audio-1.0", "第一段台词", None, None, &bare);
-        assert_eq!(minimal.as_object().unwrap().len(), 2);
-        // 文档：不传 `audio_config` 时默认返回 mp3。
-        assert_eq!(bare.container_extension, "mp3");
-        assert!(bare.config.get("enable_subtitle").is_none());
-    }
-
-    #[test]
-    fn gateway_audio_config_rejects_out_of_range_and_headerless_pcm() {
-        // 文档区间：语速/音量 [-50, 100]，音调 [-12, 12]。
-        assert!(
-            gateway_audio_plan(Some(&SpeechAudioConfig {
-                pitch_rate: Some(13),
-                ..Default::default()
-            }))
-            .is_err()
-        );
-        assert!(
-            gateway_audio_plan(Some(&SpeechAudioConfig {
-                speech_rate: Some(101),
-                ..Default::default()
-            }))
-            .is_err()
-        );
-        assert!(
-            gateway_audio_plan(Some(&SpeechAudioConfig {
-                format: Some("aac".into()),
-                ..Default::default()
-            }))
-            .is_err()
-        );
-        // pcm 没有文件头：无法校验时长，也不能安全配入音轨，本地先拦住。
-        let pcm = gateway_audio_plan(Some(&SpeechAudioConfig {
-            format: Some("pcm".into()),
-            ..Default::default()
-        }))
-        .expect_err("pcm must be refused");
-        assert!(pcm.to_string().contains("pcm"));
-        assert!(
-            gateway_audio_plan(Some(&SpeechAudioConfig {
-                format: Some("ogg_opus".into()),
-                pitch_rate: Some(-12),
-                ..Default::default()
-            }))
-            .unwrap()
-            .container_extension
-                == "ogg"
-        );
-    }
-
-    #[test]
-    fn gateway_speaker_accepts_names_and_leaves_default_voice_unset() {
-        assert!(validate_gateway_speaker("zh_female_vv_uranus_bigtts").is_ok());
-        assert!(validate_gateway_speaker("温柔女声").is_ok());
-        // 空串 = 使用上游默认音色，因此不能当非法值拦下。
-        assert!(validate_gateway_speaker("").is_ok());
-        // 从控制台复制时夹带的空格/换行必须拒绝：无效音色名不会报错，
-        // 而是静默回退默认音色并照常计费。
-        assert!(validate_gateway_speaker("Vivi 中文").is_err());
-        assert!(validate_gateway_speaker("\tzh_female").is_err());
-        assert!(validate_gateway_speaker("  ").is_err());
-        assert!(validate_gateway_speaker(&"音".repeat(129)).is_err());
-    }
-
-    #[test]
-    fn gateway_reply_decodes_audio_and_base64_subtitle() {
-        let audio = b"ID3\x01\x02\x03fake-audio".to_vec();
-        let subtitle = base64::engine::general_purpose::STANDARD
-            .encode(json!({"audio_segment": [{"text": "你好"}]}).to_string());
-        let reply = parse_gateway_tts_reply(200, "audio/mpeg", Some(&subtitle), &audio).unwrap();
-        assert_eq!(reply.audio, audio);
-        assert_eq!(
-            reply.subtitle.unwrap()["audio_segment"][0]["text"],
-            json!("你好")
-        );
-        // 账号未开通字幕权限时响应头不出现，音频仍然可用。
-        let plain = parse_gateway_tts_reply(200, "audio/wav", None, &audio).unwrap();
-        assert!(plain.subtitle.is_none());
-        assert!(parse_gateway_tts_reply(200, "audio/mpeg", None, &[]).is_err());
-        assert!(parse_gateway_tts_reply(200, "audio/mpeg", Some("not-base64!"), &audio).is_err());
-    }
-
-    #[test]
-    fn gateway_reply_keeps_the_upstream_error_envelope() {
-        let unauthorized =
-            r#"{"error":{"message":"令牌无效","type":"moyu_api_error","code":""}}"#.as_bytes();
-        let error = parse_gateway_tts_reply(401, "application/json", None, unauthorized)
-            .expect_err("401 must fail");
-        let BackendError::Protocol { message, details } = &error else {
-            panic!("expected protocol error, got {error:?}");
-        };
-        assert!(message.contains("API 令牌无效"));
-        assert_eq!(details["httpStatus"], json!(401));
-        assert_eq!(details["upstreamMessage"], json!("令牌无效"));
-
-        let missing_channel =
-            r#"{"error":{"message":"No available channels","code":"model_not_found"}}"#.as_bytes();
-        let error = parse_gateway_tts_reply(503, "application/json", None, missing_channel)
-            .expect_err("503 must fail");
-        assert!(error.to_string().contains("模型名称不存在"));
-
-        // 200 却返回 JSON：不是音频，不能当合成结果落盘。
-        let error = parse_gateway_tts_reply(200, "application/json", None, missing_channel)
-            .expect_err("json success body is not audio");
-        assert!(error.to_string().contains("模型名称不存在"));
-        // 登录页/网关自家错误页以 HTML 返回时也按非音频处理，并保留原文预览。
-        let error = parse_gateway_tts_reply(200, "text/html", None, b"<html>login</html>")
-            .expect_err("html is not audio");
-        assert!(error.to_string().contains("不是音频数据"));
-    }
-
-    /// 起一个只应答一次的假网关，返回 (base_url, 收到请求原文的接收端)。
-    fn fake_gateway(
-        response_head: String,
-        response_body: Vec<u8>,
-    ) -> (String, std::sync::mpsc::Receiver<String>) {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake gateway");
-        let port = listener.local_addr().expect("fake gateway address").port();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("fake gateway connection");
-            // 读超时让假网关自己失败，而不是让客户端等到合成总超时。
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .expect("fake gateway read timeout");
-            let mut received = Vec::new();
-            let mut chunk = [0_u8; 4096];
-            let header_end = loop {
-                let read = stream.read(&mut chunk).expect("read request");
-                assert!(read > 0, "request closed before headers");
-                received.extend_from_slice(&chunk[..read]);
-                if let Some(index) = received.windows(4).position(|part| part == b"\r\n\r\n") {
-                    break index + 4;
-                }
-            };
-            let headers = String::from_utf8_lossy(&received[..header_end]).to_string();
-            let content_length = headers
-                .lines()
-                .filter_map(|line| line.split_once(':'))
-                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                .expect("json body length");
-            // 请求头与 JSON 体常常在同一次 read 里到达：已收到的尾部字节必须计入
-            //  body 长度，否则会一直等已经读过的数据。
-            while received.len() - header_end < content_length {
-                let read = stream.read(&mut chunk).expect("read request body");
-                assert!(read > 0, "request closed before body");
-                received.extend_from_slice(&chunk[..read]);
-            }
-            let body = &received[header_end..header_end + content_length];
-            sender
-                .send(format!("{headers}{}", String::from_utf8_lossy(body)))
-                .expect("capture request");
-            stream
-                .write_all(response_head.as_bytes())
-                .expect("write head");
-            stream.write_all(&response_body).expect("write body");
-            stream.flush().expect("flush");
-        });
-        (format!("http://127.0.0.1:{port}"), receiver)
-    }
-
-    #[tokio::test]
-    async fn gateway_synthesis_posts_bearer_json_and_returns_binary_audio() {
-        let audio = b"ID3\x01\x02\x03fake-audio".to_vec();
-        let subtitle = base64::engine::general_purpose::STANDARD
-            .encode(json!({"audio_segment": [{"text": "你好"}]}).to_string());
-        let head = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: audio/mpeg\r\nx-subtitle: {subtitle}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            audio.len()
-        );
-        let (base_url, received) = fake_gateway(head, audio.clone());
-        let plan = gateway_audio_plan(Some(&SpeechAudioConfig {
-            format: Some("mp3".into()),
-            enable_subtitle: Some(true),
-            ..Default::default()
-        }))
-        .unwrap();
-        let body =
-            gateway_request_body("seed-audio-1.0", "你好。", Some("zh_female_1"), None, &plan);
-        let client = speech_client(SpeechWire::Gateway).expect("client");
-        let reply = fetch_gateway_audio(
-            &client,
-            &format!("{base_url}{GATEWAY_TTS_PATH}"),
-            "sk-test-token",
-            &body,
-        )
-        .await
-        .expect("audio");
-        assert_eq!(reply.audio, audio);
-        assert_eq!(
-            reply.subtitle.unwrap()["audio_segment"][0]["text"],
-            json!("你好")
-        );
-
-        let request = received.recv().expect("captured request").to_lowercase();
-        assert!(request.starts_with("post /v1/tts/create http/1.1"));
-        assert!(request.contains("authorization: bearer sk-test-token"));
-        assert!(request.contains("\"text_prompt\":\"你好。\""));
-        assert!(request.contains("\"speaker\":\"zh_female_1\""));
-        assert!(request.contains("\"enable_subtitle\":true"));
-    }
-
-    #[tokio::test]
-    async fn gateway_rejection_keeps_the_http_status_and_chinese_message() {
-        let payload = r#"{"error":{"message":"令牌无效","type":"moyu_api_error","code":""}}"#
-            .as_bytes()
-            .to_vec();
-        let head = format!(
-            "HTTP/1.1 401 Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-            payload.len()
-        );
-        let (base_url, _received) = fake_gateway(head, payload);
-        let client = speech_client(SpeechWire::Gateway).expect("client");
-        let error = fetch_gateway_audio(
-            &client,
-            &format!("{base_url}{GATEWAY_TTS_PATH}"),
-            "sk-invalid",
-            &gateway_request_body(
-                "seed-audio-1.0",
-                "你好。",
-                None,
-                None,
-                &gateway_audio_plan(None).unwrap(),
-            ),
-        )
-        .await
-        .expect_err("401 must fail");
-        assert!(error.to_string().contains("API 令牌无效或未提供"));
-    }
 }

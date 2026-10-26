@@ -1,9 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as v from "valibot";
-import {
-  decodeWorkflowVersionDocument,
-  encodeWorkflowVersionDocument,
-} from "./workflowVersionStorage";
 import type { SeedanceTaskMode } from "./seedanceTasks";
 // 跨语言契约类型：由 ts-rs 从 src-tauri 的 Rust 类型生成（pnpm codegen），
 // 手写 union 一律不再维护；需要前端独有变体时在本地联合里显式扩展（见 StagingStatus）。
@@ -21,8 +17,6 @@ import type { VideoDownloadQualityMode } from "./bindings/VideoDownloadQualityMo
 import type { VideoDownloadCredentialSource } from "./bindings/VideoDownloadCredentialSource";
 import type { VideoCookieBrowser as VideoDownloaderCookieBrowser } from "./bindings/VideoCookieBrowser";
 import type { VideoFrameExtractionStatus } from "./bindings/VideoFrameExtractionStatus";
-import type { VideoCompositionStatus } from "./bindings/VideoCompositionStatus";
-import type { VideoComposerEngineState } from "./bindings/VideoComposerEngineState";
 
 import {
   formatRawBackendError,
@@ -32,6 +26,9 @@ import {
   isDesktopRuntime,
   subscribeBackendEvent,
 } from "./ipc";
+// 错误文本的还原规则收敛在 errorFormat：后端摘要与素材库摘要共用同一套判断，
+// 免得同一段 JSON 在两个地方被解读成两种样子。
+import { errorPayloadFromText, looksLikeSerializedError } from "./errorFormat";
 
 // IPC 收口在 ./ipc：invoke/listen 只在那里出现。这里 re-export 公共守卫与
 // 错误类型，保持既有 `from "./backend"` 导入路径稳定。
@@ -52,6 +49,7 @@ import {
   generationResultRecordSchema,
   generationResultSavedEventSchema,
   generationResultSaveProgressEventSchema,
+  generationPollingStoppedEventSchema,
   generationRetryEventSchema,
   generationRetryExhaustedEventSchema,
   generationStateChangedEventSchema,
@@ -63,6 +61,7 @@ import {
   localBase64AssetGroupSchema,
   localBase64AssetGroupsSchema,
   localBase64AssetPageSchema,
+  generationModelCatalogSchema,
   numberSchema,
   localBase64AssetRecordSchema,
   modelDefinitionsSchema,
@@ -86,9 +85,7 @@ import {
   stagingStateChangedEventSchema,
   stringSchema,
   tosBucketPullSummarySchema,
-  videoComposerEngineStatusSchema,
   workspaceUiPrefsSchema,
-  videoCompositionJobRecordSchema,
   videoDownloaderEngineStatusSchema,
   videoDownloadJobRecordSchema,
   videoFrameExtractionJobRecordSchema,
@@ -158,6 +155,32 @@ export interface RemoteModelOption {
   readonly operationSchema: ModelOperationSchema;
   /** 该模型应使用的令牌分组；null = 供应商默认令牌。 */
   readonly tokenGroup: string | null;
+}
+
+/**
+ * 创作台模型目录项。
+ *
+ * 服务端一次性下发「模型 + 该模型声明的参数能力表」：参数范围与枚举来自
+ * 服务端声明，客户端只按声明渲染，不按模型名自行推断。
+ */
+export interface GenerationModelCatalogEntry {
+  readonly providerConnectionId: string;
+  readonly providerDisplayName: string;
+  readonly modelDefinitionId: string;
+  readonly remoteModelId: string;
+  readonly displayName: string;
+  readonly operations: readonly GenerationOperation[];
+  readonly operationSchema: ModelOperationSchema;
+}
+
+/**
+ * 创作台模型目录。
+ *
+ * 一次 IPC 拿齐供应商、模型与参数能力表；相比前端分三次查询再拼装，
+ * 少两轮往返，也避免两端拼装规则漂移。
+ */
+export async function loadGenerationModelCatalog(): Promise<GenerationModelCatalogEntry[]> {
+  return invokeDesktop("list_generation_models", generationModelCatalogSchema);
 }
 
 export interface ProviderModelSelection {
@@ -430,6 +453,14 @@ export interface TosStagingConfig {
 export interface WorkspaceUiPrefs {
   readonly activeAssetProviderId: string | null;
   readonly assetLibrarySource: "cloud" | "local" | null;
+  /**
+   * 创作台默认创作类型（image / video / text / speech）。
+   *
+   * 可选字段：保存时省略表示「不改这一项」，服务端按非空才覆盖来合并。
+   */
+  readonly creationMode?: string | null;
+  /** 创作台默认模型（模型定义 ID）；省略表示不改这一项。 */
+  readonly creationModelDefinitionId?: string | null;
 }
 
 import type { StagingStatus as BackendStagingStatus } from "./bindings/StagingStatus";
@@ -460,7 +491,7 @@ export interface StagingJobRecord {
   readonly id: string;
   readonly localPath: string;
   readonly purpose: string;
-  /** 素材上传只收三媒体；schema 校验同为三变体 picklist。 */
+  /** 上传请求只收三媒体；读回来的记录同样是三媒体（Rust 生产端不产 text）。 */
   readonly mediaType: MediaLibraryKind;
   readonly objectKey: string | null;
   readonly status: StagingStatus;
@@ -770,6 +801,8 @@ export const tosStagingClient: TosStagingClient = {
 const emptyWorkspaceUiPrefs: WorkspaceUiPrefs = {
   activeAssetProviderId: null,
   assetLibrarySource: null,
+  creationMode: null,
+  creationModelDefinitionId: null,
 };
 
 export const workspaceUiClient = {
@@ -781,12 +814,16 @@ export const workspaceUiClient = {
       );
       if (payload == null) return emptyWorkspaceUiPrefs;
       const trimmedProvider = payload.activeAssetProviderId?.trim();
+      const trimmedMode = payload.creationMode?.trim();
+      const trimmedModel = payload.creationModelDefinitionId?.trim();
       return {
         activeAssetProviderId: trimmedProvider ? trimmedProvider : null,
         assetLibrarySource:
           payload.assetLibrarySource === "local" || payload.assetLibrarySource === "cloud"
             ? payload.assetLibrarySource
             : null,
+        creationMode: trimmedMode ? trimmedMode : null,
+        creationModelDefinitionId: trimmedModel ? trimmedModel : null,
       };
     } catch {
       return emptyWorkspaceUiPrefs;
@@ -922,10 +959,21 @@ export function subscribeStagingEvents(
 }
 
 /*
- * 后端错误的 Rust 侧显示前缀（`BackendError` 的 `#[error("validation error: …")]`）。
+ * 后端错误的 Rust 侧显示前缀（`BackendError` 的 `#[error("…")]`）。
  * 这是给日志和排障用的分类名，对用户只是噪声，必须在展示前剥掉。
+ *
+ * 前缀清单来自 `src-tauri/src/backend/error.rs` 的每个变体：
+ *   validation error: / database error: / credential error: / HTTP transport error:
+ *   I/O error: / JSON error: / URL error: / desktop runtime error: / protocol error:
+ *   not found: / conflict:
+ *
+ * 「not found:」与「conflict:」**不含 "error" 字样**，之前的正则要求前缀里
+ * 必须有 error，于是这两类前缀剥不掉 —— 用户会看到
+ * 「conflict: 画布已在别处被修改（…）」这种半中半英的文案。
+ * 所以这里改成显式列举，不再依赖 "error" 这个字样。
  */
-const BACKEND_ERROR_KIND_PREFIX = /^[A-Za-z][A-Za-z/ ]*?\berror:\s*/;
+const BACKEND_ERROR_KIND_PREFIX =
+  /^(?:validation|database|credential|HTTP transport|I\/O|JSON|URL|desktop runtime|protocol|not found|conflict)\s*(?:error)?:\s*/;
 
 function backendErrorMessageOf(error: unknown): string | null {
   if (error != null && typeof error === "object" && !(error instanceof Error)) {
@@ -955,6 +1003,11 @@ function serializedBackendError(value: string): Record<string, unknown> | null {
 function backendErrorTextMessage(value: string): string | null {
   const serialized = backendErrorMessageOf(serializedBackendError(value));
   if (serialized != null) return serialized;
+  // `formatRawBackendError` 摊平的 Error 实例没有 `kind` 字段，但同样能从
+  // JSON 里还原出 `message`；还原不出来就返回 null，绝不把整坨 JSON 当成
+  // 一句人话交出去。
+  const plain = backendErrorMessageOf(errorPayloadFromText(value));
+  if (plain != null) return plain;
   // Older histories store the status line and raw HTTP body as one string.
   const response = /^HTTP[ \t]+(\d{3})[^\r\n]*\r?\n([\s\S]*)$/i.exec(value.trim());
   if (!response) return null;
@@ -991,10 +1044,16 @@ function backendErrorTextMessage(value: string): string | null {
  * 报错要能在不看技术细节的情况下读懂，这是无障碍对「错误识别」的最低要求
  * （WCAG 3.3.1），因此所有面向用户的展示都从这里取摘要。
  *
+ * 这里接受三种形态，调用点直接把原始错误对象交过来即可：
+ *   1. Tauri 载荷对象 `{kind, message, details}`：取 `message`；
+ *   2. `Error` 实例（含 `BackendContractError` / `DesktopInvocationError`）：取 `message`；
+ *   3. 字符串：可能是普通句子，也可能是被序列化过的载荷 JSON，都能还原。
+ *
  * 分类前缀（`validation error:` 等）是给日志用的，一并剥掉；完整原文交给
  * `backendErrorDetails` 的「展开完整报错」，排查不受影响。
  *
- * 保留了一句兜底文案：真的一句话都取不出来时，也不能把 undefined/空串当错误显示。
+ * 兜底有两条：真的一句话都取不出来时，也不能把 undefined/空串当错误显示；
+ * 原文看起来还是一段 JSON 时，宁可给一句通用提示，也不要把 JSON 印给用户。
  */
 export function backendErrorMessage(error: unknown): string {
   const candidate =
@@ -1004,8 +1063,9 @@ export function backendErrorMessage(error: unknown): string {
         ? error.message
         : backendErrorMessageOf(error);
   const message = candidate == null ? "" : backendErrorTextMessage(candidate);
-  const summary = (message ?? candidate ?? "").replace(BACKEND_ERROR_KIND_PREFIX, "").trim();
-  return summary || "操作失败，请重试。";
+  const fallback = candidate == null || looksLikeSerializedError(candidate) ? "" : candidate;
+  const summary = (message ?? fallback).replace(BACKEND_ERROR_KIND_PREFIX, "").trim();
+  return summary && !looksLikeSerializedError(summary) ? summary : "操作失败，请重试。";
 }
 
 /**
@@ -1547,7 +1607,14 @@ export interface GenerationTaskPage {
 }
 
 export type { MediaType };
-/** 素材库三媒体（图片/视频/音频）；"text" 只出现在生成结果（Context-IR 文档）里。 */
+/**
+ * 素材库三媒体（图片/视频/音频）。
+ *
+ * Rust 的 `MediaType` 有四个值（含 Context-IR 的 "text"），但那一套服务于**生成结果**
+ * 记录（见 `GenerationResultMediaType`）。**素材库**这一侧不收文本：Rust 的
+ * `parse_media_type` 只认 image/video/audio，其余一律 None，素材库里不会出现
+ * text 记录。所以「发出去的请求」与「读回来的记录」都用本类型。
+ */
 export type MediaLibraryKind = Exclude<MediaType, "text">;
 
 /**
@@ -1649,7 +1716,6 @@ export interface StartGenerationCommand {
   readonly outputName?: string;
   /** 本地视频任务意图，仅用于参数校验及重试，不原样发送给供应商。 */
   readonly videoTaskType?: SeedanceTaskMode;
-  readonly workflowRunId?: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
   readonly operation: GenerationOperation;
@@ -1667,6 +1733,14 @@ export interface GenerationTaskClient {
   get(this: void, taskId: string): Promise<GenerationTaskDetail>;
   getProgress(this: void, taskId: string): Promise<GenerationTaskProgress>;
   queryVideoTaskNow(this: void, taskId: string): Promise<void>;
+  /**
+   * 取消在途生成任务。
+   *
+   * 后端命令 `cancel_generation_task` 会置运行时取消位、唤醒轮询并把任务落成
+   * `cancelled` 终态；远端任务本身不会被取消（供应商侧无取消接口），但本机不再
+   * 轮询、不再落盘产物。
+   */
+  cancel(this: void, taskId: string): Promise<GenerationTaskDetail>;
 }
 
 export const generationClient: GenerationTaskClient = {
@@ -1676,12 +1750,70 @@ export const generationClient: GenerationTaskClient = {
   getProgress: (taskId) =>
     invokeDesktop("get_generation_task_progress", generationTaskProgressSchema, { taskId }),
   queryVideoTaskNow: (taskId) => invokeDesktopVoid("query_video_task_now", { taskId }),
+  cancel: (taskId) => invokeDesktop("cancel_generation_task", generationTaskDetailSchema, { taskId }),
 };
 
 /** Create a separate final task from a reviewed draft using its frozen credential scope. */
 export function promoteSeedanceDraft(taskId: string): Promise<string> {
   return invokeDesktop("promote_seedance_draft", stringSchema, { taskId });
 }
+
+/* ── 智能剪辑（video clip）合成请求 ───────────────────────────────────── */
+
+/**
+ * 智能剪辑模式键。与 Rust 侧 `VideoClipMode` 的 snake_case 序列化一一对应。
+ *
+ * 五个模式对应原站 liblib 的五个剪辑模式：默认模式 / 讲解视频 / 批量广告 /
+ * 口播视频 / 素材混剪。
+ */
+export type VideoClipMode =
+  "default" | "explainer_video" | "batch_ad" | "talking_head_video" | "smart_mix_cut";
+
+/** 合成参数：比例 / 时长（秒）/ 清晰度。 */
+export interface VideoClipParamsPayload {
+  readonly aspectRatio: string;
+  readonly durationSeconds: number;
+  readonly resolution: string;
+}
+
+/** 一条参与合成的素材。槽位键与原站 `slotKey` 一致。 */
+export interface VideoClipMaterialPayload {
+  readonly slotKey: string;
+  readonly nodeType: string;
+  readonly displayName: string;
+  readonly role: string;
+  /** 文字槽位正文；媒体槽位为 null。 */
+  readonly text: string | null;
+  /** 媒体槽位的素材身份；文字槽位为 null。 */
+  readonly target: ExplicitMediaTarget | null;
+}
+
+/** 智能剪辑合成命令。字段名与 Rust 侧 `StartVideoClipCommand` 一致（camelCase）。 */
+export interface StartVideoClipCommand {
+  readonly canvasId: string;
+  readonly sourceNodeId: string;
+  readonly mode: VideoClipMode;
+  readonly prompt: string;
+  readonly materials: readonly VideoClipMaterialPayload[];
+  readonly params: VideoClipParamsPayload;
+  readonly providerConnectionId: string;
+  readonly modelDefinitionId: string;
+  readonly operation: GenerationOperation;
+  /**
+   * 产物名：与 Rust 侧 `Option<String>` 对齐，显式给 `null` 表示不指定。
+   * 不用可选字段（`?`）——那会让「忘了传」与「明确不要」变成同一种请求。
+   */
+  readonly outputName: string | null;
+}
+
+export interface VideoClipClient {
+  /** 发起合成；返回生成任务 id（与既有生成任务同一套管线）。 */
+  start(this: void, command: StartVideoClipCommand): Promise<string>;
+}
+
+export const videoClipClient: VideoClipClient = {
+  start: (command) => invokeDesktop("start_video_clip", stringSchema, { command }),
+};
 
 export async function renameGenerationResult(
   taskId: string,
@@ -1764,22 +1896,13 @@ export interface CanvasDocumentClient {
 
 export const canvasDocumentClient: CanvasDocumentClient = {
   list: () => invokeDesktop("list_canvas_documents", canvasDocumentSummariesSchema),
-  save: async (command) =>
-    decodeCanvasVersionRecord(
-      await invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, {
-        command: { ...command, document: encodeWorkflowVersionDocument(command.document) },
-      }),
-    ),
-  get: async (canvasId) =>
-    decodeCanvasVersionRecord(
-      await invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
-    ),
+  save: (command) =>
+    invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, {
+      command,
+    }),
+  get: (canvasId) => invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
   delete: (canvasId) => invokeDesktopVoid("delete_canvas_document", { canvasId }),
 };
-
-function decodeCanvasVersionRecord(record: CanvasDocumentRecord): CanvasDocumentRecord {
-  return { ...record, document: decodeWorkflowVersionDocument(record.document) };
-}
 
 /** 提示词优化模式：决定注入哪份内置提示词方法作为文本模型的系统提示词。 */
 export type PromptOptimizationMode =
@@ -1790,62 +1913,10 @@ export type PromptOptimizationMode =
   | "realistic_character"
   | "fpv_path"
   | "fight_prompt_master"
-  | "multi_grid_storyboard"
-  | "storyboard_prompt"
-  | "gpt_image_2_style"
   | "cinematic_dialogue";
 
 /** 文本技能模式；完整技能库随应用编译，运行时保留核心合同并按需选择参考资料。 */
-export type TextSkillMode =
-  | PromptOptimizationMode
-  | "canvas_agent"
-  | "screenplay"
-  | "storyboard"
-  | "knowledge_video_director"
-  | "knowledge_video_qc"
-  | "brand_video_plan"
-  | "ai_film_router"
-  | "ai_film_synopsis"
-  | "ai_film_characters"
-  | "ai_film_worldbuilding"
-  | "ai_film_treatment"
-  | "ai_film_screenplay"
-  | "ai_film_assets"
-  | "ai_film_acting"
-  | "ai_film_prompts"
-  | "ai_film_qc"
-  | "comic_drama_director"
-  | "comic_drama_screenplay"
-  | "comic_drama_style"
-  | "comic_drama_screenplay_review"
-  | "comic_drama_style_review"
-  | "comic_drama_art"
-  | "comic_drama_storyboard"
-  | "comic_drama_director_review"
-  | "comic_drama_art_review"
-  | "comic_drama_storyboard_review"
-  | "comic_drama_content_review"
-  | "music_video_timeline"
-  | "music_video_style"
-  | "music_video_storyboard"
-  | "music_video_prompts"
-  | "music_video_review"
-  | "commerce_research"
-  | "commerce_creative"
-  | "commerce_script"
-  | "commerce_storyboard"
-  | "commerce_assets"
-  | "commerce_quick"
-  | "commerce_review"
-  | "remotion_planner"
-  | "remotion_review"
-  | "xhs_cover_plan"
-  | "xhs_cover_qc"
-  | "product_scene_inspect"
-  | "reverse_video_analysis"
-  | "reverse_video_review"
-  | "reelbench_analysis"
-  | "viral_remix";
+export type TextSkillMode = PromptOptimizationMode | "screenplay" | "viral_remix";
 
 /** 文本模型请求注入系统提示词的历史上下文条目。 */
 export interface PromptOptimizationContextEntry {
@@ -1887,7 +1958,6 @@ export interface PromptReferenceInput {
 }
 
 export interface OptimizeVideoPromptCommand {
-  readonly workflowRunId?: string;
   /** 用于把文本模型调用归档到当前画布与来源节点；旧调用方可省略。 */
   readonly canvasId?: string;
   readonly sourceNodeId?: string;
@@ -1926,6 +1996,7 @@ export type GenerationEventName =
   | "generation:result-ready"
   | "generation:result-saved"
   | "generation:result-save-progress"
+  | "generation:polling-stopped"
   | "generation:retry"
   | "generation:retry-exhausted";
 
@@ -1987,6 +2058,7 @@ export const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
   "generation:result-ready",
   "generation:result-saved",
   "generation:result-save-progress",
+  "generation:polling-stopped",
   "generation:retry",
   "generation:retry-exhausted",
 ];
@@ -1998,6 +2070,7 @@ const GENERATION_EVENT_SCHEMAS = {
   "generation:result-ready": generationResultReadyEventSchema,
   "generation:result-saved": generationResultSavedEventSchema,
   "generation:result-save-progress": generationResultSaveProgressEventSchema,
+  "generation:polling-stopped": generationPollingStoppedEventSchema,
   "generation:retry": generationRetryEventSchema,
   "generation:retry-exhausted": generationRetryExhaustedEventSchema,
 } as const satisfies Record<GenerationEventName, v.GenericSchema>;
@@ -2238,64 +2311,4 @@ export const mediaClient: MediaClient = {
       sourcePath,
       maxDimension: maxDimension ?? null,
     }),
-};
-
-// ---------- 画布视频合成（内置 FFmpeg 引擎） ----------
-
-export type { VideoCompositionStatus };
-
-export type { VideoComposerEngineState };
-
-export interface VideoComposerEngineStatus {
-  readonly state: VideoComposerEngineState;
-  readonly version: string | null;
-  readonly binaryPath: string | null;
-  readonly lastError: string | null;
-}
-
-export interface VideoCompositionJobRecord {
-  readonly jobId: string;
-  readonly status: VideoCompositionStatus;
-  /** 0-100；引擎准备与探测阶段为 null。 */
-  readonly progress: number | null;
-  readonly finalPath: string | null;
-  readonly fileName: string | null;
-  readonly width: number | null;
-  readonly height: number | null;
-  readonly durationSeconds: number | null;
-  readonly error: string | null;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-}
-
-export interface VideoCompositionInputParams {
-  readonly key: string;
-  readonly name: string;
-  /** 本地文件绝对路径或 http(s) 远程地址。 */
-  readonly source: string;
-}
-
-export interface VideoComposerClient {
-  getEngine: () => Promise<VideoComposerEngineStatus>;
-  installEngine: () => Promise<VideoComposerEngineStatus>;
-  startComposition: (
-    inputs: readonly VideoCompositionInputParams[],
-    outputName: string,
-  ) => Promise<VideoCompositionJobRecord>;
-  getJob: (jobId: string) => Promise<VideoCompositionJobRecord>;
-  cancelJob: (jobId: string) => Promise<VideoCompositionJobRecord>;
-}
-
-export const videoComposerClient: VideoComposerClient = {
-  getEngine: () => invokeDesktop("get_video_composer_engine", videoComposerEngineStatusSchema),
-  installEngine: () =>
-    invokeDesktop("install_video_composer_engine", videoComposerEngineStatusSchema),
-  startComposition: (inputs, outputName) =>
-    invokeDesktop("start_video_composition", videoCompositionJobRecordSchema, {
-      command: { inputs: [...inputs], outputName },
-    }),
-  getJob: (jobId) =>
-    invokeDesktop("get_video_composition_job", videoCompositionJobRecordSchema, { jobId }),
-  cancelJob: (jobId) =>
-    invokeDesktop("cancel_video_composition", videoCompositionJobRecordSchema, { jobId }),
 };

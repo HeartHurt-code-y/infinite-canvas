@@ -1,5 +1,5 @@
 import { Icon } from "../../components/Icon";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { ErrorAlert, type ErrorAlertNotice } from "../../components/ErrorAlert";
 import {
   useCallback,
   useEffect,
@@ -9,9 +9,12 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   describeConnectivityTest,
+  backendErrorMessage,
   formatRawBackendError,
+  frontendLog,
   assetLibraryClient,
   providerScopedModelDefinitionId,
   providerSettingsClient,
@@ -314,12 +317,24 @@ export function ProviderSettingsDialog({
   /** 拉取模型时使用的令牌分组列表（空字符串 "" 表示默认令牌）。 */
   const [pullTokenGroups, setPullTokenGroups] = useState<string[]>([""]);
   const [busyAction, setBusyAction] = useState<BusyAction>("loading-connections");
-  const [rawError, setRawError] = useState<string | null>(null);
+  // 存原始错误对象：摘要、展开与复制统一交给 ErrorAlert，界面不再自己拼 JSON。
+  const [rawError, setRawError] = useState<ErrorAlertNotice | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [testNotice, setTestNotice] = useState<{
     readonly ok: boolean;
     readonly message: string;
   } | null>(null);
+
+  /**
+   * 记录一次失败：原始 payload 只进日志，界面上交给 ErrorAlert 出人话摘要。
+   *
+   * 以前这里直接把 `formatRawBackendError` 的结果塞进 state，用户看到的是一坨
+   * `{"details":null,"kind":"validation",…}`；现在调用点只负责递原始错误对象。
+   */
+  const showFailure = useCallback((error: unknown, label?: string) => {
+    frontendLog("error", `[settings] ${label ?? "供应商设置操作失败"}：${formatRawBackendError(error)}`);
+    setRawError({ label, error });
+  }, []);
 
   // 已保存的模型配置从本地数据库恢复（不走网络），供应商连接与其模型分类在每次打开
   // 设置时原样重现，无需重新拉取或重新配置。请求序号防止快速切换供应商时旧响应覆盖新选择。
@@ -342,12 +357,12 @@ export function ProviderSettingsDialog({
         setModelTypeFilter("all");
       } catch (error: unknown) {
         if (requestId !== savedModelsRequestRef.current) return;
-        setRawError(formatRawBackendError(error));
+        showFailure(error);
       } finally {
         if (requestId === savedModelsRequestRef.current) setBusyAction(null);
       }
     },
-    [client],
+    [client, showFailure],
   );
 
   // 重新打开设置 / 切换供应商时，把已保存的 API Key 明文回填到输入框，使其「持久化一直显露」。
@@ -417,7 +432,7 @@ export function ProviderSettingsDialog({
         }
       })
       .catch((error: unknown) => {
-        if (active) setRawError(formatRawBackendError(error));
+        if (active) showFailure(error);
       })
       .finally(() => {
         if (active) setBusyAction(null);
@@ -508,23 +523,24 @@ export function ProviderSettingsDialog({
     const existingProvider = providers.some((provider) => provider.id === draft.id);
     const apiKey = apiKeyRef.current?.value ?? "";
     if (!draft.displayName.trim()) {
-      setRawError("供应商名称不能为空。");
+      setRawError({ error: "供应商名称不能为空。" });
       return null;
     }
     if (isBailianConnection) {
       if (!isValidBailianWorkspaceId(draft.workspaceId)) {
-        setRawError(
-          "请填写业务空间 ID。地址会按华北2（北京）拼接为 https://{业务空间ID}.cn-beijing.maas.aliyuncs.com。",
-        );
+        setRawError({
+          error:
+            "请填写业务空间 ID。地址会按华北2（北京）拼接为 https://{业务空间ID}.cn-beijing.maas.aliyuncs.com。",
+        });
         return null;
       }
     } else if (!draft.baseUrl.trim()) {
-      setRawError("供应商名称和 Base URL 不能为空。完整地址会交给后端继续校验。");
+      setRawError({ error: "供应商名称和 Base URL 不能为空。完整地址会交给后端继续校验。" });
       return null;
     }
     // 火山引擎方舟连接通过素材库令牌（AK/SK JSON）鉴权，供应商级 API Key 允许留空。
     if (!existingProvider && !apiKey && !isVolcengineArkConnection) {
-      setRawError("新供应商连接需要输入 API Key；保存后密钥只进入系统凭据管理器。");
+      setRawError({ error: "新供应商连接需要输入 API Key；保存后密钥只进入系统凭据管理器。" });
       return null;
     }
     return { apiKey };
@@ -578,7 +594,7 @@ export function ProviderSettingsDialog({
       await onCatalogChanged();
       setSuccessMessage(`已保存 ${provider.displayName} 的连接信息。`);
     } catch (error) {
-      setRawError(formatRawBackendError(error));
+      showFailure(error, "保存供应商连接失败");
     } finally {
       setBusyAction(null);
     }
@@ -623,7 +639,7 @@ export function ProviderSettingsDialog({
       );
       window.requestAnimationFrame(() => modelSearchRef.current?.focus());
     } catch (error) {
-      setRawError(formatRawBackendError(error));
+      showFailure(error, "拉取模型列表失败");
     } finally {
       setBusyAction(null);
     }
@@ -638,7 +654,7 @@ export function ProviderSettingsDialog({
       return usage.kind === "image" && !usage.textToImage && !usage.imageToImage;
     });
     if (incompleteImageModel) {
-      setRawError(`${incompleteImageModel.displayName} 至少需要启用一种图片生成能力。`);
+      setRawError({ error: `${incompleteImageModel.displayName} 至少需要启用一种图片生成能力。` });
       return;
     }
     setBusyAction("saving-models");
@@ -673,13 +689,18 @@ export function ProviderSettingsDialog({
           message: describeConnectivityTest(result, `供应商 ${draft.displayName} `),
         });
       } catch (error) {
+        // 连通性测试失败降级为提示：摘要走 backendErrorMessage，原始 payload 只进日志。
+        frontendLog(
+          "error",
+          `[settings] 供应商 ${draft.displayName} 连通性测试失败：${formatRawBackendError(error)}`,
+        );
         setTestNotice({
           ok: false,
-          message: `供应商 ${draft.displayName} 连通性测试失败：${formatRawBackendError(error)}`,
+          message: `供应商 ${draft.displayName} 连通性测试失败：${backendErrorMessage(error)}`,
         });
       }
     } catch (error) {
-      setRawError(formatRawBackendError(error));
+      showFailure(error, "保存模型绑定失败");
     } finally {
       setBusyAction(null);
     }
@@ -710,7 +731,7 @@ export function ProviderSettingsDialog({
     }
   };
 
-  return (
+  return createPortal(
     <div className="settings-layer">
       <button
         type="button"
@@ -969,13 +990,11 @@ export function ProviderSettingsDialog({
           </form>
 
           {rawError ? (
-            <>
-              <div className="settings-error" role="alert">
-                <strong>完整原始错误</strong>
-                <pre tabIndex={0}>{rawError}</pre>
-              </div>
-              <ErrorCopyButton text={rawError} />
-            </>
+            <ErrorAlert
+              error={rawError.error}
+              label={rawError.label}
+              hint="请检查上一步填写的内容后再试一次；展开完整报错可把诊断文本贴给开发者。"
+            />
           ) : null}
           {successMessage ? (
             <p className="settings-success" role="status">
@@ -1266,14 +1285,14 @@ export function ProviderSettingsDialog({
               </footer>
 
               {testNotice ? (
-                <p className={testNotice.ok ? "settings-success" : "settings-error"} role="status">
-                  {testNotice.ok ? (
+                testNotice.ok ? (
+                  <p className="settings-success" role="status">
                     <Icon name="check-circle" aria-hidden="true" size="md" />
-                  ) : (
-                    <Icon name="warning-circle" aria-hidden="true" size="md" />
-                  )}
-                  {testNotice.message}
-                </p>
+                    {testNotice.message}
+                  </p>
+                ) : (
+                  <ErrorAlert error={testNotice.message} hint="请核对地址与令牌后重试。" />
+                )
               ) : null}
             </section>
           ) : busyAction == null ? (
@@ -1288,6 +1307,7 @@ export function ProviderSettingsDialog({
           <AppUpdateSettings />
         </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }

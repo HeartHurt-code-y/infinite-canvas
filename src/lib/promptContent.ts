@@ -106,6 +106,22 @@ export interface PromptContentAttachmentItem {
   readonly name: string;
   /** "document" 目前仅向前兼容存储：生成通道尚不支持文档 target，摄取侧暂只收媒体文件。 */
   readonly mediaType: "image" | "video" | "audio" | "document";
+  /** 是否为所在块的最后一个行内节点（见 PromptContentMediaReferenceItem.trailing）。 */
+  readonly trailing?: boolean;
+  /**
+   * 所在块的类型（"bullet" / "ordered" / "blockquote" / 标题 …）与缩进层级。
+   *
+   * chip 本身不带正文，早期只靠 `trailing` 猜「它属于哪个块」—— 而「块末尾的
+   * chip」与「下一个块开头的 chip」在条目序列上完全同形，判错就会把两个列表项
+   * 焊成一个（第二个列表项整条消失，且每次落盘都从编辑器 JSON 重新推导 →
+   * 固化进存档）。
+   *
+   * 正向转换时块上下文是**已知**的（`walkInline` 拿得到 style），存下来即可
+   * 让反向转换精确还原。缺省（undefined）表示「旧存档，没有块信息」：反向
+   * 转换退回按 `trailing` 猜的旧路径，行为与加字段之前完全一致。
+   */
+  readonly block?: string;
+  readonly indent?: number;
 }
 
 export interface PromptContentTextItem extends PromptTextStyle {
@@ -127,6 +143,39 @@ export interface PromptContentMediaReferenceItem {
    * 位置时，靠它判断「这一处引用要跟着新素材走」，而不是按名称去猜。
    */
   readonly slotSnapshot?: number;
+  /**
+   * 这个引用是不是**所在块的最后一个行内节点**。
+   *
+   * canonical 把 chip 存成独立条目后，「列表项里夹了一个 @引用」与
+   * 「列表项末尾放了个 @引用、下一行才是新列表项」在条目序列上**完全同形**，
+   * 反向转换无法判断该不该合并 —— 判错就会把一个列表项裂成两个、
+   * 有序列表编号错位（AGENTS.md 明令禁止的「存盘后结构永久损坏」）。
+   *
+   * 靠这个标记区分：块内中间的 chip（trailing 不为 true）后面还有同块文本，
+   * 说明它和后面的文本属于**同一个**列表项；块末尾的 chip（trailing=true）
+   * 后面即使还有同块文本，那也是**下一个**列表项。
+   *
+   * 缺省（undefined）按「**块末尾**」处理：旧存档没有这个字段，而旧行为是
+   * 「chip 视为块末尾、下一个同块条目另起列表项」。若把缺省当成「块中间」，
+   * 旧存档的 chip 会被并进下一个列表项 —— 列表项被吞掉、有序编号错位，
+   * 且每次落盘都从编辑器 JSON 重新推导，一次重开就固化成 AGENTS.md 明令禁止的
+   * 「存盘后结构永久损坏」。
+   */
+  readonly trailing?: boolean;
+  /**
+   * 所在块的类型与缩进层级。
+   *
+   * chip 本身不带正文，早期只靠 `trailing` 猜「它属于哪个块」—— 而「块末尾的
+   * chip」与「下一个块开头的 chip」在条目序列上完全同形，判错就会把两个列表项
+   * 焊成一个（第二个列表项整条消失，且每次落盘都从编辑器 JSON 重新推导 →
+   * 固化进存档）。
+   *
+   * 正向转换时块上下文是**已知**的（`walkInline` 拿得到 style），存下来即可让
+   * 反向转换精确还原。缺省（undefined）表示「旧存档，没有块信息」：反向转换
+   * 退回按 `trailing` 猜的旧路径，行为与加字段之前完全一致。
+   */
+  readonly block?: string;
+  readonly indent?: number;
 }
 
 export interface PromptContentPendingReferenceItem {
@@ -134,6 +183,20 @@ export interface PromptContentPendingReferenceItem {
   readonly normalizedPattern: string;
   readonly displayText: string;
   readonly candidateCount: number;
+  /**
+   * 这个待确认引用是不是**所在块的最后一个行内节点**。
+   *
+   * 与其它 chip 同义：块内中间（trailing 非 true）说明它与后面的同块文本属于
+   * **同一个**列表项；块末尾（trailing=true）说明后面的同块文本属于**下一个**。
+   *
+   * 缺省按「块末尾」处理：待确认 chip 没有这个字段的旧存档，正向转换也从未写过
+   * 它，若按「块中间」解释，待确认 chip 后面的**下一个列表项**会被并进当前项
+   * ——列表结构被吞并（普通 UI 即可触发：列表项末尾输入一个歧义的 @素材名）。
+   */
+  readonly trailing?: boolean;
+  /** 所在块的类型与缩进层级（见 PromptContentMediaReferenceItem.block）。 */
+  readonly block?: string;
+  readonly indent?: number;
 }
 
 /**
@@ -151,6 +214,11 @@ export interface PromptContentMarkReferenceItem {
   /** 不含编号的区域描述（颜色、工具、画面范围）。 */
   readonly descriptionSnapshot: string;
   readonly color: string;
+  /** 是否为所在块的最后一个行内节点（见 PromptContentMediaReferenceItem.trailing）。 */
+  readonly trailing?: boolean;
+  /** 所在块的类型与缩进层级（见 PromptContentMediaReferenceItem.block）。 */
+  readonly block?: string;
+  readonly indent?: number;
 }
 
 /** 插入标注引用时的输入；mentionId 由会话生成，同一个标记可以被引用多次。 */
@@ -268,6 +336,19 @@ export interface PromptContentEditorSession {
   confirmPending(pattern: string, candidate: PromptReferenceCandidate): number;
   reconcileConnections(): number;
   replaceText(text: string): AutoMentionResolutionResult;
+  /**
+   * 用纯文本替换内容，但**保留**已有的附件与已解析的 @引用。
+   *
+   * 为什么需要它：画布的撤销栈只存 `config.generatedPrompt` 这份**纯文本镜像**
+   * （canonical 文档不在历史切片里）。撤销后用纯文本回灌 canonical，会把整篇
+   * 文档压成一条纯文本 item —— 而附件（`attachment`）**根本不进 plainText**
+   * （见 `viewFromDocument`：附件只计数、不进正文），所以附件会被**永久丢弃**，
+   * 用户无从察觉。@引用的素材身份绑定也会退化成「按名字重新认领」。
+   *
+   * 这个方法用于「撤销回灌」这条路径：文本回退、附件与引用保住。
+   * 「整篇替换」（外部写入新提示词）仍用 `replaceText` —— 那时旧附件确实该清掉。
+   */
+  replaceTextKeepingAttachments(text: string): AutoMentionResolutionResult;
   aliases(): readonly { readonly candidateIndex: number; readonly label: string }[];
   ambiguityCount(): number;
   ambiguityOptions(
@@ -309,10 +390,21 @@ export interface PromptContentEditorSession {
 }
 
 export interface PromptContentModule {
+  /** 订阅节点提示内容，供画布摘要读取；DOM 卸载时仍保留原会话。 */
+  subscribe(nodeKey: string, listener: () => void): () => void;
   adoptEditor(nodeKey: string, session: PromptContentEditorSession | null): void;
   remove(nodeKey: string): PromptContentDocumentV1 | null;
   restoreDocument(nodeKey: string, document: PromptContentDocumentV1): void;
   replaceText(
+    nodeKey: string,
+    text: string,
+    candidates: readonly PromptReferenceCandidate[],
+  ): AutoMentionResolutionResult | null;
+  /**
+   * 用纯文本替换内容但保留附件与 @引用（撤销回灌用）。
+   * 语义见 `PromptContentEditorSession.replaceTextKeepingAttachments`。
+   */
+  replaceTextKeepingAttachments(
     nodeKey: string,
     text: string,
     candidates: readonly PromptReferenceCandidate[],
@@ -329,6 +421,12 @@ export interface PromptContentModule {
   read(nodeKey: string): PromptContentView | null;
   snapshotAll(nodeKeys?: ReadonlySet<string>): Readonly<Record<string, PromptContentDocumentV1>>;
   restoreAll(
+    persisted: Readonly<Record<string, PromptContentDocumentV1 | string>>,
+  ): { readonly ok: true } | { readonly ok: false; readonly invalidNodeKeys: readonly string[] };
+  /**
+   * 只恢复快照里有的节点，不动其它节点（撤销用；语义见实现）。
+   */
+  restoreSubset(
     persisted: Readonly<Record<string, PromptContentDocumentV1 | string>>,
   ): { readonly ok: true } | { readonly ok: false; readonly invalidNodeKeys: readonly string[] };
 }
@@ -423,11 +521,14 @@ function decodePersistedPromptContent(value: unknown): PromptContentDocumentV1 |
   const structured = decodePromptContentDocument(value);
   if (structured != null) return structured;
   if (typeof value !== "string") return null;
-  const template = document.createElement("template");
-  template.innerHTML = value;
-  const root = document.createElement("div");
-  root.append(template.content.cloneNode(true));
-  return documentFromDom(root);
+  /*
+   * 用 DOMParser 解析，而不是 template.innerHTML + cloneNode：
+   * template 的内容虽然惰性，但 cloneNode 进**活动文档**后，`<img src=x onerror=…>`
+   * 这类节点的插入步骤会执行——任何以字符串形式存进存档的提示词都成了脚本执行入口。
+   * DOMParser 得到的 document 不激活，其中的元素不会触发任何加载或事件。
+   */
+  const parsed = new DOMParser().parseFromString(value, "text/html");
+  return documentFromDom(parsed.body);
 }
 
 export function decodePromptContentDocument(value: unknown): PromptContentDocumentV1 | null {
@@ -473,6 +574,10 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         normalizedPattern: normalizePromptReferenceText(raw["normalizedPattern"]),
         displayText: raw["displayText"],
         candidateCount: Math.max(2, Math.floor(raw["candidateCount"])),
+        // 缺省 = true（视为块末尾），理由同 media_reference.trailing。
+        trailing: raw["trailing"] !== false,
+        // 块上下文：随存档保留（缺失 = 旧存档，反向转换退回按 trailing 猜的旧路径）。
+        ...decodeChipBlockContext(raw),
       });
       continue;
     }
@@ -495,6 +600,10 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         target,
         name: raw["name"],
         mediaType: raw["mediaType"],
+        // 缺省 = true（视为块末尾），理由同 media_reference.trailing。
+        trailing: raw["trailing"] !== false,
+        // 块上下文：随存档保留（缺失 = 旧存档，反向转换退回按 trailing 猜的旧路径）。
+        ...decodeChipBlockContext(raw),
       });
       continue;
     }
@@ -517,6 +626,10 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         labelSnapshot: raw["labelSnapshot"],
         descriptionSnapshot: raw["descriptionSnapshot"],
         color: raw["color"],
+        // 缺省 = true（视为块末尾），理由同 media_reference.trailing。
+        trailing: raw["trailing"] !== false,
+        // 块上下文：随存档保留（缺失 = 旧存档，反向转换退回按 trailing 猜的旧路径）。
+        ...decodeChipBlockContext(raw),
       });
       continue;
     }
@@ -550,12 +663,44 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         raw["slotSnapshot"] >= 0
           ? { slotSnapshot: raw["slotSnapshot"] }
           : {}),
+        /*
+         * 「是否块末尾」必须随存档保留，否则落盘再读回后无法判断该不该合并列表项。
+         *
+         * 缺省（字段缺失）= **true**（视为块末尾）：`trailing` 是后来才加的字段，
+         * 旧存档里没有它，而旧行为是「chip 视为块末尾、下一个同块条目另起列表项」。
+         * 若把缺省当成「块中间」，旧存档的 chip 会被并进下一个列表项 ——
+         * 列表项被吞掉、有序编号错位，且每次落盘都会从编辑器 JSON 重新推导，
+         * 一次重开就固化成 AGENTS.md 明令禁止的「存盘后结构永久损坏」。
+         */
+        trailing: raw["trailing"] !== false,
+        // 块上下文：随存档保留（缺失 = 旧存档，反向转换退回按 trailing 猜的旧路径）。
+        ...decodeChipBlockContext(raw),
       });
       continue;
     }
     return null;
   }
   return { schema: "prompt-content", version: 1, items };
+}
+
+/**
+ * 从存档条目里取出 chip 的块上下文（`block` / `indent`）。
+ *
+ * 缺失就**不写**这两个字段 —— 表示「这是旧存档，没有块信息」，反向转换会退回
+ * 按 `trailing` 猜的旧路径，行为与加这个字段之前完全一致。
+ *
+ * `indent` 只在 > 0 时保留（与文本条目的 `style.indent` 口径一致：0 是缺省层级）。
+ */
+function decodeChipBlockContext(raw: Record<string, unknown>): {
+  readonly block?: string;
+  readonly indent?: number;
+} {
+  const block = typeof raw["block"] === "string" && raw["block"] ? raw["block"] : null;
+  const indent = raw["indent"];
+  return {
+    ...(block != null ? { block } : {}),
+    ...(typeof indent === "number" && Number.isInteger(indent) && indent > 0 ? { indent } : {}),
+  };
 }
 
 export function isPromptContentDocument(value: unknown): value is PromptContentDocumentV1 {
@@ -574,7 +719,8 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
       second.kind === "pending_reference" &&
       first.normalizedPattern === second.normalizedPattern &&
       first.displayText === second.displayText &&
-      first.candidateCount === second.candidateCount
+      first.candidateCount === second.candidateCount &&
+      sameChipBlockContext(first, second)
     );
   }
   if (first.kind === "attachment") {
@@ -583,6 +729,8 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
       first.attachmentId === second.attachmentId &&
       first.name === second.name &&
       first.mediaType === second.mediaType &&
+      (first.trailing ?? false) === (second.trailing ?? false) &&
+      sameChipBlockContext(first, second) &&
       sameMediaReferenceTarget(first.target, second.target)
     );
   }
@@ -593,7 +741,9 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
       first.markId === second.markId &&
       first.labelSnapshot === second.labelSnapshot &&
       first.descriptionSnapshot === second.descriptionSnapshot &&
-      first.color === second.color
+      first.color === second.color &&
+      (first.trailing ?? false) === (second.trailing ?? false) &&
+      sameChipBlockContext(first, second)
     );
   }
   if (second.kind !== "media_reference") return false;
@@ -604,8 +754,35 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
     (first.learnedPattern ?? "") === (second.learnedPattern ?? "") &&
     (first.aliasSnapshot ?? "") === (second.aliasSnapshot ?? "") &&
     (first.slotSnapshot ?? -1) === (second.slotSnapshot ?? -1) &&
+    /*
+     * `trailing` 必须参与比较：它是决定「列表项要不要与后面的同块文本合并」
+     * 与「有序编号怎么算」的结构性字段。两份结构不同的文档若被判为相同，
+     * 自动识别就会误以为「内容没变」而短路掉修复。
+     */
+    (first.trailing ?? false) === (second.trailing ?? false) &&
+    /*
+     * 块上下文同理：它决定 chip 属于哪个列表项。漏掉它，两份**归属不同**的文档
+     * 会被判为相同 → 反向转换按错误的归属重建 → 列表项被吞并。
+     */
+    sameChipBlockContext(first, second) &&
     sameMediaReferenceTarget(first.target, second.target)
   );
+}
+
+/**
+ * 两个 chip 的块上下文是否一致。
+ *
+ * 块上下文（`block` / `indent`）决定 chip 落在哪个列表项 / 引用块 / 标题里，
+ * 属于结构性字段 —— 与 `trailing` 同等重要，必须参与相等判定。
+ *
+ * 缺省按「无块上下文」比较（`undefined` 与 `undefined` 相等；`undefined` 与
+ * 实际值不等）—— 旧存档没有这两个字段，新旧文档因此不会被误判为相同。
+ */
+function sameChipBlockContext(
+  first: { readonly block?: string | undefined; readonly indent?: number | undefined },
+  second: { readonly block?: string | undefined; readonly indent?: number | undefined },
+): boolean {
+  return first.block === second.block && first.indent === second.indent;
 }
 
 /** 结构化比较两份 canonical document 是否等价，用于判断自动识别是否真正改动了内容。 */
@@ -615,6 +792,38 @@ function promptDocumentsEqual(
 ): boolean {
   if (first.items.length !== second.items.length) return false;
   return first.items.every((item, index) => promptContentItemEqual(item, second.items[index]!));
+}
+
+/**
+ * 比较两份「提示词快照集合」是否等价（按节点 key 索引）。
+ *
+ * ## 为什么需要它
+ *
+ * 撤销/重做与提示词快照的同步是**双向**的：
+ *
+ *   提示词变了 → 更新 store 快照 → 撤销时 store 快照恢复 → 灌回提示词模块
+ *   → 提示词模块 `restoreAll` 会**无条件 notify**（即使内容没变）→ 又触发
+ *   「提示词变了 → 更新 store 快照」→ 引用变了 → 撤销订阅再灌一次 → **无限递归**。
+ *
+ * 只比引用挡不住这个循环（每次 `snapshotAll` 都是新对象，引用必然不同）。
+ * 必须比**内容**：内容没变就不写 store，循环到此为止。
+ *
+ * 这也是性能所需：提示词模块的 notify 不只在内容变化时触发，写入 store 之前
+ * 先比一次内容，能避免大量无谓的 store 写入。
+ */
+export function promptContentDocumentMapsEqual(
+  first: Readonly<Record<string, PromptContentDocumentV1>>,
+  second: Readonly<Record<string, PromptContentDocumentV1>>,
+): boolean {
+  const firstKeys = Object.keys(first);
+  const secondKeys = Object.keys(second);
+  if (firstKeys.length !== secondKeys.length) return false;
+  return firstKeys.every((key) => {
+    const left = first[key];
+    const right = second[key];
+    if (left == null || right == null) return left === right;
+    return promptDocumentsEqual(left, right);
+  });
 }
 
 function viewFromDocument(
@@ -628,14 +837,54 @@ function viewFromDocument(
   let referenceCount = 0;
   let pendingCount = 0;
   let attachmentCount = 0;
-  // 有序列表的 markdown 投影编号：遇到任何非 ordered 条目即重新从 1 计数。
-  let orderedCounter = 0;
+  /*
+   * 有序列表的 markdown 投影编号：**按缩进层级分别计数**。
+   *
+   * 编辑器（tiptap）把每一层嵌套列表渲染成独立的 `orderedList` 节点，
+   * **每层都从 1 重新起算**（见 `promptTiptap.ts` 建嵌套层的逻辑）。
+   * 之前这里用的是一个扁平的计数器，父层与嵌套层共用 —— 于是
+   * 「1. 甲 / 1.1 乙 / 2. 丙」在编辑器里显示 1 / 1 / 2，模型收到的却是 1 / 2 / 3，
+   * 连父层第二项的编号都被带偏。AGENTS.md 把「有序列表编号少算一项」列为
+   * 禁止的结构损坏，这里必须与编辑器口径一致。
+   *
+   * 两条补充规则（否则仍会与编辑器不一致）：
+   *   1. 遇到**任何非 ordered 的块**（段落 / 无序列表 / 引用 / 标题 / 分割线）
+   *      都要**清空全部层级**的计数器：编辑器里非列表块必然切断列表序列，
+   *      之后的有序列表是从 1 重新起算的。
+   *   2. 计数器按**缩进层级**分桶，父层与嵌套层互不干扰。
+   */
+  const orderedCounters = new Map<number, number>();
   for (const item of document.items) {
     if (item.kind === "text") {
       const orderedNumber =
-        item.block === "ordered" ? (orderedCounter += 1) : ((orderedCounter = 0), undefined);
+        item.block === "ordered"
+          ? (() => {
+              const depth = item.indent ?? 0;
+              const next = (orderedCounters.get(depth) ?? 0) + 1;
+              orderedCounters.set(depth, next);
+              // 深层结束或换块时，上层的计数不再延续。
+              for (const key of orderedCounters.keys()) {
+                if (key > depth) orderedCounters.delete(key);
+              }
+              return next;
+            })()
+          : undefined;
+      if (item.block !== "ordered") {
+        // 非列表块切断列表序列：所有层级清零。
+        orderedCounters.clear();
+      }
       const text = serializePromptTextMarkdown(item.text, item, orderedNumber);
       segments.push({ kind: "text", text });
+      /*
+       * 这里刻意**不**给 plainText 补块级之间的换行：发给供应商的文本走的是
+       * segments（Rust 侧 media.rs 逐段 push_str，段间没有分隔符），而 plainText
+       * 是它的界面镜像。两边必须一致——只给一边补换行会让「界面看到的」与
+       * 「模型收到的」不是同一份文本。
+       *
+       * 块级结构自定界这件事由 canonical 文档本身保证（标题/列表/引用/代码块/
+       * 分割线各自独立成条，见 promptRichText 的 appendStyledText 语义）。
+       * 若要让模型也收到分行文本，应在 segments 侧统一补，而不是只补镜像。
+       */
       plain.push(text);
       continue;
     }
@@ -847,6 +1096,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       onUpdate: ({ editor }) => {
         if (this.isComposing()) return;
         this.document = promptDocumentFromTiptapJson(editor.getJSON());
+        this.emitFormatChanges();
       },
     });
     // 格式状态（加粗、标题等）随每个事务变化，工具栏据此高亮。
@@ -950,6 +1200,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
    * 才知道这次输入真的插入了 @（候选菜单据此打开）。
    */
   private notify(data = ""): void {
+    this.emitFormatChanges();
     const dom = this.editor?.view.dom;
     if (dom == null) return;
     dom.dispatchEvent(
@@ -1223,6 +1474,44 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         );
     }
     return 0;
+  }
+
+  replaceTextKeepingAttachments(text: string): AutoMentionResolutionResult {
+    /*
+     * 保留当前文档里的附件与已解析的 @引用，只把正文换成新文本。
+     *
+     * 保留项的顺序：附件与引用按它们在原文档里的相对顺序排在正文之后。
+     * 纯文本镜像里没有位置信息，无法还原「附件夹在正文中间」的样子 ——
+     * 保守地排在后面，至少**不丢内容**（丢内容不可逆，位置不精确可修）。
+     *
+     * 已解析的 @引用（`media_reference`）原样保留 target 与 mentionId：
+     * 重新按名字认领（`replaceText` 的做法）会在素材改名或同名歧义时绑错目标，
+     * 而这里保住的是**确切的**素材身份。
+     */
+    const preserved = (this.document?.items ?? []).filter(
+      (item) =>
+        item.kind === "attachment" ||
+        item.kind === "media_reference" ||
+        item.kind === "mark_reference",
+    );
+    const items: PromptContentItem[] = text ? [{ kind: "text", text }] : [];
+    preserved.forEach((item, index) => {
+      const trailing = index === preserved.length - 1;
+      items.push(trailing ? { ...item, trailing: true } : { ...item, trailing: false });
+    });
+    const next: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items,
+    };
+    this.document = next;
+    // 直接应用：保留项已经是解析好的，不能再走 resolveReferences（那会按名字
+    // 重新认领 @引用，把确切的素材身份换成「名字相同就算」的模糊匹配）。
+    if (this.editor != null) {
+      this.applyDocument(false, false);
+    }
+    this.notify();
+    return { converted: 0, ambiguous: 0, pending: this.read().pendingCount, unbound: NO_UNBOUND };
   }
 
   replaceText(text: string): AutoMentionResolutionResult {
@@ -1548,6 +1837,33 @@ export function createPromptContentEditorSession(
 class PromptContentModuleImplementation implements PromptContentModule {
   private readonly sessions = new Map<string, PromptContentEditorSession>();
   private pendingRestore = new Map<string, PromptContentDocumentV1>();
+  private readonly listeners = new Map<string, Set<() => void>>();
+  private readonly sessionSubscriptions = new Map<string, () => void>();
+
+  subscribe(nodeKey: string, listener: () => void): () => void {
+    let listeners = this.listeners.get(nodeKey);
+    if (listeners == null) {
+      listeners = new Set();
+      this.listeners.set(nodeKey, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) this.listeners.delete(nodeKey);
+    };
+  }
+
+  private notify(nodeKey: string): void {
+    for (const listener of this.listeners.get(nodeKey) ?? []) listener();
+  }
+
+  private observeSession(nodeKey: string, session: PromptContentEditorSession): void {
+    this.sessionSubscriptions.get(nodeKey)?.();
+    this.sessionSubscriptions.set(
+      nodeKey,
+      session.subscribeFormatChanges(() => this.notify(nodeKey)),
+    );
+  }
 
   adoptEditor(nodeKey: string, session: PromptContentEditorSession | null): void {
     // DOM adapter 暂时卸载时保留原 handle；只有 remove 才删除 canonical content。
@@ -1560,6 +1876,8 @@ class PromptContentModuleImplementation implements PromptContentModule {
       this.pendingRestore.delete(nodeKey);
     }
     this.sessions.set(nodeKey, session);
+    if (previous !== session) this.observeSession(nodeKey, session);
+    this.notify(nodeKey);
   }
 
   remove(nodeKey: string): PromptContentDocumentV1 | null {
@@ -1567,6 +1885,9 @@ class PromptContentModuleImplementation implements PromptContentModule {
     const pending = this.pendingRestore.get(nodeKey);
     this.sessions.delete(nodeKey);
     this.pendingRestore.delete(nodeKey);
+    this.sessionSubscriptions.get(nodeKey)?.();
+    this.sessionSubscriptions.delete(nodeKey);
+    this.notify(nodeKey);
     return session?.snapshot() ?? pending ?? null;
   }
 
@@ -1580,10 +1901,78 @@ class PromptContentModuleImplementation implements PromptContentModule {
       // Source updates also apply to restored nodes that have never entered the viewport.
       session = createPromptContentEditorSession(candidates);
       this.sessions.set(nodeKey, session);
+      this.observeSession(nodeKey, session);
       this.pendingRestore.delete(nodeKey);
     }
     session.updateConnections(candidates);
-    return session.replaceText(text);
+    const result = session.replaceText(text);
+    this.notify(nodeKey);
+    return result;
+  }
+
+  replaceTextKeepingAttachments(
+    nodeKey: string,
+    text: string,
+    candidates: readonly PromptReferenceCandidate[],
+  ): AutoMentionResolutionResult | null {
+    let session = this.sessions.get(nodeKey);
+    if (session == null) {
+      /*
+       * 编辑器还没挂载（节点从未进入视口）：文档在 `pendingRestore` 里。
+       *
+       * 必须**先把它恢复到新建的 session**，再谈「保留附件」—— 否则新建的是空
+       * session，保留源是空的，附件与 @引用照样全丢；而且 `pendingRestore` 一删，
+       * 节点进入视口时连原文都没有了。
+       */
+      const pending = this.pendingRestore.get(nodeKey);
+      session = createPromptContentEditorSession(candidates);
+      this.sessions.set(nodeKey, session);
+      this.observeSession(nodeKey, session);
+      this.pendingRestore.delete(nodeKey);
+      if (pending != null) session.restore(pending);
+    }
+    session.updateConnections(candidates);
+    const result = session.replaceTextKeepingAttachments(text);
+    this.notify(nodeKey);
+    return result;
+  }
+
+  /**
+   * **按快照里有的节点**逐个恢复，不动快照之外的节点。
+   *
+   * ## 为什么不能直接用 `restoreAll`
+   *
+   * `restoreAll` 的语义是「整个画布回到这份快照」—— 快照里没有的节点会被
+   * **清空**（`session.restore(EMPTY_DOCUMENT)`）。那是**存档恢复**该有的语义。
+   *
+   * 但**撤销**的语义不同：撤销只回滚一步，不该把「这一步之外」的内容清掉。
+   * 具体例子：用户删掉一个提示词节点 → 撤销 → 节点回来了。若这期间快照里
+   * 恰好没有那个节点的键（因为快照是「上一次 config 写入」时刻的），用
+   * `restoreAll` 会把它的提示词**清空** —— 节点回来了，内容没了。
+   *
+   * 所以这里只恢复快照里**明确存在**的节点，其余一律不动。
+   */
+  restoreSubset(persisted: Readonly<Record<string, PromptContentDocumentV1>>): {
+    readonly ok: boolean;
+    readonly invalidNodeKeys: readonly string[];
+  } {
+    const invalidNodeKeys: string[] = [];
+    const plan = new Map<string, PromptContentDocumentV1>();
+    for (const [nodeKey, value] of Object.entries(persisted)) {
+      const decoded = typeof value === "string" ? decodePromptContentDocument(value) : value;
+      if (decoded == null) {
+        invalidNodeKeys.push(nodeKey);
+        continue;
+      }
+      plan.set(nodeKey, decoded);
+    }
+    for (const [nodeKey, document] of plan) {
+      const session = this.sessions.get(nodeKey);
+      if (session) session.restore(document);
+      else this.pendingRestore.set(nodeKey, document);
+    }
+    for (const nodeKey of plan.keys()) this.notify(nodeKey);
+    return { ok: invalidNodeKeys.length === 0, invalidNodeKeys };
   }
 
   restoreDocument(nodeKey: string, document: PromptContentDocumentV1): void {
@@ -1592,6 +1981,7 @@ class PromptContentModuleImplementation implements PromptContentModule {
     const session = this.sessions.get(nodeKey);
     if (session) session.restore(decoded);
     else this.pendingRestore.set(nodeKey, decoded);
+    this.notify(nodeKey);
   }
 
   preparePlainText(nodeKey: string): PromptPlainTextPreparation | null {
@@ -1605,7 +1995,17 @@ class PromptContentModuleImplementation implements PromptContentModule {
       readonly allowMediaOnly: boolean;
     },
   ): PromptGenerationPreparation | null {
-    return this.sessions.get(nodeKey)?.prepareGeneration(context) ?? null;
+    let session = this.sessions.get(nodeKey);
+    if (session == null) {
+      // 预览节点尚未打开编辑器时，也从原存档冻结请求；不能依赖 DOM 挂载或清空草稿。
+      session = createPromptContentEditorSession();
+      const pending = this.pendingRestore.get(nodeKey);
+      if (pending != null) session.restore(pending);
+      this.pendingRestore.delete(nodeKey);
+      this.sessions.set(nodeKey, session);
+      this.observeSession(nodeKey, session);
+    }
+    return session.prepareGeneration(context);
   }
 
   focusIssue(nodeKey: string, issue: PromptContentIssue): boolean {
@@ -1613,7 +2013,8 @@ class PromptContentModuleImplementation implements PromptContentModule {
   }
 
   read(nodeKey: string): PromptContentView | null {
-    return this.sessions.get(nodeKey)?.read() ?? null;
+    const pending = this.pendingRestore.get(nodeKey);
+    return this.sessions.get(nodeKey)?.read() ?? (pending ? viewFromDocument(pending, []) : null);
   }
 
   snapshotAll(nodeKeys?: ReadonlySet<string>): Readonly<Record<string, PromptContentDocumentV1>> {
@@ -1621,8 +2022,17 @@ class PromptContentModuleImplementation implements PromptContentModule {
     const snapshots: Record<string, PromptContentDocumentV1> = {};
     for (const nodeKey of keys) {
       const session = this.sessions.get(nodeKey);
-      snapshots[nodeKey] =
-        session?.snapshot() ?? this.pendingRestore.get(nodeKey) ?? EMPTY_DOCUMENT;
+      const pending = this.pendingRestore.get(nodeKey);
+      /*
+       * 既没有会话也没有待恢复内容 → 这个节点**从来没有过**提示词。
+       *
+       * 落盘快照的 key 集合现在按「画布里现存的节点」求交集（而不是手工登记
+       * 节点类型），若对没有提示词的节点也写一条空文档，素材/产物这类节点
+       * 就会在存档里堆出大量空条目 —— 白占体积，还让「文档是否相等」的比较
+       * 多出无意义的差异。
+       */
+      if (session == null && pending == null) continue;
+      snapshots[nodeKey] = session?.snapshot() ?? pending ?? EMPTY_DOCUMENT;
     }
     return snapshots;
   }
@@ -1644,6 +2054,7 @@ class PromptContentModuleImplementation implements PromptContentModule {
       session.restore(plan.get(nodeKey) ?? EMPTY_DOCUMENT);
     }
     this.pendingRestore = new Map([...plan].filter(([nodeKey]) => !this.sessions.has(nodeKey)));
+    for (const nodeKey of this.listeners.keys()) this.notify(nodeKey);
     return { ok: true };
   }
 }

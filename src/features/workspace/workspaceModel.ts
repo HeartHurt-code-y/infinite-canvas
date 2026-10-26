@@ -1,4 +1,3 @@
-import type { WorkflowVersionHistory } from "./workflowVersionHistory";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import {
   referenceCandidateFromTarget,
@@ -7,9 +6,8 @@ import {
 import type { Edge as ReactFlowEdge, Node as ReactFlowNode } from "@xyflow/react";
 import { type ReactNode } from "react";
 import {
+  backendErrorMessage,
   formatBytes,
-  formatRawBackendError,
-  isDesktopRuntime,
   type CloudAsset,
   type CloudAssetStatus,
   type ConfiguredModel,
@@ -19,71 +17,39 @@ import {
   type LocalBase64AssetRecord,
   type MediaLibraryKind,
   type MediaReferenceTarget,
-  type PickedPromptMaterial,
   type PromptOptimizationContextEntry,
   type PromptOptimizationMode,
   type PromptMaterialKind,
-  type PromptReferenceInput,
   type ProviderCallRecord,
   type ProviderCatalogEntry,
   type StagingJobRecord,
   type StagingStatus,
-  type VideoDownloadCredentialSource,
   toMediaSrc,
 } from "../../lib/backend";
 import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib/modelCapabilities";
 import type { PerTaskVideoUrlInput } from "../../lib/perTaskVideo";
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
 import type { WhiteModelControlConfig } from "../../lib/whiteModelControl";
-import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
 import type { GreenScreenConfig } from "../../lib/greenScreen";
-import { type VideoCompositionInput } from "../../lib/videoComposer";
-import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
-import type {
-  BrandVideoWorkflowCheckpoint,
-  BrandVideoWorkflowOptions,
-} from "./brandVideoWorkflowModel";
-import type {
-  MusicVideoWorkflowCheckpoint,
-  MusicVideoWorkflowOptions,
-} from "./musicVideoWorkflowModel";
-import type {
-  WorkflowExecutionPlan,
-  WorkflowMediaReviewKind,
-  WorkflowMediaApproval,
-} from "./workflowExecutionPlan";
-import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./commerceWorkflowModel";
-import type { RemotionWorkflowCheckpoint, RemotionWorkflowOptions } from "./remotionWorkflowModel";
-import type { XhsCoverWorkflowCheckpoint, XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
-import type {
-  ProductSceneWorkflowCheckpoint,
-  ProductSceneWorkflowOptions,
-} from "./productSceneWorkflowModel";
-import type {
-  ReverseVideoWorkflowCheckpoint,
-  ReverseVideoWorkflowOptions,
-} from "./reverseVideoWorkflowModel";
-import type {
-  ReelbenchWorkflowCheckpoint,
-  ReelbenchWorkflowOptions,
-} from "./reelbenchWorkflowModel";
-import type {
-  ComicDramaWorkflowCheckpoint,
-  ComicDramaWorkflowOptions,
-} from "./comicDramaWorkflowModel";
 
 export type AssetKind = MediaLibraryKind;
 export type AssetLibrarySource = "cloud" | "local";
 /** 生成节点种类。视频、图片与提示词配置按画布节点实例保存。 */
 export type GenerationNodeId = "image" | "video";
 export type CanvasGenNodeKind = GenerationNodeId | "prompt";
-export type DocumentSkillNodeKind = "screenplay" | "storyboard";
+export type DocumentSkillNodeKind = "screenplay";
+/**
+ * 节点 kind 标签：共享图标映射（PromptNodeViews.NodeTypeIcon）按它取图标。
+ *
+ * `viral_remix` / `video_downloader` / `frame_extractor` 三类节点已随 liblib 画布
+ * 对齐下线，画布里不再存在；`video_composer`（视频拼接与合成）也已被「智能剪辑」
+ * 取代而整体下线。这里暂留是因为共享图标映射（PromptNodeViews.tsx）仍在枚举
+ * 它们，删掉那段映射后即可移除。
+ */
 export type RepositoryNodeKind =
   | CanvasGenNodeKind
   | DocumentSkillNodeKind
-  | "knowledge_video_workflow"
   | "viral_remix"
-  | "video_composer"
   | "video_downloader"
   | "frame_extractor";
 export type MobilePanel = "assets" | null;
@@ -163,8 +129,14 @@ export interface AssetUploadEntry {
   readonly adjustment: string | null;
 }
 
+/** 所有普通画布节点共用的组织属性，独立于工作流审批与执行身份。 */
+export interface CanvasNodeOrganization {
+  /** 普通组织组身份。只组织节点，不授权或触发执行。沿用旧素材组字段以兼容存档。 */
+  readonly assetGroupId?: string;
+}
+
 /** 从素材库拖到画布上生成的素材节点。旧文档未保存 source 时按 cloud 处理。 */
-export interface AssetNodeData {
+export interface AssetNodeData extends CanvasNodeOrganization {
   /** 节点实例 id（同一素材可多次投放）。 */
   readonly key: string;
   readonly assetId: string;
@@ -182,8 +154,6 @@ export interface AssetNodeData {
    * 单次拖入按投放先后编号，多选放入按点选先后编号。旧文档没有此字段。
    */
   readonly libraryPickOrder?: number;
-  /** 框选成组后的组 id。同一 id 且至少两个素材时，共享组上的一个输出端口。 */
-  readonly assetGroupId?: string;
   readonly x: number;
   readonly y: number;
   /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
@@ -191,7 +161,7 @@ export interface AssetNodeData {
 }
 
 /**
- * 画布连线：既承载媒体/生成节点关系，也承载剧本 → 分镜的文档输入关系。
+ * 画布连线：既承载媒体/生成节点关系，也承载剧本之间的文档输入关系。
  * fromKey/toKey 共用画布节点 key 命名空间，具体语义由两端节点类型决定。
  */
 export interface AssetEdgeData {
@@ -201,7 +171,12 @@ export interface AssetEdgeData {
 }
 
 export interface CanvasFlowNodeData extends Record<string, unknown> {
+  readonly groupMemberKeys?: readonly string[];
   readonly content: ReactNode;
+  /** 选中时浮在节点上方的工具条（liblib 的 .node-floating-ui）。 */
+  readonly floatingToolbar?: ReactNode;
+  /** 编辑器独立于 React Flow 的视口卸载与缩放，按节点身份保留输入会话。 */
+  readonly editorContent?: ReactNode;
   readonly hasSourceHandle: boolean;
   readonly hasTargetHandle: boolean;
   readonly inputSummary?: string;
@@ -244,7 +219,7 @@ export interface ConnectedAssetInput {
   readonly slotIndex?: number | undefined;
 }
 
-/** 分镜节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
+/** 剧本节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
 export interface ConnectedScreenplayInput {
   readonly key: string;
   readonly name: string;
@@ -361,37 +336,22 @@ export const OUTPUT_NODE_WIDTH = ASSET_NODE_WIDTH;
 export const OUTPUT_NODE_HEIGHT = ASSET_NODE_HEIGHT;
 
 // 生成节点紧凑尺寸（与 CSS 保持一致），用于连线端点与落点命中检测。
-export const IMAGE_GEN_NODE_WIDTH = 580;
-export const IMAGE_GEN_NODE_HEIGHT = 480;
-export const IMAGE_GEN_NODE_COARSE_HEIGHT = 620;
-export const VIDEO_GEN_NODE_WIDTH = 580;
-export const VIDEO_GEN_NODE_HEIGHT = 900;
-export const VIDEO_GEN_NODE_COARSE_HEIGHT = 1140;
-export const PROMPT_NODE_WIDTH = 520;
-export const PROMPT_NODE_HEIGHT = 650;
-export const PROMPT_NODE_COARSE_HEIGHT = 760;
-export const SCREENPLAY_NODE_WIDTH = 620;
-export const SCREENPLAY_NODE_HEIGHT = 760;
-export const SCREENPLAY_NODE_COARSE_HEIGHT = 900;
-export const VIDEO_COMPOSER_NODE_WIDTH = 580;
-export const VIDEO_COMPOSER_NODE_HEIGHT = 500;
-export const VIDEO_DOWNLOADER_NODE_WIDTH = 580;
-export const VIDEO_DOWNLOADER_NODE_HEIGHT = 520;
-export const VIDEO_FRAME_EXTRACTOR_NODE_WIDTH = 580;
-export const VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT = 470;
-export const VIRAL_REMIX_NODE_WIDTH = 620;
-export const VIRAL_REMIX_NODE_HEIGHT = 780;
-export const VIRAL_REMIX_NODE_COARSE_HEIGHT = 920;
-export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH = 960;
-export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT = 390;
-export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT = 450;
-
-/** Match the workflow card's viewport-width cap before its DOM size is measured. */
-export function knowledgeVideoWorkflowNodeWidth(viewportWidth?: number): number {
-  return viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
-    ? Math.min(KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH, Math.max(1, viewportWidth - 32))
-    : KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH;
-}
+export const IMAGE_GEN_NODE_WIDTH = 622;
+export const IMAGE_GEN_NODE_HEIGHT = 400;
+export const IMAGE_GEN_NODE_COARSE_HEIGHT = 406;
+export const VIDEO_GEN_NODE_WIDTH = 622;
+export const VIDEO_GEN_NODE_HEIGHT = 400;
+export const VIDEO_GEN_NODE_COARSE_HEIGHT = 406;
+export const PROMPT_NODE_WIDTH = 622;
+export const PROMPT_NODE_HEIGHT = 400;
+export const PROMPT_NODE_COARSE_HEIGHT = 406;
+export const SCREENPLAY_NODE_WIDTH = 622;
+export const SCREENPLAY_NODE_HEIGHT = 400;
+export const SCREENPLAY_NODE_COARSE_HEIGHT = 406;
+/** 智能剪辑节点：空态 350×350（原站实测），连接态封面区更宽。 */
+export const VIDEO_CLIP_NODE_WIDTH = 350;
+export const VIDEO_CLIP_NODE_HEIGHT = 350;
+export const VIDEO_CLIP_NODE_CONNECTED_WIDTH = 566;
 
 // 结果展示节点固定尺寸。
 export const RESULT_NODE_WIDTH = 250;
@@ -496,7 +456,7 @@ export const OUTPUT_NODE_GAP_Y = 32;
 // 素材卡片使用指针拖拽（见 AssetCard）：
 // Tauri WebView 的系统拖放处理器会拦截 HTML5 dataTransfer 拖拽，不能依赖 draggable。
 
-export interface BaseGenNodeData {
+export interface BaseGenNodeData extends CanvasNodeOrganization {
   readonly name?: string;
   readonly key: string;
   readonly x: number;
@@ -552,7 +512,7 @@ export interface ScreenplayNodeConfig {
   readonly catalogResolved: boolean;
 }
 
-export interface ScreenplayNodeData {
+export interface ScreenplayNodeData extends CanvasNodeOrganization {
   readonly key: string;
   readonly kind: "screenplay";
   readonly x: number;
@@ -562,334 +522,65 @@ export interface ScreenplayNodeData {
   readonly config: ScreenplayNodeConfig;
 }
 
-export interface StoryboardNodeData {
-  readonly key: string;
-  readonly kind: "storyboard";
-  readonly x: number;
-  readonly y: number;
-  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
-  readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: ScreenplayNodeConfig;
-}
-
-export type DocumentSkillNodeData = ScreenplayNodeData | StoryboardNodeData;
-
-export interface VideoComposerNodeConfig {
-  readonly outputName: string;
-  /** 保存用户明确调整过的顺序；恢复时会与当前连线集合归一化。 */
-  readonly inputOrder: readonly string[];
-}
-
-/** 本地工具节点：按显式顺序把素材视频或生成产物视频录制为一个完整视频。 */
-export interface VideoComposerNodeData {
-  readonly key: string;
-  readonly kind: "video_composer";
-  readonly x: number;
-  readonly y: number;
-  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
-  readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: VideoComposerNodeConfig;
-}
-
-export interface VideoComposerInput {
-  readonly key: string;
-  readonly name: string;
-  readonly src: string;
-  readonly sourceLabel: "素材" | "产物";
-  readonly edgeId: string;
-  /**
-   * 可交给 Rust FFmpeg 合成的来源：本地文件绝对路径或 http(s) 地址。
-   * 省略（如仅有会话内 blob 预览）时整次合成回退 WebView MediaRecorder 路径。
-   */
-  readonly ffmpegSource?: string | null;
-}
-
-export interface VideoComposerRunState {
-  readonly status: "running" | "done" | "error";
-  readonly progress: number;
-  readonly error: string | null;
-}
-
-/** 本地工具节点：粘贴网络视频链接（抖音等），用内置 yt-dlp 引擎下载为本地视频。 */
-export interface VideoDownloaderNodeData {
-  readonly key: string;
-  readonly kind: "video_downloader";
-  readonly x: number;
-  readonly y: number;
-  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
-  readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: VideoDownloaderNodeConfig;
-}
-
-export interface VideoDownloaderNodeConfig {
-  /** 节点内保存的链接输入（可能是整段分享口令文本，启动时提取首个 URL）。 */
-  readonly url: string;
-}
+export type DocumentSkillNodeData = ScreenplayNodeData;
 
 /**
- * 下载任务的会话内运行状态。jobId 关联后端内存任务记录；
- * 下载完成时节点右侧自动落一张 origin=download 的产物卡片。
+ * 「智能剪辑」节点的配置。字段与原站 liblib 的 `video-clip` 节点一一对应。
+ *
+ * 提示词本身不住这里：原站与本项目的生成节点一样，提示词内容存在提示词模块
+ * （promptContents）里，节点配置只记「用哪个模式」「参数是多少」。
  */
-export interface VideoDownloaderRunState {
-  readonly jobId: string;
-  readonly status: "running" | "done" | "error" | "cancelled";
-  readonly preparingEngine: boolean;
-  readonly progress: number | null;
-  /** B 站画质路由的中文说明（如「未登录 B 站：将自动下载 480P 画质…」）。 */
-  readonly qualityHint: string | null;
-  /** B 站成片下载后是否已自动去除右上角水印。 */
-  readonly watermarkRemoved: boolean;
-  /** 本次真实下载使用的来源；公开访问 none 不代表登录验证。 */
-  readonly credentialSource?: VideoDownloadCredentialSource | null | undefined;
-  /** 自动模式逐项预检状态，来源选定后清空。 */
-  readonly probeStatus?: string | null | undefined;
-  readonly error: string | null;
-}
-
-/** 本地工具节点：输入任意视频，按指定秒数抽取关键帧图片并落卡。 */
-export interface VideoFrameExtractorNodeData {
-  readonly key: string;
-  readonly kind: "frame_extractor";
-  readonly x: number;
-  readonly y: number;
-  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
-  readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: VideoFrameExtractorNodeConfig;
-}
-
-export interface VideoFrameExtractorNodeConfig {
-  /** 抽帧秒数（可多个）；空数组代表尚未配置。 */
-  readonly timestamps: readonly number[];
-  /**
-   * 手动指定的本地视频绝对路径；为空时优先使用连线来源
-   * （素材视频 / 视频产物 / 下载节点完成产物）。
-   */
-  readonly videoPath: string;
-  /** 持久化本地批次，重启后继续同一个任务及其剩余视频。 */
-  readonly checkpoint?: {
-    readonly batchId: string;
-    readonly activeJobId: string;
-    readonly requestId?: string;
-    readonly sources: readonly string[];
-    readonly timestamps: readonly number[];
-  };
-}
-
-/**
- * 抽帧任务的展示状态。jobId 关联后端持久化任务记录；
- * 完成后每个抽帧秒数自动落一张 origin=frame_extract 的图片产物卡片。
- */
-export interface VideoFrameExtractorRunState {
-  readonly jobId: string;
-  readonly status: "running" | "paused" | "done" | "error" | "cancelled";
-  readonly preparingEngine: boolean;
-  readonly progress: number | null;
-  readonly error: string | null;
-}
-
-/** 抽帧节点的视频输入：素材视频或视频产物（含下载/合成完成产物）。 */
-export interface FrameExtractorVideoInput {
-  readonly key: string;
-  readonly name: string;
-  /** 前端展示/预览用 src。 */
-  readonly src: string | null;
-  /** 传给 Rust 抽帧的本地文件绝对路径。 */
-  readonly finalPath: string | null;
-  readonly sourceLabel: "素材" | "产物";
-  readonly edgeId: string;
-}
-
-export interface ViralRemixNodeConfig {
-  readonly modelSelection: NodeModelSelection;
-  /** 可选的题材、品牌或改编方向；为空时按内置技能自动完成忠实复刻与三条二创。 */
-  readonly instructions: string;
-  /** 当前可编辑、可导出的 Markdown 复刻方案。 */
-  readonly currentDocument: string;
-  readonly catalogResolved: boolean;
-}
-
-export interface ViralRemixNodeData {
-  readonly key: string;
-  readonly kind: "viral_remix";
-  readonly x: number;
-  readonly y: number;
-  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
-  readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: ViralRemixNodeConfig;
-}
-
-export interface ViralRemixVideoInput {
-  readonly key: string;
-  readonly name: string;
-  readonly src: string | null;
-  readonly sourceLabel: "素材" | "产物" | "下载节点";
-  readonly edgeId: string;
-}
-
-/** 知识视频工作流对用户暴露的少量稳定阶段；内部步骤不会展开为画布节点。 */
-export type KnowledgeVideoWorkflowPhase =
-  | "idle"
-  | "planning"
-  | "awaiting_approval"
-  | "generating"
-  | "qc"
-  | "composing"
-  | "done"
-  | "failed"
-  | "paused";
-
-export type KnowledgeVideoWorkflowSection =
-  "HOOK" | "CONCEPT" | "VISUAL" | "EXAMPLE" | "PITFALL" | "RECAP" | "FILM";
-
-export type KnowledgeVideoWorkflowTrack = "LECTURER" | "DEMO" | "METAPHOR" | "FILM";
-
-/** 文本模型定稿后供媒体生成阶段消费的单个镜头。 */
-export interface KnowledgeVideoWorkflowShot {
-  readonly dependsOn?: readonly string[];
-  readonly continuationFromShotId?: string;
-  readonly id: string;
-  readonly sequence: number;
-  readonly section: KnowledgeVideoWorkflowSection;
-  readonly track: KnowledgeVideoWorkflowTrack;
-  readonly title: string;
+export interface VideoClipNodeConfig {
+  /** 剪辑模式键：default / explainerVideo / batchAd / talkingHeadVideo / smartMixCut。 */
+  readonly modeKey: string;
+  /** 比例，例如 "16:9"。 */
+  readonly aspectRatio: string;
+  /** 目标时长（秒）。 */
   readonly durationSeconds: number;
-  readonly visual: string;
-  readonly narration: string;
-  readonly videoPrompt: string;
-  readonly imagePrompt?: string | null;
-  readonly acceptance: string;
-  readonly referenceAssetIds?: readonly string[];
-}
-
-/** 单镜头的可恢复执行记录。任务本身仍由现有 generation task 表持久化。 */
-export interface KnowledgeVideoWorkflowShotRun {
-  readonly continuationReferencePath?: string | null;
-  readonly continuationSourcePath?: string | null;
-  readonly shotId: string;
-  readonly imageTaskId?: string | null;
-  readonly videoTaskId?: string | null;
-  /** 用户主动重做该镜头后置为 true；重新生成期间该镜头的旧片段不参与合成。 */
-  readonly redoRequested?: boolean;
-  /** 用户修改过该镜头的分镜文本/提示词/参数后置为 true，提示当前片段可能不是最新提示词生成的。 */
-  readonly promptEdited?: boolean;
-  /** 重做时被替换掉的旧视频任务 ID。保留它们可阻止历史恢复时按请求指纹复用旧结果。 */
-  readonly supersededTaskIds?: readonly string[];
-  readonly referenceImagePath?: string | null;
-  readonly clipPath?: string | null;
-  readonly qcStatus: "pending" | "passed" | "failed";
-  readonly qcReport?: string | null;
-  readonly repairPrompt?: string | null;
-  readonly retryCount: number;
+  /** 清晰度，例如 "720P"。 */
+  readonly resolution: string;
+  /** 合成产物名。 */
+  readonly outputName: string;
 }
 
 /**
- * 跨自动保存可恢复的工作流检查点。高频进度属于组件会话状态；这里只保存阶段边界、
- * 用户已批准的计划版本与外部任务身份，避免恢复后重复计费提交。
+ * 「智能剪辑」节点：照抄原站 liblib 的 `video-clip` 节点类型。
+ *
+ * 原站节点类型清单里的「智能剪辑」就是它（i18n：canvas:nodeTypeVideoClip =
+ * 智能剪辑，canvas:nodeTypeVideoClipDesc = 多个视频片段合为一个）。
  */
-export interface KnowledgeVideoWorkflowCheckpoint {
-  readonly executionPlan?: WorkflowExecutionPlan;
-  readonly mediaApprovals?: Partial<Record<WorkflowMediaReviewKind, WorkflowMediaApproval>>;
-  /** 参考素材变更后不得复用旧计划；缺省兼容未添加素材的旧画布。 */
-  readonly materialsSignature?: string;
-  readonly film?: AiFilmWorkflowCheckpoint;
-  readonly comicDrama?: ComicDramaWorkflowCheckpoint;
-  readonly musicVideo?: MusicVideoWorkflowCheckpoint;
-  readonly brandVideo?: BrandVideoWorkflowCheckpoint;
-  readonly commerce?: CommerceWorkflowCheckpoint;
-  readonly remotion?: RemotionWorkflowCheckpoint;
-  readonly xhsCover?: XhsCoverWorkflowCheckpoint;
-  readonly productScene?: ProductSceneWorkflowCheckpoint;
-  readonly reverseVideo?: ReverseVideoWorkflowCheckpoint;
-  readonly reelbench?: ReelbenchWorkflowCheckpoint;
-  readonly documentsOnly?: boolean;
-  readonly version: 1;
-  readonly runId: string | null;
-  readonly phase: KnowledgeVideoWorkflowPhase;
-  readonly planRevision: number;
-  readonly approvedPlanRevision: number | null;
-  /** 完整保留规划模型按 V2.4 合同返回的机读清单，供节点内查看和恢复。 */
-  readonly manifest: string;
-  readonly script: string;
-  readonly storyboard: string;
-  readonly shots: readonly KnowledgeVideoWorkflowShot[];
-  readonly shotRuns: Readonly<Record<string, KnowledgeVideoWorkflowShotRun>>;
-  readonly decision: {
-    readonly kind: "planning" | "qc";
-    readonly question: string;
-    readonly recommendation: string;
-    /** QC 确认仅针对这一镜头及生成结果；缺省只用于旧检查点兼容。 */
-    readonly qcTarget?: { readonly shotId: string; readonly signature: string };
-  } | null;
-  /** 暂停或失败时保留实际停留阶段，刷新画布后仍能显示正确进度。 */
-  readonly lastActivePhase: "planning" | "generating" | "qc" | "composing" | null;
-  readonly coverImagePath: string | null;
-  readonly activeCompositionJobId: string | null;
-  readonly finalPath: string | null;
-  readonly error: string | null;
-  readonly updatedAt: number | null;
-}
-
-/** 高频运行进度留在会话状态；阶段性检查点另由节点配置持久化。 */
-export interface KnowledgeVideoWorkflowRunState {
-  readonly phase: KnowledgeVideoWorkflowPhase;
-  readonly progress: number;
-  readonly message: string;
-  readonly error: string | null;
-}
-
-export interface KnowledgeVideoWorkflowModelSelections {
-  readonly text: NodeModelSelection;
-  readonly image: NodeModelSelection;
-  readonly video: NodeModelSelection;
-}
-
-/** 一个节点封装从内容规划到最终合成的全部业务配置与恢复检查点。 */
-export interface KnowledgeVideoWorkflowConfig {
-  /** Durable revision graph scoped to this workflow; independent from canvas edits. */
-  readonly versionHistory?: WorkflowVersionHistory;
-  /** Explicit approval binds this exact multi-step plan to the current input. */
-  readonly executionPlan?: WorkflowExecutionPlan;
-  /** Independent execution archive; restarting creates a new history identity. */
-  readonly historyRunId?: string;
-  /** 缺省为知识视频，影视模板复用同一封装式执行与持久化接口。 */
-  readonly film?: AiFilmWorkflowOptions;
-  readonly comicDrama?: ComicDramaWorkflowOptions;
-  readonly musicVideo?: MusicVideoWorkflowOptions;
-  readonly brandVideo?: BrandVideoWorkflowOptions;
-  readonly commerce?: CommerceWorkflowOptions;
-  readonly remotion?: RemotionWorkflowOptions;
-  readonly xhsCover?: XhsCoverWorkflowOptions;
-  readonly productScene?: ProductSceneWorkflowOptions;
-  readonly reverseVideo?: ReverseVideoWorkflowOptions;
-  readonly reelbench?: ReelbenchWorkflowOptions;
-  readonly brief: string;
-  /** 所有工作流共用的本地参考素材，仅保存路径和元数据。 */
-  readonly materials?: readonly PickedPromptMaterial[];
-  /** 连线在执行时解析，历史恢复只保存媒体身份，不保存临时读取地址。 */
-  readonly connectedMaterials?: readonly PromptReferenceInput[];
-  /** 执行时冻结连线文本，保留来源身份与全文供历史恢复及检查点校验。 */
-  readonly connectedTexts?: readonly {
-    readonly key: string;
-    readonly sourceKey: string;
-    readonly displayName: string;
-    readonly text: string;
-  }[];
-  readonly models: KnowledgeVideoWorkflowModelSelections;
-  readonly imageParameterValues: Readonly<Record<string, ModelParameterValue>>;
-  readonly videoParameterValues: Readonly<Record<string, ModelParameterValue>>;
-  readonly approvalPolicy: "exceptions_only";
-  readonly maxAutomaticRetries: number;
-  readonly checkpoint: KnowledgeVideoWorkflowCheckpoint;
-  readonly catalogResolved: boolean;
-}
-
-export interface KnowledgeVideoWorkflowNodeData {
+export interface VideoClipNodeData extends CanvasNodeOrganization {
   readonly key: string;
-  readonly kind: "knowledge_video_workflow";
+  readonly kind: "video_clip";
+  /** 节点名（画布上显示在卡片上方）。 */
+  readonly name?: string;
   readonly x: number;
   readonly y: number;
+  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置）。 */
   readonly measured?: { readonly width: number; readonly height: number };
-  readonly config: KnowledgeVideoWorkflowConfig;
+  readonly config: VideoClipNodeConfig;
+}
+
+/**
+ * 智能剪辑节点消费的上游素材。
+ *
+ * 槽位归属由节点类型决定：视频 → 视频 / 参考视频 / 生成视频，图片 → 产品图，
+ * 音频 → 音频，文字节点 → 文字。原站每个模式声明自己接受哪几类槽位、
+ * 每个槽位最少几个、最多几个（见 videoClipModes.ts）。
+ */
+export interface VideoClipInput {
+  readonly key: string;
+  readonly name: string;
+  /** 上游节点类型：video / image / audio / text。 */
+  readonly nodeType: "video" | "image" | "audio" | "text";
+  readonly edgeId: string;
+  readonly previewUrl: string | null;
+  /** 素材身份：提交时按它把素材交给供应商，不能按显示名推断。 */
+  readonly target?: MediaReferenceTarget;
+  /** 文字槽位的正文（nodeType 为 text 时有值）。 */
+  readonly text?: string | null;
+  /** 视频时长（秒），用于瓦片上的时长角标。 */
+  readonly durationSeconds?: number | null;
 }
 
 export function usesCoarsePointer(): boolean {
@@ -1003,7 +694,7 @@ export function genNodeDimensions(kind: CanvasGenNodeKind): { width: number; hei
 }
 
 /** 画布上的结果展示节点实例。 */
-export interface ResultNodeData {
+export interface ResultNodeData extends CanvasNodeOrganization {
   readonly key: string;
   readonly x: number;
   readonly y: number;
@@ -1034,7 +725,7 @@ export interface OutputLayerInfo {
  * 不在生成节点内部展示产物，而是生成独立卡片并以虚线连回来源节点。
  * 任务进行中先落下占位卡片展示进度，结果返回后先展示会话内预览，保存完成后切换到本地文件，失败展示完整原始错误。
  */
-export interface OutputNodeData {
+export interface OutputNodeData extends CanvasNodeOrganization {
   /** 用户改名独立于媒体身份和自动保存路径，结果补发不能覆盖。 */
   readonly customName?: string;
   /** 节点实例 id。 */
@@ -1076,11 +767,7 @@ export interface OutputNodeData {
   readonly uploadedToLocal?: boolean;
   /** 该产物已独立保存到对象存储，未导入供应商素材库。 */
   readonly uploadedToObjectStorage?: boolean;
-  /**
-   * 框选成组后的组 id。与素材节点共用同一套组。
-   * 没有点选序号的产物按从上到下、从左到右排在有序号的素材之后。
-   */
-  readonly assetGroupId?: string;
+  /** 没有点选序号的产物按从上到下、从左到右排在有序号的素材之后。 */
   readonly libraryPickOrder?: number;
   readonly x: number;
   readonly y: number;
@@ -1097,26 +784,6 @@ export function outputNodeDimensions(node: OutputNodeData): CanvasNodeDimensions
     : fitMediaNodeDimensions(node.aspectRatio);
 }
 
-/**
- * 画布节点 key 的统一识别模式，与下方 *NodeKey 工厂同源维护：`前缀-8位base36`
- * （Math.random 的进制串可能丢前导零，实际 1–8 位）。前缀表必须覆盖全部节点 key
- * 工厂，新增节点类型时同步扩这里；创作助手消息里的节点代号识别也依赖它。
- * 两侧 lookaround 把匹配钉在完整 token 上，避免命中 `xgen-abc123`、
- * `gen-abc123def9`（超长）或 `frame-extractor-config` 这类带连字符的词。
- */
-const CANVAS_NODE_KEY_SOURCE =
-  "(?<![a-z0-9-])(?:asset|gen|output|composer|downloader|frame-extractor|screenplay|storyboard|viral-remix|knowledge-video)-[a-z0-9]{1,8}(?![a-z0-9-])";
-
-/** 全局模式：给 matchAll / 分词用（matchAll 会克隆正则，共享实例无 lastIndex 污染）。 */
-export const CANVAS_NODE_KEY_PATTERN = new RegExp(CANVAS_NODE_KEY_SOURCE, "g");
-
-const CANVAS_NODE_KEY_EXACT_PATTERN = new RegExp(`^${CANVAS_NODE_KEY_SOURCE}$`);
-
-/** 整段字符串是否恰好是一个节点 key 形状（行内代码精确匹配用）。 */
-export function isCanvasNodeKeyShape(value: string): boolean {
-  return CANVAS_NODE_KEY_EXACT_PATTERN.test(value);
-}
-
 export function assetNodeKey(): string {
   return `asset-${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -1129,32 +796,21 @@ export function outputNodeKey(): string {
   return `output-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function videoComposerNodeKey(): string {
-  return `composer-${Math.random().toString(36).slice(2, 10)}`;
+/** 智能剪辑节点 key。原站节点类型名是 `video-clip`。 */
+export function videoClipNodeKey(): string {
+  return `video-clip-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export function videoDownloaderNodeKey(): string {
-  return `downloader-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export function frameExtractorNodeKey(): string {
-  return `frame-extractor-${Math.random().toString(36).slice(2, 10)}`;
+/**
+ * 智能剪辑节点的默认名。原站 i18n `defaultVideoClipNodeName` = 智能剪辑 {index}，
+ * 序号按画布上已有的智能剪辑节点数递增。
+ */
+export function videoClipNodeName(index: number): string {
+  return `智能剪辑 ${index}`;
 }
 
 export function screenplayNodeKey(): string {
   return `screenplay-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export function storyboardNodeKey(): string {
-  return `storyboard-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export function viralRemixNodeKey(): string {
-  return `viral-remix-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-export function knowledgeVideoWorkflowNodeKey(): string {
-  return `knowledge-video-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function screenplayMessageId(): string {
@@ -1311,33 +967,6 @@ export function nextPreparedMediaOutputSlot(
   return nextOutputPosition(source, current, options);
 }
 
-export function nextVideoComposerOutputSlot(
-  node: VideoComposerNodeData,
-  current: readonly OutputNodeData[],
-  options: OutputPlacementOptions = {},
-): { x: number; y: number } {
-  const width = node.measured?.width ?? VIDEO_COMPOSER_NODE_WIDTH;
-  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
-}
-
-export function nextVideoDownloaderOutputSlot(
-  node: VideoDownloaderNodeData,
-  current: readonly OutputNodeData[],
-  options: OutputPlacementOptions = {},
-): { x: number; y: number } {
-  const width = node.measured?.width ?? VIDEO_DOWNLOADER_NODE_WIDTH;
-  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
-}
-
-export function nextFrameExtractorOutputSlot(
-  node: VideoFrameExtractorNodeData,
-  current: readonly OutputNodeData[],
-  options: OutputPlacementOptions = {},
-): { x: number; y: number } {
-  const width = node.measured?.width ?? VIDEO_FRAME_EXTRACTOR_NODE_WIDTH;
-  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
-}
-
 /** 从产物绝对路径提取文件名（兼容 Windows 反斜杠分隔符）。 */
 export function fileNameFromPath(path: string): string {
   const segments = path.split(/[\\/]/).filter(Boolean);
@@ -1351,66 +980,6 @@ export function textResultFromSource(source: unknown): string | null {
   if (value.kind !== "text" || typeof value.text !== "string") return null;
   const text = value.text.trim();
   return text.length > 0 ? text : null;
-}
-
-/** 桌面端通过原生 HTTP 拉取远程素材，转为同源 Blob，避免画布录制被 CORS 污染。 */
-export async function materializeCompositionInputs(inputs: readonly VideoComposerInput[]): Promise<{
-  readonly inputs: readonly VideoCompositionInput[];
-  readonly objectUrls: readonly string[];
-}> {
-  const objectUrls: string[] = [];
-  try {
-    const materialized = await Promise.all(
-      inputs.map(async (input) => {
-        if (!isDesktopRuntime() || !/^https?:\/\//i.test(input.src)) {
-          return { key: input.key, name: input.name, src: input.src };
-        }
-        const { fetch: tauriFetch } = await import("@tauri-apps/plugin-http");
-        const response = await tauriFetch(input.src);
-        if (!response.ok) {
-          throw new Error(`读取「${input.name}」失败（HTTP ${response.status}）。`);
-        }
-        const objectUrl = URL.createObjectURL(await response.blob());
-        objectUrls.push(objectUrl);
-        return { key: input.key, name: input.name, src: objectUrl };
-      }),
-    );
-    return { inputs: materialized, objectUrls };
-  } catch (error) {
-    for (const url of objectUrls) URL.revokeObjectURL(url);
-    throw error;
-  }
-}
-
-export async function saveComposedVideoBlob(
-  blob: Blob,
-  fileName: string,
-): Promise<{ readonly finalPath: string | null; readonly previewSrc: string | null }> {
-  if (!isDesktopRuntime()) {
-    const previewSrc = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = previewSrc;
-    anchor.download = fileName;
-    anchor.click();
-    return { finalPath: null, previewSrc };
-  }
-  const [{ downloadDir, join }, { exists, mkdir, writeFile }] = await Promise.all([
-    import("@tauri-apps/api/path"),
-    import("@tauri-apps/plugin-fs"),
-  ]);
-  const directory = await join(await downloadDir(), "无限画布");
-  await mkdir(directory, { recursive: true });
-  let finalPath = await join(directory, fileName);
-  const extensionIndex = fileName.lastIndexOf(".");
-  const baseName = extensionIndex > 0 ? fileName.slice(0, extensionIndex) : fileName;
-  const extension = extensionIndex > 0 ? fileName.slice(extensionIndex) : "";
-  let suffix = 2;
-  while (await exists(finalPath)) {
-    finalPath = await join(directory, `${baseName}-${suffix}${extension}`);
-    suffix += 1;
-  }
-  await writeFile(finalPath, new Uint8Array(await blob.arrayBuffer()));
-  return { finalPath, previewSrc: null };
 }
 
 export const ASSET_CLOUD_STATUS_LABELS: Record<CloudAssetStatus, string> = {
@@ -1896,7 +1465,9 @@ export function stagingErrorSummary(error: unknown): string | null {
     }
     if (itemErrorText != null) return itemErrorText;
   }
-  return formatRawBackendError(error);
+  // 兜底也必须是人话：以前这里直接返回 `formatRawBackendError` 的 JSON 原文，
+  // 素材库列表里会直接显示一坨 `{"kind":"validation",…}`。
+  return backendErrorMessage(error);
 }
 
 export function stagingErrorFullText(error: unknown): string | null {
@@ -2205,11 +1776,6 @@ export const SCREENPLAY_NODE_DESCRIPTOR: StaticNodeDescriptor = {
   description: "内置双技能 · 多轮创作与 Markdown 导出",
 };
 
-export const STORYBOARD_NODE_DESCRIPTOR: StaticNodeDescriptor = {
-  kindLabel: "剧本转工业级分镜脚本",
-  description: "内置 V5.0 技能 · 多轮分镜与 Markdown 导出",
-};
-
 export interface DocumentSkillNodeCopy {
   readonly descriptor: StaticNodeDescriptor;
   readonly assistantRole: string;
@@ -2253,28 +1819,6 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     exportAriaLabel: "导出 Markdown 剧本文档",
     exportReadyTitle: "导出当前剧本",
     exportEmptyTitle: "暂无可导出的剧本",
-  },
-  storyboard: {
-    descriptor: STORYBOARD_NODE_DESCRIPTOR,
-    assistantRole: "分镜导演",
-    documentName: "分镜脚本",
-    currentDocumentLabel: "当前工业级分镜脚本",
-    skillTitle: "V5.0 分镜技能已内置",
-    skillDetail: "V5.0 完整技能库 · 智能按需加载",
-    providerAriaLabel: "分镜文本模型供应商",
-    modelAriaLabel: "分镜文本模型",
-    conversationAriaLabel: "工业级分镜多轮对话",
-    emptyTitle: "粘贴剧本，开始工业化拆镜",
-    emptyDescription: "逐轮锁定画幅、时长与资产；每轮都会带上完整对话和当前分镜稿。",
-    composerAriaLabel: "分镜对话消息",
-    composerPlaceholder:
-      "粘贴剧本，或输入：将上面的剧本转成 9:16、每段 15 秒的 Seedance 2.5 分镜脚本",
-    documentPlaceholder: "最新工业级分镜稿会同步到这里；可直接编辑、继续对话并导出 Markdown。",
-    loadingLabel: "正在匹配分镜方法并读取上下文…",
-    removeAriaLabel: "移除剧本转工业级分镜脚本节点",
-    exportAriaLabel: "导出 Markdown 分镜脚本文档",
-    exportReadyTitle: "导出当前工业级分镜脚本",
-    exportEmptyTitle: "暂无可导出的分镜脚本",
   },
 };
 
@@ -2320,6 +1864,19 @@ export const CANVAS_DOCUMENT_TITLE = "未命名画布";
 /** 画布状态变更后的自动保存防抖间隔。 */
 export const CANVAS_SAVE_DEBOUNCE_MS = 1000;
 
+/**
+ * 崩溃草稿的写入防抖间隔。
+ *
+ * 草稿是崩溃兜底：进程被强杀时，自动保存的防抖窗口（1 秒）内的编辑会丢。
+ * 草稿用**更短**的窗口，把这段丢失窗口压到 0.3 秒。
+ *
+ * 为什么不是每次编辑都写：写草稿要付一次「整份画布序列化 + 同步写盘」的代价
+ * （还要把每个提示词节点的编辑器 JSON 转成 canonical 文档）。每次击键都付一次，
+ * 在大画布上就是每次击键都阻塞主线程几毫秒。独立防抖让两头都变好 ——
+ * 丢失窗口更小，序列化次数降到约 1/10。
+ */
+export const CANVAS_DRAFT_DEBOUNCE_MS = 300;
+
 /** 生成数量上限：供应商 API 无数量参数时，数量 > 1 拆分为多个独立任务（每个任务数量 1）。 */
 export const MAX_GENERATION_COUNT = 4;
 
@@ -2344,8 +1901,6 @@ export interface ImageNodeConfig {
   readonly inputSlots?: readonly (string | null)[];
   /** 提交时注入 equirectangular 全景说明，并尽量选用模型最宽画幅。 */
   readonly panoramaEnabled?: boolean;
-  /** 图片节点站位导演台草稿；与视频白模工作台共用结构，不走 Blender。 */
-  readonly whiteModelStudio?: WhiteModelStudioDraft;
 }
 
 export interface VideoNodeConfig {
@@ -2357,8 +1912,6 @@ export interface VideoNodeConfig {
   readonly seedanceTaskMode?: SeedanceTaskMode;
   /** 白模参考视频与渲染要求；生成时合入冻结提示词，原输入框正文保持可编辑。 */
   readonly whiteModelControl?: WhiteModelControlConfig;
-  /** Blender 制作参数与持久渲染任务，关闭工作台后仍可恢复。 */
-  readonly whiteModelStudio?: WhiteModelStudioDraft;
   /** 绿幕制作、明确选用与无缝融合的分阶段配置，任务复用生成历史。 */
   readonly greenScreen?: GreenScreenConfig;
   /** 连接素材的显式角色：素材 key → first_frame/last_frame/reference_*。 */
@@ -2504,57 +2057,6 @@ export function createScreenplayNodeConfig(
   };
 }
 
-export function createViralRemixNodeConfig(
-  modelSelection: NodeModelSelection,
-  catalogResolved: boolean,
-): ViralRemixNodeConfig {
-  return {
-    modelSelection: { ...modelSelection },
-    instructions: "",
-    currentDocument: "",
-    catalogResolved,
-  };
-}
-
-export function createKnowledgeVideoWorkflowConfig(
-  modelSelections: NodeModelSelections,
-  catalogResolved: boolean,
-): KnowledgeVideoWorkflowConfig {
-  return {
-    brief: "",
-    materials: [],
-    models: {
-      text: { ...modelSelections.prompt },
-      image: { ...modelSelections.image },
-      video: { ...modelSelections.video },
-    },
-    imageParameterValues: {},
-    videoParameterValues: {},
-    approvalPolicy: "exceptions_only",
-    maxAutomaticRetries: 2,
-    checkpoint: {
-      version: 1,
-      runId: null,
-      phase: "idle",
-      planRevision: 0,
-      approvedPlanRevision: null,
-      manifest: "",
-      script: "",
-      storyboard: "",
-      shots: [],
-      shotRuns: {},
-      decision: null,
-      lastActivePhase: null,
-      coverImagePath: null,
-      activeCompositionJobId: null,
-      finalPath: null,
-      error: null,
-      updatedAt: null,
-    },
-    catalogResolved,
-  };
-}
-
 export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, string> = {
   seedance_2_0: "Seedance 2.0 专用",
   seedance_2_5: "Seedance 2.5 专用",
@@ -2563,11 +2065,19 @@ export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, str
   realistic_character: "人物真实感图片 专用",
   fpv_path: "FPV 路径",
   fight_prompt_master: "打斗导演",
-  multi_grid_storyboard: "多宫格分镜",
-  storyboard_prompt: "故事板",
-  gpt_image_2_style: "GPT Image 2 风格库",
   cinematic_dialogue: "电影对白表演",
 };
+
+/**
+ * 旧画布可能仍带着已下线的提示词模式（例如随组件删除的风格库模式）。
+ * 画布文档按 JSON 透传，不做结构校验，因此这里把未知模式降级成默认模式，
+ * 让历史节点仍能提交，而不是被后端的枚举校验直接拒绝。
+ */
+export function resolvePromptOptimizationMode(mode: string): PromptOptimizationMode {
+  return mode in PROMPT_OPTIMIZATION_MODE_LABELS
+    ? (mode as PromptOptimizationMode)
+    : "seedance_2_5";
+}
 
 /** 把提示词段序列（文本 + @引用）压成纯文本：引用内联为「@显示名」。 */
 export const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -2575,6 +2085,9 @@ export const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
   "failed",
   "unknown",
   "interrupted",
+  // 任务可被显式取消（cancel_generation_task）或随画布删除而收敛。
+  // 它是终态：取消后不再轮询、不再落盘产物。
+  "cancelled",
 ]);
 
 export const TASK_STATUS_LABELS: Record<string, string> = {
@@ -2585,8 +2098,17 @@ export const TASK_STATUS_LABELS: Record<string, string> = {
   running: "生成中",
   succeeded: "已成功",
   failed: "失败",
-  unknown: "结果未知",
+  /*
+   * 「结果未知」= 上游可能已经受理并计费，只是我们没拿到结果。
+   *
+   * 写成「结果未知」四个字，用户会读成「失败了，再点一次」—— 那就是**第二次
+   * 付费请求**。所以这里必须把「可能已计费」摆出来，让人先去核对远程任务。
+   * 落 Unknown 的两种来源都是这个语义：上游 5xx / 网络中断（可能已受理），
+   * 以及上游回了 2xx 但回执里没有任务号（确定已受理、只是缺身份）。
+   */
+  unknown: "结果未知（可能已计费）",
   interrupted: "已中断",
+  cancelled: "已取消",
 };
 
 export const SAVE_STATUS_LABELS: Record<string, string> = {
@@ -3068,35 +2590,4 @@ export function resolvePendingDocumentNodeConfig<T extends DocumentSkillNodeData
           catalogResolved: true,
         },
       };
-}
-
-export function resolvePendingKnowledgeVideoWorkflowConfig(
-  node: KnowledgeVideoWorkflowNodeData,
-  providerCatalog: readonly ProviderCatalogEntry[],
-): KnowledgeVideoWorkflowNodeData {
-  if (node.config.catalogResolved) return node;
-  return {
-    ...node,
-    config: {
-      ...node.config,
-      models: {
-        text: reconcileTextModelSelection(node.config.models.text, providerCatalog),
-        image: reconcileNodeModelSelection(
-          "image",
-          node.config.models.image,
-          providerCatalog,
-          node.config.productScene?.generationMode === "reference"
-            ? "image_to_image"
-            : "text_to_image",
-        ),
-        video: reconcileNodeModelSelection(
-          "video",
-          node.config.models.video,
-          providerCatalog,
-          "video_generation",
-        ),
-      },
-      catalogResolved: true,
-    },
-  };
 }

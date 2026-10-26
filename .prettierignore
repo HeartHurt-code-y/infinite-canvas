@@ -5,8 +5,6 @@ out/
 node_modules/
 src-tauri/gen/
 src-tauri/target/
-src-tauri/resources/remotion-runtime/
-tools/remotion-runtime/
 package-lock.json
 pnpm-lock.yaml
 .firecrawl/
@@ -20,7 +18,6 @@ pnpm-lock.yaml
 .tmp/
 
 # 生成物与工具产物，不是源码，重排它们只会制造无法评审的巨型 diff。
-component-catalog.json
 .qoder-credits/
 
 # 随应用打包的净化供应商资料（markdown 正文与 manifest.json 由构建直接取字节）。
@@ -29,3 +26,5 @@ skills/
 src-tauri/skills/
 # ts-rs 生成的跨语言契约绑定（pnpm codegen 产物，逐字提交）
 src/lib/bindings/
+# vendored 的第三方源码（wry 等）：只做补丁，不参与本仓库的格式与评审。
+src-tauri/vendor/

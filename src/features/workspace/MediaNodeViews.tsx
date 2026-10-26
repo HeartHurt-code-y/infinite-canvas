@@ -1,11 +1,15 @@
 import { Icon } from "../../components/Icon";
+import { ErrorAlert } from "../../components/ErrorAlert";
+import { useModalFocusTrap } from "../../components/useModalFocusTrap";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "../../lib/toast";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
-import { requestRuntimeComponents } from "../../lib/runtimeComponents";
+import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import "./CanvasGenEditor.css";
 import {
+  backendErrorMessage,
   formatBytes,
   formatRawBackendError,
   formatSaveProgress,
@@ -20,26 +24,23 @@ import {
   type GenerationTaskSummary,
   type MediaReferenceTarget,
   type ProviderCatalogEntry,
-  type VideoDownloadCredentialSource,
-  type VideoDownloaderCookieBrowser,
-  type VideoDownloaderEngineStatus,
 } from "../../lib/backend";
-import type { PromptContentEditorSession } from "../../lib/promptContent";
+import type { PromptContentEditorSession, PromptContentModule } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
-import { DownloadCookieSourceControls } from "./DownloadCookieSourceControls";
 import {
   copyTextToDesktopClipboard,
   revealDesktopItem,
   exportArtifactToDesktop,
 } from "./desktopActions";
 import { NodeNameEditor } from "./NodeNameEditor";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
 import { artifactFileName } from "./artifactNames";
-import { localAssetNodeMediaUrl } from "./localAssetMedia";
+import { localAssetNodeMediaUrl, signedUrlExpired } from "./localAssetMedia";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
-import { useLocalVideoPoster } from "./localVideoPoster";
+import { MediaGenerationPreview, MediaNodeTaskStatus } from "./VideoGenerationNode";
+import { CanvasNodeEditorShell } from "./CanvasNodeEditor";
+import { useLocalVideoPoster, useMediaFileFingerprint } from "./localVideoPoster";
 import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
   AssetKindIcon,
@@ -61,17 +62,6 @@ import type {
   ResultNodeData,
   RetryInfo,
   StaticNodeDescriptor,
-  VideoComposerInput,
-  VideoComposerNodeConfig,
-  VideoComposerNodeData,
-  VideoComposerRunState,
-  VideoDownloaderNodeConfig,
-  VideoDownloaderNodeData,
-  VideoDownloaderRunState,
-  FrameExtractorVideoInput,
-  VideoFrameExtractorNodeConfig,
-  VideoFrameExtractorNodeData,
-  VideoFrameExtractorRunState,
   VideoNodeConfig,
 } from "./workspaceModel";
 import {
@@ -97,9 +87,9 @@ export function CanvasGenNode({
   node,
   descriptor,
   selected,
-  dragging,
   starting,
   activeTask,
+  latestTask,
   connectedInputs,
   inheritedInputs,
   inputSlotPositions,
@@ -109,6 +99,7 @@ export function CanvasGenNode({
   registerPromptInput,
   providerCatalog,
   onSelect,
+  onEdit,
   onNodeDragStart,
   onRemove,
   onUnlink,
@@ -117,13 +108,17 @@ export function CanvasGenNode({
   onImageConfigChange,
   onVideoConfigChange,
   onAnnotateVideo,
-  onOpenWhiteModelStudio,
   greenScreenResults,
   onGreenScreenUseResult,
   onImportGreenScreenVideo,
   onStartGeneration,
   startError,
   onRename,
+  presentation = "card",
+  editorOpen = selected,
+  onCloseEditor,
+  promptContents,
+  previewOutput,
 }: {
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly descriptor: StaticNodeDescriptor;
@@ -132,6 +127,7 @@ export function CanvasGenNode({
   readonly starting: boolean;
   readonly startError: string | null;
   readonly activeTask: GenerationTaskSummary | null;
+  readonly latestTask?: GenerationTaskSummary | null | undefined;
   readonly connectedInputs: readonly ConnectedAssetInput[];
   readonly inheritedInputs: readonly InheritedAssetInput[];
   /** 直连素材在其槽位表里的位置；参考清单据此保留空位、不自动上移。 */
@@ -146,6 +142,7 @@ export function CanvasGenNode({
   ) => void;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly onSelect: (key: string) => void;
+  readonly onEdit?: ((key: string) => void) | undefined;
   readonly onNodeDragStart: (
     key: string,
     x: number,
@@ -159,7 +156,6 @@ export function CanvasGenNode({
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
-  readonly onOpenWhiteModelStudio?: ((nodeKey: string) => void) | undefined;
   readonly greenScreenResults?: readonly GreenScreenResult[] | undefined;
   readonly onGreenScreenUseResult?: ((nodeKey: string, key: string) => void) | undefined;
   readonly onImportGreenScreenVideo?: ((nodeKey: string) => void) | undefined;
@@ -169,10 +165,19 @@ export function CanvasGenNode({
   ) => void;
   readonly onStartGeneration: (key: string) => void;
   readonly onRename?: ((key: string, name: string) => void) | undefined;
+  readonly presentation?: "card" | "editor";
+  readonly editorOpen?: boolean;
+  readonly onCloseEditor?: (() => void) | undefined;
+  readonly promptContents?: PromptContentModule | undefined;
+  readonly previewOutput?: OutputNodeData | null | undefined;
 }) {
   const isVideo = node.kind === "video";
-  const nodeElementRef = useRef<HTMLDivElement>(null);
   const effectiveInputs = [...connectedInputs, ...inheritedInputs];
+  /** 提示词编辑会话：参考瓦片上的「@」按钮要靠它往提示词里插引用。 */
+  const promptSessionRef = useRef<PromptContentEditorSession | null>(null);
+  const handlePromptSession = useCallback((session: PromptContentEditorSession | null) => {
+    promptSessionRef.current = session;
+  }, []);
   const reorderableKeys = new Set(
     connectedInputs
       .filter((input) => input.edgeId === `${input.key}->${node.key}`)
@@ -184,109 +189,129 @@ export function CanvasGenNode({
   const selectionReady = Boolean(
     node.config.modelSelection.providerId && node.config.modelSelection.modelDefinitionId,
   );
-  const statusLabel = activeTask
-    ? (TASK_STATUS_LABELS[activeTask.status] ?? "正在生成")
-    : starting
-      ? "提交中…"
-      : "空闲 · 可发起生成";
+  if (presentation === "card") {
+    return (
+      <MediaGenerationPreview
+        node={node}
+        selected={selected}
+        editing={editorOpen}
+        starting={starting}
+        activeTask={activeTask}
+        latestTask={latestTask}
+        inputs={effectiveInputs}
+        output={previewOutput}
+        promptContents={promptContents}
+        startError={startError}
+        onSelect={onSelect}
+        onEdit={onEdit}
+        onNodeDragStart={onNodeDragStart}
+        onSizeChange={onSizeChange}
+        onRemove={onRemove}
+        onRename={onRename}
+      />
+    );
+  }
 
-  useEffect(() => {
-    const element = nodeElementRef.current;
-    if (element == null) return;
-    const reportSize = () => {
-      const width = element.offsetWidth;
-      const height = element.offsetHeight;
-      if (width > 0 && height > 0) onSizeChange(node.key, { width, height });
-    };
-    reportSize();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(reportSize);
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, [node.key, onSizeChange]);
-
-  return (
-    <div
-      ref={nodeElementRef}
-      className={`canvas-gen-node canvas-gen-node--${node.kind}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      data-connection-target={node.key}
-      aria-busy={starting || activeTask != null}
-      onMouseDown={(event) => {
-        const target = event.target as HTMLElement;
-        if (target.closest(".canvas-gen-node__settings")) {
-          onSelect(node.key);
-          return;
-        }
-        // 提示词输入框、按钮内部按下不触发节点拖动。
-        if (
-          target.closest(".prompt-mention, .canvas-gen-node__actions, .node-media-chip__unlink")
-        ) {
-          return;
-        }
-        onSelect(node.key);
-        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
-      }}
-    >
-      <div className="canvas-gen-node__header">
-        <span className={`canvas-gen-node__type canvas-gen-node__type--${node.kind}`}>
-          <span className="canvas-gen-node__type-icon" aria-hidden="true">
-            <NodeTypeIcon kind={node.kind} size={16} />
-          </span>
-          <span className="canvas-gen-node__type-copy">
-            <strong title={node.name}>{node.name ?? descriptor.kindLabel}</strong>
-            <small>
-              {isVideo
-                ? referenceInputCount > 0
-                  ? `参考素材 ${referenceInputCount}`
-                  : "视频任务"
-                : referenceInputCount > 0
-                  ? `参考媒体 ${referenceInputCount}`
-                  : "图片任务"}
-            </small>
-          </span>
-        </span>
-        <span className="canvas-gen-node__actions">
-          {onRename ? (
-            <NodeNameEditor
-              name={node.name ?? descriptor.kindLabel}
-              label="修改生成节点名称"
-              onSave={(name) => onRename(node.key, name)}
-            />
-          ) : null}
-          <button
-            type="button"
-            className="canvas-gen-node__remove"
-            aria-label={`移除${descriptor.kindLabel}节点`}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
+  const form = (
+    <div className="video-node-editor__form" aria-busy={starting || activeTask != null}>
+      {/*
+        原站 liblib 编辑区（实测 2026-10-22，1707×898 / DPR 1.5）：
+          面板根    flex flex-col gap-2 p-2（间隙 8 / 内边距 8）
+          工具行    flex flex-wrap items-center gap-1 pl-1 pt-1
+          缩略图行  nopan flex w-full min-w-0 flex-wrap items-start gap-2 pl-1
+          提示词区  relative flex-1 overflow-hidden rounded-xl p-2 min-h-20
+          底栏      flex w-full items-start gap-1
+        本项目原来把「提示词」标签行放在最上面、素材缩略图排在提示词之后，
+        这里按原站重排；标签行降级为仅供读屏使用（label / description 仍要挂上）。
+      */}
+      <div className="canvas-gen-node__tool-chips" role="group" aria-label="创作工具">
+        <button
+          type="button"
+          className="canvas-gen-node__tool-chip"
+          aria-label="添加参考素材"
+          data-tooltip="从素材库选参考"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toast.error("参考素材选择后端暂未接入：可从节点左侧手柄的「引用该节点生成」接入素材");
+          }}
+        >
+          <CanvasChromeIcon name="plus" size={12} />
+          <span>参考</span>
+        </button>
+        <button
+          type="button"
+          className="canvas-gen-node__tool-chip"
+          aria-label="标记"
+          data-tooltip="标记（后端暂未接入）"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toast.error("标记后端暂未接入");
+          }}
+        >
+          <CanvasChromeIcon name="crosshair" size={12} />
+          <span>标记</span>
+        </button>
+        <button
+          type="button"
+          className="canvas-gen-node__tool-chip"
+          aria-label="角色库"
+          data-tooltip="角色库（后端暂未接入）"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toast.error("角色库后端暂未接入");
+          }}
+        >
+          <CanvasChromeIcon name="member" size={12} />
+          <span>角色库</span>
+        </button>
+        <button
+          type="button"
+          className="canvas-gen-node__tool-chip"
+          aria-label="运镜"
+          data-tooltip="运镜（后端暂未接入）"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            toast.error("运镜后端暂未接入");
+          }}
+        >
+          <CanvasChromeIcon name="video" size={12} />
+          <span>运镜</span>
+        </button>
       </div>
-
-      <div className="canvas-gen-node__prompt-section">
-        <div className="canvas-gen-node__section-heading">
-          {/* 提示词是生成节点的唯一必填输入，但这里刻意不放红色星号：这段
-              标签文字通过 aria-labelledby 直接充当输入框的可访问名（见 App.test.tsx
-              的 "提示词输入框，输入 @ 引用素材"），星号会污染这个名称。*/}
-          <span id={promptLabelId}>
-            <span aria-hidden="true">提示词</span>
-            <span className="sr-only">提示词输入框，输入 @ 引用素材</span>
-          </span>
-          <small id={promptHintId}>
-            {promptSourceName
-              ? inheritedInputs.length > 0
-                ? `已接入提示词输出 · 自动继承 ${inheritedInputs.length} 张参考图`
-                : `已接入 ${promptSourceName} 的输出`
-              : referenceInputCount > 0
-                ? `${referenceInputCount} 个参考素材已连接`
-                : "输入 @ 引用素材"}
-          </small>
-        </div>
+      <GenerationInputChips
+        inputs={effectiveInputs}
+        {...(inputSlotPositions ? { positions: inputSlotPositions } : {})}
+        onUnlink={onUnlink}
+        onInsertReference={(input) => {
+          // 原站的 @ 在参考瓦片上：点一下把这份参考插进提示词。
+          const session = promptSessionRef.current;
+          if (session == null) return;
+          const candidate = mentionCandidates.find((item) => item.canvasNodeKey === input.key);
+          if (candidate == null) return;
+          session.insertReference(candidate);
+        }}
+        reorderableKeys={reorderableKeys}
+        onReorder={(sourceKey, targetKey) => onReorderInput(node.key, sourceKey, targetKey)}
+      />
+      <div className="canvas-gen-node__prompt-area">
+        {/* 提示词是生成节点的唯一必填输入；原站编辑区没有可见标题，
+            这里保留读屏用的标签与提示（aria-labelledby / aria-describedby 指向它们）。*/}
+        <span id={promptLabelId} className="sr-only">
+          提示词输入框，输入 @ 引用素材
+        </span>
+        <span id={promptHintId} className="sr-only">
+          {promptSourceName
+            ? inheritedInputs.length > 0
+              ? `已接入提示词输出 · 自动继承 ${inheritedInputs.length} 张参考图`
+              : `已接入 ${promptSourceName} 的输出`
+            : referenceInputCount > 0
+              ? `${referenceInputCount} 个参考素材已连接`
+              : "输入 @ 引用素材"}
+        </span>
         <PromptMentionInput
           nodeKey={node.key}
           candidates={mentionCandidates}
@@ -294,173 +319,65 @@ export function CanvasGenNode({
           registerInput={registerPromptInput}
           labelledBy={promptLabelId}
           describedBy={promptHintId}
-          expandable
-        />
-        <GenerationInputChips
-          inputs={effectiveInputs}
-          {...(inputSlotPositions ? { positions: inputSlotPositions } : {})}
-          onUnlink={onUnlink}
-          reorderableKeys={reorderableKeys}
-          onReorder={(sourceKey, targetKey) => onReorderInput(node.key, sourceKey, targetKey)}
+          expandable={false}
+          onSession={handlePromptSession}
         />
       </div>
 
-      {node.kind === "video" ? (
-        <VideoNodeSettings
-          greenScreenResults={greenScreenResults}
-          greenScreenBusy={starting || activeTask != null}
-          onGreenScreenGenerate={() => onStartGeneration(node.key)}
-          onGreenScreenUseResult={
-            onGreenScreenUseResult ? (key) => onGreenScreenUseResult(node.key, key) : undefined
-          }
-          onImportGreenScreenVideo={
-            onImportGreenScreenVideo ? () => onImportGreenScreenVideo(node.key) : undefined
-          }
-          onOpenWhiteModelStudio={
-            onOpenWhiteModelStudio ? () => onOpenWhiteModelStudio(node.key) : undefined
-          }
-          config={node.config}
-          providerCatalog={providerCatalog}
-          hasMediaInputs={effectiveInputs.length > 0}
-          mediaInputs={effectiveInputs}
-          {...(onAnnotateVideo
-            ? {
-                onAnnotateVideo: (input: ConnectedAssetInput | InheritedAssetInput) =>
-                  onAnnotateVideo(node.key, input),
-              }
-            : {})}
-          onChange={(config) => onVideoConfigChange(node.key, config)}
-        />
-      ) : (
-        <ImageNodeSettings
-          config={node.config}
-          providerCatalog={providerCatalog}
-          hasMediaInputs={connectedInputs.some(
-            (input) => input.kind === "image" || input.kind === "video",
-          )}
-          onChange={(config) => onImageConfigChange(node.key, config)}
-          onOpenWhiteModelStudio={
-            onOpenWhiteModelStudio ? () => onOpenWhiteModelStudio(node.key) : undefined
-          }
-        />
-      )}
-
       {startError ? (
-        <>
-          <div className="canvas-gen-node__error" role="alert">
-            {!isVideo ? (
-              <strong>
-                <Icon name="warning-circle" aria-hidden="true" size="sm" />
-                未能开始生成 · 检查配置后重试
-              </strong>
-            ) : null}
-            <pre
-              className="raw-error canvas-gen-node__start-error"
-              aria-label="发起任务失败"
-              tabIndex={0}
-            >
-              {startError}
-            </pre>
-          </div>
-          <ErrorCopyButton text={startError} />
-        </>
+        <div aria-label="发起任务失败">
+          <ErrorAlert
+            id={`generation-start-error-${node.key}`}
+            error={startError}
+            hint="检查提示词、素材和模型设置后重试；提交回执不明确时请在历史中核对原任务。"
+          />
+        </div>
       ) : null}
 
       <div className="canvas-gen-node__footer">
         {isVideo ? (
-          <div className="canvas-gen-node__video-status" role="status" aria-live="polite">
-            <span className="canvas-gen-node__video-status-copy">
-              <span
-                className={`canvas-gen-node__video-status-icon${activeTask || starting ? " is-active" : ""}`}
-                aria-hidden="true"
-              >
-                {activeTask || starting ? (
-                  <Icon name="circle-notch" className="spin-icon" size="md" />
-                ) : (
-                  <Icon name="check-circle" size="md" />
-                )}
-              </span>
-              <span>
-                <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
-                <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
-              </span>
-            </span>
-            {activeTask?.progress != null ? (
-              <strong className="canvas-gen-node__video-progress-value">
-                {Math.round(activeTask.progress)}%
-              </strong>
-            ) : null}
-            {activeTask ? (
-              <span
-                className="canvas-gen-node__video-progress"
-                role="progressbar"
-                aria-label="视频节点生成进度"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={
-                  activeTask.progress != null
-                    ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
-                    : undefined
+          <VideoNodeSettings
+            presentation="compact"
+            active={editorOpen}
+            greenScreenResults={greenScreenResults}
+            greenScreenBusy={starting || activeTask != null}
+            onGreenScreenGenerate={() => onStartGeneration(node.key)}
+            onGreenScreenUseResult={
+              onGreenScreenUseResult ? (key) => onGreenScreenUseResult(node.key, key) : undefined
+            }
+            onImportGreenScreenVideo={
+              onImportGreenScreenVideo ? () => onImportGreenScreenVideo(node.key) : undefined
+            }
+            config={node.config}
+            providerCatalog={providerCatalog}
+            hasMediaInputs={effectiveInputs.length > 0}
+            mediaInputs={effectiveInputs}
+            {...(onAnnotateVideo
+              ? {
+                  onAnnotateVideo: (input: ConnectedAssetInput | InheritedAssetInput) =>
+                    onAnnotateVideo(node.key, input),
                 }
-              >
-                <i
-                  style={{
-                    width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
-                  }}
-                />
-              </span>
-            ) : null}
-          </div>
+              : {})}
+            onChange={(config) => onVideoConfigChange(node.key, config)}
+          />
         ) : (
-          <div className="canvas-gen-node__image-status" role="status" aria-live="polite">
-            <span className="canvas-gen-node__image-status-copy">
-              <span
-                className={`canvas-gen-node__image-status-icon${activeTask || starting ? " is-active" : ""}`}
-                aria-hidden="true"
-              >
-                {activeTask || starting ? (
-                  <Icon name="circle-notch" className="spin-icon" size="md" />
-                ) : (
-                  <Icon name="check-circle" size="md" />
-                )}
-              </span>
-              <span>
-                <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
-                <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
-              </span>
-            </span>
-            {activeTask?.progress != null ? (
-              <strong className="canvas-gen-node__image-progress-value">
-                {Math.round(activeTask.progress)}%
-              </strong>
-            ) : null}
-            {activeTask ? (
-              <span
-                className="canvas-gen-node__image-progress"
-                role="progressbar"
-                aria-label="图片生成进度"
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-valuenow={
-                  activeTask.progress != null
-                    ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
-                    : undefined
-                }
-              >
-                <i
-                  style={{
-                    width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
-                  }}
-                />
-              </span>
-            ) : null}
-          </div>
+          <ImageNodeSettings
+            presentation="compact"
+            active={editorOpen}
+            config={node.config}
+            providerCatalog={providerCatalog}
+            hasMediaInputs={effectiveInputs.some(
+              (input) => input.kind === "image" || input.kind === "video",
+            )}
+            onChange={(config) => onImageConfigChange(node.key, config)}
+          />
         )}
         <div className="canvas-gen-node__footer-actions">
           <button
             type="button"
-            className={`canvas-gen-node__start canvas-gen-node__start--labeled${starting ? " is-busy" : ""}`}
+            className={`canvas-gen-node__start${starting ? " is-busy" : ""}`}
             aria-label={isVideo ? "开始视频生成" : "开始图片生成"}
+            aria-describedby={startError ? `generation-start-error-${node.key}` : undefined}
             data-state={starting ? "loading" : undefined}
             title={
               !selectionReady
@@ -472,7 +389,14 @@ export function CanvasGenNode({
             disabled={
               starting ||
               !selectionReady ||
-              (node.kind === "video" && node.config.greenScreen?.enabled && activeTask != null)
+              /*
+               * 该节点已有在途任务时必须禁用 —— 之前这个条件只对「绿幕视频」
+               * 生效，图片节点与普通视频节点在任务跑着的时候按钮仍可点，
+               * 再点一次就是**第二个付费任务**：两个任务各自计费、界面上多出
+               * 一张产物卡片，用户完全看不出自己重复提交了。
+               * 后端 start 不按 sourceNodeId 去重，所以客户端必须挡住。
+               */
+              activeTask != null
             }
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -483,993 +407,51 @@ export function CanvasGenNode({
           >
             {starting ? (
               <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
-            ) : isVideo ? (
-              <Icon name="play" aria-hidden="true" size="md" />
             ) : (
-              <Icon name="sparkle" aria-hidden="true" size="md" />
+              <CanvasChromeIcon name="arrow-up" size={14} />
             )}
-            <span>{starting ? "提交中" : "生成"}</span>
           </button>
         </div>
       </div>
-      <span
-        className={`node-port node-port--left node-port--${isVideo ? "video" : "image"}`}
-        aria-hidden="true"
-      />
-      <span
-        className={`node-port node-port--right node-port--${isVideo ? "video" : "image"}`}
-        aria-hidden="true"
-      />
+      {starting || activeTask ? (
+        <MediaNodeTaskStatus kind={node.kind} task={activeTask} starting={starting} />
+      ) : null}
     </div>
   );
-}
-
-export function CanvasVideoComposerNode({
-  node,
-  inputs,
-  selected,
-  dragging,
-  runState,
-  recordingFormat,
-  onSelect,
-  onNodeDragStart,
-  onRemove,
-  onUnlink,
-  onConfigChange,
-  onMoveInput,
-  onCompose,
-}: {
-  readonly node: VideoComposerNodeData;
-  readonly inputs: readonly VideoComposerInput[];
-  readonly selected: boolean;
-  readonly dragging: boolean;
-  readonly runState: VideoComposerRunState | undefined;
-  readonly recordingFormat: string | null;
-  readonly onSelect: (key: string) => void;
-  readonly onNodeDragStart: (
-    key: string,
-    x: number,
-    y: number,
-    clientX: number,
-    clientY: number,
-  ) => void;
-  readonly onRemove: (key: string) => void;
-  readonly onUnlink: (edgeId: string) => void;
-  readonly onConfigChange: (key: string, config: VideoComposerNodeConfig) => void;
-  readonly onMoveInput: (nodeKey: string, inputKey: string, direction: -1 | 1) => void;
-  readonly onCompose: (key: string) => void;
-}) {
-  const running = runState?.status === "running";
-  const canCompose = inputs.length >= 2 && recordingFormat != null && !running;
-  const statusText = running
-    ? `正在合成 · ${runState.progress}%`
-    : runState?.status === "done"
-      ? "合成完成 · 产物已落在右侧"
-      : runState?.status === "error"
-        ? "合成失败 · 请查看错误"
-        : inputs.length < 2
-          ? `还需 ${2 - inputs.length} 段视频`
-          : recordingFormat == null
-            ? "当前系统不支持视频录制"
-            : "顺序已就绪";
   return (
-    <div
-      className={`canvas-video-composer${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      data-connection-target={node.key}
-      aria-busy={running || undefined}
-      onMouseDown={(event) => {
-        if (
-          (event.target as HTMLElement).closest("button, input, .canvas-video-composer__inputs")
-        ) {
-          onSelect(node.key);
-          return;
-        }
-        onSelect(node.key);
-        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
+    <CanvasNodeEditorShell
+      nodeKey={node.key}
+      kindLabel={isVideo ? "视频生成" : "图片生成"}
+      anchor={{
+        x: node.x,
+        y: node.y,
+        width: node.measured?.width ?? 622,
+        height: node.measured?.height ?? 400,
       }}
+      name={node.name ?? descriptor.kindLabel}
+      open={editorOpen}
+      onClose={() => onCloseEditor?.()}
     >
-      <div className="canvas-video-composer__header">
-        <span className="canvas-video-composer__type">
-          <span className="canvas-video-composer__type-icon" aria-hidden="true">
-            <Icon name="film-strip" size="md" />
-          </span>
-          <span>
-            <strong>视频拼接与合成</strong>
-            <small>{inputs.length > 0 ? `${inputs.length} 段 · 按序拼接` : "本地工具"}</small>
-          </span>
-        </span>
-        <span className="canvas-video-composer__actions">
-          <button
-            type="button"
-            className="canvas-video-composer__compose"
-            disabled={!canCompose}
-            aria-label="开始视频拼接与合成"
-            title={
-              inputs.length < 2
-                ? "至少连接 2 段视频"
-                : recordingFormat == null
-                  ? "当前系统 WebView 不支持视频录制"
-                  : "按列表顺序合成为完整视频"
-            }
-            data-state={running ? "loading" : undefined}
-            onClick={(event) => {
-              event.stopPropagation();
-              onCompose(node.key);
-            }}
-          >
-            {running ? (
-              <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
-            ) : (
-              <Icon name="play" aria-hidden="true" size="md" />
-            )}
-            <span>{running ? "合成中" : "合成"}</span>
-          </button>
-          <button
-            type="button"
-            className="canvas-video-composer__remove"
-            disabled={running}
-            aria-label="移除视频拼接与合成节点"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
-      </div>
-
-      <div className="canvas-video-composer__section-heading">
-        <span>视频片段</span>
-        <small>连接顺序可在此调整</small>
-      </div>
-      {inputs.length > 0 ? (
-        <ol className="canvas-video-composer__inputs" aria-label="视频合成顺序">
-          {inputs.map((input, index) => (
-            <li key={input.key}>
-              <span className="canvas-video-composer__index" aria-hidden="true">
-                {index + 1}
-              </span>
-              <span className="canvas-video-composer__input-copy">
-                <strong title={input.name}>{input.name}</strong>
-                <small>{input.sourceLabel}视频</small>
-              </span>
-              <span className="canvas-video-composer__input-actions">
-                <button
-                  type="button"
-                  disabled={index === 0 || running}
-                  aria-label={`上移第 ${index + 1} 段：${input.name}`}
-                  onClick={() => onMoveInput(node.key, input.key, -1)}
-                >
-                  <Icon name="arrow-up" aria-hidden="true" size="sm" />
-                </button>
-                <button
-                  type="button"
-                  disabled={index === inputs.length - 1 || running}
-                  aria-label={`下移第 ${index + 1} 段：${input.name}`}
-                  onClick={() => onMoveInput(node.key, input.key, 1)}
-                >
-                  <Icon name="arrow-down" aria-hidden="true" size="sm" />
-                </button>
-                <button
-                  type="button"
-                  disabled={running}
-                  aria-label={`移除第 ${index + 1} 段：${input.name}`}
-                  onClick={() => onUnlink(input.edgeId)}
-                >
-                  <Icon name="x" aria-hidden="true" size="sm" />
-                </button>
-              </span>
-            </li>
-          ))}
-        </ol>
-      ) : (
-        <div className="canvas-video-composer__empty">
-          <Icon name="film-strip" aria-hidden="true" size="xl" />
-          <span>从视频素材或视频产物的右侧端口拖入连线</span>
-        </div>
-      )}
-
-      <label className="canvas-video-composer__name-field">
-        <span>输出名称</span>
-        <input
-          value={node.config.outputName}
-          maxLength={80}
-          disabled={running}
-          aria-label="合成视频输出名称"
-          onChange={(event) =>
-            onConfigChange(node.key, { ...node.config, outputName: event.target.value })
-          }
-        />
-      </label>
-      <div className="canvas-video-composer__summary">
-        <span>
-          <strong>画面</strong>
-          <small>跟随首段 · 完整适配</small>
-        </span>
-        <span>
-          <strong>格式</strong>
-          <small>{recordingFormat ?? "不可用"}</small>
-        </span>
-        <span>
-          <strong>转场</strong>
-          <small>无 · 顺序直切</small>
-        </span>
-      </div>
-      <div
-        className={`canvas-video-composer__status${runState?.status ? ` is-${runState.status}` : ""}`}
-        role="status"
-        aria-live="polite"
-      >
-        <span>
-          {running ? (
-            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
-          ) : runState?.status === "error" ? (
-            <Icon name="warning-circle" aria-hidden="true" size="md" />
-          ) : (
-            <Icon name="check-circle" aria-hidden="true" size="md" />
-          )}
-          <strong>{statusText}</strong>
-        </span>
-        {running ? (
-          <span
-            className="canvas-video-composer__progress"
-            role="progressbar"
-            aria-label="视频合成进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={runState.progress}
-          >
-            <i style={{ width: `${runState.progress}%` }} />
-          </span>
-        ) : null}
-      </div>
-      {runState?.status === "error" && runState.error ? (
-        <>
-          <pre className="canvas-video-composer__error" role="alert" tabIndex={0}>
-            {runState.error}
-          </pre>
-          <ErrorCopyButton text={runState.error} />
-        </>
-      ) : null}
-      <span className="node-port node-port--left node-port--video" aria-hidden="true" />
-      <span className="node-port node-port--right node-port--video" aria-hidden="true" />
-    </div>
+      {form}
+    </CanvasNodeEditorShell>
   );
-}
-
-/** 是否为 B 站链接（含 b23.tv 短链），用于触发 B 站画质路由提醒。 */
-function isBilibiliLink(url: string): boolean {
-  const candidate = url.match(/https?:\/\/[^\s<>"']+/i)?.[0];
-  if (!candidate) return false;
-  try {
-    const hostname = new URL(candidate).hostname.toLowerCase();
-    return ["bilibili.com", "b23.tv"].some(
-      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
-    );
-  } catch {
-    return false;
-  }
-}
-
-const DOWNLOAD_CREDENTIAL_SOURCE_LABEL: Record<VideoDownloadCredentialSource, string> = {
-  chrome: "Chrome 浏览器 Cookies",
-  edge: "Edge 浏览器 Cookies",
-  firefox: "Firefox 浏览器 Cookies",
-  brave: "Brave 浏览器 Cookies",
-  manual: "已导入的 cookies.txt",
-  site_session: "站点会话",
-  none: "未使用 Cookies",
-};
-
-/**
- * 画布网络爆款视频下载节点：内置 yt-dlp 引擎，粘贴抖音等站点链接下载为
- * 本地视频文件。可读取上游文本链接和视频来源；成功后右侧自动落一张可连入视频拼接与
- * 合成节点的产物卡片。
- */
-export function CanvasVideoDownloaderNode({
-  node,
-  downloadSources = [],
-  selected,
-  dragging,
-  runState,
-  engineStatus,
-  enginePreparing,
-  onSelect,
-  onNodeDragStart,
-  onRemove,
-  onConfigChange,
-  onStartDownload,
-  onCancelDownload,
-  onPrepareEngine,
-  onUpdateEngine,
-  onImportCookies,
-  onSelectCookieBrowser,
-  onClearCookies,
-  onRevealResult,
-  onConnectionStart,
-}: {
-  readonly node: VideoDownloaderNodeData;
-  readonly downloadSources?: readonly string[];
-  readonly selected: boolean;
-  readonly dragging: boolean;
-  readonly runState: VideoDownloaderRunState | undefined;
-  readonly engineStatus: VideoDownloaderEngineStatus | null;
-  readonly enginePreparing: boolean;
-  readonly onSelect: (key: string) => void;
-  readonly onNodeDragStart: (
-    key: string,
-    x: number,
-    y: number,
-    clientX: number,
-    clientY: number,
-  ) => void;
-  readonly onRemove: (key: string) => void;
-  readonly onConfigChange: (key: string, config: VideoDownloaderNodeConfig) => void;
-  readonly onStartDownload: (key: string) => void;
-  readonly onCancelDownload: (key: string) => void;
-  readonly onPrepareEngine: () => void;
-  readonly onUpdateEngine: () => void;
-  readonly onImportCookies: () => void;
-  readonly onSelectCookieBrowser: (browser: VideoDownloaderCookieBrowser | null) => void;
-  readonly onClearCookies: () => void;
-  readonly onRevealResult: (key: string) => void;
-  readonly onConnectionStart: (key: string) => void;
-}) {
-  const running = runState?.status === "running";
-  const url = node.config.url;
-  const canStart = (downloadSources.length > 0 || url.trim().length > 0) && !running;
-  const engineReady = engineStatus?.state === "ready";
-  const engineStateLabel =
-    enginePreparing || engineStatus?.state === "installing"
-      ? "引擎准备中…"
-      : engineStatus == null
-        ? "引擎状态检测中…"
-        : engineStatus.state === "ready"
-          ? `yt-dlp ${engineStatus.version ?? ""} · 就绪`
-          : engineStatus.state === "failed"
-            ? "引擎获取失败"
-            : "尚未安装 · 首次下载时自动获取";
-  const probeStatus = runState?.probeStatus ?? "";
-  const statusText = running
-    ? runState?.preparingEngine
-      ? "正在准备下载引擎…"
-      : probeStatus.length > 0
-        ? probeStatus
-        : engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource
-          ? "正在逐源预检视频访问…"
-          : `正在下载 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
-    : runState?.status === "done"
-      ? "下载完成 · 产物已落在右侧"
-      : runState?.status === "cancelled"
-        ? "已取消"
-        : runState?.status === "error"
-          ? "下载失败 · 请查看错误"
-          : url.trim().length > 0
-            ? "粘贴链接后即可下载"
-            : "粘贴抖音等站点的视频链接";
-  const isBilibiliUrl = isBilibiliLink(url);
-  const bilibiliLoggedIn = engineStatus?.bilibiliLoggedIn === true;
-  return (
-    <div
-      className={`canvas-video-downloader${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      aria-busy={running || undefined}
-      onMouseDown={(event) => {
-        if ((event.target as HTMLElement).closest("button, input, select, label")) {
-          onSelect(node.key);
-          return;
-        }
-        onSelect(node.key);
-        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
-      }}
-    >
-      <div className="canvas-video-downloader__header">
-        <span className="canvas-video-downloader__type">
-          <span className="canvas-video-downloader__type-icon" aria-hidden="true">
-            <Icon name="download-simple" size="md" />
-          </span>
-          <span>
-            <strong>网络爆款视频下载</strong>
-            <small>{engineStateLabel}</small>
-          </span>
-        </span>
-        <span className="canvas-video-downloader__actions">
-          {runState?.status === "done" && !running ? (
-            <button
-              type="button"
-              className="canvas-video-downloader__reveal"
-              aria-label="在文件夹中显示下载结果"
-              title="在文件夹中显示"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onRevealResult(node.key);
-              }}
-            >
-              <Icon name="folder-open" aria-hidden="true" size="md" />
-            </button>
-          ) : null}
-          {running ? (
-            <button
-              type="button"
-              className="canvas-video-downloader__cancel"
-              aria-label="取消视频下载"
-              title="取消下载"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCancelDownload(node.key);
-              }}
-            >
-              <Icon name="x" aria-hidden="true" size="md" />
-              <span>取消</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="canvas-video-downloader__start"
-              disabled={!canStart}
-              aria-label="开始下载视频"
-              title={canStart ? "依次下载当前输入链接" : "请填写或连接视频链接"}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onStartDownload(node.key);
-              }}
-            >
-              <Icon name="download-simple" aria-hidden="true" size="md" />
-              <span>下载</span>
-            </button>
-          )}
-          <button
-            type="button"
-            className="canvas-video-downloader__remove"
-            disabled={running}
-            aria-label="移除网络爆款视频下载节点"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
-      </div>
-
-      <div className="canvas-video-downloader__section-heading">
-        <span>视频链接</span>
-        <small>支持抖音分享口令整段粘贴</small>
-      </div>
-      <input
-        type="text"
-        className="canvas-video-downloader__url"
-        value={url}
-        onChange={(event) => {
-          onConfigChange(node.key, { url: event.target.value });
-        }}
-        placeholder="https://v.douyin.com/… 或直接粘贴分享口令"
-        aria-label="视频链接"
-        spellCheck={false}
-        autoComplete="off"
-        disabled={running}
-      />
-
-      {downloadSources.length > 0 ? (
-        <p aria-label="下载输入数量">将依次下载 {downloadSources.length} 个链接</p>
-      ) : null}
-      <div className="canvas-video-downloader__engine-row">
-        {isDesktopRuntime() ? (
-          <button
-            type="button"
-            className="canvas-video-downloader__engine-action"
-            title="准备需要网页解析的视频下载功能"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              requestRuntimeComponents("browser-download");
-            }}
-          >
-            网页解析组件
-          </button>
-        ) : null}
-        <span
-          className="canvas-video-downloader__engine-chip"
-          data-state={engineStatus?.state ?? "unknown"}
-        >
-          {engineReady ? <Icon name="check-circle" aria-hidden="true" size="xs" /> : null}
-          {engineStatus?.state === "failed" ? (
-            <Icon name="warning-circle" aria-hidden="true" size="xs" />
-          ) : null}
-          <span>{engineStateLabel}</span>
-        </span>
-        {engineStatus?.state === "ready" ? (
-          <button
-            type="button"
-            className="canvas-video-downloader__engine-action"
-            aria-label="更新下载引擎到最新版本"
-            title="更新引擎（抖音等站点的提取器修复随新版本发布）"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onUpdateEngine();
-            }}
-          >
-            更新引擎
-          </button>
-        ) : engineStatus?.state !== "installing" && !enginePreparing ? (
-          <button
-            type="button"
-            className="canvas-video-downloader__engine-action"
-            aria-label="立即准备下载引擎"
-            title="立即下载内置 yt-dlp 引擎"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onPrepareEngine();
-            }}
-          >
-            立即准备
-          </button>
-        ) : null}
-      </div>
-
-      <DownloadCookieSourceControls
-        status={engineStatus}
-        busy={enginePreparing || running}
-        onSelectBrowser={onSelectCookieBrowser}
-        onImportCookies={onImportCookies}
-        onClearCookies={onClearCookies}
-        importLabel="导入 Cookies 文件"
-      />
-
-      {isBilibiliUrl ? (
-        <div
-          className={`canvas-video-downloader__quality${!engineStatus?.cookieBrowser && bilibiliLoggedIn ? " is-logged-in" : " is-guest"}`}
-          role="status"
-        >
-          {engineStatus?.cookieBrowser ? (
-            <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          ) : bilibiliLoggedIn ? (
-            <Icon name="check-circle" aria-hidden="true" size="sm" />
-          ) : (
-            <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          )}
-          <span>
-            {engineStatus?.cookieBrowser === "auto"
-              ? "下载时自动逐源预检；预检通过不代表视频已下载，实际画质以下载结果为准"
-              : engineStatus?.cookieBrowser
-                ? "下载时尝试读取浏览器 Cookies；目标视频能否访问及实际画质以下载结果为准"
-                : bilibiliLoggedIn
-                  ? "文件含 B 站登录凭据 · 目标视频能否访问及实际画质以下载结果为准"
-                  : "未登录 B 站 · 将自动下载 480P 画质，导入登录态 Cookies 可下载最高画质"}
-          </span>
-        </div>
-      ) : null}
-
-      <div
-        className={`canvas-video-downloader__status${runState?.status ? ` is-${runState.status}` : ""}`}
-        role="status"
-        aria-live="polite"
-      >
-        <span>
-          {running ? (
-            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
-          ) : runState?.status === "error" ? (
-            <Icon name="warning-circle" aria-hidden="true" size="md" />
-          ) : runState?.status === "done" ? (
-            <Icon name="check-circle" aria-hidden="true" size="md" />
-          ) : null}
-          <strong>{statusText}</strong>
-        </span>
-        {runState?.qualityHint ? (
-          <span className="canvas-video-downloader__quality-hint">{runState.qualityHint}</span>
-        ) : null}
-        {runState?.credentialSource ? (
-          <span className="canvas-video-downloader__quality-hint">
-            本次{runState.status === "done" ? "下载" : "尝试"}使用：
-            {DOWNLOAD_CREDENTIAL_SOURCE_LABEL[runState.credentialSource]}
-            {runState.credentialSource === "none" || runState.credentialSource === "site_session"
-              ? " · 不代表已登录"
-              : ""}
-          </span>
-        ) : null}
-        {runState?.watermarkRemoved ? (
-          <span className="canvas-video-downloader__watermark-hint">已自动去除 B 站右上角水印</span>
-        ) : null}
-        {running &&
-        !runState?.preparingEngine &&
-        !runState?.probeStatus &&
-        !(engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource) ? (
-          <span
-            className="canvas-video-downloader__progress"
-            role="progressbar"
-            aria-label="视频下载进度"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={runState?.progress != null ? Math.round(runState.progress) : undefined}
-          >
-            <i
-              style={{
-                width: `${runState?.progress != null ? Math.min(100, Math.max(0, Math.round(runState.progress))) : 0}%`,
-              }}
-            />
-          </span>
-        ) : null}
-      </div>
-      {runState?.status === "error" && runState.error ? (
-        <>
-          <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
-            {runState.error}
-          </pre>
-          {isDesktopRuntime() &&
-          /browser runtime unavailable|网页解析组件.*(?:未|缺|安装)|浏览器.*组件.*(?:未|缺)/i.test(
-            runState.error,
-          ) ? (
-            <button
-              type="button"
-              className="canvas-video-downloader__engine-action"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                requestRuntimeComponents("browser-download");
-              }}
-            >
-              准备网页解析组件
-            </button>
-          ) : null}
-          <ErrorCopyButton text={runState.error} />
-        </>
-      ) : null}
-      {engineStatus?.state === "failed" && engineStatus.lastError ? (
-        <>
-          <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
-            {engineStatus.lastError}
-          </pre>
-          <ErrorCopyButton text={engineStatus.lastError} />
-        </>
-      ) : null}
-      <button
-        type="button"
-        className="node-port node-port--right node-port--video canvas-video-downloader__output-port"
-        aria-label="从网络爆款视频下载节点拖出连线"
-        title="连接到爆款视频复刻节点；下载完成后自动作为输入"
-        onMouseDown={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onConnectionStart(node.key);
-        }}
-        onClick={(event) => event.stopPropagation()}
-      />
-    </div>
-  );
-}
-
-/**
- * 画布视频抽帧节点：
- * - 输入视频（素材/视频产物/下载·合成节点连线，或手动填写本地路径）；
- * - 填写一个或多个秒数（支持小数），点击「抽帧」后用内置 ffmpeg 逐秒抽取关键帧；
- * - 完成后每帧落一张图片产物卡片（origin=frame_extract），可连入图片/视频生成节点作为参考图。
- */
-export function CanvasVideoFrameExtractorNode({
-  node,
-  inputs,
-  selected,
-  dragging,
-  runState,
-  producedFrames,
-  onSelect,
-  onNodeDragStart,
-  onRemove,
-  onConfigChange,
-  onStartExtraction,
-  onCancelExtraction,
-}: {
-  readonly node: VideoFrameExtractorNodeData;
-  readonly inputs: readonly FrameExtractorVideoInput[];
-  readonly selected: boolean;
-  readonly dragging: boolean;
-  readonly runState: VideoFrameExtractorRunState | undefined;
-  readonly producedFrames: readonly OutputNodeData[];
-  readonly onSelect: (key: string) => void;
-  readonly onNodeDragStart: (
-    key: string,
-    x: number,
-    y: number,
-    clientX: number,
-    clientY: number,
-  ) => void;
-  readonly onRemove: (key: string) => void;
-  readonly onConfigChange: (key: string, config: VideoFrameExtractorNodeConfig) => void;
-  readonly onStartExtraction: (key: string) => void;
-  readonly onCancelExtraction: (key: string) => void;
-}) {
-  const running = runState?.status === "running";
-  const source = inputs[0] ?? null;
-  const manualPath = node.config.videoPath.trim();
-  const resolvedSource =
-    source ??
-    (manualPath.length > 0
-      ? {
-          key: "manual",
-          name: fileNameFromPath(manualPath),
-          src: manualPath,
-          sourceLabel: "本地文件" as const,
-          edgeId: "",
-          finalPath: manualPath,
-        }
-      : null);
-  // 秒数编辑：用单个文本框输入多个秒数（逗号/空格/顿号分隔），实时解析并写回配置。
-  const [timestampsText, setTimestampsText] = useState(() => node.config.timestamps.join(", "));
-  // 节点配置变化时同步外部值到编辑框：在渲染期间比较并调整（React 官方
-  // "adjusting state when props change" 模式），避免 effect 内同步 setState；
-  // 用户输入中的中间态不打断（serialized 不变时 if 不触发）。
-  const serializedTimestamps = node.config.timestamps.join(", ");
-  // 用户输入中间态（如 "8." 小数点后未输完）解析后与配置一致，不强制覆盖，避免小数点被吃掉。
-  // 仅当外部配置真正变化（解析结果不同）时才同步文本框。
-  const parsedCurrentInput = parseTimestampList(timestampsText);
-  const inputMatchesConfig =
-    parsedCurrentInput.length === node.config.timestamps.length &&
-    parsedCurrentInput.every((value, index) => value === node.config.timestamps[index]);
-  if (serializedTimestamps !== timestampsText && !inputMatchesConfig) {
-    setTimestampsText(serializedTimestamps);
-  }
-  const handleTimestampsInput = (text: string) => {
-    setTimestampsText(text);
-    const timestamps = parseTimestampList(text);
-    onConfigChange(node.key, { ...node.config, timestamps });
-  };
-  const timestamps = parseTimestampList(timestampsText);
-  const canStart =
-    !running &&
-    (node.config.checkpoint != null || (resolvedSource != null && timestamps.length > 0));
-  const statusText = running
-    ? runState?.preparingEngine
-      ? "正在准备 ffmpeg 引擎…"
-      : `正在抽帧 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
-    : runState?.status === "done"
-      ? `抽帧完成 · ${producedFrames.length} 张图片已落在右侧`
-      : runState?.status === "paused"
-        ? "任务已保存 · 可继续抽帧"
-        : runState?.status === "cancelled"
-          ? "已取消"
-          : runState?.status === "error"
-            ? "抽帧失败 · 请查看错误"
-            : resolvedSource == null
-              ? "请连入视频或填写视频文件路径"
-              : timestamps.length === 0
-                ? "请填写至少一个抽帧秒数"
-                : "填好秒数后即可抽帧";
-  return (
-    <div
-      className={`canvas-video-frame-extractor${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      aria-busy={running || undefined}
-      onMouseDown={(event) => {
-        if ((event.target as HTMLElement).closest("button, input")) {
-          onSelect(node.key);
-          return;
-        }
-        onSelect(node.key);
-        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
-      }}
-    >
-      <div className="canvas-video-frame-extractor__header">
-        <span className="canvas-video-frame-extractor__type">
-          <span className="canvas-video-frame-extractor__type-icon" aria-hidden="true">
-            <Icon name="images" size="md" />
-          </span>
-          <span>
-            <strong>视频抽帧</strong>
-            <small>{resolvedSource ? resolvedSource.name : "等待视频输入"}</small>
-          </span>
-        </span>
-        <span className="canvas-video-frame-extractor__actions">
-          {running ? (
-            <button
-              type="button"
-              className="canvas-video-frame-extractor__cancel"
-              aria-label="取消视频抽帧"
-              title="取消抽帧"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onCancelExtraction(node.key);
-              }}
-            >
-              <Icon name="x" aria-hidden="true" size="md" />
-              <span>取消</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="canvas-video-frame-extractor__start"
-              disabled={!canStart}
-              aria-label="开始视频抽帧"
-              title={
-                resolvedSource == null
-                  ? "请先连入视频或填写视频文件路径"
-                  : timestamps.length === 0
-                    ? "请填写至少一个抽帧秒数"
-                    : "按秒数逐帧抽取关键帧"
-              }
-              data-state={running ? "loading" : undefined}
-              onClick={(event) => {
-                event.stopPropagation();
-                onStartExtraction(node.key);
-              }}
-            >
-              {running ? (
-                <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
-              ) : (
-                <Icon name="play" aria-hidden="true" size="md" />
-              )}
-              <span>{running ? "抽帧中" : node.config.checkpoint ? "继续抽帧" : "开始抽帧"}</span>
-            </button>
-          )}
-          <button
-            type="button"
-            className="canvas-video-frame-extractor__remove"
-            disabled={running}
-            aria-label="移除视频抽帧节点"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
-        </span>
-      </div>
-
-      <div className="canvas-video-frame-extractor__source">
-        <span className="canvas-video-frame-extractor__source-label">
-          {source
-            ? `视频输入 · ${inputs.length} 段`
-            : manualPath.length > 0
-              ? `本地文件 · ${fileNameFromPath(manualPath)}`
-              : "视频输入"}
-        </span>
-        {inputs.length > 0 ? (
-          <ol aria-label="视频抽帧输入">
-            {inputs.map((input) => (
-              <li key={input.key}>{input.name}</li>
-            ))}
-          </ol>
-        ) : null}
-        <input
-          className="canvas-video-frame-extractor__path"
-          type="text"
-          value={manualPath}
-          placeholder="或直接填写本地视频文件路径（可选）"
-          aria-label="视频文件路径"
-          disabled={running || node.config.checkpoint != null}
-          onMouseDown={(event) => event.stopPropagation()}
-          onChange={(event) => {
-            onConfigChange(node.key, { ...node.config, videoPath: event.target.value });
-          }}
-        />
-        <p className="canvas-video-frame-extractor__helper">
-          按输入顺序对每段视频使用相同秒数抽帧；可通过任意上游节点传入视频。
-        </p>
-        {!running && node.config.checkpoint ? (
-          <button
-            type="button"
-            onClick={() => {
-              const { checkpoint, ...config } = node.config;
-              void checkpoint;
-              onConfigChange(node.key, config);
-            }}
-          >
-            开始新批次
-          </button>
-        ) : null}
-      </div>
-
-      <div className="canvas-video-frame-extractor__field">
-        <label
-          htmlFor={`frame-ts-${node.key}`}
-          className="canvas-video-frame-extractor__field-label"
-        >
-          抽帧秒数
-        </label>
-        <input
-          id={`frame-ts-${node.key}`}
-          className="canvas-video-frame-extractor__timestamps"
-          type="text"
-          inputMode="decimal"
-          value={timestampsText}
-          placeholder="例如 3, 8.5, 12"
-          aria-label="抽帧秒数，多个秒数用逗号分隔"
-          disabled={running || node.config.checkpoint != null}
-          aria-invalid={(timestampsText.length > 0 && timestamps.length === 0) || undefined}
-          onMouseDown={(event) => event.stopPropagation()}
-          onChange={(event) => handleTimestampsInput(event.target.value)}
-        />
-        <p className="canvas-video-frame-extractor__helper">
-          {timestamps.length > 0
-            ? `将抽取第 ${timestamps.map((t) => formatTimestampSeconds(t)).join("、")} 秒，共 ${timestamps.length} 张。`
-            : "支持 0 与小数秒，多个秒数用逗号、空格或顿号分隔。"}
-        </p>
-      </div>
-
-      {runState?.status === "error" && runState.error ? (
-        <>
-          <pre className="canvas-video-frame-extractor__error" role="alert" tabIndex={0}>
-            {runState.error}
-          </pre>
-          <ErrorCopyButton text={runState.error} />
-        </>
-      ) : null}
-
-      <div
-        className={`canvas-video-frame-extractor__status${runState?.status === "error" || runState?.status === "cancelled" ? " is-error" : ""}${runState?.status === "done" ? " is-done" : ""}`}
-      >
-        <span>
-          {runState?.status === "done" ? (
-            <Icon name="check-circle" aria-hidden="true" size="sm" />
-          ) : null}
-          {runState?.status === "error" || runState?.status === "cancelled" ? (
-            <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          ) : null}
-          {statusText}
-        </span>
-      </div>
-
-      {running ? (
-        <span
-          className="canvas-video-frame-extractor__progress"
-          role="progressbar"
-          aria-label="视频抽帧进度"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={runState?.progress != null ? Math.round(runState.progress) : undefined}
-        >
-          <i
-            style={{
-              width: `${runState?.progress != null ? Math.min(100, Math.max(0, Math.round(runState.progress))) : 0}%`,
-            }}
-          />
-        </span>
-      ) : null}
-
-      {producedFrames.length > 0 ? (
-        <div className="canvas-video-frame-extractor__frames" aria-label="抽帧结果预览">
-          {producedFrames.map((frame) => {
-            const label = frame.name ?? "抽帧图片";
-            return (
-              <figure key={frame.key} className="canvas-video-frame-extractor__frame">
-                {frame.finalPath != null ? (
-                  <FrameExtractorThumb finalPath={frame.finalPath} label={label} />
-                ) : null}
-                <figcaption>{frame.name != null ? fileNameFromPath(frame.name) : label}</figcaption>
-              </figure>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function parseTimestampList(text: string): number[] {
-  return Array.from(
-    new Set(
-      text
-        .split(/[,，、;\s]+/)
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0)
-        .map((part) => Number(part))
-        .filter((value) => Number.isFinite(value) && value >= 0),
-    ),
-  ).sort((a, b) => a - b);
-}
-
-function formatTimestampSeconds(value: number): string {
-  if (Number.isInteger(value)) return String(value);
-  return String(Number(value.toFixed(2)));
 }
 
 /** 本地图片缩略图：后端磁盘缓存（sha256 键）。卡片不能在等待或失败时解码原图。 */
 const MEDIA_THUMBNAIL_MAX_DIMENSION = 512;
+
+/**
+ * 缩略图结果的存活时长：必须是**有限值**。
+ *
+ * 之前是 `staleTime: Infinity` —— 同一个路径在整个会话里只会问后端一次。
+ * 于是后端「路径 + 大小 + 修改时间 + 边长」这套缓存键形同虚设：只要路径不变，
+ * 前端永不再次调用 `create_media_thumbnail`，后端永远没机会重算 → 同路径内容被覆写后
+ * 界面一直显示旧缩略图，而且整个会话不自愈。
+ *
+ * 取 5 分钟：内容变化主要由「内容指纹进查询键」发现（指纹变了就是新键），
+ * 这个有限值只负责让「节点重新进入视口」这类事件能触发一次重新核对，不是轮询。
+ */
+const MEDIA_THUMBNAIL_STALE_TIME = 5 * 60 * 1000;
 
 function useMediaThumbnailSrc(
   finalPath: string | null,
@@ -1479,35 +461,36 @@ function useMediaThumbnailSrc(
   readonly unavailable: boolean;
 } {
   const enabled = isDesktopRuntime() && finalPath != null && visible;
-  const { data, isError } = useQuery({
-    queryKey: ["media-thumbnail", finalPath, MEDIA_THUMBNAIL_MAX_DIMENSION],
+  /*
+   * 内容指纹进查询键：查询键因此反映「内容身份」而不只是路径。
+   * 同一路径的文件被改写（产物还在落盘、或被外部替换）→ 大小/修改时间变化 → 指纹变 →
+   * 查询键变 → React Query 认为是另一条查询 → 重新向后端要一次缩略图。
+   * 后端那边也按同一组数据建缓存键，于是两边的身份判定是一致的。
+   */
+  const fingerprint = useMediaFileFingerprint(finalPath, enabled);
+  const { data, isError, isPending } = useQuery({
+    queryKey: ["media-thumbnail", finalPath, MEDIA_THUMBNAIL_MAX_DIMENSION, fingerprint],
     queryFn: () => mediaClient.createThumbnail(finalPath as string, MEDIA_THUMBNAIL_MAX_DIMENSION),
-    enabled,
-    staleTime: Infinity,
+    enabled: enabled && fingerprint != null,
+    staleTime: MEDIA_THUMBNAIL_STALE_TIME,
     gcTime: 30 * 60 * 1000,
     retry: false,
   });
+  /*
+   * 三种状态必须分开：
+   * · 还在问（指纹没算出来，或后端正在跑 ffmpeg 出首帧）→ 加载中；
+   * · 后端明确答「这张缩不出来」（Ok(None)）或调用失败 → 确实不可用；
+   * · 拿到缩略图 → 可用。
+   *
+   * 之前 `unavailable: enabled && (isError || data === null)` 把「还没问出结果」也算成
+   * 不可用：产物还在落盘时后端会先答 None（源文件还不完整），节点于是先显示
+   * 「预览不可用」，而那条 None 又因为 staleTime: Infinity 永远不会被推翻。
+   */
+  const loading = enabled && (isPending || fingerprint == null);
   return {
     src: data == null || finalPath == null ? null : toMediaSrc(data.path),
-    unavailable: enabled && (isError || data === null),
+    unavailable: enabled && !loading && (isError || data === null),
   };
-}
-
-/** 抽帧结果单帧缩略图：成批本地图片走缩略图管线，避免逐帧全量解码。 */
-function FrameExtractorThumb({
-  finalPath,
-  label,
-}: {
-  readonly finalPath: string;
-  readonly label: string;
-}) {
-  const thumbnail = useMediaThumbnailSrc(finalPath);
-  const src = isDesktopRuntime() ? thumbnail.src : toMediaSrc(finalPath);
-  return src ? (
-    <img src={src} alt={label} draggable={false} />
-  ) : (
-    <AssetMediaState kind="image" state={thumbnail.unavailable ? "unavailable" : "loading"} />
-  );
 }
 
 /**
@@ -1786,7 +769,6 @@ export function CanvasAssetNode({
   dragging,
   onNodeDragStart,
   onConnectionStart,
-  onRemove,
   onAspectRatioChange,
   onRefreshMediaUrls,
   onPreview,
@@ -1797,7 +779,7 @@ export function CanvasAssetNode({
   readonly edgeCount: number;
   /** 该节点正在被拖动（视觉反馈）。 */
   readonly dragging: boolean;
-  /** 节点主体按下：开始拖动节点（端口与移除按钮已阻止冒泡）。 */
+  /** 节点主体按下：开始拖动节点（端口与操作按钮已阻止冒泡）。 */
   readonly onNodeDragStart: (
     key: string,
     x: number,
@@ -1806,6 +788,10 @@ export function CanvasAssetNode({
     clientY: number,
   ) => void;
   readonly onConnectionStart: (key: string) => void;
+  /**
+   * 删除节点。原站卡片上没有删除按钮（删除走「选中后按 Delete」），
+   * 这里保留 prop 只是为了不改动调用方的插槽契约，组件本身不再渲染删除入口。
+   */
   readonly onRemove: (key: string) => void;
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   /** 云端素材预览续签成功：用新签名地址回写节点数据（持久化到画布文档）。 */
@@ -1865,6 +851,30 @@ export function CanvasAssetNode({
     },
     [node, onRefreshMediaUrls, imageBytes],
   );
+  /*
+   * 签名地址过期 → 渲染前就续签，不等 onError。
+   *
+   * 之前只有「加载失败」才触发续签：用户先看到一帧「预览不可用」，才知道要去点重试。
+   * 但对象存储预签名地址本身写着有效期（`X-Tos-Date` + `X-Tos-Expires`），
+   * 渲染前就能判断它已经过期 —— 这时直接续签，界面不会先坏一次。
+   *
+   * 只认火山 TOS 的签名格式（`signedUrlExpired` 对认不出的地址一律返回 false），
+   * 不去猜其他供应商的签名语义；那些地址仍然走 onError 自愈路径。
+   *
+   * 检查的是**原始地址**（localMediaUrl / node.videoUrl），不是渲染时用的代理地址：
+   * 代理地址是 `assetproxy://...?v=…` 或把源地址塞进 `src=` 查询串，签名参数已被转义，
+   * 在上面判断不出有效期。
+   *
+   * `attemptMediaRefresh` 自带「同一地址只续签一次、实例内最多两次」的闸门，
+   * 所以本 effect 反复触发也不会打出重复请求。
+   */
+  useEffect(() => {
+    for (const url of [localMediaUrl, node.videoUrl]) {
+      if (url == null || url === "") continue;
+      if (!signedUrlExpired(url)) continue;
+      attemptMediaRefresh(url);
+    }
+  }, [localMediaUrl, node.videoUrl, attemptMediaRefresh]);
   return (
     <div
       className={`canvas-asset-node${node.kind === "image" || node.kind === "video" ? " canvas-asset-node--media" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
@@ -1959,24 +969,30 @@ export function CanvasAssetNode({
           </span>
         ) : null}
       </span>
-      <span className="canvas-asset-node__identity">
-        <AssetKindIcon kind={node.kind} />
-        <span className="canvas-asset-node__name" title={node.name}>
-          {node.name}
+      {/*
+        素材节点的标题行（对齐原站 liblib）：
+        原站的标签在**媒体上方**——一行小字（名称 + 规格），灰白色，不是压在图上的白字。
+      */}
+      <span className="canvas-asset-node__header">
+        <span className="canvas-asset-node__identity">
+          <AssetKindIcon kind={node.kind} />
+          <span className="canvas-asset-node__name" title={node.name}>
+            {node.name}
+          </span>
+          {node.source !== "local" ? (
+            <span
+              className="canvas-asset-node__cloud-badge"
+              data-state={awaitingCloudId ? "processing" : "ready"}
+              title={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
+              aria-label={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
+            />
+          ) : null}
         </span>
-        {node.source !== "local" ? (
-          <span
-            className="canvas-asset-node__cloud-badge"
-            data-state={awaitingCloudId ? "processing" : "ready"}
-            title={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
-            aria-label={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
-          />
-        ) : null}
-      </span>
-      <span className="canvas-asset-node__meta">
-        {awaitingCloudId
-          ? `${typeLabel} · 云端处理中`
-          : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
+        <span className="canvas-asset-node__meta">
+          {awaitingCloudId
+            ? `${typeLabel} · 云端处理中`
+            : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
+        </span>
       </span>
       {isVideo && onPrepareVideo && !awaitingCloudId ? (
         <div
@@ -1998,18 +1014,6 @@ export function CanvasAssetNode({
           onSave={(destination) => onSaveToLibrary(node.key, destination)}
         />
       ) : null}
-      <button
-        type="button"
-        className="canvas-asset-node__remove"
-        aria-label={`移除素材节点：${node.name}`}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          onRemove(node.key);
-        }}
-      >
-        <Icon name="x" aria-hidden="true" size="xs" />
-      </button>
       <button
         type="button"
         className="canvas-asset-node__port"
@@ -2042,23 +1046,13 @@ export function CanvasOutputLightbox({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const finalPath = node.finalPath;
 
-  useEffect(() => {
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-
-    window.addEventListener("keydown", handleKeyDown, true);
-    closeButtonRef.current?.focus();
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-  }, [onClose]);
+  // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的画布上），Esc 关闭，
+  // 关闭后焦点回到打开预览的那个元素。
+  const trap = useModalFocusTrap({
+    active: true,
+    onEscape: onClose,
+    initialFocusRef: closeButtonRef,
+  });
 
   const mediaSrc = finalPath != null ? toMediaSrc(finalPath) : (node.previewSrc ?? null);
   if (mediaSrc == null) return null;
@@ -2072,7 +1066,14 @@ export function CanvasOutputLightbox({
         : "生成图片");
 
   return createPortal(
-    <div className="history-lightbox" role="dialog" aria-modal="true" aria-label="媒体预览">
+    <div
+      className="history-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="媒体预览"
+      ref={trap.ref}
+      {...trap.containerProps}
+    >
       <button
         ref={closeButtonRef}
         type="button"
@@ -2130,23 +1131,13 @@ export function CanvasAssetLightbox({
 }) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  useEffect(() => {
-    const previouslyFocused =
-      document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-
-    window.addEventListener("keydown", handleKeyDown, true);
-    closeButtonRef.current?.focus();
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown, true);
-      if (previouslyFocused?.isConnected) previouslyFocused.focus();
-    };
-  }, [onClose]);
+  // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的画布上），Esc 关闭，
+  // 关闭后焦点回到打开预览的那个元素。
+  const trap = useModalFocusTrap({
+    active: true,
+    onEscape: onClose,
+    initialFocusRef: closeButtonRef,
+  });
 
   // 大图同样优先用会话内已下载的字节：放大查看不必等一次远端往返，签名过期也照常显示。
   // 地址取与节点视觉区同一份（本地素材续签登记表优先），避免「节点里已是新签名、放大后
@@ -2179,7 +1170,14 @@ export function CanvasAssetLightbox({
   if (mediaSrc == null) return null;
 
   return createPortal(
-    <div className="history-lightbox" role="dialog" aria-modal="true" aria-label="素材预览">
+    <div
+      className="history-lightbox"
+      role="dialog"
+      aria-modal="true"
+      aria-label="素材预览"
+      ref={trap.ref}
+      {...trap.containerProps}
+    >
       <button
         ref={closeButtonRef}
         type="button"
@@ -2240,7 +1238,6 @@ export function CanvasOutputNode({
   node,
   dragging,
   onNodeDragStart,
-  onRemove,
   onAspectRatioChange,
   onPreview,
   onConnectionStart,
@@ -2260,7 +1257,7 @@ export function CanvasOutputNode({
   readonly node: OutputNodeData;
   /** 该节点正在被拖动（视觉反馈）。 */
   readonly dragging: boolean;
-  /** 节点主体按下：开始拖动节点（移除/复制按钮已阻止冒泡）。
+  /** 节点主体按下：开始拖动节点（操作按钮已阻止冒泡）。
    * activateOnTap 可选：按在媒体区域上且未拖动的抬起触发（全屏预览）。 */
   readonly onNodeDragStart: (
     key: string,
@@ -2270,6 +1267,10 @@ export function CanvasOutputNode({
     clientY: number,
     activateOnTap?: () => void,
   ) => void;
+  /**
+   * 删除节点。原站卡片上没有删除按钮（删除走「选中后按 Delete」），
+   * 这里保留 prop 只是为了不改动调用方的插槽契约，组件本身不再渲染删除入口。
+   */
   readonly onRemove: (key: string) => void;
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   readonly onPreview: (key: string) => void;
@@ -2410,9 +1411,9 @@ export function CanvasOutputNode({
       window.clearTimeout(copyResetTimerRef.current);
       copyResetTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
     } catch (error) {
-      const message = formatRawBackendError(error);
-      toast.error("复制失败", { description: message });
-      frontendLog("error", `[canvas] 复制错误信息失败: ${message}`);
+      // 完整原文只进日志；用户看到的是提过摘要的一句话。
+      frontendLog("error", `[canvas] 复制错误信息失败: ${formatRawBackendError(error)}`);
+      toast.error("复制失败", { description: backendErrorMessage(error) });
     }
   }, [failedDetail]);
 
@@ -2429,12 +1430,12 @@ export function CanvasOutputNode({
       });
       toast.success("已重新保存到本机");
     } catch (error) {
-      const message = formatRawBackendError(error);
-      toast.error("重试保存失败", { description: message });
+      // 完整原文只进日志；用户看到的是提过摘要的一句话。
       frontendLog(
         "error",
-        `[canvas] 手动重试保存失败: taskId=${node.taskId}, resultIndex=${failedSaveResult.resultIndex}, ${message}`,
+        `[canvas] 手动重试保存失败: taskId=${node.taskId}, resultIndex=${failedSaveResult.resultIndex}, ${formatRawBackendError(error)}`,
       );
+      toast.error("重试保存失败", { description: backendErrorMessage(error) });
     } finally {
       setResuming(false);
     }
@@ -2455,9 +1456,9 @@ export function CanvasOutputNode({
       window.clearTimeout(copyResetTimerRef.current);
       copyResetTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
     } catch (error) {
-      const message = formatRawBackendError(error);
-      toast.error("复制失败", { description: message });
-      frontendLog("error", `[canvas] 复制扩写正文失败: ${message}`);
+      // 完整原文只进日志；用户看到的是提过摘要的一句话。
+      frontendLog("error", `[canvas] 复制扩写正文失败: ${formatRawBackendError(error)}`);
+      toast.error("复制失败", { description: backendErrorMessage(error) });
     }
   }, [node.textContent]);
 
@@ -2475,7 +1476,7 @@ export function CanvasOutputNode({
           : node.origin === "download"
             ? "网络爆款视频下载 · 本地结果"
             : node.origin === "white_model"
-              ? "Blender 白模动画 · 本地结果"
+              ? "白模动画 · 本地结果"
               : node.origin === "white_model_still"
                 ? "白模站位图 · 本地结果"
                 : node.origin === "green_screen"
@@ -2817,9 +1818,11 @@ export function CanvasOutputNode({
                   .then((path) => {
                     if (path) toast.success("产物已导出");
                   })
-                  .catch((error: unknown) =>
-                    toast.error(`导出失败：${formatRawBackendError(error)}`),
-                  )
+                  .catch((error: unknown) => {
+                    // 完整原文只进日志；用户看到的是提过摘要的一句话。
+                    frontendLog("error", `[canvas] 导出产物失败: ${formatRawBackendError(error)}`);
+                    toast.error(`导出失败：${backendErrorMessage(error)}`);
+                  })
                   .finally(() => setExporting(false));
               }}
             >
@@ -2848,18 +1851,6 @@ export function CanvasOutputNode({
           }}
         />
       ) : null}
-      <button
-        type="button"
-        className="canvas-asset-node__remove"
-        aria-label={`移除产物卡片：${node.name ?? statusText}`}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          onRemove(node.key);
-        }}
-      >
-        <Icon name="x" aria-hidden="true" size="xs" />
-      </button>
       {canUseAsGenerationReference || canConnectToComposer ? (
         <button
           type="button"
@@ -2894,7 +1885,6 @@ export function CanvasResultNode({
   latestResult,
   onSelect,
   onNodeDragStart,
-  onRemove,
 }: {
   readonly node: ResultNodeData;
   readonly descriptor: StaticNodeDescriptor;
@@ -2909,6 +1899,10 @@ export function CanvasResultNode({
     clientX: number,
     clientY: number,
   ) => void;
+  /**
+   * 删除节点。原站卡片上没有删除按钮（删除走「选中后按 Delete」），
+   * 这里保留 prop 只是为了不改动调用方的插槽契约，组件本身不再渲染删除入口。
+   */
   readonly onRemove: (key: string) => void;
 }) {
   return (
@@ -2946,18 +1940,6 @@ export function CanvasResultNode({
               <Icon name="folder-open" aria-hidden="true" size="sm" />
             </button>
           ) : null}
-          <button
-            type="button"
-            className="canvas-result-node__remove"
-            aria-label={`移除${descriptor.title}节点`}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove(node.key);
-            }}
-          >
-            <Icon name="x" aria-hidden="true" size="xs" />
-          </button>
         </span>
       </div>
       <span className="keyframe-preview keyframe-preview--large" aria-hidden="true">
@@ -3153,12 +2135,19 @@ export function GenerationInputChips({
   inputs,
   positions,
   onUnlink,
+  onInsertReference,
   reorderableKeys,
   onReorder,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly positions?: ReadonlyMap<string, number>;
   readonly onUnlink: (edgeId: string) => void;
+  /**
+   * 把某个参考素材插进提示词（原站 liblib 的 @ 按钮就在参考瓦片上）。
+   * 缺省时不渲染该按钮——瓦片只剩序号角标与解除连线。
+   */
+  readonly onInsertReference?:
+    ((input: ConnectedAssetInput | InheritedAssetInput) => void) | undefined;
   readonly reorderableKeys?: ReadonlySet<string>;
   readonly onReorder?: (sourceKey: string, targetKey: string) => void;
 }) {
@@ -3246,6 +2235,21 @@ export function GenerationInputChips({
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
             className={`node-media-chip${inherited ? " is-inherited" : ""}${isOutput ? " is-output" : ""}${canReorder ? " is-reorderable nodrag nopan" : ""}${dragSourceKey === input.key ? " is-dragging" : ""}${dropTargetKey === input.key ? " is-drop-target" : ""}`}
             draggable={canReorder}
+            /*
+             * 原站 liblib 的参考缩略图是 48×48 方块，靠拖拽排序，没有上移/下移按钮；
+             * 编辑层里那两个按钮因此隐藏了，键盘排序改由方块自身承担
+             * （方块可聚焦，↑ / ↓ 调整顺序），拖拽仍然照旧可用。
+             */
+            tabIndex={canReorder ? 0 : undefined}
+            onKeyDown={(event) => {
+              if (!canReorder) return;
+              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+              event.preventDefault();
+              event.stopPropagation();
+              const target = event.key === "ArrowUp" ? previousKey : nextKey;
+              if (target == null) return;
+              onReorder?.(input.key, target);
+            }}
             onPointerDown={canReorder ? (event) => event.stopPropagation() : undefined}
             onMouseDown={canReorder ? (event) => event.stopPropagation() : undefined}
             onDragStart={
@@ -3335,7 +2339,32 @@ export function GenerationInputChips({
               height="2.5rem"
               maxWidth="7rem"
             />
-            <span className="node-media-chip__name" title={input.name}>
+            {/* 原站瓦片右下角是 @ 按钮：把这份参考插进提示词。 */}
+            {onInsertReference && !inherited ? (
+              <button
+                type="button"
+                className="node-media-chip__mention nodrag nopan"
+                aria-label={`在提示词中引用：${input.name}`}
+                title="引用素材到提示词"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onInsertReference(input);
+                }}
+              >
+                @
+              </button>
+            ) : null}
+            <span
+              className="node-media-chip__name"
+              title={
+                inherited
+                  ? `${input.name} · 随提示词继承`
+                  : isOutput
+                    ? `${input.name} · 上游生成节点的已保存产物`
+                    : input.name
+              }
+            >
               {input.name}
             </span>
             {canReorder ? (

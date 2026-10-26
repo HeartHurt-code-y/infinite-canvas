@@ -1,5 +1,7 @@
 import { Icon } from "../../components/Icon";
-import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
+import { useDismissOnOutside, useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
 
 import "./CanvasTabs.css";
 
@@ -11,6 +13,8 @@ export interface CanvasTabsProps {
   readonly onCreate: () => void;
   readonly onRename: (id: string, name: string) => void;
   readonly onDelete: (id: string) => void;
+  /** 打开创作台独立窗口（极简创作入口）。 */
+  readonly onOpenCreateStudio: () => void;
 }
 
 interface CanvasNameEdit {
@@ -27,12 +31,52 @@ export const CanvasTabs = memo(function CanvasTabs({
   onCreate,
   onRename,
   onDelete,
+  onOpenCreateStudio,
 }: CanvasTabsProps) {
   const [editing, setEditing] = useState<CanvasNameEdit | null>(null);
   const editingRef = useRef<CanvasNameEdit | null>(null);
   const composingRef = useRef(false);
   const tabsRef = useRef(new Map<string, HTMLButtonElement>());
   const inputRef = useRef<HTMLInputElement>(null);
+  /**
+   * 画布切换菜单（原站 liblib 顶栏的「画布 1 ⌄」）。
+   *
+   * 原站顶栏上只有一个「画布 N ⌄」chip，点开是画布列表；重命名与删除也在
+   * 这个菜单里。本项目原来的做法是把 ✏ / 🗑 直接挂在标签上，与原站不符——
+   * 按「原站没有的直接删掉」的口径改成 chip + 下拉，能力不丢。
+   */
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const switcherTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const switcherId = useId();
+
+  const { ref: switcherPanelRef } = useFloatingLayerAnchor<HTMLDivElement>({
+    open: switcherOpen,
+    anchorRef: switcherTriggerRef,
+    preferAbove: false,
+    minWidth: 200,
+    maxHeight: 320,
+  });
+  useDismissOnOutside(switcherOpen, switcherPanelRef, switcherTriggerRef, () =>
+    setSwitcherOpen(false),
+  );
+
+  useEffect(() => {
+    if (!switcherOpen) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setSwitcherOpen(false);
+      switcherTriggerRef.current?.focus({ preventScroll: true });
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    return () => window.removeEventListener("keydown", handleKeyDown, true);
+  }, [switcherOpen]);
+
+  const closeSwitcher = useCallback((refocus = true) => {
+    setSwitcherOpen(false);
+    if (refocus) switcherTriggerRef.current?.focus({ preventScroll: true });
+  }, []);
 
   useEffect(() => {
     tabsRef.current.get(activeCanvasId)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
@@ -132,28 +176,20 @@ export const CanvasTabs = memo(function CanvasTabs({
               >
                 <span className="canvas-tabs__name">{canvas.name}</span>
               </button>
-              {selected && !isEditing && (
-                <button
-                  type="button"
-                  className="canvas-tabs__rename"
-                  aria-label={`重命名画布 ${canvas.name}`}
-                  title="重命名画布（也可双击名称）"
-                  onClick={() => beginRename(canvas)}
-                  disabled={busy}
-                >
-                  <Icon name="pencil-simple" aria-hidden="true" size="sm" />
-                </button>
-              )}
               {selected && (
                 <button
                   type="button"
-                  className="canvas-tabs__delete"
-                  aria-label={`删除画布 ${canvas.name}`}
-                  title="删除画布"
-                  onClick={() => onDelete(canvas.id)}
-                  disabled={busy || editing !== null}
+                  ref={switcherTriggerRef}
+                  className="canvas-tabs__switcher"
+                  aria-label="切换画布"
+                  aria-haspopup="menu"
+                  aria-expanded={switcherOpen}
+                  aria-controls={switcherOpen ? switcherId : undefined}
+                  title="切换画布"
+                  disabled={editing !== null}
+                  onClick={() => setSwitcherOpen((open) => !open)}
                 >
-                  <Icon name="trash" aria-hidden="true" size="sm" />
+                  <Icon name="caret-down" aria-hidden="true" size="2xs" />
                 </button>
               )}
               {isEditing && (
@@ -198,6 +234,16 @@ export const CanvasTabs = memo(function CanvasTabs({
       <button
         type="button"
         className="canvas-tabs__create"
+        aria-label="打开创作台"
+        title="打开创作台（独立窗口的极简创作入口）"
+        onClick={onOpenCreateStudio}
+      >
+        <Icon name="sparkle" aria-hidden="true" size="sm" />
+        <span>创作台</span>
+      </button>
+      <button
+        type="button"
+        className="canvas-tabs__create"
         aria-label="新建画布"
         title="新建画布"
         disabled={busy}
@@ -206,6 +252,65 @@ export const CanvasTabs = memo(function CanvasTabs({
         <Icon name="plus" aria-hidden="true" size="md" />
         <span>新建画布</span>
       </button>
+      {switcherOpen
+        ? createPortal(
+            <div
+              ref={switcherPanelRef}
+              id={switcherId}
+              role="menu"
+              aria-label="切换画布"
+              className="canvas-tabs__switcher-menu"
+            >
+              {canvases.map((canvas) => {
+                const active = canvas.id === activeCanvasId;
+                return (
+                  <div key={canvas.id} className="canvas-tabs__switcher-row">
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={active}
+                      className={`canvas-tabs__switcher-item${active ? " is-current" : ""}`}
+                      disabled={busy}
+                      onClick={() => {
+                        if (!active) onSelect(canvas.id);
+                        closeSwitcher();
+                      }}
+                    >
+                      <span className="canvas-tabs__switcher-name">{canvas.name}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className="canvas-tabs__switcher-action"
+                      aria-label={`重命名画布 ${canvas.name}`}
+                      title="重命名画布"
+                      disabled={busy}
+                      onClick={() => {
+                        closeSwitcher();
+                        beginRename(canvas);
+                      }}
+                    >
+                      <Icon name="pencil-simple" aria-hidden="true" size="xs" />
+                    </button>
+                    <button
+                      type="button"
+                      className="canvas-tabs__switcher-action"
+                      aria-label={`删除画布 ${canvas.name}`}
+                      title="删除画布"
+                      disabled={busy || editing !== null}
+                      onClick={() => {
+                        closeSwitcher();
+                        onDelete(canvas.id);
+                      }}
+                    >
+                      <Icon name="trash" aria-hidden="true" size="xs" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>,
+            document.body,
+          )
+        : null}
     </nav>
   );
 });

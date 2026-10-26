@@ -1,5 +1,6 @@
 import { useId, useState } from "react";
-import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { CanvasSelect } from "../../components/CanvasSelect";
+import { ErrorAlert } from "../../components/ErrorAlert";
 import { ImeTextarea } from "../../components/ImeTextField";
 import {
   createGreenScreenConfig,
@@ -43,6 +44,9 @@ function choiceValue(input: PromptContentConnection): string {
   return JSON.stringify([input.key, input.target]);
 }
 
+/** 失效绑定（素材已断开/来源变化）在下拉里的占位值；不会命中任何真实素材。 */
+const UNAVAILABLE_VALUE = "unavailable";
+
 function BindingSelect({
   label,
   placeholder,
@@ -58,6 +62,7 @@ function BindingSelect({
   readonly kinds: readonly ("image" | "video")[];
   readonly onChange: (binding: GreenScreenBinding | null) => void;
 }) {
+  const invalidId = useId();
   const available = inputs.filter(
     (input) =>
       (input.kind === "image" || input.kind === "video") &&
@@ -69,32 +74,38 @@ function BindingSelect({
   return (
     <label className="green-screen__field">
       <span>{label}</span>
-      <select
-        value={missing ? "unavailable" : selected ? choiceValue(selected) : ""}
-        aria-invalid={missing || undefined}
-        onChange={(event) => {
-          if (!event.target.value) {
+      <CanvasSelect
+        ariaLabel={label}
+        ariaDescribedBy={missing ? invalidId : undefined}
+        value={missing ? UNAVAILABLE_VALUE : selected ? choiceValue(selected) : ""}
+        options={[
+          { value: "", label: placeholder },
+          ...(missing
+            ? [{ value: UNAVAILABLE_VALUE, label: `${binding?.name ?? ""}（已断开/来源已变化）` }]
+            : []),
+          ...available.map((input) => ({
+            value: choiceValue(input),
+            label: `${input.kind === "video" ? "视频" : "图片"} · ${input.name}`,
+          })),
+        ]}
+        onChange={(value) => {
+          if (!value) {
             onChange(null);
             return;
           }
-          const input = available.find(
-            (candidate) => choiceValue(candidate) === event.target.value,
-          );
+          const input = available.find((candidate) => choiceValue(candidate) === value);
+          // 失效绑定那条只用于回显当前状态，选中它不产生新的绑定。
           if (input) onChange({ key: input.key, name: input.name, target: input.target });
         }}
-      >
-        <option value="">{placeholder}</option>
-        {missing ? (
-          <option value="unavailable" disabled>
-            {binding.name}（已断开/来源已变化）
-          </option>
-        ) : null}
-        {available.map((input) => (
-          <option key={choiceValue(input)} value={choiceValue(input)}>
-            {input.kind === "video" ? "视频" : "图片"} · {input.name}
-          </option>
-        ))}
-      </select>
+      />
+      {missing ? (
+        <ErrorAlert
+          error="已选素材已断开或来源已变化，请重新选择。"
+          id={invalidId}
+          tone="warning"
+          variant="inline"
+        />
+      ) : null}
     </label>
   );
 }
@@ -264,10 +275,15 @@ export function GreenScreenSection({
               <>
                 <label className="green-screen__field">
                   <span>绿幕制作方式</span>
-                  <select
+                  <CanvasSelect
+                    ariaLabel="绿幕制作方式"
                     value={current.preparationMode}
-                    onChange={(event) => {
-                      const preparationMode = event.target.value;
+                    options={[
+                      { value: "generate", label: "AI 生成绿幕主体" },
+                      { value: "convert", label: "现有视频转绿幕" },
+                      { value: "existing", label: "使用已有绿幕视频" },
+                    ]}
+                    onChange={(preparationMode) => {
                       if (
                         preparationMode === "generate" ||
                         preparationMode === "convert" ||
@@ -277,11 +293,7 @@ export function GreenScreenSection({
                         update({ preparationMode });
                       }
                     }}
-                  >
-                    <option value="generate">AI 生成绿幕主体</option>
-                    <option value="convert">现有视频转绿幕</option>
-                    <option value="existing">使用已有绿幕视频</option>
-                  </select>
+                  />
                 </label>
                 {current.preparationMode !== "existing" && !reviewing ? (
                   <>
@@ -395,28 +407,29 @@ export function GreenScreenSection({
                 </label>
                 <label className="green-screen__field">
                   <span>成片声音</span>
-                  <select
+                  <CanvasSelect
+                    ariaLabel="成片声音"
                     value={current.audio}
-                    onChange={(event) => {
-                      const audio = event.target.value;
+                    options={[
+                      { value: "preserve", label: "保留主体原声" },
+                      { value: "mute", label: "静音" },
+                      { value: "scene", label: "按新场景生成声音" },
+                    ]}
+                    onChange={(audio) => {
                       if (audio === "preserve" || audio === "mute" || audio === "scene")
                         update({ audio });
                     }}
-                  >
-                    <option value="preserve">保留主体原声</option>
-                    <option value="mute">静音</option>
-                    <option value="scene">按新场景生成声音</option>
-                  </select>
+                  />
                 </label>
               </>
             )}
             {resolved.issue ? (
-              <>
-                <p className="green-screen__issue" role="alert" id={issueId}>
-                  {resolved.issue}
-                </p>
-                <ErrorCopyButton text={resolved.issue} />
-              </>
+              <ErrorAlert
+                error={resolved.issue}
+                id={issueId}
+                tone="warning"
+                hint="补齐上面缺的一项后即可生成。"
+              />
             ) : null}
             {busy ? (
               <p className="green-screen__hint" role="status">

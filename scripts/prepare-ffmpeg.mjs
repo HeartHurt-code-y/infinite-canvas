@@ -6,7 +6,7 @@
 // 保证“内置优先、运行时下载回退”两条路径拿到的是同一类官方构建。
 //
 // 平台策略：Windows（x64/arm64）、macOS（x64/arm64）、Linux（x64/arm64）
-// 都在构建期预置 ffmpeg 引擎；ffmpeg 下载失败会中断构建（与 remotion:prepare
+// 都在构建期预置 ffmpeg 引擎；ffmpeg 下载失败会中断构建（与其他组件准备脚本
 // 一致）。macOS 的 ffmpeg 发行包不含 ffprobe，因此额外做一次**非致命**的
 // ffprobe 补下载：拿到就是完整引擎，拿不到只告警——应用侧会用
 // `ffmpeg -i` 解析时长/分辨率兜底（见 src-tauri/src/backend/composer.rs）。
@@ -27,7 +27,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { ensureWindowsFfmpegLicense } from "./ffmpeg-runtime-license.mjs";
-import { assertComponentRoot } from "./runtime-component-catalog.mjs";
+import { assertComponentRoot } from "./runtime-resources.mjs";
 import { ensureMacExecutableSignature } from "./macos-runtime-signature.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");

@@ -1,9 +1,7 @@
 import js from "@eslint/js";
-import jestDom from "eslint-plugin-jest-dom";
 import prettier from "eslint-config-prettier";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
-import testingLibrary from "eslint-plugin-testing-library";
 import { defineConfig, globalIgnores } from "eslint/config";
 import globals from "globals";
 import tseslint from "typescript-eslint";
@@ -11,17 +9,13 @@ import tseslint from "typescript-eslint";
 export default defineConfig([
   globalIgnores([
     "coverage/**",
-    ".vitest/**",
     "dist/**",
     "node_modules/**",
     // 本机构建冒烟、安装包测量与发布中转产物（见 .gitignore 的 .cache/ 段）。
     ".cache/**",
-    // 姿态 WASM 与 Blender 运行时由 prepare 脚本生成，不纳入前端 lint。
-    "public/pose/**",
-    "src-tauri/resources/blender/**",
-    "src-tauri/resources/pose-runtime/**",
-    "src-tauri/resources/ai-media-runtime/**",
-    "src-tauri/resources/ai-media-quality-runtime/**",
+    // 本地临时目录（.gitignore 已忽略）：逆向分析下载的第三方产物、
+    // 抓包日志与临时脚本都在这里，不是本项目源码，不参与 lint。
+    ".tmp/**",
     // src-tauri 下的 skills 为 Rust 侧技能资产的独立 CommonJS 工具脚本，
     // 不参与前端构建，不纳入前端 lint 范围。
     "src-tauri/skills/**",
@@ -29,12 +23,11 @@ export default defineConfig([
     "src/lib/bindings/**",
     "src-tauri/gen/**",
     "src-tauri/target/**",
-    "src-tauri/resources/remotion-runtime/**",
-    // 独立的本地渲染工程，由自身的校验测试和实际渲染验证。
-    "tools/remotion-runtime/**",
     // Qoder Canvas 会话产物（.canvas.tsx），不属于本项目源码也不在 tsconfig 内，
     // 类型感知解析器会直接报 parser 错误。
     ".qoder-credits/**",
+    // vendored 的第三方源码（wry 等）：只做补丁，不参与本仓库的 lint 与格式。
+    "src-tauri/vendor/**",
   ]),
   {
     files: ["**/*.{ts,tsx}"],
@@ -95,55 +88,9 @@ export default defineConfig([
     },
   },
   {
-    // 测试文件：允许 console；启用 testing-library 与 jest-dom 最佳实践，
-    // 拦截绕过 screen 查询等反模式。no-node-access 对 @xyflow 画布几何测试
-    // （offsetWidth / parentElement / closest）过于教条，予以关闭。
-    files: ["**/*.{test,spec}.{ts,tsx}", "src/test/**/*.{ts,tsx}"],
-    extends: [testingLibrary.configs["flat/react"], jestDom.configs["flat/recommended"]],
-    rules: {
-      "no-console": "off",
-      "testing-library/no-node-access": "off",
-    },
-  },
-  {
-    // Browser Mode 用 vitest/browser 的 locator，不走 Testing Library 的 screen。
-    files: ["**/*.browser.test.{ts,tsx}"],
-    rules: {
-      "testing-library/prefer-screen-queries": "off",
-      "testing-library/prefer-presence-queries": "off",
-      "testing-library/no-node-access": "off",
-      "testing-library/no-container": "off",
-      "testing-library/render-result-naming-convention": "off",
-    },
-  },
-  {
-    // vitest 未启用 globals，@testing-library/react 无法自动注册 cleanup，
-    // setup.ts 中的 afterEach(cleanup) 是必须的，非冗余清理。
-    files: ["src/test/setup.ts"],
-    rules: {
-      "testing-library/no-manual-cleanup": "off",
-    },
-  },
-  {
     // zustand 仓库文件：vanilla store 工厂 / hook / Provider 同文件导出是有意为之，
     // Fast refresh 对纯状态仓库不生效也无影响。
     files: ["src/features/canvas/canvasStore.tsx"],
-    rules: {
-      "react-refresh/only-export-components": "off",
-    },
-  },
-  {
-    // 工作流会话控制器：deep hook 与其 context Provider 同文件导出是有意为之
-    // （Provider 只是 value 透传，与 hook 生命周期强耦合），Fast refresh 不受影响。
-    files: ["src/features/workspace/useWorkflowSessions.tsx"],
-    rules: {
-      "react-refresh/only-export-components": "off",
-    },
-  },
-  {
-    // 测试专用：会话桩 + 区块测试的旧 props 适配组件同为非组件/组件混合导出，
-    // 只被测试引用，Fast refresh 无意义。
-    files: ["src/test/workflowSessionsStub.tsx"],
     rules: {
       "react-refresh/only-export-components": "off",
     },
