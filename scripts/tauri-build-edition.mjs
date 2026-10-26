@@ -1,6 +1,6 @@
 // Explicit editions use separate Cargo/bundle directories; the legacy full build stays intact.
 import { spawn } from "node:child_process";
-import { copyFile, lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -117,6 +117,54 @@ export function editionBuildPlan(
   };
 }
 
+/**
+ * 打包器输出目录（`bundle/`）的绝对路径。
+ *
+ * 与 `archiveEditionBundles` 用的是同一套 profile/target 推导：两处必须指向
+ * 同一个目录，否则「构建时清的是 A 目录、归档时读的是 B 目录」，清理就白做了。
+ */
+export function editionBundleRoot(plan) {
+  const profile = plan.args.includes("--debug") ? "debug" : "release";
+  const targetAt = plan.args.indexOf("--target");
+  const target =
+    plan.target ??
+    (targetAt < 0
+      ? plan.args.find((argument) => argument.startsWith("--target="))?.slice(9)
+      : plan.args[targetAt + 1]);
+  return path.join(plan.targetDirectory, ...(target ? [target] : []), profile, "bundle");
+}
+
+/**
+ * 清掉上一次构建留在 `bundle/` 里的产物。
+ *
+ * ## 为什么必须清
+ *
+ * Tauri 的 NSIS 打包器**不会**清理自己的输出目录：版本从 0.2.8 升到 0.2.9 之后，
+ * `bundle/nsis/` 里会同时躺着 `无限画布_0.2.8_x64-setup.exe` 与
+ * `无限画布_0.2.9_x64-setup.exe`。归档步骤会把目录里**所有**文件按发行版改名收进
+ * `artifacts/<版本>/`，于是同一个版本的产物目录里混进了上一版的安装器，
+ * 发布前的「多个更新安装器」检查直接失败（0.2.9 发版时就是这样中断的）。
+ *
+ * 只删 `bundle/`，不删 `target/`：前者是打包器的输出目录，每次构建都会重新生成；
+ * 后者是编译缓存，删了要重编十几分钟。
+ */
+export async function cleanEditionBuildOutput(plan, root = COMPONENT_REPO_ROOT) {
+  const bundleRoot = editionBundleRoot(plan);
+  await assertComponentRoot(path.dirname(bundleRoot), root);
+  await rm(bundleRoot, { recursive: true, force: true });
+}
+
+/**
+ * 清掉同版本上一次归档留下的半成品。
+ *
+ * 归档可能跑到一半才失败（例如上一条「多个更新安装器」），残留文件会混进这次
+ * 的产物目录，让重跑既不幂等、也不干净。
+ */
+export async function cleanEditionArtifactsOutput(output, root = COMPONENT_REPO_ROOT) {
+  await assertComponentRoot(path.dirname(output), root);
+  await rm(output, { recursive: true, force: true });
+}
+
 export async function writeEditionOverrideConfig(plan, root = COMPONENT_REPO_ROOT) {
   const base = JSON.parse(await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
   const edition = JSON.parse(
@@ -203,6 +251,8 @@ export async function archiveEditionBundles(
     "artifacts",
     applicationVersion,
   );
+  // 同版本的半成品归档先清掉：重跑必须幂等，不能把上一次失败留下的文件带进产物。
+  await cleanEditionArtifactsOutput(output, root);
   const artifacts = [];
   const isMac = plan.platform?.startsWith("darwin-");
   const config = isMac
@@ -259,12 +309,7 @@ export async function archiveEditionBundles(
     (targetAt < 0
       ? plan.args.find((argument) => argument.startsWith("--target="))?.slice(9)
       : plan.args[targetAt + 1]);
-  const bundleRoot = path.join(
-    plan.targetDirectory,
-    ...(target ? [target] : []),
-    profile,
-    "bundle",
-  );
+  const bundleRoot = editionBundleRoot(plan);
   if (isMac) {
     const appPath = path.join(bundleRoot, "macos", `${config.productName}.app`);
     await assertComponentRoot(appPath, root);
@@ -467,6 +512,9 @@ export async function buildTauriEdition(edition, passthrough = [], options = {})
   if (sourceBefore.applicationVersion !== applicationVersion)
     throw new Error("Application version changed before the edition build started");
   console.log(`[tauri:${edition}] isolated native/bundle output → ${plan.targetDirectory}`);
+  // 打包器输出目录先清空：Tauri 不会自己清，上一版的安装器混进来会让归档
+  // 把「多个更新安装器」判定为失败。
+  await cleanEditionBuildOutput(plan, root);
   const runBuild =
     options.runBuild ??
     (() =>
