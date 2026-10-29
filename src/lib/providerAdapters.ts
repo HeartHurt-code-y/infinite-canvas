@@ -12,6 +12,13 @@ export const FZY_ADAPTER_ID = "fzy_ai_v1";
 export const FZY_BASE_URL = "https://fzy-ai.pages.dev";
 export const FZY_IMAGE_PROFILE = "fzy_image_tasks_v1";
 export const FZY_VIDEO_PROFILE = "fzy_video_tasks_v1";
+/**
+ * Atlas Cloud 模型生成 API：自有协议（出图 `POST /api/v1/model/generateImage`、
+ * 出视频 `POST /api/v1/model/generateVideo`，轮询统一
+ * `GET /api/v1/model/prediction/{id}`）。
+ */
+export const ATLASCLOUD_ADAPTER_ID = "atlascloud_v1";
+export const ATLASCLOUD_BASE_URL = "https://api.atlascloud.ai";
 
 /**
  * 语音合成的两个请求档案，与后端 `model_schema.rs` 一一对应：豆包语音 OpenSpeech
@@ -49,12 +56,14 @@ export function adapterAllowsEmptyApiKey(adapterId: string): boolean {
 }
 
 export function adapterSupportsAssetLibrary(adapterId: string): boolean {
-  // Grsai 只有 generate / result 两个接口，没有素材库。
+  // Grsai 只有 generate / result 两个接口，没有素材库；
+  // Atlas Cloud 只开放出图与轮询（外加一次性素材上传），同样没有素材库浏览。
   return (
     !isBailianAdapter(adapterId) &&
     adapterId !== DOUBAO_VOICE_ADAPTER_ID &&
     adapterId !== GRSAI_ADAPTER_ID &&
-    adapterId !== FZY_ADAPTER_ID
+    adapterId !== FZY_ADAPTER_ID &&
+    adapterId !== ATLASCLOUD_ADAPTER_ID
   );
 }
 

@@ -188,7 +188,11 @@ impl VideoCompositionService {
     /// 汇总当前引擎状态。版本以 version.txt 为准，不在这里探测（命令线程禁止阻塞）。
     pub fn engine_status(&self) -> VideoComposerEngineStatus {
         let binary_exists = self.ffmpeg_binary().is_file();
-        let runtime = self.inner.engine.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = self
+            .inner
+            .engine
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let state = if runtime.installing {
             VideoComposerEngineState::Installing
         } else if binary_exists {
@@ -209,7 +213,11 @@ impl VideoCompositionService {
     /// 安装（或补装）引擎；已就绪时直接返回当前状态。
     pub async fn install_engine(&self) -> VideoComposerEngineStatus {
         {
-            let mut runtime = self.inner.engine.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut runtime = self
+                .inner
+                .engine
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if runtime.installing {
                 // 已有其他调用方正在安装：直接基于当前持有的锁构造状态返回，
                 // 禁止调用 engine_status()——它会再次 lock 同一把 std Mutex，
@@ -237,7 +245,11 @@ impl VideoCompositionService {
         }
         .await;
         {
-            let mut runtime = self.inner.engine.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut runtime = self
+                .inner
+                .engine
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             runtime.installing = false;
             if let Err(ref error) = install_result {
                 runtime.last_error = Some(error.to_string());

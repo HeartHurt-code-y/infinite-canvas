@@ -1,7 +1,46 @@
+# 任务完成标准
+
+- **任务完成 = 「编译」+「真实开发环境端到端验证」两样都做完**：交付前先跑编译器（前端 `pnpm typecheck`（`tsc --noEmit`，覆盖 `tsconfig.json` 与 `tsconfig.node.json` 两份）、Rust `pnpm rust:check`（`cargo check`）），再在**真实开发环境**里把这次的改动真正跑通，看**实际结果**而不是「应该没问题」。两样都过才算完成；只编译不验证、只验证不编译，都不算完成。
+- **端到端验证要「真的跑」，不是「读代码觉得对」**：优先在**应用自身**里操作（桌面应用直接开起来点，别另起浏览器预览）；涉及外部服务的改动要**真实调用**——真的发一次生成请求、真的看返回与产物、真的确认落盘与报错文案。**允许产生实际费用**（用户明确授权），但要如实说明跑了哪几次、花在什么上。
+- **验证层级要如实标注**：端到端验证分三层——① 应用内 UI 全链路；② 应用自身代码路径触发的真实请求（例如在应用里发起的生成、真实轮询、真实落盘）；③ 协议层直打真实端点（绕开 UI，直接按应用真实产出的请求体形状调用供应商）。③ 不能替代 ①②，替代了要在交付说明里写明「未走 UI 路径」。**不允许**把「协议层打通了」写成「端到端验证通过」。
+- **验证要覆盖本次改动的实际落点**：改了哪条路径，就在那条路径上验证；改的是错误分支就触发那个错误分支（不能只跑成功路径），改的是参数契约就用真实参数跑一遍。看实际结果（实际请求体、实际响应、实际产物、实际错误文案），而不是「代码逻辑上应该会……」。
+- **编译器是最低门槛，不是全部**：编译器只看类型。测试套件 / eslint / knip / prettier / clippy / 前端构建 / Tauri 打包 / `pnpm codegen` 仍然**一律不跑**（见「测试约定」）。这些免掉的检查正是「端到端验证」必须自己扛起来的理由——编译器看不见的那类问题只能靠真机跑一遍看出来。
+- **审查与修复要按范围收敛**：仓库里可能同时存在用户自己在改的未跟踪模块（本项目常见于 `src/features/create/`）。这类文件的报错要**归因并如实说明**，**不要代改**（会冲掉进行中的修改）。改动范围之外的问题只说明，不顺手重排无关代码。
+- **交付说明必须如实写清两件事**：① **端到端验证到底跑了什么**（在哪跑的、点了什么、真实请求/生成跑了没有、结果是什么）；② **编译器跑没跑、结果如何**。**没跑就说没跑，没验证就说没验证**——不要把「应该没问题」写成「已验证」。修复了别人的前置失败要写明归因。
+
 # 画布节点交互约定
 
-- 画布节点里的下拉（供应商、模型、参数枚举、任务类型、素材角色）一律用 `src/components/CanvasSelect.tsx`，不要再用原生 `<select>`：原生弹层由浏览器画在 React Flow 缩放层之外，WebView2/WKWebView 的非整数缩放下点击经常落空，用户要点好几次甚至切不动。`CanvasSelect` 的菜单挂在 body 上，点击必然落位。
+- **说明气泡（tooltip）统一由 `src/components/TooltipLayer.tsx` 提供**：触发器上写 `data-tooltip="文案"` 即可，不要再写自己的 CSS 伪元素。该层挂在 `App.tsx` 根部（**错误边界里面**——它自己出问题要由边界兜住，挂在外面则整个应用白屏、连报错页都看不到），用**事件委托**接管全应用的 `[data-tooltip]`（画布节点会被 React Flow 反复重渲染，逐个挂监听既啰嗦又容易漏），并把气泡 **portal 到 `document.body`**（`position: fixed`）。
+- **为什么不能退回 CSS 伪元素**（`[data-tooltip]::after`）：伪元素**永远朝下**展开（`top: calc(100% + gap)`），贴底的控件组（画布左下控件组 `.canvas-viewport-dock`、底部浮坞）下方没有空间，说明被视口下沿切掉；伪元素还挂在触发器内部，会被祖先的 `overflow: hidden`（`.canvas-stage`）裁掉，也量不到自己的宽度（长文案无法在视口右沿夹住），还会跟着 React Flow 的缩放层一起缩放。
+- **定位必须用实测宽高**：翻面判断（「下方装不装得下」）与水平夹取都依赖气泡的**实测尺寸**，不能用估算值——估算偏小会让下方明明放不下却判定放得下，说明照样被切掉。计算统一走 `src/components/floatingLayer.ts` 的 `placeTooltip`，与画布节点菜单、创作台浮层共用同一套「实测尺寸 + 不越出视口」规则，不另写一份。
+- **读屏描述与视觉气泡必须是两个元素**：`aria-describedby` 的语义是「该控件的**稳定**描述」。若直接指向视觉气泡会有三个故障：气泡是共享的、内容随 hover 改写（焦点在 A、鼠标悬停 B 时 A 会念出 B 的文案）；hover 路径会给**非焦点**元素挂引用（描述只在聚焦时有意义）；气泡隐藏时清空内容，焦点元素的描述就指向了空元素。所以视觉气泡标 `aria-hidden="true"` 只管视觉，读屏描述是另一个常驻的 `sr-only` 元素（id 由 `useId()` 生成，见下一条），内容跟随**当前焦点**的触发器——与仓库既有范式一致（`MediaNodeViews` 的 `<span id={promptHintId} className="sr-only">`）。描述元素必须**常驻 DOM**：焦点那一刻它若不存在，读屏就读不到。
+- **只有说明提供了可访问名之外的信息时才挂 `aria-describedby`**：全应用有 7 处触发器的 `data-tooltip` 与 `aria-label` 完全相同（如「切换小地图」），另有 3 处说明是**可访问名的子串**（「打开素材库侧板」配「素材库」、「打开创作台」配「创作台」、「打开全局设置」配「全局设置」）——名字念完那句话也就说完了，再挂一次描述是同一句话念两遍，那是噪声不是信息；而「功能组件（后端暂未接入）」「整理画布 · Alt+Shift+F」「清空画布上的节点与连线」这类**只有 tooltip 里有的信息**必须关联，否则读屏用户永远拿不到。判据是「可访问名有没有把说明这句话说完整」：**说明被名字逐字包含 → 不挂**；说明比名字更长 → 挂。**描述要挂在真正获得焦点的那个元素上，不是挂在触发器上**——`aria-describedby` 不向下继承，挂在祖先上等于没挂（今天 26 处触发器都是叶子 `button`、焦点元素恰好就是触发器，属于「恰好成立」而不是「设计上成立」，别依赖这个巧合）。关联要放在 **`useLayoutEffect`**（提交阶段同步执行）而不是 `useEffect`：读屏通常在焦点事件那一轮就查询控件的描述，而被动副作用排到 paint 之后才跑的话，属性还没挂上，描述就漏掉了。触发器若原本已有 `aria-describedby`（如 `CanvasSelect` 的错误提示），要**追加**；失焦时**只摘掉自己挂的那个 id**，不要整串还原成挂载前的快照——期间别人可能又加了引用，整串还原会把那一条一起抹掉。关联用的 state 更新要**幂等**（同一锚点、同一文案、**同一描述宿主**时复用上一次的 state 对象）：否则每次 focusin 都会让 effect 重跑一轮，cleanup 先移除 `aria-describedby`、再重新加上，中间那个窗口里读屏查询描述会拿到空值；而只比锚点与文案会漏判「同一触发器内焦点换了子元素」——描述会留在旧宿主上。描述元素的 id 用 **`useId()`**（与 `CanvasSelect`、`SearchableMultiSelect` 一致），不要手写常量——手写常量在挂了两个实例时会撞 id，读屏会引用到错误的元素；React 生成的 id 带冒号（`:r0:`/`_r_0_`），在 `aria-describedby` 里合法且能被可访问性树正确解析（已实测）。
+- **指针与焦点是两条独立的状态源**：焦点离开时若指针仍指着触发器，不该隐藏；指针离开时若**键盘来源**的焦点还留在触发器上，也不该隐藏。判断「指针是否还在上面」要用 `elementFromPoint` + 最后已知指针坐标，**不要用 `:hover`**——Chrome 里 `:hover` 不匹配 disabled 元素，而本项目有不少置灰按钮带 `data-tooltip`。
+- **「焦点还留着说明」只认键盘来源的焦点**：鼠标点过按钮后焦点就落在按钮上，若用 `contains(document.activeElement)` 判定「焦点还在就别隐藏」，指针一移开说明就永远赖在屏幕上（粘住的气泡）。焦点来源要在**聚焦那一刻**定下来（`focusin` 时记下当时的输入设备），不能等隐藏时再去看「最近一次输入设备」——用户 Tab 到按钮后又用鼠标点了别处，最近输入设备变成指针，但那个焦点确实是键盘落在按钮上的。用鼠标点了当前键盘聚焦的触发器时，要撤掉「键盘持有」（等价于 `:focus-visible` 的行为）。
+- **只有键盘来源的焦点才给「视觉气泡」**（读屏描述不受此限）：鼠标点击按钮同样会派发 `focusin`，若一并响应，用户点一下按钮就冒出一段说明（旧实现用 `:focus-visible` 正是为了避免这个）。**`:focus-visible` 不能直接用**：实测鼠标点击一个此前被键盘聚焦过的按钮后，`:focus-visible` 仍为 `true`——它反映的是「上一次交互方式」而非「这一次」。所以自己追踪最近输入设备（`keydown` 记为键盘、`pointerdown` 记为指针），这是 UI 库（Radix / React Aria）的标准做法。
+- **读屏描述始终跟随「实际焦点」，与焦点来源无关**：元素确实是当前焦点，描述它就是对的（读屏 + 鼠标的用户同样需要）。若按输入来源跳过更新，焦点从 A 移到 B 时 `focused` 会仍指向**已失焦的 A**，A 的 `aria-describedby` 残留——那是陈旧状态。焦点移到另一个触发器时**不要**抢先清空描述（清空会让 `aria-describedby` 先被撤除再重新挂上，中间那个窗口里读屏查询描述会拿到空值），交给紧随其后的 `focusin` 更新；但新焦点若是**没有说明**的触发器（`data-tooltip` 为空），`focusin` 会提前返回，描述就会永远停在旧元素上——这条路径要在 `focusout` 就清掉。
+- **Escape 关闭后，指针没离开该触发器时不应复活说明**：否则用户会以为 Escape 没用——指针在按钮上微动一下，说明就回来了。要记住被关掉的那个触发器，直到指针**真正离开**它才解除屏蔽。注意屏蔽只针对**指针路径**：键盘聚焦是另一次明确的交互，照常给说明（否则纯键盘用户一旦误按 Escape，就再也拿不到那个控件的说明了——屏蔽的解除条件是指针离开，键盘用户可能一辈子不动鼠标）。
+- **气泡定位写 `transform` 而不是 `top/left`**：`transform` 走合成器不触发重排；写 `top/left` 会让浏览器每帧重新布局气泡，在大画布上是明显的 layout thrash。跟随触发器用低频定时器（`FOLLOW_INTERVAL_MS`）而不是 rAF 每帧轮询——画布平移走 transform、没有对应事件，只能轮询，而每帧 `getBoundingClientRect()` 会**强制同步布局**。
+- **水平夹取不能写成 `min(max(margin, centered), max(margin, vw - w - margin))`**：气泡比视口还宽时两个边界大小关系会反转，结果取到下界、气泡照样溢出视口。`placeTooltip` 里已显式分两种情况处理。视口宽度要用 **`documentElement.clientWidth`**（不含滚动条）而不是 `window.innerWidth`：`position: fixed` 的包含块是**视口可见区**，实测有 15px 滚动条时 `innerWidth` 是 1000 而 fixed 元素右沿只能到 985，用 `innerWidth` 夹取会让气泡压到滚动条上。纵向仍用 `innerHeight`——`documentElement.clientHeight` 在根元素自身可滚动时是**内容高度**（实测 3000），用它会把气泡算到屏幕外。
+- **触摸设备不响应悬停**：触摸点一下会派发 `pointerover` 却**不派发** `pointerout`，气泡会粘在屏幕上不消失。用 `event.pointerType === "touch"` 直接忽略（比旧的 `@media (hover: hover)` 更精确：混合设备上鼠标照常用）。
+- **触发器可能已经不可用了**，有两种形态：从 DOM 里消失（画布节点被删、React 重渲染替换了按钮）→ `isConnected` 为 false；还在 DOM 里但被藏起来（`display: none` 的容器、响应式断点下隐藏的控件）→ `isConnected` 为 true 但矩形全为 0。两种情况下 `getBoundingClientRect()` 都拿不到有效位置，气泡会被摆到视口左上角并一直停在那儿——比不显示更糟。定位前必须同时查 `isConnected` **和**矩形宽高。更可靠的是**事件驱动**：浏览器在元素消失时**不会**派发 `pointerout`，只派发一次 `pointerover`（落在 body 上）——所以「指针落到不带 `data-tooltip` 的元素上」这条路径必须收掉气泡，不能直接 return。只靠定时器检测卸载时机不可靠（机器繁忙时定时器会被推迟，检测就晚了）。
+- **触发器被别的东西盖住时也要收掉气泡**：气泡渲染在 body 上、层级是 `--z-tooltip`（600，全应用最高），比展开的提示词编辑器（`--z-modal`，400，全屏 + scrim）还高。编辑器一打开就把 `.workspace-shell` 置为 `inert`，而 `inert` 子树不接收指针事件——**指针不动就不会再有 pointerover/pointerout**，气泡会浮在模态之上一直挂着。事件驱动救不了这一种，要在每轮跟随里做命中测试兜底：触发器中心那个位置上若不是它自己、它的后代或它的祖先，就说明它被盖住了，收掉气泡（气泡自己是 `pointer-events: none`，不会成为命中目标）。
+- **指针移出又立刻移回要取消「待隐藏」定时器**：否则气泡会在指针明明停着的时候消失（`pointerover` 命中同一触发器时不能直接 `return`，要先清隐藏定时器）。
+- **换了触发器要把上一个的气泡收掉**：旧气泡描述的是上一个控件（箭头还指着上一个），留在屏幕上会误导；旧实现（CSS 伪元素）本来就是指针移开时 120ms 淡出的，保持一致。注意 `hide()` 会连带清掉「待显示」定时器，所以**必须排在重新计时之前**。例外：旧气泡若是由**键盘焦点**持有的（焦点还停在那个控件上），就留着——它描述的仍是当前焦点控件，等新气泡显示出来再替换，新气泡也走了之后「焦点持有」的恢复逻辑会把说明还给焦点控件。
+- **Escape 要关掉当前显示的那一条说明**，不要 `preventDefault`/`stopPropagation`：Escape 在本项目里是关闭弹窗与菜单的通用键（`CanvasSelect`、`SearchableMultiSelect` 都监听它），本层不该抢掉那些行为；只关视觉会留下「半关闭」状态——描述还在、焦点没变、也不会再有 `focusin` 来刷新它。但读屏描述**只在它属于同一个触发器**时才一起关：焦点在 B、鼠标悬停 A 时按 Escape，被关掉的是 A 的气泡，B 仍然聚焦着，把 B 的说明也抽走会让读屏用户丢掉当前控件的说明。
+- **Escape 的屏蔽必须「先记再隐藏」**：`hide()` 会把 `anchorRef.current` 置空，先隐藏再读就永远读到 null，被关掉的触发器根本没被记住，屏蔽机制等于没写（指针一动说明就复活，Escape 看起来"没生效"）。记住后在指针**真正离开**该触发器前不再显示它；等待显示的定时器回调里也要再确认一次（不要只依赖 `hide()` 顺带清定时器这种隐式保证）。
+- **Escape 处理要先判输入法组合状态**（`event.isComposing || event.keyCode === 229`）：组合期间的 Escape 归输入法（取消候选窗口）。本项目所有 Escape 处理都遵循这一条（`CanvasNodeEditor`、`PromptNodeViews`、`VideoNodeSettingsControls`、`NodeNameEditor`、`DocumentNodeViews`），浮层这层也要跟：漏掉会造成用户在提示词编辑器里按 Escape 取消候选时，顺手把画布上的说明也关掉了，而那一处还会被记成「被 Escape 关过」。
+- **已经被别人认领的 Escape 不再动作**（判 `event.defaultPrevented`）：本项目的 Escape 消费者（`CanvasNodeEditor`、`CanvasSelect`、`SearchableMultiSelect`）都会 `preventDefault()` + `stopPropagation()` 认领这个键；「关掉下拉菜单的 Escape」不该顺手把画布上的说明也关掉、还给那个触发器记上一笔「被 Escape 关过」（指针没离开前它的说明再也不出现）。因此 **Escape 的处理必须挂在冒泡阶段**——捕获阶段还没有人处理过，`defaultPrevented` 恒为 false；而**「记录输入来源」的 keydown 监听仍要留在捕获阶段**，因为有些控件会 `stopPropagation()` 掉 keydown（`CanvasNodeEditor` 关闭编辑层时就会），冒泡阶段收不到 → 焦点来源会被误判成指针，键盘聚焦的说明就不出来了。两个监听各司其职，不要合并成一个。
+- **指针离开所有触发器时必须取消「待显示」定时器**：说明有 800ms 的显示延迟，指针在延迟到期前就移开的话，那次延迟结束仍会把说明弹出来——指针明明不在按钮上，屏幕上却冒出一条说明；而且此时已经没有 `pointerout` 可以收它了（气泡的锚点不是当前指针所在的那个触发器），它会一直挂在那儿。所以「指针离开所有触发器」这条路径要同时做两件事：取消待显示 + 安排隐藏。`focusout` 路径**不能**取消待显示——焦点挪走时指针可能还停在某个触发器上，那条说明还得照常出现。
+- **Escape 也要记住「延迟中」的那个触发器**：气泡还没显示（还在 800ms 延迟里）时按 Escape，`anchorRef` 是空的，只记 `anchorRef` 等于没记——那次延迟中的说明会在 Escape 之后照样冒出来，Escape 看着像没生效。要单独记「待显示」的锚点。
+- **悬停延迟保持 800ms、键盘聚焦立即出现**：这是旧伪元素实现定下的节奏（`transition-delay: 800ms` / 聚焦 `0ms`）。改这个数值属于**改交互节奏**而不是修 bug——修「说明被视口切掉」时不要顺手改时长。
+- **说明文案可能自己变**：触发器可以在状态变化时改写自己的 `data-tooltip`（如切换模式的按钮在「移动 · 拖动画布」↔「框选 · 框选节点」之间切换、工具条项的「（后端暂未接入）」后缀随能力状态出现或消失）。说明若停在旧文案上，用户读到的是一句**已经失效的话**——比不显示更糟。定位的每一轮跟随都要**重读触发器的 `data-tooltip`**并与当前显示的文案比对，不一致就换文案、按新文案重测尺寸再定位；文案被清空（属性被摘掉）则收掉气泡。**读屏描述同样要跟着换**：它读的是**焦点那个控件**的属性（与当前气泡挂在谁身上无关——焦点在 B、悬停 A 时两者可以是不同元素），否则屏幕上的说明与念出来的说明会不一致。
+- **画布节点里的下拉（供应商、模型、参数枚举、任务类型、素材角色）一律用 `src/components/CanvasSelect.tsx`，不要再用原生 `<select>`：原生弹层由浏览器画在 React Flow 缩放层之外，WebView2/WKWebView 的非整数缩放下点击经常落空，用户要点好几次甚至切不动。`CanvasSelect` 的菜单挂在 body 上，点击必然落位。
 - 节点设置面板（`VideoNodeSettingsControls`）的「点外部关闭」判断要放过 portal 出去的浮层（如 `.canvas-select__menu`），否则 capture 阶段先关面板，菜单随面板卸载，选项点不中。
+- **「引用该节点生成」的入口是手柄**点按**，不是拖拽**：React Flow 12.11 的手柄只在指针位移超过 `connectionDragThreshold`（默认 1px）之后才派发 `onConnectStart` / `onConnectEnd`——纯点按一个手柄，RF 一个事件都不发，连 `onConnectEnd` 都没有。所以「点手柄弹菜单」这条路径必须自己接：在 `document` 上用**捕获阶段**的 `pointerdown` / `pointerup` 识别 `.react-flow__handle`（RF 在手柄 div 上写了 `data-nodeid` / `data-handleid`，节点与端口都读得到），点按即弹「添加节点」菜单。**位移阈值必须与 `handleConnectEnd` 对齐（4px）**，否则同一次手势会同时弹出两个菜单、落点随机。拖拽仍然是连线手势，两条路径互斥（拖拽结束时的 click 落在 mousedown 与 mouseup 的**共同祖先**上）。别把回调挂进节点视图：节点视图被 `memo` 包着，挂回调会让每个节点的 `data` 引用都变、缓存全失效。
+- **手柄的键盘路径不能缺**：手柄命中区在节点外侧 80px、纯鼠标手势，键盘用户原本完全够不到「引用该节点生成」。手柄只在**节点被选中时**进 Tab 序列（`CanvasFlowViews` 按 `selected` 给 `tabIndex`），焦点落在手柄上按 Enter / Space 等价于点按；处理时记得 `preventDefault` **并 `stopPropagation`**——React Flow 的节点包装层把 Enter / Space 当成「选中节点」，不拦住的话编辑层会展开、盖住建在旁边的新节点。鼠标路径同理：点手柄后紧接着的那一次 click 要拦掉，否则节点会被选中。
+- **方向按端口语义走，报错文案不能讲反**：输出端口（右侧）=「引用该节点生成」，新节点摆在被引用节点的**左边**，边是「原节点 → 新节点」；输入端口（左侧）=「接入该节点」，新节点摆在右边，边是「新节点 → 原节点」。本项目画布从左往右流，**左侧是输入端口**——拿它讲「引用该节点生成」方向是反的（曾有一句报错让用户去点左侧手柄，而那个入口当时根本不存在，用户点下去毫无反应）。
+- **生成节点的「参考素材」不需要后端**：图片节点与视频节点共用 `src/features/workspace/CanvasReferenceTools.tsx`（上传本地素材 / 从画布上挑一份已存在的素材），素材入库走本地素材库、连线走画布 store，全程前端闭环。别再给它挂「后端暂未接入」的 toast——那条链路没有后端依赖。
 - 提示词内容存在提示词模块（`promptContents`）里，**不进画布 store**，所以内容变化不会触发 store 订阅里的落盘。改字必须显式排期落盘（`scheduleCanvasSaveRef`）：节点卡里的编辑器靠 `input` 事件冒泡到画布视口触发排期，而独立编辑区（视口之外）的冒泡到不了视口，只靠那一条会丢掉独立编辑区里改的字。
 - **提示词住在 `promptContents` 的节点类型，必须显式进 `collectCanvasDocument` 的快照 key 集合**（`promptContents.snapshotAll(keys)` 只快照给定 key）。漏掉时排期与落盘都"正常"，但存出来的画布文档里没有这段提示词，重新打开就丢了——智能剪辑节点（`videoClipNodes`）就是这么漏过一次，提示词节点（`gen` 的 `kind: "prompt"`）也漏过一次。复制粘贴走 `document.promptContents` 按 key 过滤（通用），所以只要存进文档，复制就自动带上。
 - **快照 key 集合不再按节点类型登记，改成「画布里现存的节点 key」**（`WorkspaceApp.tsx` 的 `collectCanvasDocument` 用 `useAllCanvasNodeKeys()` 求交集）。此前靠「`gen` + `videoClip`」两份手工列表推导，而那份登记表与真正的注册点（`PromptMentionInput` 挂载处）**没有任何编译期关联** —— 已经因此丢过两次提示词，且症状最难察觉（排期与落盘都正常，只是重开丢了 @引用的素材身份绑定与粘贴附件，纯文本有 `config` 镜像所以不丢）。**新增任何注册 `PromptMentionInput` 的节点类型不需要再登记任何地方**，天然被覆盖。
@@ -43,7 +82,7 @@
 - 画布仍保留通用能力：素材、生图／生视频、提示词（文本）、剧本创作、视频合成（智能剪辑）与创作台。数字模特库、品牌设计工作台等非工作流功能不受影响。
 - **数字模特库与品牌设计工作台的 Rust 命令仍在线**（`list_brand_models` / `save_brand_model_version` / `approve_brand_model_version` / `validate_brand_model_version` / `archive_brand_model` / `read_brand_design_image` / `export_brand_design_bundle`，见 `src-tauri/src/lib.rs`），前端客户端 `src/lib/brandModels.ts` 与 `src/lib/brandDesignClient.ts` 也保留。它们的 UI 入口原本只挂在已下线的工作流面板上（`BrandVideoWorkflowSections` / `ProductSceneWorkflowSections`），工作流下线后**当前没有入口**——这是待补的独立功能入口，不是死代码：`knip.json` 的 `ignore` 里显式豁免了这两个文件，**不要当死代码删掉**，也不要因为「knip 报未使用」就顺手移除豁免。
 - **`src/lib/bindings/**` 是 ts-rs 生成物**（由 `pnpm codegen` 产出），不是手写源码：Rust 侧类型删了但绑定文件仍在是正常的（下次 codegen 会清），反过来手删绑定文件也会被 codegen 重新生成。`knip.json` 已整目录豁免。
-- **画布的节点类型清单与 liblib.tv 画布逐项对齐**（逆向规格 `docs/integrations/liblib-canvas-re.md` 第 3.3 节）：文本 / 图片 / 视频 / 智能剪辑 / 导演台 / 逐帧拉片 / 音频 / 剧本 / 参考节点。原站没有的节点类型（网络爆款视频下载 / 视频抽帧 / 爆款视频复刻）**已删除**，不要再加回来；原站有而本项目后端尚未提供的（导演台 / 逐帧拉片 / 音频 / 参考节点）保留条目与文案，点击给出「后端暂未接入」的明确说明，不静默失败。
+- **画布的节点类型清单与 liblib.tv 画布逐项对齐**（逆向规格 `docs/integrations/liblib-canvas-re.md` 第 3.3 节）：文本 / 图片 / 视频 / 智能剪辑 / 导演台 / 逐帧拉片 / 音频 / 剧本 / 参考节点。原站没有的节点类型（网络爆款视频下载 / 视频抽帧 / 爆款视频复刻）**已删除**，不要再加回来；原站有而本项目后端尚未提供的（导演台 / 逐帧拉片 / 参考节点）保留条目与文案，点击给出「后端暂未接入」的明确说明，不静默失败。**音频节点已接入**（见「音频节点约定」）。
 - 历史数据不做兼容：旧画布里的工作流节点直接丢弃，Rust 侧 `workflow_history` 表不再读写。
 
 # 已下线功能约定
@@ -58,24 +97,40 @@
 # 测试约定
 
 - **本项目不再保留任何测试资产，也不再执行测试**：没有 Vitest 用例、没有 `*.test.ts(x)` / `*.test.mjs`、没有 Rust `#[cfg(test)]` 模块、没有 `src-tauri/tests/` 目录。删测试时一并清掉测试依赖（`vitest`、`@testing-library/*`、`@vitest/browser-playwright`、`playwright`、`jsdom`、jest 相关插件等）、`vitest.config.ts`、eslint 的测试插件与 CI 里的测试步骤。
-- **不要为了「跑通门禁」新增测试**：`pnpm check` / `pnpm knip` / `cargo clippy` 等既有门禁照常维护，但只做**功能实现**与**编译验证**，不要写测试来证明功能。
-- **默认不跑任何测试与质量套件**（用户 2026-10-24 明确「以后不跑任何测试和质量套件」「以后都不用跑ESLint和tsc」）：不跑 vitest、`npx tsc --noEmit`、`pnpm lint` / eslint、`pnpm knip`、`cargo clippy`、`prettier --check`。前端改动的正确性靠逐处自查与真机行为验证；Rust 侧保留 `cargo check` 作为编译验证（它不是质量套件，是编译器本身）。交付说明里如实写「本轮没跑门禁，验证方式是……」，门禁留给用户自己安排。
-- **别指望门禁兜底**：上面这条免掉的不只是时间，还有发现手段。async 函数被当 void 回调传、`useMemo` 依赖数组漏项、React 回调不稳定导致 effect 反复重跑这类问题，只能靠读代码时逐处核对；写回调、传 props、列依赖、传回调给 hook 这四类地方要主动多看一眼。
-- **`pnpm codegen` 保留**：`cargo test --lib export_bindings` 跑的是 ts-rs 宏在编译期生成的绑定导出用例，不是手写测试；`src/lib/bindings/*.ts` 仍由它生成，改 Rust 类型后照常跑。
+- **本项目允许使用编译器做验证**（用户 2026-10-28 明确要求）：`npx tsc --noEmit`（前端类型检查）与 `cargo check`（Rust 类型检查）**可以运行，且应当运行**——改共享类型、跨模块重构、大范围改动时没有编译器兜底风险太高。本条只放开「编译器」这一类验证，**不**重新启用测试套件、eslint / knip / prettier / clippy / 前端构建 / Tauri 打包 / `pnpm codegen`。
+- **除编译器外，仍不运行测试、lint 与打包类门禁**（用户 2026-10-27 明确要求）：包括前端构建、Tauri 打包、`cargo build`、vitest、`pnpm lint` / eslint、`pnpm knip`、`cargo clippy`、`cargo fmt --check`、`prettier --check` 和 `pnpm check`。不要为了门禁新增测试；保留仓库里已有的构建与 CI 配置，除非用户另外要求修改。通过阅读代码、已有产物和不涉及编译的实际交互检查核对实现，交付时如实说明验证范围和未验证部分；只有用户明确改变要求后才运行上述命令。
+- **别指望门禁兜底**：测试与 lint 这条免掉的不只是时间，还有发现手段。async 函数被当 void 回调传、`useMemo` 依赖数组漏项、React 回调不稳定导致 effect 反复重跑这类问题，只能靠读代码时逐处核对；写回调、传 props、列依赖、传回调给 hook 这四类地方要主动多看一眼。
+- **`src/lib/bindings/*.ts` 仍是 ts-rs 生成物**：保留生成机制，但默认不运行 `pnpm codegen`，因为它会触发 Rust 编译；需要更新绑定时须先取得用户明确的新要求。
+- **Rust 的 MSRV 声明要跟实际用到的语法与依赖对齐**：`Cargo.toml` 的 `rust-version` 是 **1.89** —— 本仓库代码在用 let-chains（2024 版稳定于 1.88），依赖里 `notify-rust 4.18`（经 `tauri-plugin-notification`）要求 1.89。写低了会让用那个版本机器的人在依赖解析阶段撞上 "requires rustc 1.89.0 or newer" 这种难以定位的报错。
 
 # 生成请求约定
 
 - 生成接口的能力、素材数量/格式/大小/时长、参数范围、枚举、账户权限及参数组合由服务端兜底；不要在 React 前端或 Tauri 本地后端按缓存目录、旧文档或本地白名单拦截用户请求。
 - 客户端负责按当前 API 文档完整编码用户参数与素材；文档新增字段时补齐上传和映射，不能以“未定义/不支持”为由拦截，也不能静默丢弃输入。界面枚举仅提供选项与默认值，保留用户显式参数。
 - 保留本地文件读取、素材/任务身份、凭据冻结和请求编码完整性保障；服务端拒绝时呈现其真实错误。付费提交回执不明确时核对原任务，不删字段重发或自动重复扣费。
+- **批量／可重试的付费提交必须带固定任务身份**（`StartGenerationCommand.clientTaskId`）：身份由前端在提交**之前**就写进画布文档，后端按「同一身份 + 同一份请求」只创建一次任务（`tasks.rs` 的 `existing_client_task` 比对 `logical_request.clientRequestHash`，不同则返回 `Conflict`）。这样重复点击、恢复、重提都只会拿回同一个任务，不会产生第二笔付费请求——前端因此可以放心做「继续或核对」：先查任务在不在，在就只认领，不在才用同一身份重提。请求内容变了（镜头或生成节点被编辑过）就不能复用身份，这时把该条标成「需处理」而不是重发。
+- **前端 TS 开了 `exactOptionalPropertyTypes`**：可选属性不能显式传 `undefined`，类型要写成 `prop?: T | undefined` 才接得住；`phase` 这类字面量联合字段要显式 `as const` 或 `as 字段类型`，否则会被推成 `string`。
 
 # 入口与生成页约定
 
 - 同一个前端产物只有两个入口，由 `src/features/create/createEntry.ts` 统一判定：`studio`（默认，画布工作台）与 `create`（创作台）。判定通道：URL `?view=` > hash > Tauri 窗口标签。新增入口时在这一个文件里加，不要在 `App.tsx` 里散落判断。
+- **创作台窗口不能在 Tauri 命令里同步建**（`src-tauri/src/lib.rs` 的 `open_create_window`）：同步命令跑在 UI 线程、且在 WebView2 的 IPC 回调栈里，在那里再建一个 WebView2 控制器会踩 WebView2 的重入限制——控制器的创建完成回调要等当前回调返回才派发，而 wry 正阻塞在等它（`wait_with_pump` → `GetMessageA`）。结果是窗口外壳建出来、webview 永远停在 `about:blank`（**白屏**），整个 UI 线程被卡死（主窗口看着还活着，实际不再响应任何 Tauri 事件）。正确做法：命令体用 `async`（跑在异步运行时上），建窗口的动作交给 `AppHandle::run_on_main_thread` 排到事件循环的下一轮——那里已不在 WebView2 回调栈里，同时窗口仍建在事件循环线程上（tao 要求如此）。新增任何「命令里开窗口」的功能都照这个形状写。
+- **`async` 是这条约定的前提，不是风格**：`run_on_main_thread` 在**事件循环线程上会就地执行**（tauri-runtime-wry 的 `send_user_message` 判断 `current_thread().id() == main_thread_id` 就直接处理消息），所以同步命令调 `run_on_main_thread` 等于没绕开——照样在 WebView2 回调栈里建窗口，照样死锁，而且**没有任何编译错误**，症状与原来的 bug 一模一样。凡是「命令里要开窗口」的命令，一律写成 `async fn`。
+- **命令的结果要回传前端，并且带超时**：别手写这套流程——用 `src-tauri/src/lib.rs` 的 `run_window_action`（延后到事件循环 + oneshot 回传 + 10s 超时 + 前端已放弃就不再执行窗口操作 + 闭包 panic 被关在里头，五件事都在里面）。手写就一定会有人漏掉超时、漏掉「前端收到『超时，请重试』之后窗口又凭空冒出来」那个守卫（`sender.is_closed()`），或者漏掉 panic 守卫——建窗口的闭包跑在事件循环线程上，它 panic 会穿出线程边界、release 下直接 abort 整个进程（与 `backend/protocol_reply.rs` 的 `run_catching_panic` 同一个道理）。
+- **创作台的「画布」入口是跨窗口动作**：侧栏「画布 → 全部 / 新建画布」不要在创作台窗口里导航画布入口——入口在挂载时按 URL / 窗口标签定死（`createEntry.ts`），创作台窗口的标签永远是 `create`，导航只会把创作台自己重载一遍。跨窗口交给后端命令 `focus_main_window`（`src-tauri/src/lib.rs`）：它把画布工作台窗口拉到前台，主窗口不在时重建一个（重建同样要 `async` + 排到事件循环，见上面两条）。
+- **画布工作台的「先存后关」是单点依赖，必须留兜底**（前端 `src/features/workspace/CanvasWorkspace.tsx` 的 `onCloseRequested`，后端 `src-tauri/src/lib.rs` 的 `arm_close_watchdog`）：Tauri 只要发现窗口注册过 close-requested 的 JS 监听器，就**无条件** `prevent_close()`（tauri 的 `manager::window::on_window_event`），原生 WM_CLOSE 被吞掉——窗口能不能关掉全看 JS 有没有跑到 `destroy()`。而记录 JS 监听器的那张表（`js_event_listeners`）**只在 JS 主动 unlisten 时才清理**：渲染进程一崩，监听器注册永久残留，Rust 于是永远 prevent_close、JS 却已经没人跑，窗口就再也关不掉（只能任务管理器）。所以三条不能破：① Rust 侧保留关闭兜底看门狗（超时强制销毁窗口），前端明确「保存失败、窗口保持打开」时调 `cancel_forced_window_close` 把它撤掉，否则兜底会与「窗口保持打开」的提示自相矛盾；② 前端关闭流程里不能有「既不关窗口、又不复位 `closing` 闩锁」的出口——闩锁卡死时用户再点 ❌ 会被静默吞掉，表现同样是「关不掉」；③ 保存要有上限（`withCloseFlushTimeout`），并且把「保存卡住」与「保存失败」分开处理：卡住（应用已不可用）强制关窗，失败（存档没写进去但画布还在内存里）留窗口让用户重试。
+- **「窗口关不掉」有两种模式，兜底方式完全不同**（都表现为「点右上角 ❌ 没反应，只能任务管理器」）：
+  - **渲染进程死亡**：上面那条（JS 监听器注册残留 → Rust 永远 prevent_close → 没人调 `destroy()`）。现场签名：宿主进程还活着、`Responding=True`、但**一个 `msedgewebview2.exe` 子进程都没有**，日志尾部连续出现 `[tauri_runtime_wry] WebView2 error: HRESULT(0x8007139F)`。兜底＝Rust 侧关闭看门狗（超时后 `Window::destroy()`，实测渲染进程被杀后 **8.07s** 关掉）。
+  - **事件循环代理失效**：tao 的 `EventLoopProxy::send_event` 就是 `PostMessageW` 到一个隐藏窗口「Tao Thread Event Target」。这个窗口没建成（tao 此时返回**空句柄**、代理永远发不出消息）或已被销毁时，Tauri 的 `destroy()` / `close()` **全部**失败，报错文案是 `runtime error: failed to send message to the webview`——这句文案有误导性，它说的不是「webview 发消息失败」，而是「事件循环代理不可用」。现场签名：日志出现上面那句报错，且枚举顶层窗口找不到「Tao Thread Event Target」。此时连 Rust 侧的看门狗也发不出去，唯一出路是**摘掉 JS 的关闭监听器**：没有监听器 → Tauri 不再拦截 → 原生关闭请求直接生效（用户要再点一次 ❌，前端会提示「关闭失败，画布已保存，请再点一次关闭按钮」）。
+- **测关闭窗口不要用 `Get-Process` 的 `MainWindowHandle`**：多线程下它会随机返回不同的句柄（实测同一进程两次拿到两个值，其中一个根本不是主窗口），必须自己 `EnumWindows` 按窗口类（`Tauri Window`）+ 标题（`无限画布`）挑，否则 WM_CLOSE 会打空、测出「关不掉」的假结论。
+- **别用 CDP 改 `window.__TAURI_INTERNALS__.invoke` 来模拟失败**：它是 `writable:false, configurable:false`，赋值被静默忽略，桩根本没生效——测出来的现象会被误当成真实行为（曾据此误判「关闭监听器没注册」）。要模拟「destroy 发不出去」，正确做法是把 tao 的代理窗口打掉（给「Tao Thread Event Target」发 WM_CLOSE），这样复现的是真实故障路径。
+- **画布文档的存取命令必须是 `async`**（`save_canvas_document` / `get_canvas_document` / `list_canvas_documents` / `delete_canvas_document`）：同步命令跑在 UI 线程、且在 WebView2 的 IPC 回调栈里，存档写入是本地 SQLite 事务，落在 UI 线程上就等于把整个应用按住——窗口不响应、事件循环停摆，连「点 ❌ 关闭」这条兜底路径都发不出去（`destroy` 同样要排队等事件循环）。命令体写成 `async fn` 才会被 Tauri 挪到异步运行时上，UI 线程全程不被占。
 - 创作台在 `src/features/create/`：侧栏 / 顶栏 / 记录流 / 底部浮坞 / 资产库抽屉五件套。视觉规格全部来自对即梦创作页的实测，数值落在 `tokens.css` 的 `--color-create-*` / `--size-create-*` / `--create-text-*` 令牌组里；改样式时只改令牌，不写字面值。
 - **资产库不是外部服务**：它接本项目自己的素材库（本机 Base64 + 已接入供应商的云端），实现在 `src/features/create/useCreateAssets.ts`。不要为了「看起来更像」去接别人的资产接口。
 - 参考素材必须带**素材身份**而不是 URL：`CreateReference` 有 `local_file` / `asset` / `local_base64_asset` 三种形状，映射到后端三种合法 target（`src/features/create/useCreateSession.ts`）。`mediaType` 取素材真实类型，role 由媒体类型分派（`reference_image` / `reference_video` / `reference_audio`，与后端 `media.rs` 的归一表一致）。把 video 素材按 image 送，后端会按图片通道读视频字节——失败或静默忽略。
 - 资产库抽屉是**页面网格里的第三列**，不是 `position: fixed` 浮层。做成浮层会把底部浮坞的提交钮压在抽屉底下，用户表现为「面板开着就发不了」。
+- **素材拖拽一律用指针事件，不要用 HTML5 `draggable` / `dataTransfer`**：Tauri WebView 的系统拖放处理器会截走 dataTransfer 拖拽（画布素材卡早就因此改成指针拖拽，见 `workspaceModel.ts` 里「素材卡片使用指针拖拽」那条注释）。创作台这边同理：拖拽源在 `CreateAssetDrawer`，落点在浮坞（`CreateComposer` / `CreateAgentComposer`），会话与命中测试收在 `src/features/create/createAssetDrag.ts`。三条容易踩的细节：① 落点靠 `data-create-drop-zone` 属性标记 + `elementFromPoint` 命中测试找（不用 dragover/drop），浮坞外壳挂属性、拖拽源 `closest()` 向上找；② 拖拽结束后浏览器会补发一次 click（落在 mousedown 与 mouseup 的共同祖先上），必须吞掉，否则「拖进浮坞」会把素材同时点选进挑选列表；③ 缩略图要写 `draggable={false}`，否则浏览器原生拖走图片会在半路接管这次手势。
+- **隐形浮层不许压住可交互控件**（`opacity: 0` 的按钮照样吃点击）：工具条两侧那两块滚动浮层（即梦 `.scroll-button-container`）曾挂在 `.create-toolbar` 上，`right: 0` 落到工具条右缘——正好是动作区的提交键，那枚隐形按钮把提交键整个盖住（实测两者矩形只差 3px），点击全被它吃掉；而它只做 `scrollBy`，参数没溢出时什么也不发生，用户看到的就是「点发送没反应」，后端连一条日志都没有。两条规矩：① 浮层的定位基准是**参数区**（`.create-toolbar__params`），不是整条工具条；② 隐形按钮默认 `pointer-events: none`，只有那一侧真的能滚时才接管点击（否则「创作类型」下拉最左侧 49px 也是死区）。排查这类「点了没反应」用 UI 自动化把窗口内控件矩形列出来做相交检测（PowerShell + `System.Windows.Automation`），比读 CSS 快也准。
 - **顶栏挂在整页上，不在内容列里**（即梦实测 `top-actions-host` 是整页级绝对定位）：抽屉开合时主区会变窄，但顶栏不跟着移。放在内容列里的话，抽屉一开顶栏就左移 94px，看着像被挤走了。顶栏移到 `.create-surface` 顶层，抽屉打开时右缘让开抽屉宽度即可。
 - 逆向结论与逐项实测数值见 `docs/integrations/jimeng-generate-page-re.md`（页面外壳）与 `docs/integrations/jimeng-model-switching-re.md`（模型与参数）。
 
@@ -162,6 +217,7 @@
 - 参考素材是 **48×48 方形瓦片**（1px hairline #525252、圆角 8、object-cover 裁切），左上角 14×14 序号角标、右下角 12×12 的 **@ 圆钮**（把这份参考插进提示词）、hover 时右上角出现 15×15 解除连线按钮；原站用拖拽排序、没有上移/下移按钮，所以编辑层里那两个按钮是隐藏的，键盘排序由瓦片自身（可聚焦，↑/↓）承担。瓦片上**不放**素材名、不放来源角标——原站没有，来源信息收进瓦片 title。
 - 提示词正文：14px、行高 1.8、最小高 80px、滚动区上限 100px、右内边距 6px；面板圆角 12。**提示词区里不放任何按钮**（原站没有）：@ 在参考瓦片上，识别素材名仍留在提示词节点里。
 - 设置浮层（模型 / 参数）宽 **365px**，**底边贴触发器顶边上方 8px**，挂在**编辑层 DOM 内**（编辑层是定位祖先，按相对坐标贴靠，画布平移缩放不用重新测量）。浮层内容不是编辑层 DOM 的后代会让既有断言查不到它，别改成挂到 `document.body`。
+- **生成结果图上不压「AI生成」水印**：原站 liblib 在媒体左上角有一枚位图水印 `watermark.png`（48×23），本项目曾用文字胶囊替代，**现已按用户要求整体删除**（图片节点与视频节点共用 `VideoGenerationNode.tsx` 里的同一处实现，一起去掉，对应 CSS 类 `canvas-node-preview__badge` 已删除）。不要按「与 liblib 完全一致」把它加回来。
 
 # 智能剪辑（video clip）约定
 
@@ -177,11 +233,28 @@
 - 提示词**不进画布 store**：住在提示词模块（`promptContents`）里，与生成节点一致。保存画布时它的 key 必须进 `collectCanvasDocument` 的快照集合，否则重开画布提示词会丢。
 - 原站的预置素材是它自家 CDN 的资源地址，本项目**不拉外链**：预设只落「模式 + 提示词」，素材由用户自己连进来。**这些外链 URL 也不要留在源码里**——既误导（本项目不引入外链素材），又留着将来误接的风险；预设表里只保留提示词文案。
 - 成片名带序号（`智能剪辑成片 {index}`，与节点名「智能剪辑 N」呼应）：产物名同时用于输出节点显示名与任务历史，固定文案会让多个智能剪辑的成片同名，画布上无法分辨。产物名只作本地命名元数据，**不参与结果文件命名**，所以不会互相覆盖。
-- 后端契约在 `src-tauri/src/backend/video_clip.rs`（命令 `start_video_clip`）：校验模式 / 槽位 / 参数，把「用户提示词 + 文字槽位正文 + `，参数是 {params}`」组装成既有 `StartGenerationCommand`，走同一套生成任务管线。模型不暴露给用户，提交时取工作区默认的**视频模型**。
-- 「打开智能剪辑」指向原站的视频剪辑时间轴编辑器（字幕轨 / 文本轨 / 转场 / PR·剪映工程导出），本项目后端**尚未接入**：点击给出明确说明，不静默失败。
+- 后端契约：`video_clip.rs` 的 `start_video_clip` 负责讲解 / 广告 / 口播的供应商视频生成适配，必须携带稳定 `clientTaskId`。默认模式 / 素材混剪走 `video_clip_render.rs`：冻结文本模型与凭据引用，读取原视频并抽取中点帧，生成受校验的剪辑方案，再用内置 FFmpeg 实际裁切、拼接与导出；读任务记录不重新提交。模式不暴露模型按钮，使用工作区默认文本或视频模型。
+- 「打开智能剪辑」已接本项目的 `VideoClipTimeline`：裁切 / 分割 / 排序 / 音量 / 淡入淡出 / 字幕轨，支持 MP4、SRT 和本项目 JSON 工程的导出与导入。剪辑决策持久化在节点 config，预览租约不得落盘；复制节点清空原任务身份与投递记录。它不是原站私有时间轴或 PR / 剪映工程格式的还原，不宣称支持这些私有格式。智能编排只看中点抽帧，不能声称看完整视频、识别真实语音或完成音频节拍分析。
 - 原站的预置素材是它自家 CDN 的资源地址，本项目**不拉外链**：预设只落「模式 + 提示词」，素材由用户自己连进来。
 - 「智能剪辑」在画布创建菜单里指向 `video_clip`。旧的 `video_composer`（本地「视频拼接与合成」）节点类型**已整体下线**：模型、store 类型面、视图、样式、客户端、合成任务后端（`start_video_composition` 等命令）与 WebView MediaRecorder 实时合成模块全部删除；旧画布里的这类节点按已下线类型的先例**直接丢弃，不做兼容读取**。原站画布节点清单里没有「视频拼接与合成」这一项。
 - **新增画布节点类型时，`WorkspaceApp.tsx` 的 `CANVAS_NODE_TYPE_KEYS` 必须同步加进去**。这个清单决定「画布成员 key 集合」，选中集、@ 引用候选、节点查找都从它派生；漏登记的症状是节点能建出来、能渲染，但**永远选不中**（点它没反应、编辑层不打开）。目前登记：`asset / gen / screenplay / videoClip / result / output`。
+
+- 智能剪辑的「＋参考」复用 `CanvasReferenceTools`（本地上传 / 画布挑选，含文字与剧本节点），不依赖原站后端。剪辑在途时，预设、模式、参数与解除连线必须锁定；状态读失败只能重新读取，不能代替用户重发付费请求。
+
+# 音频节点约定
+
+- 画布的「音频」节点（`gen.kind === "audio"`）逆向自 liblib.tv 画布的音频节点，规格见 `docs/integrations/liblib-audio-node-re.md`，数值全部来自 2026-10-28 的**活体实测**（登录态、DPR 1.5）。它是**生成节点的一种**（`gen`），不新增 store 节点类型：沿用 `genNodes` 持久化、`NodeModelSelections`、提示词模块与 `CanvasNodeEditorShell` 外壳。
+- 节点卡是 **320×350**、圆角 24、底色 `--nt-bg-float`；空态中央是 48×48 音符图标 + 「尝试：」+ 一枚「音频生视频」预设按钮。标题条图标（波形）与卡片音符、预设按钮的方框播放图标**照抄原站 SVG path**（`CanvasAudioNode.tsx` 里的 `AudioWaveIcon` / `AudioNoteIcon` / `AudioToVideoIcon`）——Lucide 里没有同构字形，语义相近但形状差很多的替代品反而更糟。
+- 生成编辑层（`CanvasAudioNode.tsx` + `CanvasAudioNode.css`）自上而下：**工具 chips（上传 / 画布参考）→ 提示词正文 → 底栏**。底栏从左到右是 **模型下拉 · 格式下拉（语种 / 采样率 / 输出格式三段）· 翻译 · 高级设置 · 字数 `0/2000` · 消耗位 · 32×32 提交键**，一字不差的顺序不要改。
+- **模型下拉列本项目供应商目录里 `speech_generation` 能力的模型**，不照抄原站那 6 个 SaaS 模型名（Seed Audio 1.0 / Eleven V3 / Mureka V8…）。模型下拉用 `CanvasSelect`（画布节点里的下拉一律用它，不用原生 `<select>`）；格式下拉是**三段式浮层**（原站就是一个触发器弹三个分区），用 `placeFloatingLayer` + portal 挂在 body 上，高度必须用实测值。
+- **消耗位显示「—」**：原站那里是积分单价，本项目按供应商实际计费、没有积分余额——编一个单价出来就是骗人。
+- 参数映射（前端 → 后端 `parameters`）：`language` / `sample_rate`（8000·16000·24000·48000）/ `format`（wav·mp3·pcm·ogg_opus）/ `voice_setting_speed`（0.5–2 步长 0.01）/ `voice_setting_pitch`（-12–12 步长 1）/ `voice_setting_vol`（0.01–10 步长 0.01）。这六个键**不能过 `generationParameters` 的能力白名单**（白名单只留模型 Schema 声明过的键，会把它们全筛掉），后端按名字显式取。网关 TTS 契约里没有语言项，`language` 会被忽略。
+- `pcm` 在本项目**不可用**（无头裸流没有容器信息就没有时长，既校验不了也不能安全配进音轨，后端直接拒收）。条目**保留**（与原站逐项对齐）但在格式浮层里**置灰并写明原因**——悄悄删掉会让「与原站一致」说不清，留一个必然失败的选项而不说明则是陷阱。见 `AUDIO_NODE_FORMAT_DISABLED`。
+- **音频参考素材的语义是「音色参考」**：至多 1 段音频，作为 `audio_data` 随请求发送；图片 / 视频参考被拒。前端先拦一道并说人话（「音频节点只接受音频素材作为音色参考」），后端 `media.rs` 的 speech 分支再兜一道。
+- 「音频生视频」只**建节点 + 连线**（视频节点摆在音频节点**右边**，边是「音频 → 视频」），**不自动发起付费生成**——用户还没写提示词也没确认模型，自动提交等于替用户按下付费按钮。
+- 提示词正文住在**提示词模块**（`promptContents`）里，不进画布 store；因此音频节点的 key 必须进 `collectCanvasDocument` 的快照集合（现有实现按「画布里现存的节点 key」求交集，新增挂 `PromptMentionInput` 的节点类型自动覆盖）。
+- 后端走**既有生成任务管线**（`operation: "speech_generation"` + `clientTaskId` 幂等），不新开 Tauri 命令：`provider.rs` 的 `GenerationSubmission::Audio` → `tasks.rs` 落 `pending_audio_result` → `local_results.rs` 的 `save_audio` 写盘 → 产物 `mediaType` 为 `audio`。**只支持网关 TTS 线路**（`seed-audio*`，`POST /v1/tts/create`）；豆包 SSE 线路（`seed-tts*`）会给出明确报错，不静默失败。
+- 产物落卡后，音频节点卡里用原生 `<audio controls>` 播放（项目里没有音频波形组件）。
 
 # 画布快捷键约定
 
@@ -189,3 +262,4 @@
 - 缩放键位是 `mod+=` / `mod+-` / `mod+0`（原站注册表口径），`0` 走 `fitView`（适应画布），不是"重置到 50%"。不要绑裸键 `+` / `=` / `-` / `0`——那会让随手敲一个等号就缩放。
 - **`react-hotkeys-hook@5.3.3` 默认按 `event.code`（物理键位）匹配**，除非显式传 `useKey: true` 改用 `event.key`（字符值）。`"="` 的 code 是 `Equal`、`"-"` 的是 `Minus`——按 code 匹配时 `mod+=` / `mod+-` **永远匹配不上，缩放快捷键会完全失效且毫无报错**。凡是用字符键（`=`、`-`、`.`、`,` 等非字母数字键）的热键，都必须带 `useKey: true`。
 - 成组 `mod+g`、解组 `mod+shift+g`、撤销 `mod+z`、重做 `mod+shift+z`、复制 `mod+c`、粘贴 `mod+v`、复制节点 `mod+d`、删除 `Delete`/`Backspace`、退出 `Esc` 已实装。新增快捷键时同步更新面板的 `keys` 与 `available`。
+

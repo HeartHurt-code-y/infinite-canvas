@@ -30,6 +30,12 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { toast } from "../../lib/toast";
 import type { AssetItem } from "../workspace/workspaceModel";
 import {
+  beginCreateAssetDrag,
+  endCreateAssetDrag,
+  findCreateDropZone,
+  setCreateAssetDragOverTarget,
+} from "./createAssetDrag";
+import {
   CREATE_ASSET_CATEGORIES,
   CREATE_ASSET_SOURCES,
   type CreateAssetCategoryId,
@@ -77,6 +83,54 @@ export interface CreateAssetDrawerProps {
 function thumbSrc(asset: AssetItem): string | null {
   if (!asset.previewUrl) return null;
   return toMediaProxyUrl(asset.previewUrl, { assetId: asset.id });
+}
+
+/*
+ * ── 拖拽进浮坞 ────────────────────────────────────────────────────────
+ *
+ * 素材卡可以**拖**到浮坞的参考条里，和「点开抽屉挑素材」是两条并行的路。
+ *
+ * 拖拽走指针事件而不是 HTML5 draggable：Tauri WebView 的系统拖放处理器
+ * 会截走 dataTransfer 拖拽（见 workspaceModel.ts 里「素材卡片使用指针拖拽」
+ * 那条注释），画布那边也是指针拖拽，这里沿用同一套。
+ */
+
+/** 超过这个位移才算「在拖」，否则仍是一次点击（点选素材）。 */
+const DRAG_THRESHOLD_PX = 6;
+/** 拖拽影子的边长。 */
+const DRAG_GHOST_SIZE_PX = 48;
+
+/**
+ * 跟随指针的拖拽影子。
+ *
+ * 直接挂在 body 上、用 transform 移动：拖拽期间每帧都要动，走 React state
+ * 会让整张素材网格（一页 60 张）每帧重渲染。
+ */
+function createDragGhost(asset: AssetItem, clientX: number, clientY: number): HTMLElement {
+  const ghost = document.createElement("div");
+  ghost.className = "create-assets__drag-ghost";
+  ghost.setAttribute("aria-hidden", "true");
+  const src = thumbSrc(asset);
+  if (src !== null) {
+    const image = document.createElement("img");
+    image.src = src;
+    image.alt = "";
+    /* 缩略图默认可被浏览器原生拖走，那会让指针拖拽半路被系统拖放接管。 */
+    image.draggable = false;
+    ghost.appendChild(image);
+  } else {
+    ghost.classList.add("create-assets__drag-ghost--empty");
+    ghost.textContent = asset.name;
+  }
+  document.body.appendChild(ghost);
+  moveDragGhost(ghost, clientX, clientY);
+  return ghost;
+}
+
+/** 移动拖拽影子：只改 transform，不碰 left/top（避免每帧重排）。 */
+function moveDragGhost(ghost: HTMLElement, clientX: number, clientY: number): void {
+  const offset = DRAG_GHOST_SIZE_PX / 2;
+  ghost.style.transform = `translate3d(${clientX - offset}px, ${clientY - offset}px, 0)`;
 }
 
 /**
@@ -228,18 +282,27 @@ function AssetTile({
   asset,
   order,
   menuOpen,
+  dragging,
   onPick,
   onMenuToggle,
   onMenuClose,
   onUseAsReference,
+  onPointerDown,
 }: {
   readonly asset: AssetItem;
   readonly order: number | null;
   readonly menuOpen: boolean;
+  /** 这一格正被拖着。 */
+  readonly dragging: boolean;
   readonly onPick: (asset: AssetItem) => void;
   readonly onMenuToggle: (asset: AssetItem) => void;
   readonly onMenuClose: () => void;
   readonly onUseAsReference?: ((asset: AssetItem) => void) | undefined;
+  /** 按下：交给抽屉统一处理拖拽手势（一页 60 张卡不各挂一套监听）。 */
+  readonly onPointerDown: (
+    asset: AssetItem,
+    event: React.PointerEvent<HTMLButtonElement>,
+  ) => void;
 }) {
   const src = thumbSrc(asset);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -256,12 +319,14 @@ function AssetTile({
         type="button"
         className="create-assets__tile"
         data-picked={order !== null ? "true" : "false"}
+        data-dragging={dragging ? "true" : "false"}
+        onPointerDown={(event) => onPointerDown(asset, event)}
         onClick={() => onPick(asset)}
         title={asset.name}
       >
         <span className="create-assets__thumb">
           {src ? (
-            <img src={src} alt="" loading="lazy" />
+            <img src={src} alt="" loading="lazy" draggable={false} />
           ) : (
             <Icon name="image-square" size="sm" aria-hidden="true" />
           )}
@@ -330,6 +395,158 @@ export function CreateAssetDrawer({
     [groups],
   );
 
+  /*
+   * 拖拽手势（抽屉统一处理）。
+   *
+   * 一页最多 60 张卡，若每张卡各挂一套 window 监听，就是 180 个监听在跑；
+   * 这里按下手势只记一份，监听也只有一套。
+   *
+   * `dragRef` 记着手势本身（按下位置、是否越过阈值、拖的是哪张卡），
+   * `draggedRef` 记着「刚刚发生过一次拖拽」——用来吞掉拖拽结束后浏览器
+   * 补发的那一次 click，否则短距离拖一下会把素材也点选上。
+   */
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    active: boolean;
+    ghost: HTMLElement | null;
+    asset: AssetItem;
+  } | null>(null);
+  const draggedRef = useRef(false);
+  /** 正在被拖动的那张卡的 ID（用来给卡片加 is-dragging 状态）。 */
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  /*
+   * 落下时要用到的回调放 ref 里：它在父组件里是内联箭头，每次渲染都是
+   * 新引用，若直接进依赖会让窗口监听每帧重挂。
+   */
+  const onDropRef = useRef(onUseAsReference);
+  useEffect(() => {
+    onDropRef.current = onUseAsReference;
+  }, [onUseAsReference]);
+
+  const onTilePointerDown = useCallback(
+    (asset: AssetItem, event: React.PointerEvent<HTMLButtonElement>) => {
+      if (!event.isPrimary || event.button !== 0) return;
+      dragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        active: false,
+        ghost: null,
+        asset,
+      };
+    },
+    [],
+  );
+
+  /**
+   * 素材卡的点选。
+   *
+   * 刚拖过一次的那一下 click 是拖拽的尾巴，不是点选——吞掉它，
+   * 否则用户想把素材拖到浮坞却发现它同时被勾选进了挑选列表。
+   */
+  const handleTilePick = useCallback(
+    (asset: AssetItem) => {
+      if (draggedRef.current) {
+        draggedRef.current = false;
+        return;
+      }
+      onPick(asset);
+    },
+    [onPick],
+  );
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent): void => {
+      const drag = dragRef.current;
+      if (drag === null || event.pointerId !== drag.pointerId) return;
+      if (!drag.active) {
+        const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+        if (distance < DRAG_THRESHOLD_PX) return;
+        drag.active = true;
+        draggedRef.current = true;
+        setDraggingId(drag.asset.id);
+        const ghost = createDragGhost(drag.asset, event.clientX, event.clientY);
+        drag.ghost = ghost;
+        beginCreateAssetDrag(drag.asset);
+        moveDragGhost(ghost, event.clientX, event.clientY);
+      } else {
+        moveDragGhost(drag.ghost as HTMLElement, event.clientX, event.clientY);
+      }
+      /* 拖起来之后别再选中文本。 */
+      event.preventDefault();
+      setCreateAssetDragOverTarget(findCreateDropZone(event.clientX, event.clientY) !== null);
+    };
+
+    const finishPointerDrag = (event: PointerEvent, cancelled: boolean): void => {
+      const drag = dragRef.current;
+      if (drag === null || event.pointerId !== drag.pointerId) return;
+      dragRef.current = null;
+      setDraggingId(null);
+      endCreateAssetDrag();
+      drag.ghost?.remove();
+      drag.ghost = null;
+      if (!drag.active) return;
+      event.preventDefault();
+      if (!cancelled) {
+        /* 落在浮坞上：把这张素材作为参考素材加进去。 */
+        const zone = findCreateDropZone(event.clientX, event.clientY);
+        if (zone !== null) onDropRef.current?.(drag.asset);
+      }
+      /*
+       * click 在 pointerup 之后、rAF 之前派发：这一帧里它会看到
+       * `draggedRef` 为 true 而把自己吞掉；下一帧再复位，后面的正常点击
+       * 不受影响。
+       */
+      window.requestAnimationFrame(() => {
+        draggedRef.current = false;
+      });
+    };
+
+    const handlePointerUp = (event: PointerEvent): void => finishPointerDrag(event, false);
+    const handlePointerCancel = (event: PointerEvent): void => finishPointerDrag(event, true);
+
+    /**
+     * 指针出了窗口：当作取消。
+     *
+     * 拖到窗口外松手时，浏览器不会派发 pointerup——手势会卡在「正在拖」
+     * 状态，影子留在屏幕上、浮坞一直亮着。指针回到窗口内时的那次 move
+     * 就是我们唯一的补救机会，所以在这里就地收尾。
+     *
+     * 判据是「relatedTarget 为空」且指针已到视口边缘：relatedTarget 为空
+     * 只说明指针离开了文档（也可能只是下面的元素被卸载了），加上边缘这一
+     * 条才是真的出了窗口。
+     */
+    const handlePointerLeaveWindow = (event: PointerEvent): void => {
+      const drag = dragRef.current;
+      if (drag === null || event.pointerId !== drag.pointerId) return;
+      if (event.relatedTarget !== null) return;
+      const atEdge =
+        event.clientX <= 0 ||
+        event.clientY <= 0 ||
+        event.clientX >= window.innerWidth ||
+        event.clientY >= window.innerHeight;
+      if (!atEdge) return;
+      finishPointerDrag(event, true);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerCancel);
+    window.addEventListener("pointerout", handlePointerLeaveWindow);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerCancel);
+      window.removeEventListener("pointerout", handlePointerLeaveWindow);
+      /* 抽屉在拖拽途中被关掉时，别把影子留在屏幕上。 */
+      dragRef.current?.ghost?.remove();
+      dragRef.current = null;
+      endCreateAssetDrag();
+    };
+  }, []);
+
   /**
    * 素材卡的更多菜单。
    *
@@ -387,6 +604,7 @@ export function CreateAssetDrawer({
           <Icon name="magnifying-glass" size="xs" aria-hidden="true" />
           <input
             type="search"
+            name="create-asset-search"
             value={query}
             placeholder="搜索全部资产"
             aria-label="搜索全部资产"
@@ -462,10 +680,12 @@ export function CreateAssetDrawer({
                 asset={asset}
                 order={orderById.get(asset.id) ?? null}
                 menuOpen={menu?.asset.id === asset.id}
-                onPick={onPick}
+                dragging={draggingId === asset.id}
+                onPick={handleTilePick}
                 onMenuToggle={toggleMenu}
                 onMenuClose={closeMenu}
                 onUseAsReference={onUseAsReference}
+                onPointerDown={onTilePointerDown}
               />
             ))}
           </div>

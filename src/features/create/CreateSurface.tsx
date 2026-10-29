@@ -13,7 +13,12 @@
  */
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
-import type { GenerationOperation, MediaLibraryKind } from "../../lib/backend";
+import {
+  backendErrorMessage,
+  type GenerationOperation,
+  type MediaLibraryKind,
+} from "../../lib/backend";
+import { invokeDesktopVoid, isDesktopRuntime } from "../../lib/ipc";
 import { modelParameterCapabilities, type ModelParameterValue } from "../../lib/modelCapabilities";
 import { toast } from "../../lib/toast";
 import { DeferredDialogFallback, ProviderSettingsDialog } from "../workspace/deferredDialogs";
@@ -551,9 +556,30 @@ export function CreateSurface() {
     setPickedIds([]);
   }, []);
 
+  /**
+   * 「回到画布工作台」。
+   *
+   * 桌面端创作台是**独立窗口**（label=create），画布工作台在另一个窗口（label=main）：
+   * 这里把焦点交回那个窗口，而不是在创作台窗口里再导航一份画布。
+   *
+   * 为什么不能靠导航解决：入口在**挂载时**按 URL / 窗口标签定死（`createEntry.ts`），
+   * 创作台窗口的标签永远是 `create`，在这里改地址只会把创作台自己重新加载一遍；
+   * 而真把画布挂进这个窗口，同一张画布就会被两个 store 同时写、互相覆盖存档。
+   *
+   * 浏览器预览没有多窗口，才退化成导航到画布入口（那里没有窗口标签，导航过去
+   * 确实是画布工作台）。
+   */
   const onOpenWorkspace = useCallback(() => {
     if (typeof window === "undefined") return;
-    window.location.href = window.location.pathname;
+    if (!isDesktopRuntime()) {
+      window.location.href = window.location.pathname;
+      return;
+    }
+    // 失败不重复记日志：`ipc.ts` 的 invokeDesktop 已经把原始 payload 写进本地日志，
+    // 这里只负责给人看的那一句。
+    void invokeDesktopVoid("focus_main_window").catch((failure: unknown) => {
+      toast.error("无法回到画布工作台", { description: backendErrorMessage(failure) });
+    });
   }, []);
 
   const canSubmit =

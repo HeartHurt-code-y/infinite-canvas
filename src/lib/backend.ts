@@ -84,6 +84,7 @@ import {
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
+  translateCanvasTextResultSchema,
   tosBucketPullSummarySchema,
   workspaceUiPrefsSchema,
   videoDownloaderEngineStatusSchema,
@@ -1447,21 +1448,55 @@ export function inferMediaKindFromName(fileName: string): MediaLibraryKind | nul
   return MEDIA_EXTENSION_KINDS[extension] ?? null;
 }
 
-export async function pickLocalMediaFiles(): Promise<readonly string[]> {
+export async function pickLocalMediaFiles(
+  accept?: readonly MediaLibraryKind[],
+): Promise<readonly string[]> {
   if (!isDesktopRuntime()) return [];
   const { open } = await import("@tauri-apps/plugin-dialog");
+  const kinds = accept == null || accept.length === 0 ? null : new Set(accept);
+  const extensions = Object.entries(MEDIA_EXTENSION_KINDS)
+    .filter(([, kind]) => kinds == null || kinds.has(kind))
+    .map(([extension]) => extension);
+  if (extensions.length === 0) return [];
   const selection = await open({
     multiple: true,
     title: "选择要上传的素材文件",
     filters: [
       {
-        name: "图片 / 视频 / 音频",
-        extensions: Object.keys(MEDIA_EXTENSION_KINDS),
+        name:
+          kinds == null
+            ? "图片 / 视频 / 音频"
+            : kinds.size === 1
+              ? kinds.has("audio")
+                ? "音频"
+                : kinds.has("video")
+                  ? "视频"
+                  : "图片"
+              : "图片 / 视频 / 音频",
+        extensions,
       },
     ],
   });
   if (selection == null) return [];
   return Array.isArray(selection) ? selection : [selection];
+}
+
+/** 选择图片作为文本节点的视觉参考；取消选择时不改变画布。 */
+export async function pickLocalImageFile(): Promise<string | null> {
+  if (!isDesktopRuntime()) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selection = await open({
+    multiple: false,
+    title: "选择要反推提示词的图片",
+    filters: [
+      {
+        name: "图片",
+        // 与后端视觉理解支持的格式一致，避免导入后才发现无法提交。
+        extensions: ["png", "jpg", "jpeg", "webp", "gif"],
+      },
+    ],
+  });
+  return typeof selection === "string" ? selection : null;
 }
 
 const PROMPT_MATERIAL_BY_EXTENSION: Readonly<
@@ -1712,6 +1747,8 @@ export interface ExplicitMediaInput {
 }
 
 export interface StartGenerationCommand {
+  /** 批量操作预先分配的稳定任务身份，用于防止重复提交。 */
+  readonly clientTaskId?: string;
   /** 节点名称快照，仅用于本地历史和文件命名。 */
   readonly outputName?: string;
   /** 本地视频任务意图，仅用于参数校验及重试，不原样发送给供应商。 */
@@ -1790,6 +1827,7 @@ export interface VideoClipMaterialPayload {
 
 /** 智能剪辑合成命令。字段名与 Rust 侧 `StartVideoClipCommand` 一致（camelCase）。 */
 export interface StartVideoClipCommand {
+  readonly clientTaskId: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
   readonly mode: VideoClipMode;
@@ -1904,6 +1942,21 @@ export const canvasDocumentClient: CanvasDocumentClient = {
   delete: (canvasId) => invokeDesktopVoid("delete_canvas_document", { canvasId }),
 };
 
+/**
+ * 窗口关闭兜底。
+ *
+ * Rust 侧给「先存后关」的关闭流程上了一个看门狗：JS 侧没接住关闭请求时，超时
+ * 后强制销毁窗口——渲染进程崩了以后 JS 根本不会跑，原生关闭又被 Tauri 的
+ * `prevent_close` 吞掉，窗口会永远关不掉，只能任务管理器。
+ *
+ * 前端明确「保存失败、窗口保持打开」时要调 `cancelForcedClose` 把看门狗撤掉：
+ * 这时窗口的去留由前端决定，不能再被兜底强杀（否则与「窗口保持打开」的提示
+ * 自相矛盾）。
+ */
+export const windowCloseClient = {
+  cancelForcedClose: (): Promise<void> => invokeDesktopVoid("cancel_forced_window_close"),
+};
+
 /** 提示词优化模式：决定注入哪份内置提示词方法作为文本模型的系统提示词。 */
 export type PromptOptimizationMode =
   | "seedance_2_0"
@@ -1964,6 +2017,12 @@ export interface OptimizeVideoPromptCommand {
   readonly providerConnectionId: string;
   readonly modelDefinitionId: string;
   readonly mode: TextSkillMode;
+  /** 悬浮文本生成器走通用文本合同，不加载视频提示词技能。 */
+  readonly generalText?: boolean;
+  /** 脚本生成器使用后端内置的结构化分镜合同。 */
+  readonly scriptGenerator?: boolean;
+  /** 针对既有镜头智能合成图片及视频提示词。 */
+  readonly scriptPromptCompose?: boolean;
   readonly userPrompt: string;
   /** 提示词节点的执行意图；旧版视频节点省略时由后端按 optimize 处理。 */
   readonly task?: "generate" | "optimize";
@@ -1987,6 +2046,39 @@ export interface PromptNodeClient {
 
 export const promptNodeClient: PromptNodeClient = {
   run: (command) => invokeDesktop("run_prompt_node", optimizedPromptResultSchema, { command }),
+};
+
+/**
+ * 文本节点悬浮生成器面板的「翻译提示词」请求。
+ *
+ * 逆向规格：docs/integrations/liblib-text-node-re.md 第 4.6 节（原站是
+ * `POST /api/canva/translate`）；本项目走自己的文本模型链路，
+ * 译文直接回填面板输入框。
+ */
+export interface TranslateCanvasTextCommand {
+  readonly providerConnectionId: string;
+  readonly modelDefinitionId: string;
+  readonly text: string;
+  /** 目标语言：只接受 `English` / `Chinese`。 */
+  readonly targetLanguage: "English" | "Chinese";
+  readonly canvasId?: string;
+  readonly sourceNodeId?: string;
+}
+
+export interface TranslateCanvasTextResult {
+  readonly translatedText: string;
+  readonly targetLanguage: string;
+  /** 本次文本调用落进生成任务表的任务 id，便于在历史里追溯这次翻译。 */
+  readonly taskId: string;
+}
+
+export interface TranslateCanvasTextClient {
+  run(this: void, command: TranslateCanvasTextCommand): Promise<TranslateCanvasTextResult>;
+}
+
+export const translateCanvasTextClient: TranslateCanvasTextClient = {
+  run: (command) =>
+    invokeDesktop("translate_canvas_text", translateCanvasTextResultSchema, { command }),
 };
 
 export type GenerationEventName =

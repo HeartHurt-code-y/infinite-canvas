@@ -1,4 +1,5 @@
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
+import { readCanvasCameraPreferences } from "../../lib/canvasCameraControl";
 import {
   referenceCandidateFromTarget,
   type PromptReferenceCandidate,
@@ -31,11 +32,12 @@ import type { PerTaskVideoUrlInput } from "../../lib/perTaskVideo";
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
 import type { WhiteModelControlConfig } from "../../lib/whiteModelControl";
 import type { GreenScreenConfig } from "../../lib/greenScreen";
+import type { ScriptGeneratorState } from "./scriptGeneratorModel";
 
 export type AssetKind = MediaLibraryKind;
 export type AssetLibrarySource = "cloud" | "local";
-/** 生成节点种类。视频、图片与提示词配置按画布节点实例保存。 */
-export type GenerationNodeId = "image" | "video";
+/** 生成节点种类。视频、图片、音频与提示词配置按画布节点实例保存。 */
+export type GenerationNodeId = "image" | "video" | "audio";
 export type CanvasGenNodeKind = GenerationNodeId | "prompt";
 export type DocumentSkillNodeKind = "screenplay";
 /**
@@ -340,11 +342,15 @@ export const IMAGE_GEN_NODE_WIDTH = 622;
 export const IMAGE_GEN_NODE_HEIGHT = 400;
 export const IMAGE_GEN_NODE_COARSE_HEIGHT = 406;
 export const VIDEO_GEN_NODE_WIDTH = 622;
-export const VIDEO_GEN_NODE_HEIGHT = 400;
-export const VIDEO_GEN_NODE_COARSE_HEIGHT = 406;
-export const PROMPT_NODE_WIDTH = 622;
+export const VIDEO_GEN_NODE_HEIGHT = 350;
+export const VIDEO_GEN_NODE_COARSE_HEIGHT = 356;
+export const PROMPT_NODE_WIDTH = 350;
 export const PROMPT_NODE_HEIGHT = 400;
 export const PROMPT_NODE_COARSE_HEIGHT = 406;
+/** 音频节点：空态 320×350（原站 liblib 活体实测，见 docs/integrations/liblib-audio-node-re.md）。 */
+export const AUDIO_GEN_NODE_WIDTH = 320;
+export const AUDIO_GEN_NODE_HEIGHT = 350;
+export const AUDIO_GEN_NODE_COARSE_HEIGHT = 356;
 export const SCREENPLAY_NODE_WIDTH = 622;
 export const SCREENPLAY_NODE_HEIGHT = 400;
 export const SCREENPLAY_NODE_COARSE_HEIGHT = 406;
@@ -476,6 +482,10 @@ export type GenNodeData =
       readonly config: VideoNodeConfig;
     })
   | (BaseGenNodeData & {
+      readonly kind: "audio";
+      readonly config: AudioNodeConfig;
+    })
+  | (BaseGenNodeData & {
       readonly kind: "prompt";
       readonly config: PromptNodeConfig;
     });
@@ -509,6 +519,8 @@ export interface ScreenplayNodeConfig {
   readonly currentDocument: string;
   /** 每轮创作都会重新发送的本地多模态参考素材。 */
   readonly materials?: readonly ScreenplayMaterialInput[];
+  /** 新建脚本生成器；缺失时保留原有的剧本创作与优化节点。 */
+  readonly scriptGenerator?: ScriptGeneratorState;
   readonly catalogResolved: boolean;
 }
 
@@ -531,6 +543,9 @@ export type DocumentSkillNodeData = ScreenplayNodeData;
  * （promptContents）里，节点配置只记「用哪个模式」「参数是多少」。
  */
 export interface VideoClipNodeConfig {
+  readonly timeline?: readonly import("../../lib/videoClipEditing").ClipEdit[];
+  readonly renderDeliveries?: readonly string[];
+  readonly submission?: { readonly id: string; readonly fingerprint: string } | null;
   /** 剪辑模式键：default / explainerVideo / batchAd / talkingHeadVideo / smartMixCut。 */
   readonly modeKey: string;
   /** 比例，例如 "16:9"。 */
@@ -681,6 +696,12 @@ export function genNodeDimensions(kind: CanvasGenNodeKind): { width: number; hei
       height: usesCoarsePointer() ? VIDEO_GEN_NODE_COARSE_HEIGHT : VIDEO_GEN_NODE_HEIGHT,
     };
   }
+  if (kind === "audio") {
+    return {
+      width: AUDIO_GEN_NODE_WIDTH,
+      height: usesCoarsePointer() ? AUDIO_GEN_NODE_COARSE_HEIGHT : AUDIO_GEN_NODE_HEIGHT,
+    };
+  }
   if (kind === "prompt") {
     return {
       width: PROMPT_NODE_WIDTH,
@@ -745,6 +766,7 @@ export interface OutputNodeData extends CanvasNodeOrganization {
     | "frame_extract"
     | "video_edit"
     | "video_preparation"
+    | "long_video"
     | "ai_media"
     | "white_model"
     | "white_model_still"
@@ -948,13 +970,18 @@ function nextOutputPosition(
   return { x: rightEdge, y: firstY };
 }
 
-/** Place a generation result to the right of its source node. */
+/**
+ * Place a generation result to the right of its source node.
+ *
+ * 只读来源节点的坐标、实测宽度与种类，因此参数放宽到这几个字段：
+ * 长视频成片这类「来源节点不是生成节点」的路径也能直接复用同一套落位规则。
+ */
 export function nextOutputSlot(
-  genNode: GenNodeData,
+  genNode: Pick<GenNodeData, "x" | "y" | "measured"> & { readonly kind?: GenNodeData["kind"] },
   current: readonly OutputNodeData[],
   options: OutputPlacementOptions = {},
 ): { x: number; y: number } {
-  const width = genNode.measured?.width ?? genNodeDimensions(genNode.kind).width;
+  const width = genNode.measured?.width ?? genNodeDimensions(genNode.kind ?? "video").width;
   return nextOutputPosition({ x: genNode.x, y: genNode.y, width, height: 0 }, current, options);
 }
 
@@ -1739,6 +1766,10 @@ export const DEFAULT_NODE_MODEL_SELECTIONS: NodeModelSelections = {
     providerId: "moyu-production",
     modelDefinitionId: "doubao-seedance-2-5-260628",
   },
+  audio: {
+    providerId: "",
+    modelDefinitionId: "",
+  },
   prompt: {
     providerId: "moyu-production",
     modelDefinitionId: "doubao-seed-1-8-251228",
@@ -1763,6 +1794,10 @@ export const NODE_KIND_DESCRIPTORS: Record<CanvasGenNodeKind | "result", StaticN
   video: {
     kindLabel: "视频生成",
     description: "视频生成 · 自动轮询直到完成",
+  },
+  audio: {
+    kindLabel: "音频生成",
+    description: "语音生成 · 语种 / 采样率 / 输出格式可调",
   },
   result: {
     kindLabel: "本地结果",
@@ -1892,6 +1927,14 @@ export function parseGenerationCountInput(raw: string, max: number = MAX_GENERAT
 
 /** 提示词优化功能已从图片/视频生成节点移除，交由独立「提示词生成与优化」节点承担。 */
 export interface ImageNodeConfig {
+  readonly cameraControl?: import("../../lib/canvasCameraControl").CanvasCameraControl | undefined;
+  readonly imagePreset?: import("../../lib/canvasImagePresets").CanvasImagePresetSelection | undefined;
+  readonly imageMode?: import("../../lib/canvasImage").CanvasImageMode;
+  readonly autoLink?: boolean;
+  readonly advancedOpen?: boolean;
+  readonly upscaleResolution?: "1K" | "2K" | "4K";
+  readonly style?: import("../../lib/canvasImage").CanvasImageStyle | undefined;
+  readonly translationTask?: import("../../lib/canvasImage").CanvasImageTranslationTask | null;
   readonly modelSelection: NodeModelSelection;
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
@@ -1904,6 +1947,15 @@ export interface ImageNodeConfig {
 }
 
 export interface VideoNodeConfig {
+  readonly longVideo?: import("../../lib/longVideo").LongVideoSettings;
+  readonly longVideoRequest?: { readonly id: string; readonly fingerprint: string } | null;
+  readonly longVideoDeliveries?: readonly string[];
+  /** liblib 视频编辑区的模式和高级设置，随节点存档。 */
+  readonly videoMode?: import("../../lib/canvasVideoMode").CanvasVideoMode;
+  readonly autoLink?: boolean;
+  readonly autoVerifyMaterials?: boolean;
+  readonly verificationProviderId?: string;
+  readonly advancedOpen?: boolean;
   readonly modelSelection: NodeModelSelection;
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
@@ -1922,6 +1974,92 @@ export interface VideoNodeConfig {
   readonly perTaskUrlMedia?: readonly PerTaskVideoUrlInput[];
   /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
    *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
+  readonly inputSlots?: readonly (string | null)[];
+}
+
+/** 音频节点语种（原站实测：中文 / 英文）。 */
+export type AudioNodeLanguage = "zh" | "en";
+/** 音频节点采样率（原站实测：8k / 16k / 24k / 48k）。 */
+export type AudioNodeSampleRate = 8000 | 16000 | 24000 | 48000;
+/** 音频节点输出格式（原站实测：wav / mp3 / pcm / ogg_opus）。 */
+export type AudioNodeFormat = "wav" | "mp3" | "pcm" | "ogg_opus";
+
+/** 语速滑杆区间（原站实测 aria-valuemin/max）。 */
+export const AUDIO_NODE_SPEED_RANGE = { min: 0.5, max: 2, step: 0.01 } as const;
+/** 声调滑杆区间（原站实测）。 */
+export const AUDIO_NODE_PITCH_RANGE = { min: -12, max: 12, step: 1 } as const;
+/** 音量滑杆区间（原站实测）。 */
+export const AUDIO_NODE_VOLUME_RANGE = { min: 0.01, max: 10, step: 0.01 } as const;
+/** 提示词字数上限（原站实测「0/2000」）。 */
+export const AUDIO_NODE_PROMPT_MAX_LENGTH = 2000;
+/** 上传音频的大小上限（原站文案：50MB）。 */
+export const AUDIO_NODE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+
+export const AUDIO_NODE_LANGUAGES: readonly {
+  readonly value: AudioNodeLanguage;
+  readonly label: string;
+}[] = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "英文" },
+];
+
+export const AUDIO_NODE_SAMPLE_RATES: readonly {
+  readonly value: AudioNodeSampleRate;
+  readonly label: string;
+}[] = [
+  { value: 8000, label: "8k" },
+  { value: 16000, label: "16k" },
+  { value: 24000, label: "24k" },
+  { value: 48000, label: "48k" },
+];
+
+export const AUDIO_NODE_FORMATS: readonly {
+  readonly value: AudioNodeFormat;
+  readonly label: string;
+}[] = [
+  { value: "wav", label: "wav" },
+  { value: "mp3", label: "mp3" },
+  { value: "pcm", label: "pcm" },
+  { value: "ogg_opus", label: "ogg_opus" },
+];
+
+/**
+ * 原站实测的输出格式里，`pcm` 在本项目**不可用**。
+ *
+ * pcm 是无头裸流：没有容器信息就没有时长、没有时长就没法校验、也不能安全配进
+ * 音轨，后端会直接拒收（「pcm 是无头裸流，应用无法校验时长也不能安全配入音轨」）。
+ *
+ * 这里**保留条目**（与原站逐项对齐）但在界面上置灰并写明原因 —— 悄悄删掉会让
+ * 「与原站一致」这件事说不清；留一个必然失败的选项而不说明则是陷阱。
+ */
+export const AUDIO_NODE_FORMAT_DISABLED: Readonly<Record<string, string>> = {
+  pcm: "pcm 是无头裸流，应用无法校验时长也不能安全配入音轨，请改用 mp3、wav 或 ogg_opus。",
+};
+
+/**
+ * 音频节点的参数配置。
+ *
+ * 字段与取值区间都来自原站 liblib 音频节点的活体实测
+ * （见 docs/integrations/liblib-audio-node-re.md），提交时原样放进任务的
+ * `parameters`，由后端映射到供应商的语音合成契约。
+ */
+export interface AudioNodeConfig {
+  readonly modelSelection: NodeModelSelection;
+  readonly generationCount: number;
+  readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
+  readonly catalogResolved: boolean;
+  readonly language: AudioNodeLanguage;
+  readonly sampleRate: AudioNodeSampleRate;
+  readonly format: AudioNodeFormat;
+  /** 语速：0.5–2，步长 0.01。 */
+  readonly voiceSettingSpeed: number;
+  /** 声调：-12–12，步长 1。 */
+  readonly voiceSettingPitch: number;
+  /** 音量：0.01–10，步长 0.01。 */
+  readonly voiceSettingVolume: number;
+  readonly advancedOpen: boolean;
+  readonly autoLink?: boolean;
+  /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。 */
   readonly inputSlots?: readonly (string | null)[];
 }
 
@@ -2003,6 +2141,11 @@ export function createImageNodeConfig(
   catalogResolved: boolean,
 ): ImageNodeConfig {
   return {
+    imageMode: "auto",
+    cameraControl: readCanvasCameraPreferences(),
+    autoLink: true,
+    advancedOpen: false,
+    upscaleResolution: "2K",
     modelSelection: { ...modelSelection },
     generationCount: 1,
     parameterValues: {},
@@ -2015,10 +2158,35 @@ export function createVideoNodeConfig(
   catalogResolved: boolean,
 ): VideoNodeConfig {
   return {
+    videoMode: "auto",
+    autoLink: true,
+    autoVerifyMaterials: true,
+    advancedOpen: false,
     modelSelection: { ...modelSelection },
     generationCount: 1,
     parameterValues: {},
     catalogResolved,
+  };
+}
+
+/** 音频节点的默认配置：取值与原站 liblib 音频节点默认值一致。 */
+export function createAudioNodeConfig(
+  modelSelection: NodeModelSelection,
+  catalogResolved: boolean,
+): AudioNodeConfig {
+  return {
+    modelSelection: { ...modelSelection },
+    generationCount: 1,
+    parameterValues: {},
+    catalogResolved,
+    language: "zh",
+    sampleRate: 24000,
+    format: "wav",
+    voiceSettingSpeed: 1,
+    voiceSettingPitch: 0,
+    voiceSettingVolume: 1,
+    advancedOpen: false,
+    autoLink: true,
   };
 }
 
@@ -2351,6 +2519,7 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
     node.origin === "composition" ||
     node.origin === "download" ||
     node.origin === "video_preparation" ||
+    node.origin === "long_video" ||
     node.origin === "ai_media" ||
     node.origin === "white_model" ||
     node.origin === "green_screen"
@@ -2421,7 +2590,9 @@ export function generationInputMentionCandidate(
 }
 
 export function supportsGenerationNode(model: ConfiguredModel, nodeId: GenerationNodeId): boolean {
-  return nodeId === "video" ? isVideoGenerationModel(model) : isImageGenerationModel(model);
+  if (nodeId === "video") return isVideoGenerationModel(model);
+  if (nodeId === "audio") return isAudioGenerationModel(model);
+  return isImageGenerationModel(model);
 }
 
 export function isImageGenerationModel(model: ConfiguredModel): boolean {
@@ -2430,6 +2601,11 @@ export function isImageGenerationModel(model: ConfiguredModel): boolean {
 
 export function isVideoGenerationModel(model: ConfiguredModel): boolean {
   return model.operations.includes("video_generation");
+}
+
+/** 语音（音频）生成模型：画布音频节点只认这一类。 */
+export function isAudioGenerationModel(model: ConfiguredModel): boolean {
+  return model.operations.includes("speech_generation");
 }
 
 /** 文本（对话）模型：在全局设置里被分类为「文本模型」的模型，供提示词优化等功能使用。 */
@@ -2506,6 +2682,7 @@ export function reconcileNodeModelSelections(
   return {
     image: reconcileNodeModelSelection("image", current.image, providerCatalog, "text_to_image"),
     video: reconcileNodeModelSelection("video", current.video, providerCatalog, "video_generation"),
+    audio: reconcileNodeModelSelection("audio", current.audio, providerCatalog, "speech_generation"),
     prompt: reconcileTextModelSelection(current.prompt, providerCatalog),
   };
 }
@@ -2556,6 +2733,21 @@ export function resolvePendingGenerationNodeConfig(
           node.config.modelSelection,
           providerCatalog,
           mediaInputTargetKeys.has(node.key) ? "image_to_image" : "text_to_image",
+        ),
+        catalogResolved: true,
+      },
+    };
+  }
+  if (node.kind === "audio") {
+    return {
+      ...node,
+      config: {
+        ...node.config,
+        modelSelection: reconcileNodeModelSelection(
+          "audio",
+          node.config.modelSelection,
+          providerCatalog,
+          "speech_generation",
         ),
         catalogResolved: true,
       },

@@ -35,7 +35,9 @@ use url::Url;
 use super::{
     BackendState,
     media_cache::{MediaCache, is_cacheable_content_type, permits_storage},
-    protocol_reply::{self, MEDIA_PROXY_RESPONSE_POOL, ProtocolReplyGuard, WARM_PREVIEW_RESPONSE_POOL},
+    protocol_reply::{
+        self, MEDIA_PROXY_RESPONSE_POOL, ProtocolReplyGuard, WARM_PREVIEW_RESPONSE_POOL,
+    },
 };
 
 pub const MEDIA_PROXY_SCHEME: &str = "assetproxy";
@@ -848,8 +850,13 @@ async fn proxy_response(
                     body.as_slice(),
                     range_requested,
                 );
-                let cached_control =
-                    response_cache_header(cache, &status, &headers, body.as_slice(), range_requested);
+                let cached_control = response_cache_header(
+                    cache,
+                    &status,
+                    &headers,
+                    body.as_slice(),
+                    range_requested,
+                );
                 if let Some(value) = cached_control {
                     headers.insert("cache-control", value);
                 }
@@ -1307,12 +1314,9 @@ async fn fetch_upstream(
         // 仍要能拿到自己的 content-length，否则一次 HEAD 就会被判成「素材过大」。
         Vec::new()
     } else {
-        tokio::time::timeout(
-            budget,
-            read_body_capped(response, MAX_UPSTREAM_FULL_BYTES),
-        )
-        .await
-        .map_err(|_| UpstreamFailure::Timeout)??
+        tokio::time::timeout(budget, read_body_capped(response, MAX_UPSTREAM_FULL_BYTES))
+            .await
+            .map_err(|_| UpstreamFailure::Timeout)??
     };
     Ok((status, headers, body))
 }

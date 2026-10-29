@@ -243,6 +243,7 @@ function memberSize(node: CanvasGroupMember): { readonly width: number; readonly
   switch (node.kind) {
     case "image":
     case "video":
+    case "audio":
     case "prompt":
       return genNodeDimensions(node.kind);
     case "screenplay":

@@ -58,13 +58,18 @@ jobs:
         run: pnpm knip
 
       # bundle.resources 指向的引擎目录由 prepare 脚本生成且被 gitignore，
-      # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
+      # Tauri build script 编译时也会校验其存在，必须先行准备
       # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
       - name: Prepare bundled engines
         run: pnpm ffmpeg:prepare
 
       - name: Run project checks
         run: pnpm check
+
+      # Rust 侧仍然要编译：clippy 门禁已移除，但「能编过」这件事不能没人管。
+      # cargo check 只编译、不跑 lint，也不执行任何测试。
+      - name: Compile Rust code
+        run: pnpm rust:check
 
       - name: Build frontend
         run: pnpm build

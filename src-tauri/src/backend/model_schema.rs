@@ -4,8 +4,8 @@ use super::{
     error::{BackendError, BackendResult},
     gateway_profile::GatewayProfile,
     provider_adapter::{
-        ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH, BAILIAN_VIDEO_PATH,
-        DASHSCOPE_VIDEO_ENVELOPE, FZY_ADAPTER_ID, GRSAI_ADAPTER_ID,
+        ARK_ADAPTER_ID, ATLASCLOUD_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH,
+        BAILIAN_VIDEO_PATH, DASHSCOPE_VIDEO_ENVELOPE, FZY_ADAPTER_ID, GRSAI_ADAPTER_ID,
     },
     types::GenerationOperation,
 };
@@ -57,12 +57,19 @@ pub enum RequestDialect {
     Grsai,
     /// 饭众烟图片与视频任务：契约由连接决定，不套用同名模型的原生协议。
     FzyAi,
+    /// Atlas Cloud 图片与视频生成 API（Grok Imagine Image 2.0 / Midjourney V8.2 /
+    /// FLUX 3 / Qwen Image 3.0 家族出图，Vidu Q4 家族出视频）：图片提交
+    /// `POST /api/v1/model/generateImage`、视频提交
+    /// `POST /api/v1/model/generateVideo`，轮询统一是
+    /// `GET /api/v1/model/prediction/{id}`；平台回答套一层 `data` 信封，
+    /// 与 OpenAI 兼容网关的 `/v1/images/*` 完全不同。
+    AtlasCloud,
 }
 
 impl RequestDialect {
     /// 适配器 → 方言。方舟推理 API 的 Base URL 自带 `/api/v3`，端点因此不带
-    /// `/v1` 前缀；百炼走官方 MaaS 路径；Grsai 是自有协议；其余适配器都是
-    /// OpenAI 兼容网关。
+    /// `/v1` 前缀；百炼走官方 MaaS 路径；Grsai 与 Atlas Cloud 是自有协议；
+    /// 其余适配器都是 OpenAI 兼容网关。
     pub fn for_adapter(adapter_id: &str) -> Self {
         if adapter_id == ARK_ADAPTER_ID {
             Self::VolcengineArk
@@ -72,6 +79,8 @@ impl RequestDialect {
             Self::Grsai
         } else if adapter_id == FZY_ADAPTER_ID {
             Self::FzyAi
+        } else if adapter_id == ATLASCLOUD_ADAPTER_ID {
+            Self::AtlasCloud
         } else {
             Self::OpenAiCompatible
         }
@@ -157,6 +166,12 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     if dialect == RequestDialect::FzyAi {
         return apply_fzy_video_dialect(schema);
     }
+    if dialect == RequestDialect::AtlasCloud {
+        // Atlas Cloud 有自己的视频端点（`/api/v1/model/generateVideo`）与参数表，
+        // 必须在通用网关改写之前先接管：同一个模型名（`vidu/q4-preview/…`）在
+        // 兼容网关连接上仍走魔芋的 Vidu 契约，两者按连接方言分开。
+        return apply_atlascloud_video_dialect(schema, identity);
+    }
     if dialect == RequestDialect::AliyunBailian {
         return apply_bailian_wan_video_dialect(schema, identity);
     }
@@ -181,7 +196,9 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
         RequestDialect::AliyunBailian => false,
         // Grsai 只承载 gpt-image 系图片契约；图片家族改写在 `apply_image_dialect`
         // 已提前返回，视频契约在这里保持原样（不被误改写成网关端点）。
-        RequestDialect::Grsai | RequestDialect::FzyAi => false,
+        // Atlas Cloud 同理：它的视频契约在函数入口就整条接管（Vidu Q4 家族），
+        // 图片契约在 `apply_image_dialect` 里改写，都不会落到这里。
+        RequestDialect::Grsai | RequestDialect::FzyAi | RequestDialect::AtlasCloud => false,
         // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax 在方舟上
         // 没有端点，它们自己的契约保持原样。
         RequestDialect::VolcengineArk => {
@@ -306,12 +323,17 @@ fn apply_bailian_wan_video_dialect(schema: &mut Value, identity: &str) -> bool {
 /// 文生图与图生图共用同一对图片端点：
 /// 网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
 /// Grsai 连接例外：端点、轮询与参数整条换成 Grsai 自有协议。
+/// Atlas Cloud 连接同理：换成 `POST /api/v1/model/generateImage` +
+/// `GET /api/v1/model/prediction/{id}`。
 fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
     if dialect == RequestDialect::FzyAi {
         return apply_fzy_image_dialect(schema);
     }
     if dialect == RequestDialect::Grsai {
         return apply_grsai_image_dialect(schema, identity);
+    }
+    if dialect == RequestDialect::AtlasCloud {
+        return apply_atlascloud_image_dialect(schema, identity);
     }
     let mut changed = false;
     for operation in [
@@ -336,7 +358,8 @@ fn apply_image_operation_dialect(
     match dialect {
         RequestDialect::AliyunBailian => false,
         // Grsai 连接的图片契约在 `apply_image_dialect` 入口整条改写，不会走到这里。
-        RequestDialect::Grsai | RequestDialect::FzyAi => false,
+        // Atlas Cloud 连接同理。
+        RequestDialect::Grsai | RequestDialect::FzyAi | RequestDialect::AtlasCloud => false,
         // 方舟原生图片接口只承载自家 Seedream；其他家族的图片契约保持原样。
         RequestDialect::VolcengineArk => {
             if !is_seedream_image_model(identity) || path != GATEWAY_IMAGE_PATH {
@@ -363,7 +386,8 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
     match dialect {
         RequestDialect::AliyunBailian => false,
         // Grsai 连接不承载文本对话模型，文本契约保持原样。
-        RequestDialect::Grsai | RequestDialect::FzyAi => false,
+        // Atlas Cloud 连接同样只承载图片模型。
+        RequestDialect::Grsai | RequestDialect::FzyAi | RequestDialect::AtlasCloud => false,
         RequestDialect::VolcengineArk => {
             if !domestic_doubao || path != GATEWAY_CHAT_PATH {
                 return false;
@@ -1071,8 +1095,14 @@ fn speech_request_profile(model_id: &str) -> &'static str {
     }
 }
 
-/// 语音操作 Schema。配音不走通用生成任务通道，而由 `synthesize_speech` 命令
-/// 独立执行，所以参数不声明成节点表单字段，避免生成一排没有消费者的控件。
+/// 语音操作 Schema。两个消费方共用这一份契约：
+/// - `synthesize_speech` 命令（配音工作流）：参数由命令体直接给出；
+/// - 画布音频节点的生成任务：参数由前端随任务提交（`format` / `sample_rate` /
+///   `voice_setting_*` / `speaker`）。
+///
+/// 因此这里**不**把参数声明成节点表单字段，避免生成一排没有消费者的控件；
+/// 任务参数也不是白名单——`normalize_parameters` 以调用方给的键为基底，只补
+/// Schema 里声明过的缺省值，因此前端自带的键会原样进入请求体。
 fn speech_operation_schema(model_id: &str) -> Value {
     let (profile, path) = match speech_request_profile(model_id) {
         DOUBAO_TTS_REQUEST_PROFILE => (DOUBAO_TTS_REQUEST_PROFILE, DOUBAO_TTS_PATH),
@@ -1808,6 +1838,952 @@ fn apply_grsai_image_dialect(schema: &mut Value, identity: &str) -> bool {
         if *slot != replacement {
             *slot = replacement;
             changed = true;
+        }
+    }
+    changed
+}
+
+/// Atlas Cloud 图片生成 API 契约：
+///
+/// - 提交 `POST /api/v1/model/generateImage`，请求体是平台通用形态
+///   （`model` / `prompt` / `image_urls` / `num_images` / `aspect_ratio` /
+///   `resolution` / `quality` / `enable_base64_output`）；
+/// - 轮询 `GET /api/v1/model/prediction/{task_id}`；
+/// - 平台所有回答套一层 `data` 信封：`data.id` 是 prediction id、`data.status`
+///   是任务状态、`data.outputs` 是结果链接数组。
+///
+/// 契约文档见 `docs/integrations/atlascloud-image-api.md`。
+pub const ATLASCLOUD_IMAGE_PROFILE: &str = "atlascloud_image_v1";
+const ATLASCLOUD_GENERATE_PATH: &str = "/api/v1/model/generateImage";
+const ATLASCLOUD_PREDICTION_OBSERVE_PATH: &str = "/api/v1/model/prediction/{task_id}";
+/// 平台目录里 Grok Imagine Image 2.0 家族的模型 id 前缀：文生图与参考图编辑
+/// 两个成员共享前缀，后半段分别是 `…/text-to-image` 与 `…-developer/edit`。
+pub const ATLASCLOUD_GROK_IMAGE_PREFIX: &str = "xai/grok-imagine-image-2.0";
+/// 参考图编辑成员：必须带 1–3 张参考图，不能文生图。
+pub const ATLASCLOUD_GROK_IMAGE_EDIT_MODEL: &str = "xai/grok-imagine-image-2.0-developer/edit";
+/// 文生图成员：只吃提示词，不接受参考图。
+pub const ATLASCLOUD_GROK_IMAGE_TEXT_MODEL: &str = "xai/grok-imagine-image-2.0/text-to-image";
+/// 文档给出的画幅枚举（编辑成员 14 个取值，含 `auto`）。
+const ATLASCLOUD_ASPECT_RATIOS: [&str; 14] = [
+    "auto", "1:1", "3:4", "4:3", "9:16", "16:9", "2:3", "3:2", "9:19.5", "19.5:9", "9:20", "20:9",
+    "1:2", "2:1",
+];
+
+/// 平台目录里 Midjourney V8.2 家族的模型 id 前缀。平台目前只开放图生图成员
+/// （`midjourney/v8.2/image-to-image`），前缀命中但未登记的成员同样按「派发前
+/// 明确拒绝」处理，不套用别的成员的请求体。
+pub const ATLASCLOUD_MIDJOURNEY_IMAGE_PREFIX: &str = "midjourney/v8.2/";
+/// Midjourney V8.2 图生图成员：必须带 1 张参考图，没有文生图形态。
+pub const ATLASCLOUD_MIDJOURNEY_IMAGE_MODEL: &str = "midjourney/v8.2/image-to-image";
+/// Midjourney V8.2 文档给出的画幅枚举（9 个取值，**不含** `auto`）。
+const ATLASCLOUD_MIDJOURNEY_ASPECT_RATIOS: [&str; 9] = [
+    "1:1", "9:16", "16:9", "4:3", "3:4", "2:3", "3:2", "9:21", "21:9",
+];
+
+/// 平台目录里 FLUX 3 家族的模型 id 前缀。平台目前只开放编辑成员
+/// （`black-forest-labs/flux-3/edit`）：局部改图 + 多参考图合成，没有文生图形态。
+pub const ATLASCLOUD_FLUX3_IMAGE_PREFIX: &str = "black-forest-labs/flux-3/";
+/// FLUX 3 编辑成员：必须带 1–10 张参考图（顶层 `reference_images` 数组）。
+pub const ATLASCLOUD_FLUX3_IMAGE_MODEL: &str = "black-forest-labs/flux-3/edit";
+/// FLUX 3 文档给出的画幅枚举（15 个取值，含 `auto`）。
+const ATLASCLOUD_FLUX3_ASPECT_RATIOS: [&str; 15] = [
+    "auto", "21:9", "2:1", "16:9", "3:2", "7:5", "4:3", "5:4", "1:1", "4:5", "3:4", "5:7", "2:3", "9:16", "1:2",
+];
+/// FLUX 3 的分辨率档位（文档 4 档；`768sq` 是方图专用档，与其它家族不同）。
+const ATLASCLOUD_FLUX3_RESOLUTIONS: [&str; 4] = ["768sq", "1k", "2k", "4k"];
+
+/// 平台目录里 Qwen Image 3.0 家族的模型 id 前缀。
+///
+/// 文档给了两个写法：标题与示例用 `qwen-image-3.0-pro/edit`（Pro 编辑成员），
+/// `model` 参数的默认值写的是 `qwen-image-3.0/edit`。两者共享前缀
+/// `qwen-image-3.0`——前缀取**家族级**而不是 `qwen-image-3.0-pro/`，这样
+/// `qwen-image-3.0/edit` 也落在家族里：它没登记请求体时按「派发前明确拒绝」
+/// 处理，而不是漏到通用形态盲发。
+pub const ATLASCLOUD_QWEN_IMAGE_PREFIX: &str = "qwen-image-3.0";
+/// Qwen Image 3.0 Pro 编辑成员：必须带 1–3 张参考图，没有文生图形态。
+pub const ATLASCLOUD_QWEN_IMAGE_MODEL: &str = "qwen-image-3.0-pro/edit";
+
+/// 该模型是不是 Atlas 目录里的 Grok Imagine Image 2.0 家族成员。
+pub fn is_atlascloud_grok_image_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_GROK_IMAGE_PREFIX)
+}
+
+/// 该模型是不是 Atlas 目录里的 Midjourney V8.2 家族成员。
+pub fn is_atlascloud_midjourney_image_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_MIDJOURNEY_IMAGE_PREFIX)
+}
+
+/// 该模型是不是 Atlas 目录里的 FLUX 3 家族成员。
+pub fn is_atlascloud_flux3_image_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_FLUX3_IMAGE_PREFIX)
+}
+
+/// 该模型是不是 Atlas 目录里的 Qwen Image 3.0 家族成员。
+pub fn is_atlascloud_qwen_image_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_QWEN_IMAGE_PREFIX)
+}
+
+/// 该模型是不是本站**已登记** Atlas 契约的成员（Grok 两个成员 + Midjourney 一个成员
+/// + FLUX 3 一个成员 + Qwen Image 3.0 Pro 一个成员）。
+///
+/// 家族前缀命中但没有登记请求体的成员：不套用其它成员的请求体，也不退回通用
+/// 形态盲发——派发前明确拒绝。
+pub fn is_atlascloud_registered_image_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    identity == ATLASCLOUD_GROK_IMAGE_EDIT_MODEL
+        || identity == ATLASCLOUD_GROK_IMAGE_TEXT_MODEL
+        || identity == ATLASCLOUD_MIDJOURNEY_IMAGE_MODEL
+        || identity == ATLASCLOUD_FLUX3_IMAGE_MODEL
+        || identity == ATLASCLOUD_QWEN_IMAGE_MODEL
+}
+
+/// Midjourney V8.2 图生图成员的契约参数。
+///
+/// 与 Grok 家族**完全不同**：没有 `resolution`（原生 2K 由 `hd` 开关控制）、
+/// 没有 `num_images`（平台每次任务固定返回 4 张图）；多出 `hd` / `stylize` /
+/// `chaos` / `weird` / `seed` 五个数值开关与一个 `sref` 风格参考图地址。
+///
+/// `sref` 只接受**公网可达的 https 图片地址**（文档明确要求），因此声明为
+/// 可选字符串且不给默认值——没填就不出现在请求体里。
+fn atlascloud_midjourney_image_parameters() -> Value {
+    json!({
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "description": "输出画面的宽高比。可选 1:1 / 2:3 / 3:2 / 3:4 / 4:3 / 9:16 / 16:9 / 21:9 / 4:5。",
+            "default": "1:1",
+            "enum": ATLASCLOUD_MIDJOURNEY_ASPECT_RATIOS,
+            "order": 1
+        },
+        "hd": {
+            "type": "boolean",
+            "label": "原生 2K（1.5 倍）",
+            "description": "开启后按原生 2K 输出，费用为 1.5 倍。关闭时按模型默认分辨率出图。",
+            "default": false,
+            "order": 2
+        },
+        "quality": {
+            "type": "integer",
+            "label": "细节质量",
+            "description": "1 为标准，4 为高细节。高细节更耗时更贵，但角色保真与禁止项遵守都明显更好。",
+            "default": 1,
+            "enum": [1, 4],
+            "order": 3
+        },
+        "stylize": {
+            "type": "integer",
+            "label": "风格化强度",
+            "description": "0 到 1000。这是模型自身审美的权重，不是画质档位：调高让成片更漂亮、更\"成品\"，同时降低对提示词的服从度（画面会偏离你写的风格要求）。想让画面更听提示词就调低。",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 1000,
+            "order": 4
+        },
+        "chaos": {
+            "type": "integer",
+            "label": "多样性（Chaos）",
+            "description": "0 到 100。调高让四张候选图之间的差异更大、更出人意料；保持 0 则四张更一致。",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 100,
+            "order": 5
+        },
+        "weird": {
+            "type": "integer",
+            "label": "奇异性（Weird）",
+            "description": "0 到 3000。调高会引入非常规、不合常理的构图与元素；保持 0 更稳妥。数值过高容易出怪图。",
+            "default": 0,
+            "minimum": 0,
+            "maximum": 3000,
+            "order": 6
+        },
+        "seed": {
+            "type": "integer",
+            "label": "随机种子",
+            "description": "留空则每次生成都不一样。填一个整数可以复现同一张图，便于微调提示词时做对照。",
+            "optional": true,
+            "minimum": -1,
+            "maximum": 4294967295i64,
+            "order": 7
+        },
+        "sref": {
+            "type": "string",
+            "label": "风格参考图 URL（https）",
+            "description": "风格参考图的公网 https 地址。模型只从这张图取**画风**，不取人物设定；但画风里的具体元素（例如发色、服饰）仍可能一并渗进结果。",
+            "optional": true,
+            "order": 8
+        }
+    })
+}
+
+/// Midjourney V8.2 图生图的契约：端点与轮询与 Grok 家族相同，但参考图走**顶层
+/// 单值 `image` 字段**（不是 `image_urls` 数组），且提示词上限只有 1024 字符。
+fn atlascloud_midjourney_image_operation_schema() -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    // 参考图走顶层 `image` 单值字段：公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    request.insert("mediaEncoding".into(), json!("atlascloud_midjourney_image_inputs"));
+    request.insert("mediaField".into(), json!("image"));
+    json!({
+        "resultType": "image",
+        "requestProfileId": ATLASCLOUD_IMAGE_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_midjourney_image_parameters()
+    })
+}
+
+/// FLUX 3 编辑成员的契约参数。
+///
+/// 与同平台的 Grok 家族、Midjourney 家族**都不同**（都来自平台文档，不是推测）：
+///
+/// - 多出 `enable_prompt_expansion`（布尔：是否让模型把提示词改写得更明确，并
+///   说清每张参考图的职责）与 `output_format`（`jpeg` / `png`）；
+/// - 多出 `safety_tolerance`（整数 0–4，0 最严、4 最松）；
+/// - **没有** `quality`（Grok 有 `low`/`medium` 字符串档，Midjourney 有 1/4 数字档）；
+/// - `resolution` 多一档 `768sq`（方图专用），并支持 `4k`。
+fn atlascloud_flux3_image_parameters() -> Value {
+    json!({
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "default": "auto",
+            "enum": ATLASCLOUD_FLUX3_ASPECT_RATIOS,
+            "order": 1
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "default": "1k",
+            "enum": ATLASCLOUD_FLUX3_RESOLUTIONS,
+            "order": 2
+        },
+        "enable_prompt_expansion": {
+            "type": "boolean",
+            "label": "提示词扩写",
+            "default": false,
+            "order": 3
+        },
+        "output_format": {
+            "type": "string",
+            "label": "输出格式",
+            "default": "jpeg",
+            "enum": ["jpeg", "png"],
+            "order": 4
+        },
+        "safety_tolerance": {
+            "type": "integer",
+            "label": "安全容忍度",
+            "default": 2,
+            "minimum": 0,
+            "maximum": 4,
+            "order": 5
+        }
+    })
+}
+
+/// FLUX 3 编辑成员的契约：端点与轮询与 Grok / Midjourney 家族相同，但参考图走
+/// **顶层 `reference_images` 数组**（1–10 张，顺序即「图 1 … 图 10」，提示词里按
+/// 这个序号指代），不是 Grok 的 `image_urls`、也不是 Midjourney 的单值 `image`。
+fn atlascloud_flux3_image_operation_schema() -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    // 参考图走顶层 `reference_images` 数组：公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    request.insert("mediaEncoding".into(), json!("atlascloud_flux3_image_inputs"));
+    request.insert("mediaField".into(), json!("reference_images"));
+    json!({
+        "resultType": "image",
+        "requestProfileId": ATLASCLOUD_IMAGE_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_flux3_image_parameters()
+    })
+}
+
+/// Qwen Image 3.0 Pro 编辑成员的契约参数。
+///
+/// 与同平台另三个家族**完全不同**（都来自平台文档，不是推测）：
+///
+/// - **没有** `aspect_ratio` / `resolution` / `quality`：画幅与像素合成一个
+///   `size` 字符串（`宽*高`，例如 `1280*720`），有效范围 512*512–1440*1440；
+///   **留空 = 让模型自选分辨率**（文档原文：omit to let the model pick）；
+/// - **没有** `enable_base64_output`：文档的入参表里没有这个字段，只发契约声明
+///   的参数；
+/// - 多出 `negative_prompt` / `seed` / `prompt_extend` / `prompt_extend_mode`；
+/// - `n` 是**单请求出图张数**（1–4），不是「每请求固定 1 张」：平台按张计费，
+///   一次请求 n 张与拆成 n 个请求 n 张同价。
+///
+/// `size` / `negative_prompt` / `seed` 都是**可选**且不给默认值：留空表示
+/// 「用户没填」，组包时这个键**不进**请求体（上游收到空串会直接拒绝）。
+fn atlascloud_qwen_image_parameters() -> Value {
+    json!({
+        "size": {
+            "type": "string",
+            "label": "输出尺寸",
+            "description": "输出分辨率，格式为 宽*高（例如 1280*720），宽与高各 512–1440。留空则由模型自选分辨率。",
+            "optional": true,
+            "order": 1
+        },
+        "n": {
+            "type": "integer",
+            "label": "生成数量",
+            "description": "一次请求生成的图片张数，1–4 张。平台按张计费，一次出多张与拆成多次请求同价。",
+            "default": 1,
+            "minimum": 1,
+            "maximum": 4,
+            "order": 2
+        },
+        "negative_prompt": {
+            "type": "string",
+            "label": "反向提示词",
+            "description": "描述**不应该**出现在成图里的内容（例如「多余的水印、文字、马赛克」）。留空则不发送。",
+            "optional": true,
+            "order": 3
+        },
+        "seed": {
+            "type": "integer",
+            "label": "随机种子",
+            "description": "留空则每次生成都不一样。填一个整数可以复现同一张图，便于微调提示词时做对照。",
+            "optional": true,
+            "minimum": 0,
+            "maximum": 2147483647i64,
+            "order": 4
+        },
+        "prompt_extend": {
+            "type": "boolean",
+            "label": "智能改写",
+            "description": "开启后模型先把编辑指令改写得更明确再执行（文档默认开启）。",
+            "default": true,
+            "order": 5
+        },
+        "prompt_extend_mode": {
+            "type": "string",
+            "label": "改写方式",
+            "description": "提示词改写策略。direct 是单遍改写（DPE）；文档只开放这一个取值。",
+            "default": "direct",
+            "enum": ["direct"],
+            "order": 6
+        }
+    })
+}
+
+/// Qwen Image 3.0 Pro 编辑成员的契约：端点与轮询与其它 Atlas 家族相同，但参考图
+/// 走**顶层 `reference_image_urls` 数组**（1–3 张）——既不是 Grok 的 `image_urls`，
+/// 也不是 Midjourney 的单值 `image`，也不是 FLUX 3 的 `reference_images`（字段名
+/// 与张数上限都不同）。
+fn atlascloud_qwen_image_operation_schema() -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    // 参考图走顶层 `reference_image_urls` 数组：公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    request.insert("mediaEncoding".into(), json!("atlascloud_qwen_image_inputs"));
+    request.insert("mediaField".into(), json!("reference_image_urls"));
+    json!({
+        "resultType": "image",
+        "requestProfileId": ATLASCLOUD_IMAGE_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_qwen_image_parameters()
+    })
+}
+
+/// Atlas 家族的契约参数：画幅 / 分辨率 / 质量。
+///
+/// 文生图成员默认 `1:1`，编辑成员默认 `auto`（沿用第一张参考图的比例）。
+fn atlascloud_image_parameters(default_aspect_ratio: &str) -> Value {
+    json!({
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "default": default_aspect_ratio,
+            "enum": ATLASCLOUD_ASPECT_RATIOS,
+            "order": 1
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "default": "1k",
+            "enum": ["1k", "2k"],
+            "order": 2
+        },
+        "quality": {
+            "type": "string",
+            "label": "质量",
+            "default": "medium",
+            "enum": ["low", "medium"],
+            "order": 3
+        }
+    })
+}
+
+fn atlascloud_image_operation_schema(
+    operation: GenerationOperation,
+    default_aspect_ratio: &str,
+) -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    if operation == GenerationOperation::ImageToImage {
+        // 参考图走顶层 `image_urls` 数组：公网 URL 原样透传，本地图片编码为
+        // data URI（文档声明 base64 与 URL 均可）。
+        request.insert("mediaEncoding".into(), json!("atlascloud_image_inputs"));
+        request.insert("mediaField".into(), json!("image_urls"));
+    }
+    json!({
+        "resultType": "image",
+        "requestProfileId": ATLASCLOUD_IMAGE_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_image_parameters(default_aspect_ratio)
+    })
+}
+
+/// Atlas Cloud 连接上按**请求的操作**给出的图片契约。
+///
+/// 与 [`apply_atlascloud_image_dialect`]（按模型成员改写整份 Schema）不同，这里
+/// 按请求的操作直接给契约：编辑成员被误用在文生图上时，档案仍然是 Atlas 的，
+/// 组包层因此能给出「该模型只支持参考图编辑」的明确提示，而不是退回通用形态，
+/// 把请求发到 Atlas 上并不存在的 `/v1/images/*` 端点。
+pub fn atlascloud_image_operation_schema_for(
+    model_id: &str,
+    operation: GenerationOperation,
+) -> Option<Value> {
+    if is_atlascloud_midjourney_image_model(model_id) {
+        // Midjourney 家族只有一个图生图成员。**文生图也返回同一份档案**：这样
+        // 组包层能给出「该模型必须带 1 张参考图」的明确提示，而不是退回通用形态，
+        // 把请求发到 Atlas 上并不存在的 `/v1/images/*` 端点。
+        return Some(atlascloud_midjourney_image_operation_schema());
+    }
+    if is_atlascloud_flux3_image_model(model_id) {
+        // FLUX 3 家族同样只有编辑成员。**文生图也返回同一份档案**：组包层据此
+        // 给出「该模型必须带 1–10 张参考图」的明确提示，而不是退回通用形态。
+        return Some(atlascloud_flux3_image_operation_schema());
+    }
+    if is_atlascloud_qwen_image_model(model_id) {
+        // Qwen Image 3.0 家族同样只有编辑成员。**文生图也返回同一份档案**：组包层
+        // 据此给出「该模型必须带 1–3 张参考图」的明确提示，而不是退回通用形态。
+        return Some(atlascloud_qwen_image_operation_schema());
+    }
+    if !is_atlascloud_grok_image_model(model_id) {
+        return None;
+    }
+    let identity = model_id.to_ascii_lowercase();
+    let default_aspect_ratio = if identity == ATLASCLOUD_GROK_IMAGE_EDIT_MODEL {
+        "auto"
+    } else {
+        "1:1"
+    };
+    Some(atlascloud_image_operation_schema(
+        operation,
+        default_aspect_ratio,
+    ))
+}
+
+/// Atlas Cloud 连接上的 Grok Imagine Image 2.0 家族整条改写成 Atlas 契约。
+///
+/// 家族的两个成员能力不同，契约**按成员登记**而不是共用一份：
+///
+/// - `xai/grok-imagine-image-2.0/text-to-image`：只文生图（`text_to_image`）；
+/// - `xai/grok-imagine-image-2.0-developer/edit`：只参考图编辑（`image_to_image`，
+///   必须带 1–3 张参考图）。
+///
+/// 编辑成员的文生图槽位会被移除：留着它等于给用户留一个必然被上游拒绝的
+/// 付费入口（该模型没有文生图形态）。
+fn apply_atlascloud_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if is_atlascloud_midjourney_image_model(identity) {
+        return apply_atlascloud_midjourney_image_dialect(schema, identity);
+    }
+    if is_atlascloud_flux3_image_model(identity) {
+        return apply_atlascloud_flux3_image_dialect(schema, identity);
+    }
+    if is_atlascloud_qwen_image_model(identity) {
+        return apply_atlascloud_qwen_image_dialect(schema, identity);
+    }
+    if !is_atlascloud_grok_image_model(identity) {
+        return false;
+    }
+    let mut changed = false;
+    let (operation, default_aspect_ratio) = if identity == ATLASCLOUD_GROK_IMAGE_EDIT_MODEL {
+        (GenerationOperation::ImageToImage, "auto")
+    } else if identity == ATLASCLOUD_GROK_IMAGE_TEXT_MODEL {
+        (GenerationOperation::TextToImage, "1:1")
+    } else {
+        // 家族前缀命中但本站没有登记契约的成员：不套用其它成员的请求体，
+        // 也不退回通用形态盲发。
+        return false;
+    };
+    // 该成员不支持的另一个图片操作：整条移除，避免留下一份指向
+    // `/v1/images/generations` 的通用契约（Atlas 上不存在这个端点）。
+    let unsupported = match operation {
+        GenerationOperation::ImageToImage => GenerationOperation::TextToImage,
+        _ => GenerationOperation::ImageToImage,
+    };
+    let Some(slot) = schema.get_mut(operation.as_str()) else {
+        /*
+         * 存档里没有该成员自己的形态（用户在设置界面把另一种能力留下了，例如
+         * 给「编辑成员」只勾文生图）：**另一个图片形态必须整条删掉**。
+         *
+         * 留着它 = 留下一份指向 `/v1/images/generations` 的通用契约，而 Atlas
+         * 上根本没有这个端点——那会把付费请求发到不存在的路径上（契约文档
+         * 「不要退回通用形态」原则）。删掉之后绑定会按最终契约把那个操作一起
+         * 去掉，界面也会明说「该模型不支持，已按模型能力保存」。
+         */
+        let mut changed = false;
+        if let Some(map) = schema.as_object_mut()
+            && map.remove(unsupported.as_str()).is_some()
+        {
+            changed = true;
+        }
+        return changed;
+    };
+    let replacement = atlascloud_image_operation_schema(operation, default_aspect_ratio);
+    if *slot != replacement {
+        *slot = replacement;
+        changed = true;
+    }
+    if let Some(map) = schema.as_object_mut()
+        && map.remove(unsupported.as_str()).is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
+/// Midjourney V8.2 家族整条改写成 Atlas 契约。
+///
+/// 平台当前只登记了图生图成员 `midjourney/v8.2/image-to-image`：
+///
+/// - 契约参数与 Grok 家族**不同**（画幅 9 选 1、`hd` / `stylize` / `chaos` /
+///   `weird` / `seed` / `sref`，没有 `resolution`）；
+/// - 参考图走顶层单值 `image` 字段（不是 `image_urls` 数组），且**只能 1 张**；
+/// - 没有文生图形态：文生图槽位整条移除（留着它等于给用户留一个必然被上游
+///   拒绝的付费入口）。
+///
+/// 家族前缀命中但本站没有登记契约的成员：不套用图生图成员的请求体，也不退回
+/// 通用形态盲发。
+fn apply_atlascloud_midjourney_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if identity != ATLASCLOUD_MIDJOURNEY_IMAGE_MODEL {
+        return false;
+    }
+    let mut changed = false;
+    let replacement = atlascloud_midjourney_image_operation_schema();
+    if let Some(slot) = schema.get_mut(GenerationOperation::ImageToImage.as_str()) {
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    // 该成员没有文生图形态：整条移除，避免留下一份指向
+    // `/v1/images/generations` 的通用契约（Atlas 上不存在这个端点）。
+    //
+    // **图生图槽位不存在时也要移除**（用户在设置界面把参考生成关掉、只留了
+    // 文生图）：留着通用契约就是把付费请求发到不存在的路径上。删掉之后绑定
+    // 会按最终契约把文生图一起去掉，界面也会明说「该模型不支持」。
+    if let Some(map) = schema.as_object_mut()
+        && map.remove(GenerationOperation::TextToImage.as_str()).is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
+/// FLUX 3 家族整条改写成 Atlas 契约。
+///
+/// 平台当前只登记了编辑成员 `black-forest-labs/flux-3/edit`：
+///
+/// - 契约参数与 Grok / Midjourney 家族**都不同**（画幅 15 选 1、`768sq`/`1k`/
+///   `2k`/`4k` 四档分辨率、`enable_prompt_expansion` / `output_format` /
+///   `safety_tolerance`，没有 `quality`）；
+/// - 参考图走顶层 `reference_images` **数组**（1–10 张，顺序即提示词里的「图 1 …
+///   图 10」），既不是 Grok 的 `image_urls` 字段名，也不是 Midjourney 的单值
+///   `image`；
+/// - 没有文生图形态：文生图槽位整条移除（留着它等于给用户留一个必然被上游
+///   拒绝的付费入口）。
+///
+/// 家族前缀命中但本站没有登记契约的成员：不套用编辑成员的请求体，也不退回
+/// 通用形态盲发。
+fn apply_atlascloud_flux3_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if identity != ATLASCLOUD_FLUX3_IMAGE_MODEL {
+        return false;
+    }
+    let mut changed = false;
+    let replacement = atlascloud_flux3_image_operation_schema();
+    if let Some(slot) = schema.get_mut(GenerationOperation::ImageToImage.as_str()) {
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    // 该成员没有文生图形态：整条移除，避免留下一份指向
+    // `/v1/images/generations` 的通用契约（Atlas 上不存在这个端点）。
+    //
+    // **图生图槽位不存在时也要移除**（用户在设置界面把参考生成关掉、只留了
+    // 文生图）：留着通用契约就是把付费请求发到不存在的路径上。删掉之后绑定
+    // 会按最终契约把文生图一起去掉，界面也会明说「该模型不支持」。
+    if let Some(map) = schema.as_object_mut()
+        && map.remove(GenerationOperation::TextToImage.as_str()).is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
+/// Qwen Image 3.0 家族整条改写成 Atlas 契约。
+///
+/// 平台当前只登记了编辑成员 `qwen-image-3.0-pro/edit`：
+///
+/// - 契约参数与 Grok / Midjourney / FLUX 3 三个家族**都不同**（`size` / `n` /
+///   `negative_prompt` / `seed` / `prompt_extend` / `prompt_extend_mode`，没有
+///   `aspect_ratio` / `resolution` / `quality`）；
+/// - 参考图走顶层 `reference_image_urls` **数组**（1–3 张），既不是 Grok 的
+///   `image_urls`、也不是 Midjourney 的单值 `image`、也不是 FLUX 3 的
+///   `reference_images`；
+/// - 没有文生图形态：文生图槽位整条移除（留着它等于给用户留一个必然被上游
+///   拒绝的付费入口）。
+///
+/// 家族前缀命中但本站没有登记契约的成员（例如文档默认值 `qwen-image-3.0/edit`）：
+/// 不套用 Pro 成员的请求体，也不退回通用形态盲发。
+fn apply_atlascloud_qwen_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if identity != ATLASCLOUD_QWEN_IMAGE_MODEL {
+        return false;
+    }
+    let mut changed = false;
+    let replacement = atlascloud_qwen_image_operation_schema();
+    if let Some(slot) = schema.get_mut(GenerationOperation::ImageToImage.as_str()) {
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    // 该成员没有文生图形态：整条移除，避免留下一份指向
+    // `/v1/images/generations` 的通用契约（Atlas 上不存在这个端点）。
+    //
+    // **图生图槽位不存在时也要移除**（用户在设置界面把参考生成关掉、只留了
+    // 文生图）：留着通用契约就是把付费请求发到不存在的路径上。删掉之后绑定
+    // 会按最终契约把文生图一起去掉，界面也会明说「该模型不支持」。
+    if let Some(map) = schema.as_object_mut()
+        && map.remove(GenerationOperation::TextToImage.as_str()).is_some()
+    {
+        changed = true;
+    }
+    changed
+}
+
+// ---------------------------------------------------------------------------
+// Atlas Cloud 视频生成 API（Vidu Q4 家族）
+// ---------------------------------------------------------------------------
+
+/// Atlas Cloud 视频生成 API（Vidu Q4 参考图生视频）：提交
+/// `POST /api/v1/model/generateVideo`，轮询 `GET /api/v1/model/prediction/{id}`；
+/// 与同平台的图片家族共用同一层 `data` 信封，但**端点、参数表与媒体字段都不同**，
+/// 因此单列一个请求档案（`atlascloud_video_v1`），不与 `atlascloud_image_v1` 混用。
+pub const ATLASCLOUD_VIDEO_PROFILE: &str = "atlascloud_video_v1";
+const ATLASCLOUD_GENERATE_VIDEO_PATH: &str = "/api/v1/model/generateVideo";
+/// 平台目录里 Vidu Q4 家族的模型 id 前缀。本次只登记 `…/reference-to-video`
+/// 一个成员（文档的 `model` 字段只列了这一个取值）。
+pub const ATLASCLOUD_VIDU_VIDEO_PREFIX: &str = "vidu/q4-preview/";
+/// 参考图生视频成员：必须带 1–15 张参考图，没有纯文生视频形态。
+pub const ATLASCLOUD_VIDU_VIDEO_MODEL: &str = "vidu/q4-preview/reference-to-video";
+/// 平台目录里 Vidu Q4 家族允许的画幅（文档 `aspect_ratio` 的枚举）。
+const ATLASCLOUD_VIDU_VIDEO_ASPECT_RATIOS: [&str; 5] = ["16:9", "9:16", "1:1", "4:3", "3:4"];
+/// 平台目录里 Vidu Q4 家族允许的分辨率档位（文档 `resolution` 的枚举）。
+const ATLASCLOUD_VIDU_VIDEO_RESOLUTIONS: [&str; 5] = ["540p", "720p", "1080p", "2k", "4k"];
+
+/// 该模型是不是 Atlas 目录里的 Vidu Q4 家族成员。
+///
+/// 注意：这个 id 里含 `vidu` 标记，**魔芋平台的 Vidu 视频契约**（`/v1/video/generations`
+/// + 顶层 `images` 数组）也会按模型名命中。两条协议的判定必须按**连接方言**分开：
+/// 同一个模型名落在 Atlas 连接上走 Atlas 协议，落在兼容网关连接上才走魔芋协议。
+pub fn is_atlascloud_vidu_video_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_VIDU_VIDEO_PREFIX)
+}
+
+/// Vidu Q4 参考图生视频成员的契约参数。
+///
+/// 全部取自平台文档的输入参数表（不是推测）：
+///
+/// - `duration`：3–16 秒，默认 5；
+/// - `aspect_ratio`：`16:9` / `9:16` / `1:1` / `4:3` / `3:4`，默认 `16:9`；
+/// - `resolution`：`540p` / `720p` / `1080p` / `2k` / `4k`，默认 `720p`
+///   （平台按秒按档位计费，档位直接决定成本）；
+/// - `generate_audio`：是否生成同步音频，默认 `true`（平台的原生音频能力）；
+/// - `seed`：随机种子，默认 `-1`（随机）。`-1` 是文档的默认值，因此这里给默认值
+///   而不是留空——留空会变成「键不进请求体」，上游随即按自己的默认随机种子走，
+///   用户以为复现了种子其实没有。
+fn atlascloud_vidu_video_parameters() -> Value {
+    json!({
+        "duration": {
+            "type": "integer",
+            "label": "时长（秒）",
+            "description": "生成视频的长度，3 到 16 秒。",
+            "default": 5,
+            "minimum": 3,
+            "maximum": 16,
+            "order": 1
+        },
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "description": "输出视频的宽高比。",
+            "default": "16:9",
+            "enum": ATLASCLOUD_VIDU_VIDEO_ASPECT_RATIOS,
+            "order": 2
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "description": "输出分辨率，按秒按档位计费。",
+            "default": "720p",
+            "enum": ATLASCLOUD_VIDU_VIDEO_RESOLUTIONS,
+            "order": 3
+        },
+        "generate_audio": {
+            "type": "boolean",
+            "label": "生成音频",
+            "description": "是否与画面一起生成同步音频（对白、音效、环境声）。",
+            "default": true,
+            "order": 4
+        },
+        "seed": {
+            "type": "integer",
+            "label": "种子",
+            "description": "随机种子。-1 表示随机；固定取值可复现同一结果。",
+            "default": -1,
+            "order": 5
+        }
+    })
+}
+
+/// Vidu Q4 参考图生视频成员的契约（`POST /api/v1/model/generateVideo`）。
+///
+/// 与同平台图片家族的四点**契约级**差异（都来自平台文档，不是推测）：
+///
+/// 1. 提交端点是 `/api/v1/model/generateVideo`，不是 `generateImage`；
+/// 2. 参考图走顶层 `reference_images` **数组**（1–15 张，顺序即提示词里的「图 1 …
+///    图 15」），不是 Grok 的 `image_urls`、也不是 Midjourney 的单值 `image`；
+/// 3. 多出 `reference_audios` 数组（0–3 段参考音频），图片家族没有这个入参；
+/// 4. 参数表换成 `duration` / `aspect_ratio` / `resolution` / `generate_audio` /
+///    `seed`，没有 `num_images`、没有 `quality`、没有 `enable_base64_output`。
+///
+/// 轮询端点与图片家族相同：`GET /api/v1/model/prediction/{id}`。
+fn atlascloud_vidu_video_operation_schema() -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_VIDEO_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    // 参考图走顶层 `reference_images` 数组：公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。参考音频走 `reference_audios`。
+    request.insert("mediaEncoding".into(), json!("atlascloud_vidu_video_inputs"));
+    request.insert("mediaField".into(), json!("reference_images"));
+    request.insert("audioField".into(), json!("reference_audios"));
+    json!({
+        "resultType": "video",
+        "requestProfileId": ATLASCLOUD_VIDEO_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_vidu_video_parameters()
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Atlas Cloud 视频：Kling 4.0 Omni 参考生视频
+// ---------------------------------------------------------------------------
+
+/// 平台目录里 Kling 4.0 家族的模型 id 前缀。文档的 `model` 字段只列了
+/// `…/reference-to-video` 一个取值。
+pub const ATLASCLOUD_KLING_VIDEO_PREFIX: &str = "kwaivgi/kling-v4.0/";
+/// 参考生视频成员：把图、视频、主体与音色组合成一段 3–30 秒的一致视频。
+pub const ATLASCLOUD_KLING_VIDEO_MODEL: &str = "kwaivgi/kling-v4.0/reference-to-video";
+/// 文档给出的画幅枚举（5 个取值，含 `auto`——跟随参考素材自动选择）。
+const ATLASCLOUD_KLING_VIDEO_ASPECT_RATIOS: [&str; 5] = ["auto", "16:9", "9:16", "1:1", "21:9"];
+/// 文档给出的分辨率档位：`720p` / `1080p` 是原生档；`1080p-esr` / `2k-esr` / `4k-esr`
+/// 是在 1080p 源片上做的腾讯 ESR 超分（按「源片时长 + 增强时长」计费）。
+const ATLASCLOUD_KLING_VIDEO_RESOLUTIONS: [&str; 5] = ["720p", "1080p", "1080p-esr", "2k-esr", "4k-esr"];
+/// 文档给出的图片素材总张数上限（参考图 + 首尾关键帧合计 10 张）。
+pub const ATLASCLOUD_KLING_VIDEO_MAX_IMAGES: usize = 10;
+/// 文档给出的参考视频条数上限。
+pub const ATLASCLOUD_KLING_VIDEO_MAX_VIDEOS: usize = 5;
+/// 文档给出的提示词长度上限（英文）。
+pub const ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS: usize = 26_000;
+/// 文档给出的提示词长度上限（非英文）。
+pub const ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS_NON_ASCII: usize = 11_000;
+
+/// 该模型是不是 Atlas 目录里的 Kling 4.0 家族成员。
+///
+/// 与 Vidu Q4 家族一样，这条判定只回答「是不是 Atlas 目录里的 Kling 成员」；
+/// 真正走不走 Atlas 协议由**连接方言**裁决——同一个模型名落在兼容网关连接上
+/// 仍走网关自己的契约。
+pub fn is_atlascloud_kling_video_model(model_id: &str) -> bool {
+    model_id
+        .to_ascii_lowercase()
+        .starts_with(ATLASCLOUD_KLING_VIDEO_PREFIX)
+}
+
+/// Kling 4.0 参考生视频成员的契约参数。
+///
+/// 全部取自平台文档的输入参数表（不是推测）：
+///
+/// - `duration`：3–30 秒，默认 5；
+/// - `aspect_ratio`：`auto` / `16:9` / `9:16` / `1:1` / `21:9`，默认 `auto`
+///   （跟随参考素材自动选择）；
+/// - `resolution`：`720p` / `1080p` / `1080p-esr` / `2k-esr` / `4k-esr`，默认
+///   `1080p`（`720p` / `1080p` 是原生档，后三档是 1080p 源片的 ESR 超分，
+///   按「源片时长 + 增强时长」计费）。
+///
+/// 文档里的 `elements`（Kling 主体）、`voice_ids`（Kling 音色 ID）、`middle_images`
+/// （中间关键帧）在本画布上**没有对应的输入形态**，因此不登记为参数：主体需要
+/// Kling 元素库、音色是供应商侧的音色 ID 而非音频文件、中间关键帧要求画布节点
+/// 支持第三种关键帧槽位。画布上的音频素材会在派发前被明确拒绝（见
+/// `build_atlascloud_kling_video_body`），而不是被静默丢掉。
+fn atlascloud_kling_video_parameters() -> Value {
+    json!({
+        "duration": {
+            "type": "integer",
+            "label": "时长（秒）",
+            "description": "生成视频的长度，3 到 30 秒。",
+            "default": 5,
+            "minimum": 3,
+            "maximum": 30,
+            "order": 1
+        },
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "description": "输出视频的宽高比。auto 会跟随参考素材自动选择。",
+            "default": "auto",
+            "enum": ATLASCLOUD_KLING_VIDEO_ASPECT_RATIOS,
+            "order": 2
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "description": "720p / 1080p 是原生输出；1080p-esr / 2k-esr / 4k-esr 是在 1080p 源片上做的超分增强（按源片时长 + 增强时长计费）。",
+            "default": "1080p",
+            "enum": ATLASCLOUD_KLING_VIDEO_RESOLUTIONS,
+            "order": 3
+        }
+    })
+}
+
+/// Kling 4.0 参考生视频成员的契约（`POST /api/v1/model/generateVideo`）。
+///
+/// 与同平台其它视频家族（Vidu Q4）的**契约级**差异（都来自平台文档，不是推测）：
+///
+/// 1. 媒体槽位不同：参考图走顶层 `reference_images`（≤10 张，含首尾关键帧）、
+///    参考视频走顶层 `reference_videos`（≤5 条）、首帧走单值 `image`、尾帧走单值
+///    `last_image`；**没有** `reference_audios`（Kling 的语音位是音色 ID，不是音频
+///    文件）；
+/// 2. 参数表换成 `duration` / `aspect_ratio` / `resolution` 三项，没有
+///    `generate_audio`、没有 `seed`；
+/// 3. 提示词里的素材指代是 `@image_N` / `@video_N`（Vidu 用的是「图 N」这类自然
+///    语言指代）。
+///
+/// 提交端点与轮询端点与 Vidu Q4 相同（`/api/v1/model/generateVideo` +
+/// `GET /api/v1/model/prediction/{id}`），因此共用同一个请求档案
+/// （`atlascloud_video_v1`）。
+fn atlascloud_kling_video_operation_schema() -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(ATLASCLOUD_GENERATE_VIDEO_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(ATLASCLOUD_PREDICTION_OBSERVE_PATH));
+    // 参考图走顶层 `reference_images` 数组，参考视频走 `reference_videos`；
+    // 公网 URL 原样透传，本地文件编码为 data URI（文档声明 base64 与 URL 均可）。
+    request.insert("mediaEncoding".into(), json!("atlascloud_kling_video_inputs"));
+    request.insert("mediaField".into(), json!("reference_images"));
+    request.insert("videoField".into(), json!("reference_videos"));
+    json!({
+        "resultType": "video",
+        "requestProfileId": ATLASCLOUD_VIDEO_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": atlascloud_kling_video_parameters()
+    })
+}
+
+/// Atlas Cloud 连接上的视频家族整条改写成 Atlas 视频契约。
+///
+/// 平台上的视频家族**各自一份契约**（提交端点相同，参数表与媒体字段不同），
+/// 因此这里按成员分发，而不是共用一份请求体：
+///
+/// - `vidu/q4-preview/reference-to-video`（Vidu Q4）：`reference_images` +
+///   `reference_audios`，参数是 `duration` / `aspect_ratio` / `resolution` /
+///   `generate_audio` / `seed`；
+/// - `kwaivgi/kling-v4.0/reference-to-video`（Kling 4.0）：`reference_images` +
+///   `reference_videos` + 首帧 `image` + 尾帧 `last_image`，参数是 `duration` /
+///   `aspect_ratio` / `resolution`。
+///
+/// 家族前缀命中但本站没有登记契约的成员：视频槽位整条移除——留着它就是一份
+/// 指向 `/v1/video/generations` 的通用契约（Atlas 上没有这个端点），会把
+/// 付费请求发到不存在的路径上。删掉之后绑定会按最终契约把视频能力一起去掉，
+/// 界面也会明说「该模型不支持」。
+///
+/// **非 Atlas 视频家族的模型不动**：Atlas 连接上的图片成员由
+/// `apply_image_dialect` 单独改写，这里不能越权删它们的图片槽位。
+fn apply_atlascloud_video_dialect(schema: &mut Value, identity: &str) -> bool {
+    let replacement = if identity == ATLASCLOUD_KLING_VIDEO_MODEL {
+        Some(atlascloud_kling_video_operation_schema())
+    } else if identity == ATLASCLOUD_VIDU_VIDEO_MODEL {
+        Some(atlascloud_vidu_video_operation_schema())
+    } else {
+        None
+    };
+    let Some(replacement) = replacement else {
+        if !identity.starts_with(ATLASCLOUD_VIDU_VIDEO_PREFIX)
+            && !identity.starts_with(ATLASCLOUD_KLING_VIDEO_PREFIX)
+        {
+            return false;
+        }
+        return schema
+            .as_object_mut()
+            .and_then(|map| map.remove(GenerationOperation::VideoGeneration.as_str()))
+            .is_some();
+    };
+    let mut changed = false;
+    if let Some(slot) = schema.get_mut(GenerationOperation::VideoGeneration.as_str()) {
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    // 该成员没有图片形态：文生图与图生图槽位整条移除，避免留下一份指向
+    // `/v1/images/generations` 的通用契约（Atlas 上不存在这个端点）。
+    //
+    // **视频槽位不存在时也要移除图片槽位**（用户在设置界面把视频生成关掉、只留了
+    // 图片能力）：留着通用契约就是把付费请求发到不存在的路径上。删掉之后绑定会按
+    // 最终契约把图片能力一起去掉，界面也会明说「该模型不支持」。
+    if let Some(map) = schema.as_object_mut() {
+        for operation in [
+            GenerationOperation::TextToImage,
+            GenerationOperation::ImageToImage,
+        ] {
+            if map.remove(operation.as_str()).is_some() {
+                changed = true;
+            }
         }
     }
     changed

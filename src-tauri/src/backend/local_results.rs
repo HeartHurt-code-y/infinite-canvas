@@ -185,10 +185,14 @@ impl LocalResultService {
     }
 
     fn is_sp25_video_result(&self, task_id: &str) -> BackendResult<bool> {
-        // 已注册网关家族（按次系列、RD、PixVerse、草稿样片）使用带签名直链，
-        // 重查原任务续签。
+        // 已注册网关家族（按次系列、RD、PixVerse、草稿样片、饭众烟）的产物是带
+        // 签名的直链，保存时重查原任务续签。
+        //
+        // **不是「登记了家族档案」就等于签名直链**：Atlas Cloud 的视频产物是公开
+        // 托管链接，续签端点（`/v1/video/generations/{id}`）在 Atlas 上不存在，
+        // 误判会让一次成功的生成在下载阶段 404 失败。
         let task = self.storage.get_task_execution(task_id)?;
-        Ok(GatewayProfile::from_task(&task).is_some())
+        Ok(GatewayProfile::from_task(&task).is_some_and(GatewayProfile::uses_signed_result_url))
     }
 
     fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {
@@ -250,6 +254,36 @@ impl LocalResultService {
                 error: None,
             })
             .collect()
+    }
+
+    /// 语音合成的待写记录：音频字节由供应商同步返回，没有可再下载的直链，
+    /// `source` 记成二进制来源。
+    pub fn pending_audio_result(
+        &self,
+        task_id: &str,
+        mime_type: &str,
+        byte_size: u64,
+    ) -> GenerationResultRecord {
+        GenerationResultRecord {
+            display_name: None,
+            task_id: task_id.to_string(),
+            result_index: 1,
+            media_type: MediaType::Audio,
+            remote_task_id: None,
+            source: json!({
+                "kind": "binary",
+                "mimeType": mime_type,
+                "byteSize": byte_size,
+            }),
+            save_status: SaveStatus::Pending,
+            final_path: None,
+            relative_path: None,
+            byte_size: Some(byte_size),
+            mime_type: Some(mime_type.to_string()),
+            sha256: None,
+            saved_at: None,
+            error: None,
+        }
     }
 
     pub fn pending_video_result(
@@ -389,7 +423,7 @@ impl LocalResultService {
 
             match result {
                 Ok(prepared) => match self
-                    .commit_prepared(task_id, result_index, None, prepared)
+                    .commit_prepared(task_id, result_index, None, MediaType::Image, prepared)
                     .await
                 {
                     Ok(saved) => record = saved,
@@ -432,6 +466,73 @@ impl LocalResultService {
             records.push(record);
         }
         Ok(records)
+    }
+
+    /// 直接落盘音频字节（语音合成：供应商同步返回音频二进制，没有直链可下载）。
+    ///
+    /// 记录先由生命周期事实登记为 pending，这里接着写文件；保存失败按既有口径
+    /// 落 `failed` / `conflict`，不把「已计费但没落盘」写成成功。
+    pub async fn save_audio(
+        &self,
+        task_id: &str,
+        bytes: Vec<u8>,
+        mime_type: &str,
+        extension: &str,
+        mut on_ready: impl FnMut(&GenerationResultRecord, Option<String>) + Send,
+    ) -> BackendResult<GenerationResultRecord> {
+        info!(
+            "[save] 开始保存音频结果: taskId={task_id}, MIME={mime_type}, 扩展名={extension}, 字节 {}",
+            bytes.len()
+        );
+        let mut record = self.storage.get_result(task_id, 1)?;
+        record.save_status = SaveStatus::Writing;
+        self.persist_result(&record)?;
+        // 音频已经是本地字节，没有可即时预览的 URL：预览由最终落盘路径承担。
+        on_ready(&record, None);
+
+        let result = self.prepare_bytes(bytes, MediaType::Audio);
+        match result {
+            Ok(prepared) => match self
+                .commit_prepared(task_id, 1, None, MediaType::Audio, prepared)
+                .await
+            {
+                Ok(saved) => Ok(saved),
+                Err(error) => {
+                    record.save_status = match error {
+                        BackendError::Conflict(_) => SaveStatus::Conflict,
+                        _ => SaveStatus::Failed,
+                    };
+                    record.error = Some(error.runtime_record());
+                    error!(
+                        "[save] 音频结果提交写入失败: taskId={}, 保存状态={}, 错误: {}",
+                        task_id,
+                        record.save_status.as_str(),
+                        record
+                            .error
+                            .as_ref()
+                            .map(|error| error.to_string())
+                            .unwrap_or_default()
+                    );
+                    self.persist_result(&record)?;
+                    Ok(record)
+                }
+            },
+            Err(error) => {
+                record.save_status = SaveStatus::Failed;
+                record.error = Some(error.runtime_record());
+                error!(
+                    "[save] 音频结果校验失败: taskId={}, 保存状态=failed, 错误: {}",
+                    task_id,
+                    record
+                        .error
+                        .as_ref()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default()
+                );
+                self.persist_result(&record)?;
+                Ok(record)
+            }
+        }
     }
 
     pub async fn save_video(
@@ -489,7 +590,7 @@ impl LocalResultService {
         .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Video));
         match result {
             Ok(prepared) => match self
-                .commit_prepared(task_id, 1, Some(remote_task_id), prepared)
+                .commit_prepared(task_id, 1, Some(remote_task_id), MediaType::Video, prepared)
                 .await
             {
                 Ok(saved) => Ok(saved),
@@ -573,7 +674,7 @@ impl LocalResultService {
         let result = self.prepare_bytes(bytes, MediaType::Video);
         match result {
             Ok(prepared) => match self
-                .commit_prepared(task_id, 1, Some(remote_task_id), prepared)
+                .commit_prepared(task_id, 1, Some(remote_task_id), MediaType::Video, prepared)
                 .await
             {
                 Ok(saved) => Ok(saved),
@@ -891,6 +992,7 @@ impl LocalResultService {
                     &record.task_id,
                     record.result_index,
                     record.remote_task_id.as_deref(),
+                    media_type,
                     prepared,
                 )
                 .await
@@ -1216,6 +1318,7 @@ impl LocalResultService {
         task_id: &str,
         result_index: u32,
         remote_task_id: Option<&str>,
+        media_type: MediaType,
         prepared: PreparedMedia,
     ) -> BackendResult<GenerationResultRecord> {
         let task = self.storage.get_task_execution(task_id)?;
@@ -1297,11 +1400,7 @@ impl LocalResultService {
             display_name: None,
             task_id: task_id.to_string(),
             result_index,
-            media_type: if remote_task_id.is_some() {
-                MediaType::Video
-            } else {
-                MediaType::Image
-            },
+            media_type,
             remote_task_id: remote_task_id.map(ToOwned::to_owned),
             source: self.storage.get_result(task_id, result_index)?.source,
             save_status: SaveStatus::Succeeded,
@@ -1519,6 +1618,7 @@ fn result_location(
             matches!(
                 extension.to_ascii_lowercase().as_str(),
                 "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif" | "mp4" | "mov" | "webm"
+                    | "mp3" | "wav" | "ogg" | "flac" | "m4a" | "aac" | "opus"
             )
         });
         let mut name = safe_file_stem(base.map_or(name, |(stem, _)| stem));

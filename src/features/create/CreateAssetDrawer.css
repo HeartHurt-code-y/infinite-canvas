@@ -66,6 +66,58 @@
 }
 
 /*
+ * 正在被拖动的素材卡。
+ *
+ * 拖拽走指针事件（理由见 CreateAssetDrawer.tsx 里的说明）：所以这里要挡住
+ * 拖动时对素材名的文本选中，并给出「抓起」的手型与半透明，让用户知道
+ * 这一格已经在手上、而不是还停在原地。
+ */
+.create-assets__tile[data-dragging="true"] {
+  cursor: grabbing;
+  opacity: 0.55;
+  user-select: none;
+}
+
+/*
+ * 跟随指针的拖拽影子。
+ *
+ * 挂在 body 上（fixed 定位）：抽屉本身有 overflow 裁剪，挂进去会被切掉；
+ * 影子还要盖在浮坞之上，所以层级取全应用最高的 --z-tooltip。
+ */
+.create-assets__drag-ghost {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: var(--z-tooltip);
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border: 1px solid var(--color-create-stroke);
+  border-radius: var(--radius-create-control);
+  background: var(--color-create-media);
+  box-shadow: var(--shadow-create-popup);
+  pointer-events: none;
+}
+
+.create-assets__drag-ghost img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* 没有缩略图的素材（少数云端条目）：影子退化成一块带名字的方片。 */
+.create-assets__drag-ghost--empty {
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  color: var(--color-create-text-soft);
+  font-size: var(--text-2xs);
+  line-height: 1rem;
+  text-align: center;
+  word-break: break-all;
+}
+
+/*
  * 素材格右上角的「⋯」。
  *
  * 即梦资产页的素材菜单是**右键**触发的；这里额外给一枚可见的「⋯」，

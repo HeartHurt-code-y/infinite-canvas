@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::path::Path;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
-use tauri_plugin_log::log::{debug, error, info};
+use tauri_plugin_log::log::{debug, error, info, warn};
 
 use super::{
     BackendState,
@@ -567,8 +567,15 @@ pub fn replace_provider_model_bindings(
         .command()
 }
 
+/// 保存画布文档。
+///
+/// **必须是 `async`**：Tauri 的**同步**命令跑在 UI 线程上，而且是在 WebView2
+/// 的 IPC 回调栈里执行的。存档写入是本地 SQLite 事务，落在 UI 线程上就等于把
+/// 整个应用的 UI 线程按住——窗口不响应、事件循环停摆，连「点 ❌ 关闭」这条
+/// 兜底路径都发不出去（`destroy` 同样要排队等事件循环）。命令体是 `async`
+/// 才会被 Tauri 挪到异步运行时上，UI 线程全程不被占。
 #[tauri::command]
-pub fn save_canvas_document(
+pub async fn save_canvas_document(
     state: State<'_, BackendState>,
     command: SaveCanvasDocumentCommand,
 ) -> CommandResult<CanvasDocumentRecord> {
@@ -582,28 +589,37 @@ pub fn save_canvas_document(
     state.storage.save_canvas_document(&command).command()
 }
 
+/// 读取画布文档。`async` 理由同 `save_canvas_document`（不占 UI 线程）。
 #[tauri::command]
-pub fn get_canvas_document(
+pub async fn get_canvas_document(
     state: State<'_, BackendState>,
     canvas_id: String,
 ) -> CommandResult<CanvasDocumentRecord> {
     state.storage.get_canvas_document(&canvas_id).command()
 }
 
+/// 列出全部画布文档。`async` 理由同 `save_canvas_document`（不占 UI 线程）。
 #[tauri::command]
-pub fn list_canvas_documents(
+pub async fn list_canvas_documents(
     state: State<'_, BackendState>,
 ) -> CommandResult<Vec<CanvasDocumentSummary>> {
     state.storage.list_canvas_documents().command()
 }
 
+/// 删除画布文档。`async` 理由同 `save_canvas_document`（不占 UI 线程）。
 #[tauri::command]
-pub fn delete_canvas_document(
+pub async fn delete_canvas_document(
     state: State<'_, BackendState>,
     canvas_id: String,
 ) -> CommandResult<()> {
     // 画布没了，在途生成任务不能继续轮询供应商、继续把产物写进磁盘：
     // 先置运行时取消位让轮询尽快停下，落库由存储层在删除画布的同一个事务里完成。
+    //
+    // 长视频编排的清理是**尽力而为**：它失败不该挡住用户删画布——事务里本来就会
+    // 把这个画布的长视频行一起删掉。这里吞掉错误只记日志，不让它变成删不掉画布的理由。
+    if let Err(error) = state.long_video.cancel_canvas(&canvas_id) {
+        warn!("[long-video] 取消画布 {canvas_id} 的长视频编排失败（不阻断画布删除）：{error}");
+    }
     state.tasks.cancel_canvas_tasks(&canvas_id).command()?;
     state.storage.delete_canvas_document(&canvas_id).command()
 }
@@ -639,6 +655,86 @@ pub fn start_generation(
     state.tasks.start(command).command()
 }
 
+#[tauri::command]
+pub fn start_canvas_image_generation(
+    state: State<'_, BackendState>,
+    command: super::canvas_image::StartCanvasImageCommand,
+) -> CommandResult<String> {
+    super::canvas_image::compile(command).and_then(|generation| state.tasks.start(generation)).command()
+}
+
+/// 调用方先生成 taskId 并写入节点配置。相同身份只返回原记录，不重复提交。
+#[tauri::command]
+pub fn start_canvas_image_translation(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: super::canvas_image::StartImageTranslationCommand,
+) -> CommandResult<String> {
+    let result = (|| -> BackendResult<String> {
+        let _guard = super::canvas_image::TRANSLATION_START_LOCK.lock()
+            .map_err(|_| BackendError::Conflict("翻译任务暂不可用，请重新读取历史。".into()))?;
+        uuid::Uuid::parse_str(&command.task_id).map_err(|_| BackendError::validation("翻译任务身份无效", Value::Null))?;
+        let generation = command.generation;
+        super::canvas_image::validate_translation(&generation)?;
+        if state.storage.long_video_child_exists(&command.task_id)? {
+            let existing = state.tasks.get(&command.task_id)?;
+            if existing.summary.canvas_id != generation.canvas_id || existing.summary.source_node_id != generation.source_node_id
+                || existing.summary.provider_connection_id != generation.provider_connection_id || existing.summary.model_definition_id != generation.model_definition_id
+                || existing.summary.operation != GenerationOperation::TextGeneration
+                || existing.logical_request.get("prompt") != Some(&serde_json::to_value(&generation.prompt)?) {
+                return Err(BackendError::Conflict("翻译任务身份与原请求不一致，请读取原任务。".into()));
+            }
+            return Ok(command.task_id);
+        }
+        let profile = state.tasks.freeze_profile(&generation.provider_connection_id, &generation.model_definition_id, GenerationOperation::TextGeneration)?;
+        if state.tasks.prepare_frozen_child(&command.task_id, generation, &profile)? {
+            let task_id = command.task_id.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<BackendState>();
+                let deps = super::prompt_optimize::PromptVisionDeps {
+                    app: &app, storage: &state.storage, lifecycle: &state.lifecycle, providers: &state.providers,
+                    assets: &state.assets, staging: &state.staging, local_base64_assets: &state.local_base64_assets, local_results: &state.local_results,
+                };
+                if let Err(error) = super::prompt_optimize::run_image_prompt_translation(&deps, &task_id).await {
+                    error!("图片提示词翻译失败: taskId={task_id}, {error}");
+                }
+            });
+        }
+        Ok(command.task_id)
+    })();
+    result.command()
+}
+
+#[tauri::command]
+pub async fn list_canvas_image_presets(app: AppHandle) -> CommandResult<Vec<super::canvas_image::CanvasImagePreset>> {
+    let result = async {
+        let directory = app.path().app_data_dir()?;
+        tokio::task::spawn_blocking(move || super::canvas_image::list_presets(&directory)).await
+            .map_err(|error| BackendError::Conflict(format!("预设读取失败：{error}")))?
+    }.await;
+    result.command()
+}
+
+#[tauri::command]
+pub async fn save_canvas_image_preset(app: AppHandle, command: super::canvas_image::SaveCanvasImagePresetCommand) -> CommandResult<super::canvas_image::CanvasImagePreset> {
+    let result = async {
+        let directory = app.path().app_data_dir()?;
+        tokio::task::spawn_blocking(move || super::canvas_image::save_preset(&directory, command)).await
+            .map_err(|error| BackendError::Conflict(format!("预设保存失败：{error}")))?
+    }.await;
+    result.command()
+}
+
+#[tauri::command]
+pub async fn delete_canvas_image_preset(app: AppHandle, id: String) -> CommandResult<()> {
+    let result = async {
+        let directory = app.path().app_data_dir()?;
+        tokio::task::spawn_blocking(move || super::canvas_image::delete_preset(&directory, &id)).await
+            .map_err(|error| BackendError::Conflict(format!("预设删除失败：{error}")))?
+    }.await;
+    result.command()
+}
+
 /// 智能剪辑合成：校验模式目录与素材槽位后，复用既有生成任务管线下发。
 #[tauri::command]
 pub fn start_video_clip(
@@ -646,6 +742,91 @@ pub fn start_video_clip(
     command: StartVideoClipCommand,
 ) -> CommandResult<String> {
     state.video_clip.start(command).command()
+}
+
+#[tauri::command]
+pub async fn start_clip_render(state: State<'_, BackendState>, command: super::video_clip_render::StartClipRender) -> CommandResult<super::video_clip_render::ClipRenderJob> {
+    state.clip_render.start(command).command()
+}
+
+#[tauri::command]
+pub async fn list_clip_renders(state: State<'_, BackendState>, canvas_id: String) -> CommandResult<Vec<super::video_clip_render::ClipRenderJob>> {
+    state.clip_render.list(&canvas_id).command()
+}
+
+#[tauri::command]
+pub async fn cancel_clip_render(state: State<'_, BackendState>, id: String) -> CommandResult<super::video_clip_render::ClipRenderJob> {
+    state.clip_render.cancel(&id).command()
+}
+
+#[tauri::command]
+pub fn start_long_video(
+    state: State<'_, BackendState>,
+    command: super::long_video::model::StartLongVideoCommand,
+) -> CommandResult<super::long_video::model::LongVideoJob> {
+    state.long_video.start(command).command()
+}
+
+#[tauri::command]
+pub fn list_long_video_jobs(
+    state: State<'_, BackendState>,
+    canvas_id: String,
+) -> CommandResult<Vec<super::long_video::model::LongVideoJob>> {
+    state.long_video.list(&canvas_id).command()
+}
+
+#[tauri::command]
+pub fn get_long_video_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<super::long_video::model::LongVideoJob> {
+    state.long_video.get(&job_id).command()
+}
+
+/// 画布上删掉生成节点时叫停它上面的长视频编排：
+/// 节点没了就没有界面入口了，不叫停的话它会继续按额度提交片段、继续花钱。
+#[tauri::command]
+pub fn cancel_long_video_for_node(
+    state: State<'_, BackendState>,
+    canvas_id: String,
+    node_key: String,
+) -> CommandResult<u32> {
+    state
+        .long_video
+        .cancel_node(&canvas_id, &node_key)
+        .command()
+}
+
+/// 清空画布时叫停这张画布上的全部长视频编排。
+///
+/// 清空是整体替换节点状态，不走逐个节点的删除路径，所以那些编排的界面入口会一起消失，
+/// 而后端并不知道——不叫停的话它们会继续按额度提交片段、继续花钱。
+#[tauri::command]
+pub fn cancel_long_video_for_canvas(
+    state: State<'_, BackendState>,
+    canvas_id: String,
+) -> CommandResult<u32> {
+    state.long_video.cancel_canvas(&canvas_id).command()
+}
+
+/// 所有画布上仍在进行的长视频编排。
+///
+/// 长视频的界面入口是按节点/按画布的：用户切到别的画布后，另一张画布上的编排还在
+/// 每 1.2 秒提交一个片段（每一段都是真金白银），而「结束编排」按钮在另一张画布上。
+/// 这个跨画布清单让界面能提示「还有别处没停下的长视频」。
+#[tauri::command]
+pub fn list_active_long_video_jobs(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<super::long_video::model::LongVideoJob>> {
+    state.long_video.list_active().command()
+}
+
+#[tauri::command]
+pub fn control_long_video(
+    state: State<'_, BackendState>,
+    command: super::long_video::model::LongVideoControl,
+) -> CommandResult<super::long_video::model::LongVideoJob> {
+    state.long_video.control(command).command()
 }
 
 #[tauri::command]
@@ -688,6 +869,28 @@ pub async fn run_prompt_node(
         local_results: &state.local_results,
     };
     super::prompt_optimize::optimize_video_prompt(&deps, command)
+        .await
+        .command()
+}
+
+/// 文本节点悬浮生成器面板的「翻译提示词」：把当前正文翻成中文或英文。
+#[tauri::command]
+pub async fn translate_canvas_text(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: super::prompt_optimize::TranslateCanvasTextCommand,
+) -> CommandResult<super::prompt_optimize::TranslateCanvasTextResult> {
+    let deps = super::prompt_optimize::PromptVisionDeps {
+        app: &app,
+        storage: &state.storage,
+        lifecycle: &state.lifecycle,
+        providers: &state.providers,
+        assets: &state.assets,
+        staging: &state.staging,
+        local_base64_assets: &state.local_base64_assets,
+        local_results: &state.local_results,
+    };
+    super::prompt_optimize::translate_canvas_text(&deps, command)
         .await
         .command()
 }
@@ -1144,6 +1347,16 @@ pub async fn save_existing_asset_to_library(
     )
     .await
     .command()
+}
+
+#[tauri::command]
+pub async fn verify_generation_material(
+    state: State<'_, BackendState>,
+    command: super::generation_materials::VerifyGenerationMaterialCommand,
+) -> CommandResult<super::generation_materials::VerifiedGenerationMaterial> {
+    super::generation_materials::verify(&state, command)
+        .await
+        .command()
 }
 
 #[tauri::command]

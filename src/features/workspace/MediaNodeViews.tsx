@@ -7,6 +7,16 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "../../lib/toast";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { CanvasVideoTools } from "./CanvasVideoTools";
+import { CanvasReferenceTools, type CanvasReferenceToolsHandle } from "./CanvasReferenceTools";
+import { CanvasImageTools } from "./CanvasImageTools";
+import { CanvasImagePresetBadge } from "./CanvasImagePresetMenu";
+import { CanvasCameraControlBadge } from "./CanvasCameraControl";
+import { saveCanvasCameraPreferences } from "../../lib/canvasCameraControl";
+import { canvasImagePreset, CANVAS_IMAGE_PROMPT_PLACEHOLDER } from "../../lib/canvasImagePresets";
+import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
+import { DEFAULT_LONG_VIDEO } from "../../lib/longVideo";
+import { LongVideoProcess } from "./LongVideoProcess";
 import "./CanvasGenEditor.css";
 import {
   backendErrorMessage,
@@ -84,6 +94,7 @@ import {
 import type { GreenScreenResult } from "./GreenScreenSection";
 
 export function CanvasGenNode({
+  canvasId,
   node,
   descriptor,
   selected,
@@ -120,6 +131,7 @@ export function CanvasGenNode({
   promptContents,
   previewOutput,
 }: {
+  readonly canvasId: string;
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly descriptor: StaticNodeDescriptor;
   readonly selected: boolean;
@@ -175,6 +187,10 @@ export function CanvasGenNode({
   const effectiveInputs = [...connectedInputs, ...inheritedInputs];
   /** 提示词编辑会话：参考瓦片上的「@」按钮要靠它往提示词里插引用。 */
   const promptSessionRef = useRef<PromptContentEditorSession | null>(null);
+  const imageReferenceRef = useRef<CanvasReferenceToolsHandle>(null);
+  const imagePresetTriggerRef = useRef<HTMLButtonElement>(null);
+  const imageCameraTriggerRef = useRef<HTMLButtonElement>(null);
+  const [cameraOpenRequestId, setCameraOpenRequestId] = useState(0);
   const handlePromptSession = useCallback((session: PromptContentEditorSession | null) => {
     promptSessionRef.current = session;
   }, []);
@@ -191,7 +207,7 @@ export function CanvasGenNode({
   );
   if (presentation === "card") {
     return (
-      <MediaGenerationPreview
+      <><MediaGenerationPreview
         node={node}
         selected={selected}
         editing={editorOpen}
@@ -208,7 +224,23 @@ export function CanvasGenNode({
         onSizeChange={onSizeChange}
         onRemove={onRemove}
         onRename={onRename}
-      />
+        onVideoPreset={isVideo ? (preset) => {
+          if (preset === "long") {
+            onVideoConfigChange(node.key, { ...node.config, videoMode: "longVideo2video", generationCount: 1, longVideo: node.config.longVideo ?? { ...DEFAULT_LONG_VIDEO } });
+            (onEdit ?? onSelect)(node.key);
+            return;
+          }
+          const videoMode = preset === "frames" ? "first_last_frame" : "first_frame";
+          const intent = compileCanvasVideoMode(videoMode, effectiveInputs, node.config.mediaRoles);
+          onVideoConfigChange(node.key, { ...node.config, videoMode, seedanceTaskMode: intent.taskMode, mediaRoles: intent.mediaRoles });
+          (onEdit ?? onSelect)(node.key);
+        } : undefined}
+        onImagePreset={!isVideo ? (imageMode) => {
+          onImageConfigChange(node.key, { ...node.config, imageMode, ...(imageMode === "upscale" ? { imagePreset: undefined } : {}) });
+          (onEdit ?? onSelect)(node.key);
+          if (imageMode === "image_to_image") void imageReferenceRef.current?.addFiles();
+        } : undefined}
+      />{!isVideo ? <CanvasReferenceTools ref={imageReferenceRef} node={node} active={false} headless /> : <LongVideoProcess canvasId={canvasId} nodeKey={node.key} />}</>
     );
   }
 
@@ -225,62 +257,7 @@ export function CanvasGenNode({
         这里按原站重排；标签行降级为仅供读屏使用（label / description 仍要挂上）。
       */}
       <div className="canvas-gen-node__tool-chips" role="group" aria-label="创作工具">
-        <button
-          type="button"
-          className="canvas-gen-node__tool-chip"
-          aria-label="添加参考素材"
-          data-tooltip="从素材库选参考"
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            toast.error("参考素材选择后端暂未接入：可从节点左侧手柄的「引用该节点生成」接入素材");
-          }}
-        >
-          <CanvasChromeIcon name="plus" size={12} />
-          <span>参考</span>
-        </button>
-        <button
-          type="button"
-          className="canvas-gen-node__tool-chip"
-          aria-label="标记"
-          data-tooltip="标记（后端暂未接入）"
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            toast.error("标记后端暂未接入");
-          }}
-        >
-          <CanvasChromeIcon name="crosshair" size={12} />
-          <span>标记</span>
-        </button>
-        <button
-          type="button"
-          className="canvas-gen-node__tool-chip"
-          aria-label="角色库"
-          data-tooltip="角色库（后端暂未接入）"
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            toast.error("角色库后端暂未接入");
-          }}
-        >
-          <CanvasChromeIcon name="member" size={12} />
-          <span>角色库</span>
-        </button>
-        <button
-          type="button"
-          className="canvas-gen-node__tool-chip"
-          aria-label="运镜"
-          data-tooltip="运镜（后端暂未接入）"
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            toast.error("运镜后端暂未接入");
-          }}
-        >
-          <CanvasChromeIcon name="video" size={12} />
-          <span>运镜</span>
-        </button>
+        {isVideo ? <CanvasVideoTools node={node} active={editorOpen} inputs={effectiveInputs} sessionRef={promptSessionRef} onAnnotateVideo={onAnnotateVideo} /> : <CanvasImageTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} sessionRef={promptSessionRef} presetTriggerRef={imagePresetTriggerRef} cameraTriggerRef={imageCameraTriggerRef} cameraOpenRequestId={cameraOpenRequestId} providerCatalog={providerCatalog} onChange={config => onImageConfigChange(node.key, config)} />}
       </div>
       <GenerationInputChips
         inputs={effectiveInputs}
@@ -312,6 +289,16 @@ export function CanvasGenNode({
               ? `${referenceInputCount} 个参考素材已连接`
               : "输入 @ 引用素材"}
         </span>
+        {!isVideo ? <CanvasCameraControlBadge config={node.config} onOpen={() => setCameraOpenRequestId(value => value + 1)} onDisable={() => {
+          if (!node.config.cameraControl) return;
+          const cameraControl = { ...node.config.cameraControl, enabled: false };
+          onImageConfigChange(node.key, { ...node.config, cameraControl });
+          saveCanvasCameraPreferences(cameraControl);
+          imageCameraTriggerRef.current?.focus({ preventScroll: true });
+        }} /> : null}
+        {!isVideo && node.config.imagePreset ? <CanvasImagePresetBadge config={node.config} active={editorOpen}
+          onChange={config => onImageConfigChange(node.key, config)} onReopen={() => imagePresetTriggerRef.current?.click()}
+          onClear={() => { onImageConfigChange(node.key, { ...node.config, imagePreset: undefined }); imagePresetTriggerRef.current?.focus({ preventScroll: true }); }} /> : null}
         <PromptMentionInput
           nodeKey={node.key}
           candidates={mentionCandidates}
@@ -320,6 +307,8 @@ export function CanvasGenNode({
           labelledBy={promptLabelId}
           describedBy={promptHintId}
           expandable={false}
+          autoLink={node.config.autoLink !== false}
+          {...(!isVideo ? { placeholder: canvasImagePreset(node.config.imagePreset?.scene)?.placeholder ?? CANVAS_IMAGE_PROMPT_PLACEHOLDER } : {})}
           onSession={handlePromptSession}
         />
       </div>
@@ -339,6 +328,7 @@ export function CanvasGenNode({
           <VideoNodeSettings
             presentation="compact"
             active={editorOpen}
+            advancedHostId={`video-advanced-${node.key}`}
             greenScreenResults={greenScreenResults}
             greenScreenBusy={starting || activeTask != null}
             onGreenScreenGenerate={() => onStartGeneration(node.key)}
@@ -364,6 +354,7 @@ export function CanvasGenNode({
           <ImageNodeSettings
             presentation="compact"
             active={editorOpen}
+            advancedHostId={`image-advanced-${node.key}`}
             config={node.config}
             providerCatalog={providerCatalog}
             hasMediaInputs={effectiveInputs.some(
@@ -373,6 +364,8 @@ export function CanvasGenNode({
           />
         )}
         <div className="canvas-gen-node__footer-actions">
+          {!isVideo ? <div id={`image-tools-${node.key}`} className="canvas-image-toolbar-actions" /> : null}
+          {!isVideo ? <div id={`image-settings-${node.key}`} className="canvas-image-toolbar-actions" /> : null}
           <button
             type="button"
             className={`canvas-gen-node__start${starting ? " is-busy" : ""}`}
@@ -413,6 +406,8 @@ export function CanvasGenNode({
           </button>
         </div>
       </div>
+      <div id={`${isVideo ? "video" : "image"}-advanced-${node.key}`} hidden={!node.config.advancedOpen} />
+      {isVideo ? <LongVideoProcess canvasId={canvasId} nodeKey={node.key} /> : null}
       {starting || activeTask ? (
         <MediaNodeTaskStatus kind={node.kind} task={activeTask} starting={starting} />
       ) : null}
@@ -1467,7 +1462,9 @@ export function CanvasOutputNode({
     return () => window.clearTimeout(copyResetTimerRef.current);
   }, []);
   const metaLine =
-    node.origin === "ai_media"
+    node.origin === "long_video"
+      ? "超长视频成片 · 本地视频"
+      : node.origin === "ai_media"
       ? `AI 媒体处理 · 本地${mediaLabel}`
       : node.origin === "video_preparation"
         ? `视频准备 · 本地${mediaLabel}`
@@ -1657,7 +1654,7 @@ export function CanvasOutputNode({
                       : savedResultName != null
                         ? "已保存到本机 · 正在补齐卡片"
                         : "正在保存到本机"
-                    : node.origin === "video_preparation" || node.origin === "ai_media"
+                    : node.origin === "video_preparation" || node.origin === "ai_media" || node.origin === "long_video"
                       ? "已保存到本机 · 可作为参考输入"
                       : "已连线来源节点 · 可作为参考输入"
                 }`}

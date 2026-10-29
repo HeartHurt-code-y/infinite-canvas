@@ -1,0 +1,230 @@
+{
+  "version": 1,
+  "catalogOrigin": "liblib-remote-config-186-2026-10-27",
+  "keyOrigin": "local-stable-ids",
+  "defaultsOrigin": "liblib-remote-config-186-2026-10-27",
+  "instructionOrigin": "liblib-remote-config-186-2026-10-27",
+  "instructionAssembly": "local-append-camera-lens-focal-aperture-v1",
+  "sourceConfigId": "186",
+  "sourceConfigSha256": "b0046fd7a2044783f2d1df0774bf82f371b5db56b5b951bbadc9b28f167982dd",
+  "defaults": {
+    "camera": "panavision-dxl2",
+    "lens": "arri-signature-prime",
+    "focal": "35",
+    "aperture": "f4"
+  },
+  "camera": [
+    {
+      "key": "sony-venice",
+      "name": "Sony Venice",
+      "image": "sony-venice.webp",
+      "sourceKey": "sony_venice",
+      "prompt": ", clean digital look, 8k uhd"
+    },
+    {
+      "key": "arri-alexa-35",
+      "name": "Arri Alexa 35",
+      "image": "arri-alexa-35.webp",
+      "sourceKey": "arri_alexa_35",
+      "prompt": ", cinematic color grading, soft highlights"
+    },
+    {
+      "key": "arri-alexa-65",
+      "name": "Arri Alexa 65",
+      "image": "arri-alexa-65.webp",
+      "sourceKey": "arri_alexa_65",
+      "prompt": ", Shot on ARRI Alexa 65, large format cinematography, hyper-realistic, cinematic lighting, 8k resolution, movie still"
+    },
+    {
+      "key": "red-v-raptor",
+      "name": "Red V-Raptor",
+      "image": "red-v-raptor.webp",
+      "sourceKey": "red_v_raptor",
+      "prompt": ", high contrast, sharp focus"
+    },
+    {
+      "key": "panavision-dxl2",
+      "name": "Panavision DXL2",
+      "image": "panavision-dxl2.webp",
+      "sourceKey": "panavision_dxl2",
+      "prompt": ", Hollywood movie style"
+    },
+    {
+      "key": "arricam-lt",
+      "name": "Arricam LT",
+      "image": "arricam-lt.webp",
+      "sourceKey": "arricam_lt",
+      "prompt": ", Shot on Arricam LT, Kodak Vision3 500T, pin sharp focus, organic medium film grain, soft highlight roll-off, rich color density, faint red halo at the edge of the light source, highly detailed texture."
+    },
+    {
+      "key": "arriflex-435",
+      "name": "ArriFlex 435",
+      "image": "arriflex-435.webp",
+      "sourceKey": "arriflex_435",
+      "prompt": ", Shot on Arriflex 435, Kodak Vision3 250D 5207 style, pin sharp focus, medium film grain, soft highlight roll-off, high dynamic range, rich color density"
+    },
+    {
+      "key": "imax-keighley",
+      "name": "IMAX Keighley",
+      "image": "imax-keighley.webp",
+      "sourceKey": "imax_keighley",
+      "prompt": ", shot on IMAX Keighley, Kodak Vision3 500T style, extremely sharp focus, high dynamic range, Extremely shallow depth of field, 18k resolution, hyper-realistic skin texture, organic film grain, 3D separation, color graded, volumetric lighting, epic scale"
+    },
+    {
+      "key": "imax-film-camera",
+      "name": "IMAX Film Camera",
+      "image": "imax-film-camera.webp",
+      "sourceKey": "imax_film_camera",
+      "prompt": ", high resolution, fine film grain"
+    }
+  ],
+  "lens": [
+    {
+      "key": "zeiss-ultra-prime",
+      "name": "Zeiss Ultra Prime",
+      "image": "zeiss-ultra-prime.webp",
+      "sourceKey": "zeiss_ultra_prime",
+      "prompt": ", using Zeiss Ultra Prime, clinically sharp, high contrast"
+    },
+    {
+      "key": "cooke-sf-1-8x",
+      "name": "Cooke SF 1.8x",
+      "image": "cooke-sf-1-8x.webp",
+      "sourceKey": "cooke_sf_18x",
+      "prompt": ", using Cooke Anamorphic SF, Identify the light source, golden lens flare, oval bokeh, Full Frame Anamorphic, warm cinematic look"
+    },
+    {
+      "key": "canon-k-35",
+      "name": "Canon K-35",
+      "image": "canon-k-35.webp",
+      "sourceKey": "canon_k35",
+      "prompt": ", using Canon K-35 lens, soft contrast, golden lens flare"
+    },
+    {
+      "key": "cooke-s4",
+      "name": "Cooke S4",
+      "image": "cooke-s4.webp",
+      "sourceKey": "cooke_s4",
+      "prompt": ", using Cooke S4 lens, The Cooke Look, creamy bokeh"
+    },
+    {
+      "key": "cooke-panchro",
+      "name": "Cooke Panchro",
+      "image": "cooke-panchro.webp",
+      "sourceKey": "cooke_speed_panchro",
+      "prompt": ", using Cooke Speed Panchro Series III, buttery background blur, The Cooke Look, warm organic tones, soft sharpness, atmospheric depth"
+    },
+    {
+      "key": "arri-signature-prime",
+      "name": "Arri Signature Prime",
+      "image": "arri-signature-prime.webp",
+      "sourceKey": "arri_signature_prime",
+      "prompt": ", using Arri Signature Prime, clean image, perfect optics"
+    },
+    {
+      "key": "helios",
+      "name": "Helios",
+      "image": "helios.webp",
+      "sourceKey": "helios",
+      "prompt": ", using Helios 44-2 lens, swirly bokeh, twisted background"
+    },
+    {
+      "key": "panavision-c-series",
+      "name": "Panavision C-series",
+      "image": "panavision-c-series.webp",
+      "sourceKey": "panavision_c_series",
+      "prompt": ", anamorphic cinematic look, distinct blue horizontal lens flare, oval bokeh"
+    },
+    {
+      "key": "panavision-primo",
+      "name": "Panavision Primo",
+      "image": "panavision-primo.webp",
+      "sourceKey": "panavision_primo",
+      "prompt": ", using Panavision Primo Anamorphic, oval bokeh, Anamorphic format, horizontal blue lens flare, 2x squeeze, anamorphic look"
+    },
+    {
+      "key": "hawk-class-x",
+      "name": "Hawk Class X",
+      "image": "hawk-class-x.webp",
+      "sourceKey": "hawk_class_x",
+      "prompt": ", using Hawk Class X Anamorphic, identify the light source, subtle creamy vertical oval bokeh, organic sharpness, vintage modern aesthetic, soft horizontal flare"
+    }
+  ],
+  "focal": [
+    {
+      "key": "8",
+      "name": "8",
+      "value": 8,
+      "sourceKey": "8mm",
+      "prompt": ", 8mm prime lens, exaggerated perspective, Rectilinear, immense sense of scale, stretching at edges"
+    },
+    {
+      "key": "14",
+      "name": "14",
+      "value": 14,
+      "sourceKey": "14mm",
+      "prompt": ", 14mm prime lens, rectilinear distortion, moderate linear perspective, subtle edge stretch, spatial depth, soft vignetting"
+    },
+    {
+      "key": "24",
+      "name": "24",
+      "value": 24,
+      "sourceKey": "24mm",
+      "prompt": ", 24mm prime lens, minimal rectilinear distortion, natural linear perspective, sharp corner details, cinematic natural framing, mild vignetting"
+    },
+    {
+      "key": "35",
+      "name": "35",
+      "value": 35,
+      "sourceKey": "35mm",
+      "prompt": ", 35mm prime lens, near-zero rectilinear distortion, human-eye natural perspective, sharp full-frame details, subtle vignetting, candid cinematic framing"
+    },
+    {
+      "key": "50",
+      "name": "50",
+      "value": 50,
+      "sourceKey": "50mm",
+      "prompt": ", 50mm prime lens, zero distortion, eye-like perspective, close-up, subject focus, ultra shallow DOF, sharp center, faint vignetting"
+    },
+    {
+      "key": "75",
+      "name": "75",
+      "value": 75,
+      "sourceKey": "75mm",
+      "prompt": ", 75mm prime lens, zero distortion, strong compression, extreme tight close, subject full dominance, extreme shallow DOF, sharp center, faint vignetting"
+    },
+    {
+      "key": "125",
+      "name": "125",
+      "value": 125,
+      "sourceKey": "125mm",
+      "prompt": ", 125mm macro lens, 1:1 magnification, extreme compression, microscopic view, razor-sharp details, total background isolation, creamy bokeh, texture focused"
+    }
+  ],
+  "aperture": [
+    {
+      "key": "f1-4",
+      "name": "ƒ/1.4",
+      "value": 1.4,
+      "image": "aperture-f1-4.webp",
+      "sourceKey": "f/1.4",
+      "prompt": ", shallow depth of field, creamy bokeh, out-of-focus background"
+    },
+    {
+      "key": "f4",
+      "name": "ƒ/4",
+      "value": 4,
+      "image": "aperture-f4.webp",
+      "sourceKey": "f/4",
+      "prompt": ", f/4 aperture, infinite depth of field, razor-sharp details, hyperfocal distance"
+    },
+    {
+      "key": "f11",
+      "name": "ƒ/11",
+      "value": 11,
+      "image": "aperture-f11.webp",
+      "sourceKey": "f/11",
+      "prompt": ", f/11 aperture, deep depth of field, crystal clear background, everything in focus"
+    }
+  ]
+}

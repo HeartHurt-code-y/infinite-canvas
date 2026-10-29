@@ -48,6 +48,8 @@ export interface UseFloatingLayerAnchorOptions extends Omit<
    * 同一个 DOM 节点只该有一个 ref 源头。
    */
   readonly anchorRef: React.RefObject<HTMLElement | null>;
+  /** 画布通过 transform / 编辑层定位移动锚点时，低频跟随；仅在打开时启用。 */
+  readonly followAnchor?: boolean;
 }
 export interface FloatingLayerAnchor<T extends HTMLElement = HTMLElement> {
   /** 挂到浮层根节点上的 ref。 */
@@ -62,7 +64,7 @@ export interface FloatingLayerAnchor<T extends HTMLElement = HTMLElement> {
 export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
   options: UseFloatingLayerAnchorOptions,
 ): FloatingLayerAnchor<T> {
-  const { open, anchorRef, minWidth, preferAbove, maxHeight, margin, leftOffset, gap } = options;
+  const { open, anchorRef, minWidth, preferAbove, maxHeight, margin, leftOffset, gap, align, followAnchor } = options;
   const layerRef = useRef<T | null>(null);
   /*
    * 面板实际高度。
@@ -78,7 +80,15 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
     const layer = layerRef.current;
     const anchor = anchorRef.current;
     if (layer == null || anchor == null) return;
+    if (followAnchor) {
+      const bounds = anchor.getBoundingClientRect();
+      const available = anchor.isConnected && bounds.width > 0 && bounds.height > 0
+        && !anchor.closest("[inert]") && getComputedStyle(anchor).visibility !== "hidden";
+      layer.style.visibility = available ? "" : "hidden";
+      if (!available) return;
+    }
     const box = placeFloatingLayer(anchor, {
+      ...(align === undefined ? {} : { align }),
       ...(minWidth === undefined ? {} : { minWidth }),
       ...(preferAbove === undefined ? {} : { preferAbove }),
       ...(maxHeight === undefined ? {} : { maxHeight }),
@@ -91,7 +101,7 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
     layer.style.left = `${box.left}px`;
     layer.style.width = `${box.width}px`;
     layer.style.maxHeight = `${box.maxHeight}px`;
-  }, [anchorRef, gap, leftOffset, margin, maxHeight, minWidth, preferAbove]);
+  }, [anchorRef, gap, leftOffset, margin, maxHeight, minWidth, preferAbove, align, followAnchor]);
 
   useLayoutEffect(() => {
     if (!open) {
@@ -127,6 +137,13 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
       window.removeEventListener("scroll", applyPosition, true);
     };
   }, [open, applyPosition]);
+
+  useLayoutEffect(() => {
+    if (!open || !followAnchor) return;
+    // transform 不派发 scroll；避免逐帧读取布局，只跟随当前打开的画布浮层。
+    const timer = window.setInterval(applyPosition, 150);
+    return () => window.clearInterval(timer);
+  }, [open, followAnchor, applyPosition]);
 
   return { ref: layerRef };
 }

@@ -318,10 +318,7 @@ pub(crate) fn unavailable_response(
 ) -> Response<Vec<u8>> {
     let mut headers = HeaderMap::new();
     headers.insert("content-type", HeaderValue::from_static("application/json"));
-    headers.insert(
-        "access-control-allow-origin",
-        HeaderValue::from_static("*"),
-    );
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
     headers.insert("cache-control", HeaderValue::from_static("no-store"));
     let body = if is_head {
         Vec::new()

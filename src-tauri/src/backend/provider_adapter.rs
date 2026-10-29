@@ -22,15 +22,20 @@ pub const DOUBAO_VOICE_ADAPTER_ID: &str = "doubao_voice_v1";
 pub const GRSAI_ADAPTER_ID: &str = "grsai_v1";
 /// 饭众烟图片与视频：按连接使用统一异步任务协议。
 pub const FZY_ADAPTER_ID: &str = "fzy_ai_v1";
+/// Atlas Cloud 模型生成 API：出图 `POST /api/v1/model/generateImage`、出视频
+/// `POST /api/v1/model/generateVideo`，轮询统一 `GET /api/v1/model/prediction/{id}`；
+/// 平台所有回答套一层 `data` 信封，与 OpenAI 兼容网关的 `/v1/images/*` 完全不同。
+pub const ATLASCLOUD_ADAPTER_ID: &str = "atlascloud_v1";
 pub const DOUBAO_VOICE_BASE_URL: &str = "https://openspeech.bytedance.com";
 
-pub const SUPPORTED_ADAPTER_IDS: [&str; 6] = [
+pub const SUPPORTED_ADAPTER_IDS: [&str; 7] = [
     MOYU_ADAPTER_ID,
     ARK_ADAPTER_ID,
     BAILIAN_ADAPTER_ID,
     DOUBAO_VOICE_ADAPTER_ID,
     GRSAI_ADAPTER_ID,
     FZY_ADAPTER_ID,
+    ATLASCLOUD_ADAPTER_ID,
 ];
 
 /// 华北2（北京）百炼 MaaS 主机后缀。业务空间 ID 作为子域拼进完整 Base URL。
@@ -54,6 +59,7 @@ pub enum ProviderAdapterKind {
     DoubaoVoice,
     Grsai,
     FzyAi,
+    AtlasCloud,
 }
 
 impl ProviderAdapterKind {
@@ -65,6 +71,7 @@ impl ProviderAdapterKind {
             DOUBAO_VOICE_ADAPTER_ID => Some(Self::DoubaoVoice),
             GRSAI_ADAPTER_ID => Some(Self::Grsai),
             FZY_ADAPTER_ID => Some(Self::FzyAi),
+            ATLASCLOUD_ADAPTER_ID => Some(Self::AtlasCloud),
             _ => None,
         }
     }
@@ -88,9 +95,9 @@ impl ProviderAdapterKind {
         match self {
             Self::VolcengineArk => ARK_MODELS_PATH,
             Self::AliyunBailian => BAILIAN_MODELS_PATH,
-            // Grsai 与豆包语音一样没有目录接口：`list_models` 直接返回文档列明的
-            // 固定模型清单，不走这个路径。
-            Self::Grsai | Self::DoubaoVoice => "",
+            // Grsai、Atlas Cloud 与豆包语音一样没有目录接口：`list_models` 直接返回
+            // 文档列明的固定模型清单，不走这个路径。
+            Self::Grsai | Self::DoubaoVoice | Self::AtlasCloud => "",
             Self::Moyu | Self::FzyAi => GATEWAY_MODELS_PATH,
         }
     }
@@ -102,9 +109,12 @@ impl ProviderAdapterKind {
                 ("page_size", "1".into()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai | Self::FzyAi => {
-                Vec::new()
-            }
+            Self::Moyu
+            | Self::VolcengineArk
+            | Self::DoubaoVoice
+            | Self::Grsai
+            | Self::FzyAi
+            | Self::AtlasCloud => Vec::new(),
         }
     }
 
@@ -115,9 +125,12 @@ impl ProviderAdapterKind {
                 ("page_size", page_size.to_string()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai | Self::FzyAi => {
-                Vec::new()
-            }
+            Self::Moyu
+            | Self::VolcengineArk
+            | Self::DoubaoVoice
+            | Self::Grsai
+            | Self::FzyAi
+            | Self::AtlasCloud => Vec::new(),
         }
     }
 
@@ -138,10 +151,15 @@ impl ProviderAdapterKind {
     }
 
     pub fn supports_asset_library(self) -> bool {
-        // Grsai 只有 generate / result 两个接口，没有素材库浏览或上传。
+        // Grsai 只有 generate / result 两个接口，没有素材库浏览或上传；
+        // Atlas Cloud 只开放出图与轮询（外加一次性素材上传），没有素材库浏览接口。
         !matches!(
             self,
-            Self::AliyunBailian | Self::DoubaoVoice | Self::Grsai | Self::FzyAi
+            Self::AliyunBailian
+                | Self::DoubaoVoice
+                | Self::Grsai
+                | Self::FzyAi
+                | Self::AtlasCloud
         )
     }
 
@@ -189,8 +207,9 @@ impl ProviderAdapterKind {
                 Ok(DOUBAO_VOICE_BASE_URL.into())
             }
             // Grsai 有全球 / 国内两个官方节点，也常见自建中转：像 OpenAI 兼容网关一样
-            // 保留用户填写的 Base URL，不做主机白名单。
-            Self::Grsai | Self::Moyu | Self::FzyAi => Ok(base_url),
+            // 保留用户填写的 Base URL，不做主机白名单。Atlas Cloud 同理（文档只给
+            // `https://api.atlascloud.ai`，但也允许自建网关）。
+            Self::Grsai | Self::Moyu | Self::FzyAi | Self::AtlasCloud => Ok(base_url),
         }
     }
 }

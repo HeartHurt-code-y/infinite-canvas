@@ -20,7 +20,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri_plugin_log::log::warn;
 use ts_rs::TS;
 
 use super::{
@@ -116,6 +115,7 @@ pub struct VideoClipMaterial {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct StartVideoClipCommand {
+    pub client_task_id: String,
     pub canvas_id: String,
     pub source_node_id: String,
     /// 合成模式（原站 5 项之一）。
@@ -347,6 +347,15 @@ fn validate_materials(
     spec: &VideoClipModeSpec,
     materials: &[VideoClipMaterial],
 ) -> BackendResult<()> {
+    for material in materials {
+        let slot = spec.slots.iter().find(|slot| slot.slot_key == material.slot_key)
+            .ok_or_else(|| BackendError::validation("当前模式不接受此素材槽位", json!({"slot":material.slot_key})))?;
+        if !slot_matches(slot, material)
+            || (material.node_type == "text" && material.text.as_deref().is_none_or(|text| text.trim().is_empty()))
+            || material.target.as_ref().is_some_and(|target| target.media_type().as_str() != material.node_type) {
+            return Err(BackendError::validation("素材类型或内容与剪辑槽位不匹配，请重新连接", json!({"slot":material.slot_key})));
+        }
+    }
     for slot in spec.slots {
         let assigned: Vec<&VideoClipMaterial> = materials
             .iter()
@@ -426,7 +435,7 @@ fn compose_prompt_body(command: &StartVideoClipCommand, spec: &VideoClipModeSpec
 fn compose_explicit_media(
     spec: &VideoClipModeSpec,
     materials: &[VideoClipMaterial],
-) -> Vec<ExplicitMediaInput> {
+) -> BackendResult<Vec<ExplicitMediaInput>> {
     let mut explicit_media: Vec<ExplicitMediaInput> = Vec::new();
     for slot in spec.slots {
         if slot.accepted_node_types.contains(&"text") {
@@ -440,29 +449,23 @@ fn compose_explicit_media(
                 .accepted_node_types
                 .contains(&material.node_type.as_str())
             {
-                warn!(
-                    "[智能剪辑] 素材节点类型与槽位不匹配，已跳过：slot={}, nodeType={}, name={}",
-                    material.slot_key, material.node_type, material.display_name
-                );
-                continue;
+                return Err(BackendError::validation("剪辑素材类型与槽位不匹配", json!({"slot":slot.slot_key})));
             }
             let Some(target) = material.target.clone() else {
-                warn!(
-                    "[智能剪辑] 素材缺少素材身份，已跳过：slot={}, name={}",
-                    material.slot_key, material.display_name
-                );
-                continue;
+                return Err(BackendError::validation("剪辑素材缺少可执行身份，请重新连接", json!({"slot":slot.slot_key})));
             };
             explicit_media.push(ExplicitMediaInput {
                 target,
-                role: material.role.clone(),
+                role: match material.node_type.as_str() {
+                    "image" => "reference_image", "audio" => "reference_audio", _ => "reference_video",
+                }.into(),
                 display_name_snapshot: material.display_name.clone(),
                 type_position: None,
                 content_index: None,
             });
         }
     }
-    explicit_media
+    Ok(explicit_media)
 }
 
 /// 校验 + 组装：把智能剪辑请求翻译成既有生成管线的命令。
@@ -470,6 +473,11 @@ fn compose_explicit_media(
 pub fn prepare_generation_command(
     command: &StartVideoClipCommand,
 ) -> BackendResult<StartGenerationCommand> {
+    uuid::Uuid::parse_str(&command.client_task_id).map_err(|_| BackendError::validation("剪辑请求身份无效", json!({})))?;
+    validate_params(&command.params)?;
+    if command.operation != GenerationOperation::VideoGeneration {
+        return Err(BackendError::validation("智能剪辑只能创建视频任务", json!({})));
+    }
     let spec = command.mode.spec();
     if spec.prompt_required && command.prompt.trim().is_empty() {
         return Err(BackendError::validation(
@@ -487,15 +495,26 @@ pub fn prepare_generation_command(
         ));
     }
     // 原站合成提示词 = 用户提示词（+ 文稿正文）+`，参数是 比例 · 清晰度 · 时长`
-    let prompt = format!("{body}，参数是 {}", params_summary(&command.params));
+    let instruction = match command.mode {
+        VideoClipMode::ExplainerVideo => "制作讲解视频，以提供的声音参考与文稿组织旁白和对应画面，保持叙述连贯。",
+        VideoClipMode::BatchAd => "制作产品广告，以产品图保持外观与品牌一致，参考视频只用于节奏、结构与运镜，不复制其中无关产品。",
+        VideoClipMode::TalkingHeadVideo => "制作口播视频，遵循提供的声音参考与文稿，画面人物、口型与叙述保持一致。",
+        VideoClipMode::SmartMixCut => "按用户需求组织参考视频的节奏、内容与剪辑顺序。",
+        VideoClipMode::Default => "按照用户要求对所给视频进行剪辑。",
+    };
+    let prompt = format!("{instruction}\n{body}，参数是 {}", params_summary(&command.params));
 
-    let parameters = json!({
+    let mut parameters = json!({
         "aspect_ratio": command.params.aspect_ratio.trim(),
         "duration": command.params.duration_seconds,
         "resolution": command.params.resolution.trim(),
     });
+    if command.params.duration_seconds == 0 { parameters.as_object_mut().expect("parameters object").remove("duration"); }
 
     Ok(StartGenerationCommand {
+        client_task_id: Some(command.client_task_id.clone()),
+        camera_control_snapshot: None,
+        image_preset_snapshot: None,
         output_name: command.output_name.clone(),
         // 智能剪辑不是工作流编排任务：没有工作流运行号。
         workflow_run_id: None,
@@ -505,13 +524,21 @@ pub fn prepare_generation_command(
         provider_connection_id: command.provider_connection_id.clone(),
         model_definition_id: command.model_definition_id.clone(),
         prompt: vec![PromptSegment::Text { text: prompt }],
-        explicit_media: compose_explicit_media(spec, &command.materials),
+        explicit_media: compose_explicit_media(spec, &command.materials)?,
         parameters,
         // 智能剪辑不是 Seedance 草稿/编辑链路，任务意图不参与供应商参数方言。
         video_task_type: None,
         model_operation_schema_snapshot: None,
         generation_count: 1,
     })
+}
+
+pub(crate) fn validate_params(params: &VideoClipParams) -> BackendResult<()> {
+    if !["21:9", "16:9", "9:16", "1:1", "4:3", "3:4"].contains(&params.aspect_ratio.as_str())
+        || !["480P", "720P", "1080P"].contains(&params.resolution.as_str()) || params.duration_seconds > 300 {
+        return Err(BackendError::validation("请选择支持的比例、清晰度和0至300秒时长", json!({})));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------

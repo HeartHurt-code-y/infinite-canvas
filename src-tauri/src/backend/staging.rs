@@ -1547,8 +1547,7 @@ impl StagingService {
              */
             warn!(
                 "[staging] 暂存对象已上传但状态落盘失败，回收对象避免泄漏: jobId={}, error={}",
-                persisted.id,
-                error
+                persisted.id, error
             );
             self.live_leases.lock().await.remove(&persisted.id);
             if let Err(cleanup_error) = self.cleanup_lease(&lease).await {
@@ -1558,8 +1557,7 @@ impl StagingService {
                  */
                 warn!(
                     "[staging] 暂存对象回收失败（对象可能残留）: jobId={}, error={}",
-                    persisted.id,
-                    cleanup_error
+                    persisted.id, cleanup_error
                 );
             }
             return Err(error);
@@ -1651,10 +1649,9 @@ impl StagingService {
     /// 进程死在「已删除」与「已落库」之间时，下一轮会重发 DELETE，
     /// 对象存储回 404 被当作「已经删掉了」，结果一致。
     pub async fn reap_leaked_objects(&self) -> BackendResult<StagingCleanupSummary> {
-        let candidates = self.storage.list_staging_cleanup_candidates(
-            CLEANUP_MAX_RETRY_COUNT,
-            CLEANUP_MAX_ROWS_PER_PASS,
-        )?;
+        let candidates = self
+            .storage
+            .list_staging_cleanup_candidates(CLEANUP_MAX_RETRY_COUNT, CLEANUP_MAX_ROWS_PER_PASS)?;
         let mut summary = StagingCleanupSummary::default();
         for candidate in candidates {
             /*
@@ -1685,8 +1682,11 @@ impl StagingService {
                     let terminal = retry_count >= CLEANUP_MAX_RETRY_COUNT;
                     let next_at =
                         (!terminal).then(|| now_ms() + cleanup_retry_delay_ms(retry_count));
-                    self.storage
-                        .record_staging_cleanup_failure(&candidate.id, retry_count, next_at)?;
+                    self.storage.record_staging_cleanup_failure(
+                        &candidate.id,
+                        retry_count,
+                        next_at,
+                    )?;
                     if terminal {
                         summary.abandoned += 1;
                         error!(
@@ -1754,10 +1754,7 @@ impl StagingService {
     }
 
     /// 删除单个中转对象：重签 DELETE 地址 → 发起删除 → 成功/已不存在都算删掉了。
-    async fn delete_leaked_object(
-        &self,
-        candidate: &StagingCleanupCandidate,
-    ) -> BackendResult<()> {
+    async fn delete_leaked_object(&self, candidate: &StagingCleanupCandidate) -> BackendResult<()> {
         let saved = self.storage.get_staging_object_target(&candidate.id)?;
         let config = self.resolve_cleanup_config(&candidate.id, saved.as_ref())?;
         /*
@@ -1776,8 +1773,11 @@ impl StagingService {
                 json!({ "jobId": candidate.id, "objectKey": candidate.object_key }),
             ));
         }
-        let lease = self
-            .presign_existing_object_with_config(&candidate.id, &candidate.object_key, &config)?;
+        let lease = self.presign_existing_object_with_config(
+            &candidate.id,
+            &candidate.object_key,
+            &config,
+        )?;
         let delete_url = lease.delete_url.ok_or_else(|| {
             BackendError::protocol(
                 "staging cleanup lease has no delete url",
@@ -1800,7 +1800,9 @@ impl StagingService {
     ) -> BackendResult<TosStagingConfig> {
         let current = self.storage.get_tos_config()?;
         let config = match (saved, current) {
-            (Some(saved), Some(current)) if same_object_scope(saved, &current) && current.enabled => {
+            (Some(saved), Some(current))
+                if same_object_scope(saved, &current) && current.enabled =>
+            {
                 current
             }
             (Some(saved), _) => saved.clone(),

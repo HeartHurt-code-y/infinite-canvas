@@ -1,0 +1,26 @@
+.long-video-status { color: var(--nt-text-secondary); font-size: var(--text-sm); }
+.long-video-status > button { padding: var(--space-xs) var(--space-sm); color: var(--nt-text-default); background: var(--canvas-chip-bg); border: 0; border-radius: var(--radius-sm); }
+.long-video-process { display: grid; width: min(var(--canvas-long-video-process-width), 100%); max-height: calc(100dvh - var(--space-xl)); gap: var(--space-sm); padding: var(--space-md); overflow: auto; color: var(--nt-text-default); font-size: var(--text-sm); background: var(--panel-background); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: var(--radius-ll-float); }
+.long-video-process > header, .long-video-process__shots header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.long-video-process > header > div { display: grid; min-width: 0; gap: var(--space-xs); }
+.long-video-process :is(p, header span) { color: var(--nt-text-secondary); }
+.long-video-process button { min-height: var(--canvas-video-option-height); padding: var(--space-xs) var(--space-sm); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: var(--radius-sm); }
+.long-video-process > progress { width: 100%; accent-color: var(--nt-text-default); }
+.long-video-process__summary, .long-video-process__actions, .long-video-process__budget { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm); }
+.long-video-process__summary span { white-space: nowrap; }
+.long-video-process label { display: grid; min-width: 0; gap: var(--space-xs); }
+.long-video-process :is(input, textarea) { width: 100%; min-width: 0; font: inherit; }
+.long-video-process textarea { min-height: var(--canvas-long-video-prompt-height); resize: vertical; }
+.long-video-process__shots { display: grid; gap: var(--space-sm); padding: 0; list-style: none; }
+.long-video-process__shots > li { display: grid; min-width: 0; gap: var(--space-xs); padding: var(--space-sm); background: var(--canvas-chip-bg); border-radius: var(--radius-sm); }
+.long-video-process video { display: block; width: 100%; max-height: var(--canvas-video-preview-height); background: var(--canvas-video-preview-bg); border-radius: var(--radius-sm); }
+.long-video-process__events { display: grid; gap: var(--space-xs); padding: var(--space-sm); list-style: none; }
+.long-video-process__events li { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+.long-video-process__events time { color: var(--nt-text-muted); }
+.long-video-history { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
+/*
+ * 状态提示是常驻的 live region（条件渲染的 role="status" 不会被朗读）。
+ * 空的时候收成零高度，但不能 display:none —— 那样它就不在无障碍树里，
+ * 之后写入内容也不会被播报。
+ */
+.long-video-process__status:empty { height: 0; margin: 0; padding: 0; overflow: hidden; }

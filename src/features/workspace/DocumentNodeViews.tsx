@@ -13,6 +13,9 @@ import { CanvasSelect } from "../../components/CanvasSelect";
 import { ImeTextarea } from "../../components/ImeTextField";
 
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
+import { CanvasTextTryActions } from "./CanvasTextTryActions";
+import { usePromptAttachmentCount } from "./useNodePromptSummary";
+import type { CanvasTextTryActionKey } from "./canvasTextTryActionCatalog";
 import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import { AutoSizeThumb } from "./MediaNodeViews";
 import { RequiredMark } from "../../components/RequiredMark";
@@ -589,6 +592,9 @@ export function CanvasPromptNode({
   registerPromptInput,
   mentionCandidates,
   aliveCanvasNodeKeys,
+  onTryAction,
+  autoFocusOutput,
+  onOutputFocusHandled,
   expandable = true,
 }: {
   readonly expandable?: boolean;
@@ -611,7 +617,7 @@ export function CanvasPromptNode({
   readonly targetConnections: readonly {
     readonly key: string;
     readonly name: string;
-    readonly kind: "image" | "video";
+    readonly kind: "image" | "video" | "audio";
     readonly edgeId: string;
   }[];
   readonly onSelect: (key: string) => void;
@@ -640,6 +646,23 @@ export function CanvasPromptNode({
   readonly mentionCandidates: readonly MentionCandidate[];
   /** 画布上仍然存在的节点 key；用于把已删除素材的失效引用按同源/同名自愈重连。 */
   readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
+  /**
+   * 空态「尝试：」四个入口。
+   *
+   * 逆向来源：liblib.tv 文本节点的 `empty_generate` 状态（见
+   * `docs/integrations/liblib-text-node-re.md` 第 2、3 节）。
+   * 不传则不渲染这张卡片。
+   */
+  readonly onTryAction?: ((key: CanvasTextTryActionKey) => void) | undefined;
+  /**
+   * 打开后把光标放进输出编辑器。
+   *
+   * 画布上的「自己编写内容」会先打开独立编辑区，再把光标落进正文 ——
+   * 用户点一下就能直接写，不用先找到输入框。
+   */
+  readonly autoFocusOutput?: boolean | undefined;
+  /** 光标已落位（或落不了）后回报一次，画布据此清掉待办标记。 */
+  readonly onOutputFocusHandled?: ((nodeKey: string) => void) | undefined;
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const textModelProviders = providerCatalog
@@ -668,15 +691,33 @@ export function CanvasPromptNode({
   const hasModeHint = isFpvPath || isFightPromptMaster || isCinematicDialogue;
   const modeHintId = `prompt-mode-hint-${node.key}`;
   const conversation = node.config.conversation ?? [];
+  const promptAttachmentCount = usePromptAttachmentCount(promptContents, node.key);
   const conversationRef = useRef<HTMLDivElement>(null);
   const promptOutputId = `prompt-output-${node.key}`;
   const promptStatusText = node.config.generatedPrompt
     ? `已生成 ${node.config.generatedPrompt.length} 字${conversation.length > 0 ? `，累计 ${conversation.length} 条对话` : ""}${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 个参考素材` : ""}`
     : "输出会作为下游节点的提示词请求参数";
 
+  /*
+   * 空态判定，对齐原站文本节点的状态机（`empty_generate`）：
+   * 没有正文、没有对话、没有本轮输入、也没有连入的参考素材时，
+   * 节点处于「什么都还没有」的状态，此时才给「尝试：」卡片。
+   */
+  const isEmptyState =
+    !running &&
+    conversation.length === 0 &&
+    !node.config.generatedPrompt.trim() &&
+    promptAttachmentCount === 0 &&
+    !node.config.sourcePrompt.trim() &&
+    sourceConnections.length === 0;
+
   // 跟踪最后一次由外部（大模型生成）写入的文本，避免 onTextChange 回写时触发循环。
   // 初始化为 null，确保节点挂载时即使 generatedPrompt 已有值也会同步到编辑器。
   const lastExternalTextRef = useRef<string | null>(null);
+  // 输出编辑器的会话：「自己编写内容」要把光标放进去（编辑器里已有 @引用与附件）。
+  const outputSessionRef = useRef<PromptContentEditorSession | null>(null);
+  // 「创意 / 需求」输入框：输出编辑器还没挂上时的兜底聚焦目标。
+  const sourcePromptRef = useRef<HTMLTextAreaElement | null>(null);
   const updateCinematicDialogueGuard = (patch: Partial<CinematicDialogueGuard>) => {
     lastExternalTextRef.current = "";
     promptContents.replaceText(node.key, "", mentionCandidates);
@@ -748,6 +789,38 @@ export function CanvasPromptNode({
     [isCinematicDialogue, node.config, onChange],
   );
 
+  /**
+   * 「尝试：」的动作分发。
+   *
+   * 「自己编写内容」是纯本地交互：原站是「把节点切到可编辑正文」，
+   * 本项目的输出编辑器本来就常驻，聚焦它即可（编辑器里已有的 @引用与附件都在）。
+   * 其余三个动作要建节点、连线，由画布层处理。
+   */
+  const handleTryAction = useCallback(
+    (key: CanvasTextTryActionKey) => {
+      if (key === "writeText") {
+        if (outputSessionRef.current?.focus()) return;
+        sourcePromptRef.current?.focus();
+        return;
+      }
+      onTryAction?.(key);
+    },
+    [onTryAction],
+  );
+
+  /** 输出编辑器的会话出口（稳定引用，避免编辑器每渲染一次就重挂一次会话）。 */
+  const handleOutputSession = useCallback((session: PromptContentEditorSession | null) => {
+    outputSessionRef.current = session;
+  }, []);
+
+  // 打开编辑区后把光标放进输出编辑器；落不进去（如编辑器还没挂上）也要回报，
+  // 否则画布上的「待聚焦」标记会一直挂着。
+  useEffect(() => {
+    if (!autoFocusOutput) return;
+    outputSessionRef.current?.focus();
+    onOutputFocusHandled?.(node.key);
+  }, [autoFocusOutput, node.key, onOutputFocusHandled]);
+
   // 新消息出现时把对话区滚动到底部。
   useEffect(() => {
     const element = conversationRef.current;
@@ -778,7 +851,11 @@ export function CanvasPromptNode({
       aria-busy={running}
       onMouseDown={(event) => {
         const target = event.target as HTMLElement;
-        if (target.closest("textarea, select, button, .canvas-prompt-node__body")) {
+        if (
+          target.closest(
+            "textarea, select, button, .canvas-prompt-node__body, .canvas-text-generator",
+          )
+        ) {
           onSelect(node.key);
           return;
         }
@@ -799,6 +876,9 @@ export function CanvasPromptNode({
       </div>
 
       <div className="canvas-prompt-node__body">
+        {isEmptyState && onTryAction ? (
+          <CanvasTextTryActions onAction={handleTryAction} />
+        ) : null}
         <details className="canvas-prompt-node__guide nodrag">
           <summary>使用说明</summary>
           <strong>
@@ -1095,6 +1175,7 @@ export function CanvasPromptNode({
         <label className="canvas-prompt-node__field">
           <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
           <ImeTextarea
+            ref={sourcePromptRef}
             aria-label={node.config.task === "generate" ? "创意或需求" : "待优化提示词"}
             aria-describedby={hasModeHint ? modeHintId : undefined}
             placeholder={
@@ -1162,6 +1243,7 @@ export function CanvasPromptNode({
               describedBy={promptOutputId}
               expandable={expandable}
               onTextChange={handlePromptTextChange}
+              onSession={handleOutputSession}
             />
           </div>
         </div>
@@ -1182,7 +1264,12 @@ export function CanvasPromptNode({
               {targetConnections.map((connection) => (
                 <li key={connection.edgeId}>
                   <span>
-                    {connection.kind === "image" ? "图片" : "视频"}节点 · {connection.name}
+                    {connection.kind === "image"
+                      ? "图片"
+                      : connection.kind === "audio"
+                        ? "音频"
+                        : "视频"}
+                    节点 · {connection.name}
                   </span>
                   <button
                     type="button"

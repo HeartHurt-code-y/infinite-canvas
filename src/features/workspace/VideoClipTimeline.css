@@ -1,0 +1,36 @@
+.clip-timeline { width: min(1120px, calc(100vw - 24px)); max-width: none; height: min(800px, calc(100dvh - 24px)); max-height: none; padding: 0; color: var(--nt-text-default); background: var(--canvas-node-bg); border: 1px solid var(--nt-border-neutral-l1); border-radius: 16px; overflow: hidden; }
+.clip-timeline[open] { display: flex; flex-direction: column; }
+.clip-timeline::backdrop { background: rgb(0 0 0 / 72%); }
+.clip-timeline__header, .clip-timeline footer { display: flex; align-items: center; gap: 12px; flex-shrink: 0; padding: 12px 16px; border-bottom: 1px solid var(--nt-border-neutral-l1); }
+.clip-timeline__header > div { flex: 1; min-width: 0; }
+.clip-timeline h2 { margin: 0; font-size: 16px; }
+.clip-timeline p { margin: 6px 0; color: var(--nt-text-muted); font-size: 12px; }
+.clip-timeline button { padding: 7px 10px; color: inherit; background: var(--nt-bg-overlay); border: 1px solid var(--nt-border-neutral-l1); border-radius: 7px; cursor: pointer; }
+.clip-timeline button:disabled { opacity: .45; cursor: default; }
+.clip-timeline button:focus-visible, .clip-timeline input:focus-visible, .clip-timeline textarea:focus-visible { outline: 2px solid var(--nt-text-default); outline-offset: 2px; }
+.clip-timeline__body { display: grid; grid-template-columns: minmax(0, 1fr) 290px; align-content: start; gap: 16px; min-height: 0; flex: 1; padding: 16px; overflow: auto; }
+.clip-timeline__preview { position: relative; display: grid; place-items: center; min-height: 260px; background: #080808; border-radius: 10px; overflow: hidden; }
+.clip-timeline__preview video { width: 100%; max-height: 350px; }
+.clip-timeline__preview output { padding: 6px; color: var(--nt-text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.clip-timeline__preview .clip-timeline__caption { position: absolute; bottom: 70px; margin: 0; padding: 4px 10px; max-width: 90%; white-space: pre-wrap; text-align: center; color: #fff; background: #000a; pointer-events: none; }
+.clip-timeline__inspector fieldset { display: flex; flex-direction: column; gap: 9px; min-width: 0; padding: 0; border: 0; }
+.clip-timeline__inspector legend { margin-bottom: 12px; max-width: 100%; overflow-wrap: anywhere; font-size: 14px; }
+.clip-timeline label { display: flex; flex-direction: column; gap: 5px; font-size: 12px; }
+.clip-timeline input, .clip-timeline textarea { min-width: 0; padding: 6px; color: inherit; background: var(--nt-bg-overlay); border: 1px solid var(--nt-border-neutral-l1); border-radius: 5px; }
+.clip-timeline .clip-timeline__check { flex-direction: row; align-items: center; }
+.clip-timeline__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.clip-timeline__sequence, .clip-timeline__job, .clip-timeline__body > .error-alert { grid-column: 1 / -1; min-width: 0; }
+.clip-timeline__sequence-title { display: flex; justify-content: space-between; font-size: 12px; }
+.clip-timeline__sequence ol { display: flex; gap: 8px; margin: 8px 0 0; padding: 4px; overflow-x: auto; list-style: none; }
+.clip-timeline__sequence li { flex: 0 0 168px; padding: 3px; border: 1px solid transparent; border-radius: 9px; }
+.clip-timeline__sequence li.is-selected { border-color: var(--nt-text-default); }
+.clip-timeline__sequence li > button { display: flex; flex-direction: column; gap: 6px; width: 100%; min-height: 66px; text-align: left; }
+.clip-timeline__sequence li span { display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-timeline__sequence li small { color: var(--nt-text-muted); }
+.clip-timeline__sequence li > div { display: flex; gap: 4px; margin-top: 4px; }
+.clip-timeline__job { padding: 12px; border: 1px solid var(--nt-border-neutral-l1); border-radius: 10px; font-size: 12px; }
+.clip-timeline__job .clip-timeline__actions { margin-top: 10px; }
+.clip-timeline footer { flex-wrap: wrap; border-top: 1px solid var(--nt-border-neutral-l1); border-bottom: 0; }
+.clip-timeline footer > span { flex: 1; color: var(--nt-text-muted); font-size: 12px; }
+@media (max-width: 720px) { .clip-timeline__body { grid-template-columns: minmax(0, 1fr); padding: 10px; gap: 12px; } .clip-timeline__preview { min-height: 170px; } .clip-timeline footer > span { flex-basis: 100%; } }
+@media (max-height: 520px) { .clip-timeline__preview { min-height: 150px; } .clip-timeline__preview video { max-height: 220px; } .clip-timeline__header, .clip-timeline footer { padding: 8px 12px; } }

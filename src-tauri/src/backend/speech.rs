@@ -36,11 +36,11 @@ const GATEWAY_SYNTHESIS_ENGINE: &str = "gateway-tts-create-v1";
 const DOUBAO_RESOURCE_ID: &str = "seed-tts-2.0";
 const DUB_ENGINE: &str = "ffmpeg-dub-v1";
 /// 单句合成响应字节上限；两条协议共用，防止异常大包直写磁盘。
-const MAX_SPEECH_RESPONSE_BYTES: usize = 96 * 1024 * 1024;
+pub(crate) const MAX_SPEECH_RESPONSE_BYTES: usize = 96 * 1024 * 1024;
 /// 参考音频（音色复刻）以 Base64 内联进请求体，原始文件上限。
-const MAX_REFERENCE_AUDIO_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_REFERENCE_AUDIO_BYTES: usize = 20 * 1024 * 1024;
 /// 网关错误响应体的读取上限；错误信封远小于音频，多余部分不保留。
-const MAX_GATEWAY_ERROR_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_GATEWAY_ERROR_BYTES: usize = 1024 * 1024;
 /// 文档声明的语速/音量区间 `[-50, 100]` 与音调区间 `[-12, 12]`。
 const SPEECH_RATE_RANGE: (i32, i32) = (-50, 100);
 const PITCH_RATE_RANGE: (i32, i32) = (-12, 12);
@@ -278,7 +278,7 @@ async fn run(
 
 /// 一条连接可执行的语音合成协议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpeechWire {
+pub(crate) enum SpeechWire {
     /// 豆包语音 OpenSpeech：`X-Api-Key` 鉴权，SSE 事件里逐块 Base64 音频。
     DoubaoSse,
     /// OpenAI 兼容网关（魔芋 `seed-audio` 系）：Bearer 鉴权，成功响应体是音频二进制。
@@ -286,17 +286,17 @@ enum SpeechWire {
 }
 
 /// 绑定、模型定义与凭据解析后的语音模型快照；`synthesize` 只依赖这份结果。
-struct ResolvedSpeechModel {
-    context: ResolvedProviderContext,
-    wire: SpeechWire,
-    engine: &'static str,
+pub(crate) struct ResolvedSpeechModel {
+    pub(crate) context: ResolvedProviderContext,
+    pub(crate) wire: SpeechWire,
+    pub(crate) engine: &'static str,
     /// 请求端点：优先取模型 Schema 的 `request.path`，缺省用该协议的规范值。
-    path: String,
-    remote_model_id: String,
+    pub(crate) path: String,
+    pub(crate) remote_model_id: String,
 }
 
 /// 端点是连接的属性：适配器决定走哪条合成协议，模型名只用来核对家族。
-fn speech_wire_for_adapter(adapter_id: &str) -> BackendResult<SpeechWire> {
+pub(crate) fn speech_wire_for_adapter(adapter_id: &str) -> BackendResult<SpeechWire> {
     if adapter_id == DOUBAO_VOICE_ADAPTER_ID {
         return Ok(SpeechWire::DoubaoSse);
     }
@@ -308,7 +308,7 @@ fn speech_wire_for_adapter(adapter_id: &str) -> BackendResult<SpeechWire> {
     }
 }
 
-fn resolve_speech_binding(
+pub(crate) fn resolve_speech_binding(
     storage: &Storage,
     providers: &ProviderRuntime,
     provider_connection_id: &str,
@@ -518,17 +518,17 @@ fn decode_sse_audio(body: &[u8]) -> BackendResult<Vec<u8>> {
 
 /// 校验并编译网关的 `audio_config`。
 #[derive(Debug)]
-struct GatewayAudioPlan {
+pub(crate) struct GatewayAudioPlan {
     /// 要发送的配置对象；为空时整个 `audio_config` 键省略，由上游取默认值。
-    config: Map<String, Value>,
+    pub(crate) config: Map<String, Value>,
     /// 临时文件扩展名，让 FFmpeg 按容器探测解码器。
-    container_extension: &'static str,
+    pub(crate) container_extension: &'static str,
 }
 
 /// 文档给出语速/音量 `[-50, 100]`、音调 `[-12, 12]` 的硬区间，越界值在本地先拒绝，
 /// 不消耗一次按分钟计费的往返；`sample_rate` 没有声明区间，只做 sane 范围检查，
 /// 其余取值交给上游，返回 400 时原样展示网关错误。
-fn gateway_audio_plan(config: Option<&SpeechAudioConfig>) -> BackendResult<GatewayAudioPlan> {
+pub(crate) fn gateway_audio_plan(config: Option<&SpeechAudioConfig>) -> BackendResult<GatewayAudioPlan> {
     let default = SpeechAudioConfig::default();
     let source = config.unwrap_or(&default);
     let format = source.format.as_deref().map(str::trim).unwrap_or("");
@@ -585,7 +585,7 @@ fn gateway_audio_plan(config: Option<&SpeechAudioConfig>) -> BackendResult<Gatew
 
 /// 网关语音请求体。只发送文档声明的字段，空的可选键一律省略；音色与参考音频
 /// 同时提交时由上游按优先级决定，因此这里保持单一参考来源。
-fn gateway_request_body(
+pub(crate) fn gateway_request_body(
     model: &str,
     text: &str,
     speaker: Option<&str>,
@@ -611,7 +611,7 @@ fn gateway_request_body(
 }
 
 /// 网关音色名：空串表示使用上游默认音色，因此不能当成非法值拦下。
-fn validate_gateway_speaker(voice: &str) -> BackendResult<()> {
+pub(crate) fn validate_gateway_speaker(voice: &str) -> BackendResult<()> {
     if voice.is_empty() {
         return Ok(());
     }
@@ -627,22 +627,29 @@ fn validate_gateway_speaker(voice: &str) -> BackendResult<()> {
     Ok(())
 }
 
-/// 参考音频读取为 Base64，并返回内容哈希用于请求签名（换素材必须算作新的付费请求）。
-async fn gateway_reference_audio(path: &str) -> BackendResult<(String, String)> {
-    media_source::local_file(path)?;
-    let bytes = tokio::fs::read(Path::new(path)).await?;
+/// 参考音频的字节级校验与 Base64 编码。音色复刻的 `audio_data` 字段只有这一条
+/// 编码路径：`SynthesizeSpeechCommand.reference_audio_path`（读文件）与画布音频
+/// 节点携带的参考音频（已在解析阶段拿到字节）都走它，避免同一份音色复刻素材在
+/// 两条入口上编出两种结果。
+///
+/// `file_name` 只在文件头认不出格式时用于兜底判断（裸 MPEG 帧没有文件头），
+/// 因此可以传扩展名或完整文件名。
+pub(crate) fn encode_gateway_reference_audio(
+    bytes: &[u8],
+    file_name: Option<&str>,
+) -> BackendResult<String> {
     if bytes.is_empty() {
         return Err(invalid("音色复刻的参考音频是空文件。"));
     }
     if bytes.len() > MAX_REFERENCE_AUDIO_BYTES {
         return Err(invalid("音色复刻的参考音频不能超过 20 MiB。"));
     }
-    let is_audio = match infer::get(&bytes) {
+    let is_audio = match infer::get(bytes) {
         Some(kind) => kind.mime_type().starts_with("audio/"),
         // 裸 MPEG 帧没有文件头，`infer` 认不出来；这时接受常见音频扩展名，
         // 内容是否可用交给上游与随后的解码校验。
         None => {
-            let extension = Path::new(path)
+            let extension = Path::new(file_name.unwrap_or_default())
                 .extension()
                 .and_then(|value| value.to_str())
                 .unwrap_or_default()
@@ -656,10 +663,15 @@ async fn gateway_reference_audio(path: &str) -> BackendResult<(String, String)> 
     if !is_audio {
         return Err(invalid("音色复刻的参考文件不是可识别的音频。"));
     }
-    Ok((
-        base64::engine::general_purpose::STANDARD.encode(&bytes),
-        sha256(&bytes),
-    ))
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// 参考音频读取为 Base64，并返回内容哈希用于请求签名（换素材必须算作新的付费请求）。
+async fn gateway_reference_audio(path: &str) -> BackendResult<(String, String)> {
+    media_source::local_file(path)?;
+    let bytes = tokio::fs::read(Path::new(path)).await?;
+    let encoded = encode_gateway_reference_audio(&bytes, Some(path))?;
+    Ok((encoded, sha256(&bytes)))
 }
 
 /// `X-Subtitle` 是字幕 JSON 的 Base64；账号未开通字幕权限时该响应头不出现。
@@ -678,7 +690,7 @@ fn decode_gateway_subtitle(raw: &str) -> BackendResult<Value> {
 /// 把网关的非音频响应转成后端错误。上游错误信封是
 /// `{"error":{"message","type","code"}}`，其中 `message` 是中文原文，必须原样进
 /// 入诊断信息；无法解析为 JSON 时保留截断预览，不编造替代说明。
-fn gateway_response_error(status: u16, body: &[u8]) -> BackendError {
+pub(crate) fn gateway_response_error(status: u16, body: &[u8]) -> BackendError {
     let envelope: Option<Value> = serde_json::from_slice(body).ok();
     let message = envelope
         .as_ref()
@@ -712,21 +724,21 @@ fn gateway_response_error(status: u16, body: &[u8]) -> BackendError {
 }
 
 #[derive(Debug)]
-struct GatewayTtsReply {
-    audio: Vec<u8>,
-    subtitle: Option<Value>,
+pub(crate) struct GatewayTtsReply {
+    pub(crate) audio: Vec<u8>,
+    pub(crate) subtitle: Option<Value>,
 }
 
 /// 只有 2xx 且响应类型不是 JSON/文本时才当音频处理；这个判断同时决定读取上限
 /// （音频 96 MiB，错误信封 1 MiB），两处必须共用，避免分类与限流各自漂移。
-fn response_holds_audio(status: u16, content_type: &str) -> bool {
+pub(crate) fn response_holds_audio(status: u16, content_type: &str) -> bool {
     let normalized_type = content_type.to_ascii_lowercase();
     (200..=299).contains(&status)
         && !normalized_type.contains("json")
         && !normalized_type.starts_with("text/")
 }
 
-fn parse_gateway_tts_reply(
+pub(crate) fn parse_gateway_tts_reply(
     status: u16,
     content_type: &str,
     subtitle_raw: Option<&str>,
@@ -750,7 +762,7 @@ fn parse_gateway_tts_reply(
     })
 }
 
-async fn collect_capped(
+pub(crate) async fn collect_capped(
     response: reqwest::Response,
     limit: usize,
     oversize: &str,

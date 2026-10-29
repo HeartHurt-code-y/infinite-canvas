@@ -410,48 +410,28 @@ h3 {
   transform: translateY(0);
 }
 
+/*
+ * 触发器建立定位上下文。
+ *
+ * 这条规则原本是给伪元素 `[data-tooltip]::after` 做定位基准用的。说明气泡
+ * 改由 `TooltipLayer` 渲染到 body 上后不再依赖它，但**保留**：它不改变布局，
+ * 只影响元素内部绝对定位子元素的参照系，删掉可能改变既有元素的排布。
+ */
 [data-tooltip] {
   position: relative;
 }
 
-[data-tooltip]::after {
-  position: absolute;
-  z-index: var(--z-tooltip);
-  top: calc(100% + var(--space-xs));
-  left: 50%;
-  padding: var(--space-2xs) var(--space-xs);
-  color: var(--color-chrome-ink);
-  white-space: nowrap;
-  background: var(--color-chrome-field);
-  border: var(--rule-thin) solid var(--color-chrome-rule);
-  border-radius: var(--radius-control);
-  box-shadow: var(--shadow-whisper);
-  content: attr(data-tooltip);
-  font-family: var(--font-body);
-  font-size: var(--text-2xs);
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, 0);
-  transition: opacity var(--dur-micro) var(--ease-out);
-}
-
-@media (hover: hover) and (pointer: fine) {
-  [data-tooltip]:hover::after {
-    opacity: 1;
-    transition-delay: 800ms;
-  }
-}
-
-[data-tooltip]:focus-visible::after {
-  opacity: 1;
-  transition-delay: 0ms;
-}
-
-.square-action::after {
-  right: 0;
-  left: auto;
-  transform: none;
-}
+/*
+ * 说明气泡不再用伪元素实现。
+ *
+ * 原先的 `[data-tooltip]::after` 永远朝下展开（`top: calc(100% + gap)`），
+ * 贴底的控件组（画布左下控件组、底部浮坞）下方没有空间，说明被视口下沿
+ * 切掉；伪元素还挂在触发器内部，会被祖先的 `overflow: hidden`
+ * （`.canvas-stage`）裁掉，也量不到自己的宽度。
+ *
+ * 现在统一由 `src/components/TooltipLayer.tsx` 渲染到 body 上：
+ * 下方空间不足自动翻到上方，水平方向夹在视口内，且不受祖先裁剪与画布缩放影响。
+ */
 
 .asset-panel {
   position: fixed;

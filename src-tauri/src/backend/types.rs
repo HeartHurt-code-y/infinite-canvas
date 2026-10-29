@@ -75,11 +75,7 @@ impl GenerationTaskStatus {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Succeeded
-                | Self::Failed
-                | Self::Unknown
-                | Self::Interrupted
-                | Self::Cancelled
+            Self::Succeeded | Self::Failed | Self::Unknown | Self::Interrupted | Self::Cancelled
         )
     }
 }
@@ -315,6 +311,15 @@ impl VideoTaskType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartGenerationCommand {
+    /// 批量生成可预先分配任务身份；相同身份和请求只创建一次任务。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_task_id: Option<String>,
+    /// Local photography intent receipt; never serialized as a provider parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_control_snapshot: Option<super::camera_control::FrozenCameraControl>,
+    /// Local image-preset receipt, frozen with logical_request and never sent as a model parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_preset_snapshot: Option<super::image_presets::FrozenImagePreset>,
     /// Local naming metadata, frozen with the task and never sent as a provider parameter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_name: Option<String>,

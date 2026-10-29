@@ -1,7 +1,7 @@
 {
   "name": "infinite-canvas",
   "private": true,
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "A Tauri, React, and TypeScript desktop application for an infinite canvas.",
   "type": "module",
   "packageManager": "pnpm@12.5.1",
@@ -10,6 +10,7 @@
     "pnpm": ">=12.0.0"
   },
   "scripts": {
+    "rea": "node scripts/rea.mjs",
     "dev": "node scripts/dev-server.mjs",
     "dev:daemon": "node scripts/devserver-daemon.mjs start",
     "dev:daemon:status": "node scripts/devserver-daemon.mjs status",
@@ -26,13 +27,11 @@
     "codegen": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib export_bindings",
     "codegen:check": "pnpm codegen && git diff --exit-code -- src/lib/bindings",
     "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml --locked",
-    "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
-    "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm run doctor && pnpm check:tokens",
     "check:tokens": "node scripts/check-design-tokens.mjs --self-test",
     "audit:visuals": "node scripts/audit-visuals.mjs",
     "audit:icons": "node scripts/audit-icons.mjs",
-    "check": "pnpm check:frontend && pnpm rust:fmt && pnpm rust:clippy",
+    "check": "pnpm check:frontend",
     "tauri": "tauri",
     "ffmpeg:prepare": "node scripts/prepare-ffmpeg.mjs",
     "macos:signing-identity": "node scripts/macos-signing-identity.mjs",

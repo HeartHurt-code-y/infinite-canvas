@@ -14,6 +14,7 @@ export function CanvasNodeEditorShell({
   open,
   onClose,
   children,
+  expandOnOpen = false,
 }: {
   readonly nodeKey: string;
   readonly kindLabel?: string;
@@ -22,11 +23,17 @@ export function CanvasNodeEditorShell({
   readonly open: boolean;
   readonly onClose: () => void;
   readonly children: ReactNode;
+  readonly expandOnOpen?: boolean;
 }) {
   const elementRef = useRef<HTMLElement>(null);
   const lastControl = useRef<HTMLElement | null>(null);
   const lastRange = useRef<Range | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const previouslyOpen = useRef(false);
+  useLayoutEffect(() => {
+    if (open && !previouslyOpen.current && expandOnOpen) setExpanded(true);
+    previouslyOpen.current = open;
+  }, [open, expandOnOpen]);
   const rememberFocus = useCallback((element: EventTarget | null = document.activeElement) => {
     if (!(element instanceof HTMLElement) || !elementRef.current?.contains(element)) return;
     if (

@@ -21,6 +21,16 @@ export interface ModelParameterOption {
 export interface ModelParameterCapability {
   readonly key: string;
   readonly label: string;
+  /**
+   * 参数说明（可选）。
+   *
+   * 来自模型契约里的 `description`：告诉用户这个参数**是干什么的、往哪个方向调**。
+   * 数值型参数光看名字和范围很难猜语义（例如「风格化强度」调高是变好还是变差），
+   * 所以契约里显式写清楚，前端在参数标签上挂说明气泡。
+   *
+   * 没有声明说明的参数不显示气泡——不是每个参数都需要一句废话。
+   */
+  readonly description?: string;
   readonly type: "string" | "integer" | "number" | "boolean";
   readonly defaultValue: ModelParameterValue;
   readonly options: readonly ModelParameterOption[];
@@ -51,6 +61,7 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   negative_prompt: "反向提示词",
   watermark: "添加水印",
   prompt_extend: "智能改写",
+  prompt_extend_mode: "改写方式",
   aspect_ratio: "画幅",
   movement_amplitude: "运动幅度",
   style: "风格",
@@ -68,6 +79,11 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   generate_audio_switch: "生成音频",
   generate_multi_clip_switch: "多镜头",
   template_id: "特效模板 ID",
+  hd: "原生 2K",
+  stylize: "风格化强度",
+  chaos: "多样性（Chaos）",
+  weird: "奇异性（Weird）",
+  sref: "风格参考图 URL",
 };
 
 const OPTION_LABELS: Readonly<Record<string, string>> = {
@@ -105,6 +121,11 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   "-1": "智能时长",
   disabled: "关闭",
   fast: "快速",
+  "1k": "1K",
+  "2k": "2K",
+  "4k": "4K",
+  // FLUX 3 编辑的方图专用档位（768 见方）。
+  "768sq": "768 方图",
   jpeg: "JPEG",
   jpg: "JPG",
   png: "PNG",
@@ -113,6 +134,8 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   b64_json: "Base64 数据",
   opaque: "实体背景",
   transparent: "透明背景",
+  // Qwen Image 3.0 Pro 的提示词改写策略（文档只开放这一个取值）。
+  direct: "直接改写（DPE）",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -132,6 +155,11 @@ function optionLabel(value: ModelParameterValue, key: string): string {
   if (OPTION_LABELS[raw]) return OPTION_LABELS[raw];
   if (key === "duration" && typeof value === "number") return `${value} 秒`;
   if (key === "size") return raw.replace("x", " × ");
+  // Midjourney V8.2 的细节质量只有 1 / 4 两个档（数字）。其它模型的 quality 都是
+  // 字符串（standard/hd/low/medium…），不受这条影响。
+  if (key === "quality" && typeof value === "number") {
+    return value === 4 ? "高细节（4）" : "标准（1）";
+  }
   return raw;
 }
 
@@ -208,6 +236,9 @@ function parameterCapability(
   return {
     key,
     label: parameterLabel(key, merged),
+    ...(typeof merged["description"] === "string" && merged["description"].trim()
+      ? { description: merged["description"].trim() }
+      : {}),
     type,
     defaultValue,
     options,

@@ -1,0 +1,346 @@
+/*
+ * 文本节点的两块 UI：空态「尝试：」卡片 + 节点下方的悬浮生成器面板。
+ *
+ * 逆向规格：docs/integrations/liblib-text-node-re.md 第 2 节（卡片）与第 4 节（面板）。
+ * 原站把这些颜色写死成深色值（面板 #262626、描边 #363636、次要文案 #919191），
+ * 本项目有浅色主题，硬编码会在浅色下彻底失配 —— 所以一律走 tokens.css，
+ * 只把**原站实测出来的尺寸**（660px 宽、16px 圆角、80~100px 正文区、32px 底栏控件）
+ * 当作硬约束保留。
+ */
+
+/* ── 空态「尝试：」卡片 ─────────────────────────────────────────── */
+
+.canvas-text-try {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding-inline: var(--space-md);
+  text-align: center;
+}
+
+.canvas-text-try__icon {
+  margin-bottom: var(--space-sm);
+  color: var(--color-rule-strong);
+}
+
+.canvas-text-try__label {
+  display: block;
+  margin-bottom: var(--space-xs);
+  color: var(--color-muted);
+  font-size: var(--text-base);
+  line-height: 20px;
+}
+
+.canvas-text-try__actions {
+  text-align: left;
+}
+
+.canvas-text-try__list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3xs);
+}
+
+.canvas-text-try__item {
+  display: flex;
+  width: fit-content;
+  min-height: 36px;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text);
+  font-size: var(--text-base);
+  line-height: 20px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.canvas-text-try__item:hover:not(:disabled),
+.canvas-text-try__item:focus-visible {
+  background: var(--color-chrome-3);
+}
+
+.canvas-text-try__item:disabled {
+  color: var(--color-muted);
+  cursor: not-allowed;
+}
+
+.canvas-text-try__item-label {
+  min-width: 0;
+}
+
+/*
+ * 画布预览卡片沿用原站的 350px 方形主体，独立编辑区只复用内部动作。
+ */
+.canvas-text-try--compact {
+  min-height: 350px;
+  justify-content: center;
+  padding-block: var(--space-xs);
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-panel);
+}
+
+.canvas-content-preview.is-selected .canvas-text-try--compact {
+  border-color: var(--color-rule-strong);
+}
+
+.canvas-text-try--compact .canvas-text-try__icon {
+  margin-bottom: var(--space-xs);
+}
+
+.canvas-text-try--compact .canvas-text-try__label {
+  margin-bottom: var(--space-3xs);
+}
+
+.canvas-text-try--compact .canvas-text-try__list {
+  gap: 2px;
+}
+
+.canvas-text-try--compact .canvas-text-try__item {
+  min-height: 36px;
+}
+
+/* 卡片带「尝试：」时按内容长高：固定 252px 装不下这张卡片。 */
+.canvas-gen-node.canvas-content-preview:has(.canvas-text-try) {
+  height: auto;
+  min-height: 252px;
+}
+
+.react-flow__node .canvas-flow-node .canvas-gen-node.canvas-content-preview[data-node-kind="prompt"] {
+  width: 350px;
+}
+
+/* ── 悬浮生成器面板 ─────────────────────────────────────────────── */
+
+/*
+ * 锚点：贴节点下沿外扩 16px、水平居中于节点、固定宽 660px。
+ * 面板挂在节点内部（不是 portal），因此它随画布缩放一起缩放 —— 与原站一致。
+ */
+.canvas-text-generator {
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  left: 50%;
+  display: flex;
+  width: 660px;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
+  margin-top: 16px;
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-floating);
+  cursor: default;
+  transform: translateX(-50%);
+}
+
+/*
+ * React Flow 给节点写内联层级；面板展开时让它越过相邻卡片
+ * （与素材节点的保存菜单同一条规则）。
+ */
+.canvas-react-flow .react-flow__node:has(.canvas-text-generator) {
+  z-index: 10000 !important;
+}
+
+.canvas-text-generator__body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  padding: var(--space-xs);
+}
+
+.canvas-text-generator__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-3xs) var(--space-xs);
+}
+
+.canvas-text-generator__prompt {
+  position: relative;
+  display: flex;
+  min-height: 80px;
+  max-height: 100px;
+  padding: var(--space-xs);
+  background: var(--color-surface-1);
+  border-radius: var(--radius-card);
+}
+
+.canvas-text-generator__input {
+  width: 100%;
+  min-height: 64px;
+  max-height: 84px;
+  padding: 0;
+  overflow-y: auto;
+  color: var(--color-text);
+  font-family: inherit;
+  font-size: var(--text-base);
+  line-height: 1.8;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  /*
+   * 节点卡片带 `user-select: none` 与 `cursor: grab`（整张卡可拖动）。
+   * 面板挂在卡片里，这两个值会**继承**进来：正文框里就选不了字、光标还是个抓手。
+   * WebKit 不会用未加前缀的 `user-select` 覆盖祖先的 none，所以两个都要写。
+   */
+  cursor: text;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.canvas-text-generator__input::placeholder {
+  color: var(--color-muted);
+  opacity: 1;
+}
+
+.canvas-text-generator__input:disabled {
+  cursor: not-allowed;
+}
+
+.canvas-text-generator__input:focus-visible {
+  outline: 2px solid var(--color-rule-strong);
+  outline-offset: 2px;
+}
+
+/* 展开态：提示词区拉高，用来写长稿。 */
+.canvas-text-generator.is-expanded .canvas-text-generator__prompt {
+  min-height: 320px;
+  max-height: 320px;
+}
+
+.canvas-text-generator.is-expanded .canvas-text-generator__input {
+  min-height: 304px;
+  max-height: 304px;
+}
+
+.canvas-text-generator__bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding-top: var(--space-xs);
+  background: var(--color-surface-2);
+}
+
+.canvas-text-generator__model {
+  min-width: 0;
+  width: auto;
+  max-width: 16rem;
+  height: 32px;
+  min-height: 32px;
+  padding-inline: var(--space-xs);
+  font-size: var(--text-sm);
+}
+
+.canvas-text-generator__spacer {
+  flex: 1;
+}
+
+.canvas-text-generator__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.canvas-text-generator__icon-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-ink-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  place-items: center;
+}
+
+.canvas-text-generator__icon-button:hover:not(:disabled),
+.canvas-text-generator__icon-button:focus-visible {
+  color: var(--color-text);
+  background: var(--color-chrome-3);
+}
+
+.canvas-text-generator__icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.canvas-text-generator__cost {
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+}
+
+.canvas-text-generator__cost-icon {
+  color: var(--color-text-3);
+}
+
+.canvas-text-generator__cost-value {
+  min-width: 1.25rem;
+  text-align: center;
+}
+
+.canvas-text-generator__submit {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border: none;
+  border-radius: var(--radius-card);
+  cursor: pointer;
+  place-items: center;
+}
+
+.canvas-text-generator__submit:hover:not(:disabled),
+.canvas-text-generator__submit:focus-visible {
+  background: var(--color-accent-hover);
+}
+
+.canvas-text-generator__submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.canvas-text-generator__expand {
+  position: absolute;
+  z-index: 1;
+  top: var(--space-xs);
+  right: var(--space-xs);
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--color-ink-3);
+  background: var(--color-surface-2);
+  border: none;
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  place-items: center;
+}
+
+.canvas-text-generator__expand:hover:not(:disabled),
+.canvas-text-generator__expand:focus-visible {
+  color: var(--color-text);
+  background: var(--color-chrome-3);
+}

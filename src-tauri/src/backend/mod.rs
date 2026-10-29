@@ -2,6 +2,8 @@ pub mod asset_library;
 pub mod brand_design;
 pub mod brand_models;
 pub mod commands;
+pub mod canvas_image;
+pub mod camera_control;
 pub mod composer;
 pub mod cover_images;
 pub mod credentials;
@@ -9,9 +11,12 @@ pub mod downloader;
 pub mod error;
 pub mod frame_extractor;
 pub(crate) mod gateway_profile;
+pub mod generation_materials;
 pub mod image_normalize;
+pub mod image_presets;
 pub mod local_base64_assets;
 pub mod local_results;
+pub mod long_video;
 pub mod mac_delta_update;
 pub mod material_transfer;
 pub mod media;
@@ -37,6 +42,7 @@ pub mod thumbnail;
 pub mod tos_sign;
 pub mod types;
 pub mod video_clip;
+pub mod video_clip_render;
 pub mod video_edit_source;
 pub mod video_local_edit;
 pub mod video_preparation;
@@ -85,6 +91,8 @@ pub struct BackendState {
     pub video_preparation: VideoPreparationService,
     /// 智能剪辑（video clip）：模式目录校验 + 合成载荷组装，复用生成任务管线。
     pub video_clip: VideoClipService,
+    pub clip_render: video_clip_render::ClipRenderService,
+    pub long_video: long_video::LongVideoService,
 }
 
 impl BackendState {
@@ -193,6 +201,25 @@ impl BackendState {
         // 智能剪辑复用同一套生成任务管线：任务服务整体是 Clone（内部都是 Arc），
         // 这里克隆一份给智能剪辑服务，产物与历史沿用同一条链路。
         let video_clip = VideoClipService::new(tasks.clone());
+        let clip_render = video_clip_render::ClipRenderService::new(
+            downloads_directory.join("无限画布").join("智能剪辑"),
+            video_edit_sources.clone(), composer.clone(), tasks.clone(),
+            video_clip_render::ClipPlannerRuntime { app: app.clone(), storage: Arc::clone(&storage), lifecycle: lifecycle.clone(),
+                providers: providers.clone(), assets: assets.clone(), staging: staging.clone(), base64: local_base64_assets.clone(), results: local_results.clone() },
+        )?;
+        let long_video = long_video::LongVideoService::new(
+            app.clone(),
+            Arc::clone(&storage),
+            tasks.clone(),
+            composer.clone(),
+            providers.clone(),
+            lifecycle.clone(),
+            assets.clone(),
+            staging.clone(),
+            local_base64_assets.clone(),
+            local_results.clone(),
+            downloads_directory.join("无限画布").join("超长视频"),
+        )?;
         log_startup_stage!("媒体解析/视频剪辑源/生成任务服务");
         // 视频抽帧复用同一套 FFmpeg 引擎；产物落在下载目录「无限画布/抽帧」。
         let frame_extractor = VideoFrameExtractionService::new_with_storage(
@@ -236,6 +263,8 @@ impl BackendState {
             video_edit_sources,
             video_preparation,
             video_clip,
+            clip_render,
+            long_video,
         })
     }
 }

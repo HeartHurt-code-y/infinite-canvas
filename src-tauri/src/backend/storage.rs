@@ -25,10 +25,9 @@ use super::{
         GenerationTaskProgress, GenerationTaskStatus, GenerationTaskSummary, MediaType,
         ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
         ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget,
-        StagingCleanupCandidate, StagingJobRecord, StagingStatus, TextGenerationOutputRecord,
-        TokenUsage, TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
-        WorkspaceUiPrefs,
+        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingCleanupCandidate,
+        StagingJobRecord, StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
     },
 };
 
@@ -58,6 +57,9 @@ mod video_preparation;
 
 #[path = "storage/frame_extraction.rs"]
 mod frame_extraction;
+
+#[path = "storage/long_video.rs"]
+mod long_video;
 
 pub use generation_lifecycle::{
     GenerationLifecycleFact, GenerationOperationalEvent, GenerationRemoteObservation,
@@ -336,7 +338,7 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 9] = [
     (
         "provider-fzy-ai",
         "饭众烟 AI（图片与视频）",
@@ -399,6 +401,20 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
         "Grsai",
         "https://grsaiapi.com/",
         "grsai_v1",
+    ),
+    (
+        // Atlas Cloud 模型生成 API：出图走 `POST /api/v1/model/generateImage`，
+        // 出视频走 `POST /api/v1/model/generateVideo`，两者都用
+        // `GET /api/v1/model/prediction/{id}` 轮询；平台回答套一层 `data` 信封。
+        // 参考图走顶层数组（出图 `image_urls` / 出视频 `reference_images`，
+        // 公网 URL 或 base64 data URI）。该平台没有公开的模型目录接口，
+        // 「拉取模型」返回已登记的固定清单；没有素材库。
+        // 契约详见 `docs/integrations/atlascloud-image-api.md` 与
+        // `docs/integrations/atlascloud-vidu-video-api.md`。
+        "provider-atlascloud",
+        "Atlas Cloud",
+        "https://api.atlascloud.ai",
+        "atlascloud_v1",
     ),
 ];
 
@@ -979,10 +995,16 @@ impl Storage {
             let mut operations = selection
                 .enabled_operations
                 .iter()
+                // 契约里不存在的操作不能留在绑定上：方言按模型家族删掉了某个操作
+                // （例如 Atlas Cloud 的编辑成员没有文生图形态）时，绑定若仍声称
+                // 支持它，任务开始只会报一句「模型定义未声明该操作」。这里以最终
+                // 契约为准，把这类操作一起去掉。
+                .filter(|operation| operation_schema.get(operation.as_str()).is_some())
                 .map(|operation| operation.as_str())
                 .collect::<Vec<_>>();
             operations.sort_unstable();
             operations.dedup();
+            let enabled = selection.enabled && !operations.is_empty();
             transaction.execute(
                 "INSERT INTO provider_model_bindings
                  (provider_connection_id, model_definition_id, enabled_operations_json,
@@ -999,7 +1021,7 @@ impl Storage {
                     selection.model_definition_id,
                     serde_json::to_string(&operations)?,
                     selection.remote_model_id,
-                    selection.enabled,
+                    enabled,
                     selection.token_group,
                     timestamp,
                 ],
@@ -1535,6 +1557,11 @@ impl Storage {
         // 同一个事务里把这些任务收敛成 cancelled 终态。
         // 已成功/已失败/已中断的历史任务保持原样，历史不能丢。
         cancel_canvas_generation_tasks(&transaction, id, now_ms())?;
+        // 长视频主任务属于这个画布：画布删了还留着整份镜头清单（含提示词正文）就是纯粹的垃圾数据。
+        transaction.execute(
+            "DELETE FROM long_video_jobs WHERE canvas_id = ?1",
+            params![id],
+        )?;
         transaction.execute("DELETE FROM canvas_documents WHERE id = ?1", params![id])?;
         transaction.commit()?;
         Ok(())
@@ -2624,13 +2651,14 @@ fn migrate_local_base64_asset_groups(connection: &Connection) -> BackendResult<(
 /// 可能计费的供应商调用。
 fn migrate_provider_calls_dispatch_failed(connection: &Connection) -> BackendResult<()> {
     let mut statement = connection.prepare("PRAGMA table_info(provider_calls)")?;
-    let has_dispatch_failed_column = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .any(|result| {
-            result
-                .map(|name| name == "dispatch_failed")
-                .unwrap_or(false)
-        });
+    let has_dispatch_failed_column =
+        statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .any(|result| {
+                result
+                    .map(|name| name == "dispatch_failed")
+                    .unwrap_or(false)
+            });
     drop(statement);
     if !has_dispatch_failed_column {
         connection.execute(
@@ -2661,10 +2689,16 @@ fn migrate_staging_jobs_cleanup_retry(connection: &Connection) -> BackendResult<
         )?;
     }
     if !columns.iter().any(|name| name == "cleanup_next_at") {
-        connection.execute("ALTER TABLE staging_jobs ADD COLUMN cleanup_next_at INTEGER", [])?;
+        connection.execute(
+            "ALTER TABLE staging_jobs ADD COLUMN cleanup_next_at INTEGER",
+            [],
+        )?;
     }
     if !columns.iter().any(|name| name == "cleanup_done_at") {
-        connection.execute("ALTER TABLE staging_jobs ADD COLUMN cleanup_done_at INTEGER", [])?;
+        connection.execute(
+            "ALTER TABLE staging_jobs ADD COLUMN cleanup_done_at INTEGER",
+            [],
+        )?;
     }
     Ok(())
 }

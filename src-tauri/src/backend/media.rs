@@ -348,7 +348,10 @@ impl MediaResolver {
                 task.operation,
                 task.remote_model_id_snapshot.as_deref(),
                 &operation_schema,
-            );
+            )
+            // 网关语音合成的音色复刻要把参考音频以 Base64 内联进请求体
+            // （`audio_data`），因此解析阶段必须拿到本地字节，而不是公网 URL。
+            || task.operation == GenerationOperation::SpeechGeneration;
         for input in inputs {
             let (resolved, lease) = self
                 .resolve_target(
@@ -847,7 +850,9 @@ impl MediaResolver {
                 started_at.elapsed().as_millis()
             );
             return Err(BackendError::protocol(
-                format!("引用素材下载失败（HTTP {status}）。链接可能已失效：请更换素材链接或重新上传。"),
+                format!(
+                    "引用素材下载失败（HTTP {status}）。链接可能已失效：请更换素材链接或重新上传。"
+                ),
                 redact_request_value(&json!({
                     "httpStatus": status,
                     "url": url,
@@ -1133,6 +1138,29 @@ fn validate_media_encoding(
                 json!({
                     "videos": videos.iter().map(ResolvedMedia::archive).collect::<Vec<_>>(),
                     "audios": audios.iter().map(ResolvedMedia::archive).collect::<Vec<_>>()
+                }),
+            ))
+        }
+        // 画布音频节点只接受一段音频参考（音色复刻的 `audio_data`），图片与视频
+        // 在这个端点没有对应字段，带上去只会被上游忽略——那等于静默丢掉用户素材，
+        // 因此在本地就拦下并说明原因。
+        GenerationOperation::SpeechGeneration if !images.is_empty() || !videos.is_empty() => {
+            Err(BackendError::validation(
+                "音频生成只接受一段音频作为音色参考，不支持图片或视频素材。",
+                json!({
+                    "images": images.iter().map(ResolvedMedia::archive).collect::<Vec<_>>(),
+                    "videos": videos.iter().map(ResolvedMedia::archive).collect::<Vec<_>>()
+                }),
+            ))
+        }
+        // 网关 TTS 的音色复刻只有一个 `audio_data` 字段：多段参考音频无法表达，
+        // 静默取第一段会让用户以为参考了全部。
+        GenerationOperation::SpeechGeneration if audios.len() > 1 => {
+            Err(BackendError::validation(
+                "音频生成最多只能引用 1 段参考音频，请只保留一段音色参考。",
+                json!({
+                    "audios": audios.iter().map(ResolvedMedia::archive).collect::<Vec<_>>(),
+                    "limit": 1
                 }),
             ))
         }

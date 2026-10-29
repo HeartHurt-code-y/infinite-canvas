@@ -415,7 +415,9 @@ impl AssetLibrary {
     /// 跳过 `(page_number-1)*page_size` 条命中后收集一页；扫描在命中数集齐、
     /// 上游翻完或到达 [`KIND_SCAN_PAGE_CAP`] 时提前结束。
     pub async fn browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
-        let mut page = if self.dialect(&query.provider_connection_id)? == AssetDialect::VolcengineArk {
+        let mut page = if self.dialect(&query.provider_connection_id)?
+            == AssetDialect::VolcengineArk
+        {
             self.ark_browse(query).await?
         } else {
             let page_number = query.page_number.unwrap_or(1).max(1);

@@ -22,6 +22,7 @@ import { isDesktopRuntime } from "../../lib/backend";
 import { open } from "@tauri-apps/plugin-dialog";
 import { CreateSubjectPicker } from "./CreateSubjectPicker";
 import { CreateToolbar } from "./CreateToolbar";
+import { useCreateAssetDrag } from "./createAssetDrag";
 import { COMPOSER_PLACEHOLDER, CREATE_COPY, type CreateModeId } from "./createModel";
 import type { AgentSubject } from "./createAgentModel";
 import type { CreateModelOption, CreateReference } from "./useCreateSession";
@@ -123,6 +124,13 @@ export function CreateComposer({
     setSubjectOpen(true);
   }, []);
   /*
+   * 素材从资产库抽屉拖进来时的落点状态。
+   *
+   * 拖拽会话在模块级（createAssetDrag.ts），浮坞只读「指针是不是停在
+   * 自己身上」这一位：停在上面就把浮坞点亮，并提示松手后会加为参考素材。
+   */
+  const dropActive = useCreateAssetDrag().overTarget;
+  /*
    * 本机文件兜底入口。
    *
    * 素材库是主入口，但用户本机刚截的图还没入库时，直接选文件更省事。
@@ -151,7 +159,15 @@ export function CreateComposer({
 
   return (
     <div className="create-dock">
-      <div className="create-dock__surface">
+      <div
+        className={`create-dock__surface${dropActive ? " is-drop-target" : ""}`}
+        data-create-drop-zone="dock"
+      >
+        {dropActive ? (
+          <span className="create-dock__drop-hint" aria-hidden="true">
+            松开添加为参考素材
+          </span>
+        ) : null}
         <div className="create-dock__content">
           <div className="create-dock__references">
             {references.map((reference) => {

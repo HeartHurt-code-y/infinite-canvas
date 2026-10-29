@@ -39,6 +39,7 @@ import type {
   StagingStateChangedEvent,
   TosBucketPullSummary,
   TosStagingConfig,
+  TranslateCanvasTextResult,
   VideoDownloadJobRecord,
   VideoDownloaderEngineStatus,
   VideoFrameExtractionJobRecord,
@@ -572,6 +573,12 @@ export const optimizedPromptResultSchema = v.looseObject({
   optimizedPrompt: v.string(),
   rawModelOutput: v.string(),
 }) satisfies v.GenericSchema<OptimizedPromptResult>;
+
+export const translateCanvasTextResultSchema = v.looseObject({
+  translatedText: v.string(),
+  targetLanguage: v.string(),
+  taskId: v.string(),
+}) satisfies v.GenericSchema<TranslateCanvasTextResult>;
 
 export const generationCreatedEventSchema = v.looseObject({
   taskId: v.string(),

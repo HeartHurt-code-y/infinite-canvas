@@ -414,6 +414,7 @@ export function CreateTopBar({
           <input
             ref={searchInputRef}
             type="text"
+            name="create-search"
             value={search}
             placeholder="搜索"
             aria-label="搜索"

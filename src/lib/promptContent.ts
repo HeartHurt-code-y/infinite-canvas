@@ -309,6 +309,8 @@ export interface PromptConnectionUpdateOptions {
 
 export interface PromptContentEditorSession {
   attach(element: HTMLDivElement | null, attributes?: Readonly<Record<string, string>>): void;
+  /** 只刷新空态占位，不替换文档或重建会话。 */
+  setPlaceholder(placeholder?: string): void;
   isComposing(): boolean;
   /**
    * 连线集合变化时的唯一入口：同步候选、自愈失效引用、刷新 chip 状态、识别正文里新出现的 @。
@@ -372,8 +374,17 @@ export interface PromptContentEditorSession {
   prepareGeneration(context: {
     readonly connections: readonly PromptContentConnection[];
     readonly allowMediaOnly: boolean;
+    readonly autoLink?: boolean;
   }): PromptGenerationPreparation;
   focusIssue(issue: PromptContentIssue): boolean;
+  /**
+   * 把光标放进编辑器。
+   *
+ * 用途：画布上「自己编写内容」这类入口需要**聚焦已有编辑器**，
+ * 而不是新建一个输入框 —— 编辑器里有 @引用与附件，焦点切过去用户接着写就行。
+ * 编辑器还没挂载（节点未渲染）时返回 false，调用方据此决定是否退化处理。
+   */
+  focus(): boolean;
   /** 应用/取消行内格式（粗体、斜体等）；无编辑器或输入法组合期间为空操作。 */
   toggleInlineMark(mark: PromptInlineMark): void;
   /** 切换块级结构；"paragraph" 表示退回普通段落。 */
@@ -415,6 +426,7 @@ export interface PromptContentModule {
     context: {
       readonly connections: readonly PromptContentConnection[];
       readonly allowMediaOnly: boolean;
+      readonly autoLink?: boolean;
     },
   ): PromptGenerationPreparation | null;
   focusIssue(nodeKey: string, issue: PromptContentIssue): boolean;
@@ -1014,7 +1026,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private aliveCanvasNodeKeys: ReadonlySet<string> | null = null;
   private markReferencePresentation: ReadonlyMap<string, PromptMarkReferencePresentation> =
     new Map();
-  private readonly placeholder: string;
+  private placeholder: string;
 
   constructor(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER) {
     this.placeholder = placeholder;
@@ -1061,6 +1073,14 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     return this.composing || (this.editor?.view.composing ?? false);
   }
 
+  setPlaceholder(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER): void {
+    if (this.placeholder === placeholder) return;
+    this.placeholder = placeholder;
+    if (this.editor != null && !this.isComposing()) {
+      this.editor.view.dispatch(this.editor.state.tr.setMeta("addToHistory", false));
+    }
+  }
+
   attach(element: HTMLDivElement | null, attributes: Readonly<Record<string, string>> = {}): void {
     if (this.host === element && this.editor != null) {
       this.editor.setOptions({
@@ -1084,7 +1104,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     if (element == null) return;
     this.editor = new Editor({
       element,
-      extensions: createPromptTiptapExtensions(this.placeholder),
+      extensions: createPromptTiptapExtensions(() => this.placeholder),
       content: promptDocumentToTiptapJson(this.document, this.presentation()),
       injectCSS: false,
       editorProps: {
@@ -1645,6 +1665,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   prepareGeneration(context: {
     readonly connections: readonly PromptContentConnection[];
     readonly allowMediaOnly: boolean;
+    readonly autoLink?: boolean;
   }): PromptGenerationPreparation {
     this.updateConnections(
       context.connections.flatMap((connection) =>
@@ -1660,7 +1681,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
             ],
       ),
     );
-    this.autoResolve({ fresh: false });
+    this.autoResolve({ fresh: false, mode: context.autoLink ? "names" : "explicit" });
     const view = viewFromDocument(this.document, context.connections);
     const blocking = view.issues;
     if (blocking.length > 0) return { ok: false, issues: blocking };
@@ -1751,6 +1772,14 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     if (target == null) return false;
     target.focus();
     target.click();
+    return true;
+  }
+
+  focus(): boolean {
+    if (this.editor == null) return false;
+    // 组合期间抢焦点会让输入法丢掉候选窗口，因此先落在编辑器上再交给 TipTap。
+    if (this.isComposing()) return false;
+    this.editor.commands.focus();
     return true;
   }
 
@@ -1993,6 +2022,7 @@ class PromptContentModuleImplementation implements PromptContentModule {
     context: {
       readonly connections: readonly PromptContentConnection[];
       readonly allowMediaOnly: boolean;
+      readonly autoLink?: boolean;
     },
   ): PromptGenerationPreparation | null {
     let session = this.sessions.get(nodeKey);

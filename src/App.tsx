@@ -7,6 +7,7 @@ import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { CreateSurface, resolveCurrentEntry } from "./features/create";
 import { createQueryClient } from "./lib/queryClient";
 import { WorkspaceErrorBoundary } from "./components/WorkspaceErrorBoundary";
+import { TooltipLayer } from "./components/TooltipLayer";
 import "./styles/studio.css";
 
 export {
@@ -36,8 +37,16 @@ function App() {
   const [entry] = useState(resolveCurrentEntry);
   return (
     <QueryClientProvider client={queryClient}>
+      {/*
+       * 说明气泡挂在根部：它用事件委托接管全应用的 [data-tooltip]，
+       * 渲染到 body 上，因此不受画布缩放层与祖先 overflow 的影响。
+       *
+       * 放在错误边界**里面**：它自己若出问题（渲染期异常），由边界兜住并给出
+       * 可读的报错页；挂在边界外则整个应用白屏，连报错都看不到。
+       */}
       <WorkspaceErrorBoundary>
         {entry === "create" ? <CreateSurface /> : <CanvasWorkspace />}
+        <TooltipLayer />
       </WorkspaceErrorBoundary>
       <Toaster
         className="app-toaster"

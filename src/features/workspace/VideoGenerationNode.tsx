@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { CanvasNodeCardIcon } from "./CanvasNodeCardIcons";
+import { CanvasChromeIcon } from "./CanvasChromeIcons";
 import { toMediaSrc, type GenerationTaskSummary } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import type { PromptContentModule } from "../../lib/promptContent";
@@ -26,7 +27,7 @@ import "./VideoGenerationNode.css";
  * 点一下就地编辑，没有单独的「改名」按钮。这里照抄那个交互——点标题变成输入框，
  * 回车保存、Esc 取消。
  */
-function CanvasNodeTitle({
+export function CanvasNodeTitle({
   title,
   onRename,
 }: {
@@ -173,6 +174,8 @@ export function MediaGenerationPreview({
   onNodeDragStart,
   onSizeChange,
   onRename,
+  onVideoPreset,
+  onImagePreset,
 }: {
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly selected: boolean;
@@ -196,6 +199,8 @@ export function MediaGenerationPreview({
   readonly onSizeChange: (key: string, size: CanvasNodeDimensions) => void;
   readonly onRemove: (key: string) => void;
   readonly onRename?: ((key: string, name: string) => void) | undefined;
+  readonly onVideoPreset?: ((preset: "long" | "frames" | "first") => void) | undefined;
+  readonly onImagePreset?: ((preset: "image_to_image" | "upscale") => void) | undefined;
 }) {
   const elementRef = useRef<HTMLDivElement>(null);
   /**
@@ -294,15 +299,6 @@ export function MediaGenerationPreview({
         aria-label={`${name}的媒体预览`}
       >
         {/*
-          原站 liblib 的生成结果图左上角有「AI生成」标记，用来区分「生成出来的」
-          与「拖进来的参考素材」。这里只在有产物时出现。
-        */}
-        {mediaSrc ? (
-          <span className="canvas-node-preview__badge" aria-hidden="true">
-            AI生成
-          </span>
-        ) : null}
-        {/*
           媒体右上角的唯一动作按钮。原站同一位置放的是「替换素材」
           （24×24、bg-black/40、backdrop-blur、圆角 6px、图标 14px），
           本项目把同一个位置给「编辑」，编辑区在选中节点后展开在节点下方。
@@ -360,6 +356,21 @@ export function MediaGenerationPreview({
           ) : (
             <img src={reference.previewUrl} alt={`参考素材：${reference.name}`} draggable={false} />
           )
+        ) : isVideo && !starting && !activeTask ? (
+          <div className="canvas-video-empty">
+            <CanvasNodeCardIcon name="video" size={52} />
+            <span>尝试：</span>
+            <button type="button" onClick={() => onVideoPreset?.("long")} title="规划镜头、分段生成并合成成片">∞ <span>5分钟超长视频</span></button>
+            <button type="button" onClick={() => onVideoPreset?.("frames")}><CanvasChromeIcon name="assets" size={16} /><span>首尾帧生成视频</span></button>
+            <button type="button" onClick={() => onVideoPreset?.("first")}><CanvasChromeIcon name="universal" size={16} /><span>首帧生成视频</span></button>
+          </div>
+        ) : !isVideo && !starting && !activeTask ? (
+          <div className="canvas-image-empty">
+            <CanvasNodeCardIcon name="image" size={52} />
+            <span>尝试：</span>
+            <button type="button" onClick={() => onImagePreset?.("image_to_image")}><CanvasChromeIcon name="image" size={16} /><span>图生图</span></button>
+            <button type="button" onClick={() => onImagePreset?.("upscale")}><CanvasChromeIcon name="upscale" size={16} /><span>图片高清</span></button>
+          </div>
         ) : (
           <span
             className={`canvas-node-preview__empty ${isVideo ? "video-generation-preview__empty" : "image-generation-preview__empty"}`}

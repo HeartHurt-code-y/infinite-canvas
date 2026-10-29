@@ -640,4 +640,37 @@
   --canvas-group-ink-6: #1f4a2c;
   /* 每个组在运行时写入自己的颜色（内联样式）；这里的默认值是兜底。 */
   --canvas-group-color: var(--canvas-group-ink-1);
+  /* liblib 视频生成编辑区，2026-10-26 登录态与截图。 */
+  --canvas-video-switch-width: 38px;
+  --canvas-video-switch-height: 20px;
+  --canvas-video-switch-thumb: 16px;
+  --canvas-video-switch-inset: 2px;
+  --canvas-video-option-height: 32px;
+  --canvas-video-option-min-width: 42px;
+  --canvas-video-modal-width: 640px;
+  --canvas-long-video-process-width: 880px;
+  --canvas-long-video-prompt-height: 96px;
+  --canvas-video-thumb-size: 64px;
+  --canvas-video-preview-height: 350px;
+  --canvas-image-preview-height: 350px;
+  --canvas-image-empty-icon-size: 90px;
+  /* 图片预设：原站静态类名中的条目 / 图标尺寸；面板宽度按截图适配。 */
+  --canvas-image-preset-width: 524px;
+  --canvas-image-preset-row-height: 52px;
+  --canvas-image-preset-icon-size: 34px;
+  --canvas-image-preset-radius: 16px;
+  --canvas-image-preset-accent: #ce51ff;
+  --canvas-image-preset-new-dot: #13d5ff;
+  /* 摄像机四列滚轮：2026-10-27 原站 DOM 与静态源码。 */
+  --canvas-camera-header-height: 48px;
+  --canvas-camera-column-width: 120px;
+  --canvas-camera-wheel-height: 156px;
+  --canvas-camera-wheel-inset: 30px;
+  --canvas-camera-item-height: 96px;
+  --canvas-camera-item-border: #424242;
+  --canvas-camera-panel-shadow: 0 4px 10px rgb(0 0 0 / .12), 0 2px 4px rgb(0 0 0 / .2);
+  --canvas-video-empty-play-size: 52px;
+  --canvas-video-preview-bg: #262626;
+  --canvas-video-mark-color: #09caf5;
+  --canvas-video-mark-fill: #09caf52b;
 }

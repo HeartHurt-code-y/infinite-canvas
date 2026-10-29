@@ -3,6 +3,7 @@ import { Icon } from "../../components/Icon";
 import { toast } from "../../lib/toast";
 import type { ModelParameterCapability, ModelParameterValue } from "../../lib/modelCapabilities";
 import { CreateModeIcon } from "./createModeIcons";
+import { CreateModelSelect } from "./CreateModelSelect";
 import { CreateParamControl } from "./CreateParamControls";
 import { CreateSelect } from "./CreateSelect";
 import {
@@ -256,18 +257,15 @@ export function CreateToolbar({
    *
    * 图片类型同时看文生图与图生图（挂了参考素材就走图生图），
    * 只支持图生图的模型也必须能被选到。
+   *
+   * 平台 → 模型的二级拆分在 `CreateModelSelect` 里做，这里只负责
+   * 「当前创作类型能用哪些模型」。
    */
-  const modelOptions = useMemo(() => {
+  const modeModels = useMemo(() => {
     const operations = modeOperations(mode);
-    return models
-      .filter((item) => item.operations.some((operation) => operations.includes(operation)))
-      .map((item) => ({
-        value: item.modelDefinitionId,
-        label: item.displayName,
-        // 即梦的模型项带一句说明（卖点）。本项目的等价信息是「供应商 + 远端模型 ID」：
-        // 用户能据此分辨同名模型（例如聚合网关与 Grsai 上的同名 gpt-image-2）。
-        description: `${item.providerName} · ${item.remoteModelId}`,
-      }));
+    return models.filter((item) =>
+      item.operations.some((operation) => operations.includes(operation)),
+    );
   }, [mode, models]);
 
   /*
@@ -301,7 +299,7 @@ export function CreateToolbar({
       element.removeEventListener("scroll", update);
       observer.disconnect();
     };
-  }, [groups.length, modeEntries.length, modelOptions.length]);
+  }, [groups.length, modeEntries.length, modeModels.length]);
 
   /** 按方向滚动参数区半屏（与即梦的滚动按钮一致）。 */
   const scrollSettings = useCallback((direction: -1 | 1): void => {
@@ -312,109 +310,114 @@ export function CreateToolbar({
 
   return (
     <div className="create-toolbar">
-      <div
-        className="create-toolbar__settings"
-        ref={settingsRef}
-        data-scroll-left={scrollEdges.left ? "true" : "false"}
-        data-scroll-right={scrollEdges.right ? "true" : "false"}
-      >
-        <CreateSelect
-          primary
-          ariaLabel="创作类型"
-          /*
-           * 标题「创作类型」：即梦的创作类型下拉**有**标题（i18n key
-           * `web_home_tool_dropdown_title`，实测 aria-label 同名），
-           * 模型/参数下拉没有。上一版只有 Agent 浮坞带标题，普通浮坞漏了。
-           */
-          title="创作类型"
-          value={mode}
-          options={modeEntries}
-          /* 这是创作类型下拉，不是模型下拉：陈旧 id 时不能显示「默认模型」。 */
-          fallbackLabel="创作类型"
-          onChange={(id) => {
-            if (id === AGENT_MODE_ENTRY_VALUE) {
-              onSelectAgentMode?.();
-              return;
-            }
+      {/*
+       * 参数区外壳：滚动容器与两块滚动浮层的共同父级。
+       *
+       * 浮层必须以**参数区**为定位基准，不能以整条工具条为基准：
+       * 之前它们是 `.create-toolbar`（position: relative）的绝对定位子元素，
+       * `right: 0` 落在整条工具条的右缘——那里正好是动作区（消耗位 + 提交键）。
+       * 那枚 `opacity: 0` 的滚动按钮因此**完全盖在提交键上**（实测两者矩形
+       * 只差 3px），点击全被它吃掉：它只 scrollBy 参数区，参数没溢出时什么
+       * 也不发生，于是表现为「点发送没反应」，后端连一条日志都没有。
+       */}
+      <div className="create-toolbar__params">
+        <div
+          className="create-toolbar__settings"
+          ref={settingsRef}
+          data-scroll-left={scrollEdges.left ? "true" : "false"}
+          data-scroll-right={scrollEdges.right ? "true" : "false"}
+        >
+          <CreateSelect
+            primary
+            ariaLabel="创作类型"
             /*
-             * 即梦的清单里有「音乐 / 数字人 / 动作模仿」，本项目后端没接。
-             * 照即梦的规矩「列出来 + 标注」，点了给明确说明，不静默失败。
+             * 标题「创作类型」：即梦的创作类型下拉**有**标题（i18n key
+             * `web_home_tool_dropdown_title`，实测 aria-label 同名）。
+             * 上一版只有 Agent 浮坞带标题，普通浮坞漏了。
              *
-             * 查不到映射 = 这一项不是一种本项目的创作类型（未接入的三项）。
+             * 即梦的模型/参数下拉**没有**标题；本项目的模型下拉拆成
+             * 「平台 → 模型」两级之后，两枚都带标题（见 `CreateModelSelect`），
+             * 否则并排两枚下拉分不清谁是谁。
              */
-            const target = ENTRY_VALUE_TO_MODE[id];
-            if (target === undefined) {
-              toast(AGENT_COPY.modePending);
-              return;
-            }
-            onModeChange(target);
-          }}
-          icon={<CreateModeIcon mode={mode} className="create-select__mode-icon" />}
-        />
-        <CreateSelect
-          ariaLabel="模型"
-          /*
-           * 即梦的模型下拉：浮层 440 宽、圆角 16、选项圆角 12
-           * （源码 `.trigger-wc2vGe.lv-trigger .lv-select-popup{…}`）。
-           */
-          wide
-          popoverWidth={440}
-          value={model?.modelDefinitionId ?? null}
-          options={modelOptions}
-          onChange={(id) => {
-            const picked = models.find((item) => item.modelDefinitionId === id);
-            if (picked) onModelChange(picked);
-          }}
-        />
-        {abilityGroup ? (
-          <AbilitySelect
-            group={abilityGroup}
-            value={values[abilityGroup.capabilities[0]?.key ?? ""]}
-            onChange={onParameterChange}
+            title="创作类型"
+            value={mode}
+            options={modeEntries}
+            /* 这是创作类型下拉，不是模型下拉：陈旧 id 时不能显示「默认模型」。 */
+            fallbackLabel="创作类型"
+            onChange={(id) => {
+              if (id === AGENT_MODE_ENTRY_VALUE) {
+                onSelectAgentMode?.();
+                return;
+              }
+              /*
+               * 即梦的清单里有「音乐 / 数字人 / 动作模仿」，本项目后端没接。
+               * 照即梦的规矩「列出来 + 标注」，点了给明确说明，不静默失败。
+               *
+               * 查不到映射 = 这一项不是一种本项目的创作类型（未接入的三项）。
+               */
+              const target = ENTRY_VALUE_TO_MODE[id];
+              if (target === undefined) {
+                toast(AGENT_COPY.modePending);
+                return;
+              }
+              onModeChange(target);
+            }}
+            icon={<CreateModeIcon mode={mode} className="create-select__mode-icon" />}
           />
-        ) : null}
-        <CreateParamControl
-          ariaLabel="生成参数"
-          /*
-           * 参数按钮的图标**按档位**给（即梦实测）：
-           *   · 图片档「智能比例2K」：前置 16×16 画框图标；
-           *   · 视频档「16:9 720P」：**没有**图标。
-           */
-          icon={isImageMode ? <JimengIcon name="paramsFrame" /> : undefined}
-          summary={summary}
-          groups={parameterGroups}
-          values={values}
-          onChange={onParameterChange}
-          panelMinWidth={336}
-          /*
-           * 即梦给「AI 能力」在参数摘要末尾挂一枚蓝色 ✦（截图里是
-           * 「智能比例 · 2K ✦」）。标记位由能力目录驱动：`aiMark`。
-           */
-          aiMark={hasAiMark}
-        />
-        {countGroup ? (
+          <CreateModelSelect
+            models={modeModels}
+            model={model}
+            onModelChange={onModelChange}
+          />
+          {abilityGroup ? (
+            <AbilitySelect
+              group={abilityGroup}
+              value={values[abilityGroup.capabilities[0]?.key ?? ""]}
+              onChange={onParameterChange}
+            />
+          ) : null}
           <CreateParamControl
-            ariaLabel="生成数量"
-            icon={<JimengIcon name="countStack" />}
-            summary={countSummary}
-            groups={[countGroup]}
+            ariaLabel="生成参数"
+            /*
+             * 参数按钮的图标**按档位**给（即梦实测）：
+             *   · 图片档「智能比例2K」：前置 16×16 画框图标；
+             *   · 视频档「16:9 720P」：**没有**图标。
+             */
+            icon={isImageMode ? <JimengIcon name="paramsFrame" /> : undefined}
+            summary={summary}
+            groups={parameterGroups}
             values={values}
             onChange={onParameterChange}
-            panelMinWidth={320}
+            panelMinWidth={336}
+            /*
+             * 即梦给「AI 能力」在参数摘要末尾挂一枚蓝色 ✦（截图里是
+             * 「智能比例 · 2K ✦」）。标记位由能力目录驱动：`aiMark`。
+             */
+            aiMark={hasAiMark}
           />
-        ) : null}
-        {durationGroup ? (
-          <CreateParamControl
-            ariaLabel="生成时长"
-            /* 即梦视频档的「5s」按钮前置一枚时钟图标。 */
-            icon={<JimengIcon name="durationIcon" />}
-            summary={durationSummary}
-            groups={[durationGroup]}
-            values={values}
-            onChange={onParameterChange}
-          />
-        ) : null}
-        {/*
+          {countGroup ? (
+            <CreateParamControl
+              ariaLabel="生成数量"
+              icon={<JimengIcon name="countStack" />}
+              summary={countSummary}
+              groups={[countGroup]}
+              values={values}
+              onChange={onParameterChange}
+              panelMinWidth={320}
+            />
+          ) : null}
+          {durationGroup ? (
+            <CreateParamControl
+              ariaLabel="生成时长"
+              /* 即梦视频档的「5s」按钮前置一枚时钟图标。 */
+              icon={<JimengIcon name="durationIcon" />}
+              summary={durationSummary}
+              groups={[durationGroup]}
+              values={values}
+              onChange={onParameterChange}
+            />
+          ) : null}
+          {/*
          * 「文字效果增强」与「@主体」两枚图标钮（即梦普通浮坞也有）。
          *
          * 即梦图片生成档工具条实测（左→右）：
@@ -432,24 +435,59 @@ export function CreateToolbar({
          * 两个能力本项目后端都没有，按 AGENTS.md「Agent 模式约定」的规矩：
          * 结构定死、交互做全、点击给出明确说明，不静默失败、不藏起来。
          */}
-        {isImageMode ? (
+          {isImageMode ? (
+            <button
+              type="button"
+              className="create-toolbar__tool"
+              aria-label="文字效果增强"
+              onClick={() => toast("文字效果增强后端暂未接入。")}
+            >
+              <JimengIcon name="textEffect" />
+            </button>
+          ) : null}
           <button
             type="button"
             className="create-toolbar__tool"
-            aria-label="文字效果增强"
-            onClick={() => toast("文字效果增强后端暂未接入。")}
+            aria-label="添加主体"
+            onClick={(event) => onOpenSubjects?.(event.currentTarget)}
           >
-            <JimengIcon name="textEffect" />
+            <JimengIcon name="subjectIcon" />
           </button>
-        ) : null}
-        <button
-          type="button"
-          className="create-toolbar__tool"
-          aria-label="添加主体"
-          onClick={(event) => onOpenSubjects?.(event.currentTarget)}
-        >
-          <JimengIcon name="subjectIcon" />
-        </button>
+        </div>
+
+        {/*
+         * 左右滚动浮层（即梦 `.scroll-button-container`）。
+         *
+         * 即梦把这两块做成参数区**两侧**的 64px 绝对定位浮层，按钮默认透明、
+         * hover 工具条才显形；渐隐交给参数区的 `mask-image`。
+         *
+         * 它们是参数区（`.create-toolbar__params`）的子元素，不是整条工具条的
+         * 子元素——定位基准必须是参数区，否则右缘会落到动作区的提交键上。
+         */}
+        <div className="create-toolbar__scroll-zone create-toolbar__scroll-zone--left">
+          <button
+            type="button"
+            className="create-toolbar__scroll"
+            aria-label="向左滚动参数"
+            tabIndex={scrollEdges.left ? 0 : -1}
+            data-active={scrollEdges.left ? "true" : "false"}
+            onClick={() => scrollSettings(-1)}
+          >
+            <Icon name="caret-left" size="xs" aria-hidden="true" />
+          </button>
+        </div>
+        <div className="create-toolbar__scroll-zone create-toolbar__scroll-zone--right">
+          <button
+            type="button"
+            className="create-toolbar__scroll"
+            aria-label="向右滚动参数"
+            tabIndex={scrollEdges.right ? 0 : -1}
+            data-active={scrollEdges.right ? "true" : "false"}
+            onClick={() => scrollSettings(1)}
+          >
+            <Icon name="caret-right" size="xs" aria-hidden="true" />
+          </button>
+        </div>
       </div>
 
       <div className="create-toolbar__actions">
@@ -488,35 +526,6 @@ export function CreateToolbar({
           ) : (
             <JimengIcon name="submit" size="1.25rem" />
           )}
-        </button>
-      </div>
-
-      {/*
-       * 左右滚动浮层（即梦 `.scroll-button-container`）。
-       *
-       * 即梦把这两块做成参数区**两侧**的 64px 绝对定位浮层，按钮默认透明、
-       * hover 工具条才显形；渐隐交给参数区的 `mask-image`。
-       */}
-      <div className="create-toolbar__scroll-zone create-toolbar__scroll-zone--left">
-        <button
-          type="button"
-          className="create-toolbar__scroll"
-          aria-label="向左滚动参数"
-          tabIndex={scrollEdges.left ? 0 : -1}
-          onClick={() => scrollSettings(-1)}
-        >
-          <Icon name="caret-left" size="xs" aria-hidden="true" />
-        </button>
-      </div>
-      <div className="create-toolbar__scroll-zone create-toolbar__scroll-zone--right">
-        <button
-          type="button"
-          className="create-toolbar__scroll"
-          aria-label="向右滚动参数"
-          tabIndex={scrollEdges.right ? 0 : -1}
-          onClick={() => scrollSettings(1)}
-        >
-          <Icon name="caret-right" size="xs" aria-hidden="true" />
         </button>
       </div>
     </div>

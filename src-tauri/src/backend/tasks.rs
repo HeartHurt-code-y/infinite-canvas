@@ -8,6 +8,7 @@ use std::{
 
 use rand::Rng as _;
 use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Emitter as _};
 use tauri_plugin_log::log::{error, info, warn};
 use tauri_plugin_notification::NotificationExt as _;
@@ -19,8 +20,9 @@ use super::{
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
     model_schema::{
-        RequestDialect, apply_request_dialect, default_model_schema, is_seedance_draft_video_model,
-        normalize_parameters, refresh_pixverse_video_defaults,
+        RequestDialect, apply_request_dialect, atlascloud_image_operation_schema_for,
+        default_model_schema, is_seedance_draft_video_model, normalize_parameters,
+        refresh_pixverse_video_defaults,
     },
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
     staging::StagingService,
@@ -37,6 +39,9 @@ use super::{
 };
 
 const MAX_AUTOMATIC_RETRIES: u32 = 3;
+#[path = "tasks/long_video.rs"]
+mod long_video;
+pub(crate) use long_video::FrozenGenerationProfile;
 const WAN_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// 视频任务的轮询策略：家族任务按网关家族档案的节奏（`GatewayProfile::poll_cadence`），
@@ -157,6 +162,36 @@ fn operation_schema_for_start(
         apply_request_dialect(&mut refreshed, remote_model_id.unwrap_or_default(), dialect);
         return refreshed.get(operation.as_str()).cloned();
     }
+    /*
+     * Atlas Cloud 的视频契约（Vidu Q4 参考图生视频）同样按模型成员与操作确定：
+     * 提交端点是 `/api/v1/model/generateVideo`，参考图走 `reference_images`、
+     * 参考音频走 `reference_audios`，参数表也整张换过。这里按**请求的操作**
+     * 重新给出 Atlas 档案，而不是照抄存档里的槽位——存档可能还是旧版本按模型名
+     * 推导出的魔芋 Vidu 契约（`/v1/video/generations` + 顶层 `images`），
+     * 照抄会把付费请求发到 Atlas 上并不存在的路径上。
+     */
+    if operation == GenerationOperation::VideoGeneration
+        && dialect == RequestDialect::AtlasCloud
+    {
+        let mut refreshed = stored_operations.clone();
+        apply_request_dialect(&mut refreshed, remote_model_id.unwrap_or_default(), dialect);
+        return refreshed.get(operation.as_str()).cloned();
+    }
+    /*
+     * Atlas Cloud 的图片契约按模型家族与操作确定：编辑成员只有「参考图编辑」，
+     * 文生图成员只有「文生图」。这里按**请求的操作**重新给出 Atlas 档案，
+     * 而不是照抄存档里的槽位——存档可能是旧版本按通用网关写的（Atlas 上没有
+     * `/v1/images/generations` 这个端点），照抄会把付费请求发到不存在的路径上。
+     */
+    if matches!(
+        operation,
+        GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+    ) && dialect == RequestDialect::AtlasCloud
+        && let Some(schema) = remote_model_id
+            .and_then(|model_id| atlascloud_image_operation_schema_for(model_id, operation))
+    {
+        return Some(schema);
+    }
     if operation == GenerationOperation::VideoGeneration
         && let Some(model_id) = remote_model_id
         && let Some(family) = GatewayProfile::from_model_id(model_id)
@@ -242,8 +277,36 @@ impl GenerationTaskService {
         }
     }
 
+    /// 找到已接受的客户端任务身份时，只允许返回同一份请求的原任务。
+    fn existing_client_task(&self, task_id: &str, request_hash: &str) -> BackendResult<Option<String>> {
+        match self.storage.get_task_detail(task_id) {
+            Ok(detail) => {
+                if detail.logical_request.get("clientRequestHash").and_then(Value::as_str) == Some(request_hash) {
+                    Ok(Some(task_id.to_string()))
+                } else {
+                    Err(BackendError::Conflict("生成任务身份已被另一份请求使用，请重新创建批次。".into()))
+                }
+            }
+            Err(BackendError::NotFound(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     fn start_inner(&self, mut command: StartGenerationCommand) -> BackendResult<String> {
         validate_start_command(&command)?;
+        let client_identity = if let Some(raw_id) = command.client_task_id.as_deref() {
+            let parsed = Uuid::parse_str(raw_id).map_err(|_| BackendError::validation(
+                "批量任务身份无效", json!({ "clientTaskId": raw_id }),
+            ))?;
+            let task_id = parsed.to_string();
+            let request_hash = hex::encode(Sha256::digest(serde_json::to_vec(&command)?));
+            if let Some(existing) = self.existing_client_task(&task_id, &request_hash)? {
+                return Ok(existing);
+            }
+            Some((task_id, request_hash))
+        } else {
+            None
+        };
         let provider = self
             .storage
             .get_provider_connection(&command.provider_connection_id)?;
@@ -350,9 +413,12 @@ impl GenerationTaskService {
                     }),
                 )
             })?;
-        let logical_request = serde_json::to_value(&command)?;
-        let task_id = Uuid::new_v4().to_string();
-        self.lifecycle.create(NewTask {
+        let mut logical_request = serde_json::to_value(&command)?;
+        if let Some((_, request_hash)) = &client_identity {
+            logical_request["clientRequestHash"] = json!(request_hash);
+        }
+        let task_id = client_identity.as_ref().map(|(id, _)| id.clone()).unwrap_or_else(|| Uuid::new_v4().to_string());
+        let creation = self.lifecycle.create(NewTask {
             id: &task_id,
             canvas_id: &command.canvas_id,
             source_node_id: &command.source_node_id,
@@ -362,7 +428,16 @@ impl GenerationTaskService {
             model_definition_id: &command.model_definition_id,
             remote_model_id: Some(remote_model_id),
             logical_request: &logical_request,
-        })?;
+        });
+        if let Err(error) = creation {
+            // 同一身份并发创建时，数据库主键只允许一个成功；失败方回读原任务。
+            if let Some((_, request_hash)) = &client_identity {
+                if let Some(existing) = self.existing_client_task(&task_id, request_hash)? {
+                    return Ok(existing);
+                }
+            }
+            return Err(error);
+        }
         self.cancellations.register(&task_id);
         info!(
             "[generation] 任务已创建，即将进入后台执行: taskId={task_id}, canvasId={}, sourceNode={}, operation={}, provider={}（{}）, model={}, 远程模型={remote_model_id}, 提示词片段={} 个, 显式媒体输入={} 个, 生成数量={}",
@@ -452,7 +527,9 @@ impl GenerationTaskService {
     /// 落库由 [`Storage::delete_canvas_document`] 在删除画布的同一个事务里完成，
     /// 终态历史任务保持原样。
     pub fn cancel_canvas_tasks(&self, canvas_id: &str) -> BackendResult<Vec<String>> {
-        let task_ids = self.storage.list_nonterminal_task_ids_for_canvas(canvas_id)?;
+        let task_ids = self
+            .storage
+            .list_nonterminal_task_ids_for_canvas(canvas_id)?;
         for task_id in &task_ids {
             self.cancellations.request_cancel(task_id);
             if let Ok(slot) = self.video_polls.slot(task_id) {
@@ -498,7 +575,12 @@ impl GenerationTaskService {
             }
             Err(error) => {
                 // 取消与收尾并发时任务可能已经落成别的终态：以库里的事实为准。
-                if self.storage.get_task_execution(task_id)?.status.is_terminal() {
+                if self
+                    .storage
+                    .get_task_execution(task_id)?
+                    .status
+                    .is_terminal()
+                {
                     Ok(true)
                 } else {
                     Err(error)
@@ -910,6 +992,66 @@ impl GenerationTaskService {
                 }
                 Ok(())
             }
+            GenerationSubmission::Audio {
+                bytes,
+                mime_type,
+                extension,
+            } => {
+                info!(
+                    "[generation] 供应商返回音频结果（{} 字节），开始本地保存: taskId={task_id}",
+                    bytes.len()
+                );
+                self.cleanup_staging_leases(task_id, &bundle.staging_leases)
+                    .await;
+                // 生命周期事实（`SubmissionImagesAccepted`）本身与媒体类型无关：
+                // 它登记待写结果并把任务推进到成功终态，音频复用同一条路径。
+                self.commit_fact(
+                    task_id,
+                    GenerationLifecycleFact::SubmissionImagesAccepted {
+                        attempt_id: success.attempt_id,
+                        call_id: success.call_id,
+                        tokens: success.tokens,
+                        results: vec![self.local_results.pending_audio_result(
+                            task_id,
+                            &mime_type,
+                            bytes.len() as u64,
+                        )],
+                    },
+                )?;
+                let event_service = self.clone();
+                let result = self
+                    .local_results
+                    .save_audio(
+                        task_id,
+                        bytes,
+                        &mime_type,
+                        &extension,
+                        move |record, preview_src| {
+                            event_service.emit_result_ready(record, preview_src);
+                        },
+                    )
+                    .await?;
+                let error_suffix = result
+                    .error
+                    .as_ref()
+                    .map(|error| format!("，错误: {error}"))
+                    .unwrap_or_default();
+                info!(
+                    "[generation] 音频结果处理完成: taskId={task_id}, resultIndex={}, 保存状态={}, 最终路径={:?}, 大小={} 字节{error_suffix}",
+                    result.result_index,
+                    result.save_status.as_str(),
+                    result.final_path,
+                    result
+                        .byte_size
+                        .map(|size| size.to_string())
+                        .unwrap_or_default(),
+                );
+                self.emit(
+                    "generation:result-saved",
+                    &json!({ "taskId": task_id, "result": result }),
+                );
+                Ok(())
+            }
             GenerationSubmission::RemoteImageTask {
                 task_id: remote_task_id,
             }
@@ -1010,6 +1152,14 @@ impl GenerationTaskService {
                             info!(
                                 "[generation] 提交尝试成功: taskId={}, attemptId={}, 返回远程任务 {remote_task_id}",
                                 task.id, attempt_id
+                            );
+                        }
+                        GenerationSubmission::Audio { bytes, .. } => {
+                            info!(
+                                "[generation] 提交尝试成功: taskId={}, attemptId={}, 返回音频结果 {} 字节",
+                                task.id,
+                                attempt_id,
+                                bytes.len()
                             );
                         }
                     }
@@ -1126,26 +1276,24 @@ impl GenerationTaskService {
             "[generation] 供应商返回图片结果 {} 个，开始本地保存: taskId={task_id}",
             images.len()
         );
-        let Some(first) = self
-            .local_results
-            .pending_image_results(task_id, &images)
-            .into_iter()
-            .next()
-        else {
+        // 一次远端任务可能返回多张图（实测 Atlas/Midjourney 同一次提交有 4 张、
+        // 也有 3 张，张数由上游当次决定）：必须把**全部**结果登记进生命周期事实。
+        // 只登记第一条的话，其余结果写库时会被守卫判为「未登记」而失败，
+        // 图片一张都落不了盘。
+        let pending = self.local_results.pending_image_results(task_id, &images);
+        if pending.is_empty() {
             return Err(BackendError::protocol(
                 "image task completed without an image payload",
                 json!({ "taskId": task_id, "remoteStatus": remote_status }),
             ));
-        };
+        }
         self.commit_fact(
             task_id,
             GenerationLifecycleFact::ObservationApplied {
                 attempt_id,
                 call_id,
                 tokens,
-                observation: GenerationRemoteObservation::Succeeded {
-                    result: Box::new(first),
-                },
+                observation: GenerationRemoteObservation::Succeeded { results: pending },
             },
         )?;
         let event_service = self.clone();
@@ -1371,7 +1519,9 @@ impl GenerationTaskService {
                 remote_status.as_str()
             };
             match remote_status {
-                "NOT_START" | "SUBMITTED" | "QUEUED" | "PENDING" => {
+                // `created` 是 Atlas Cloud 等平台的「已受理、尚未开始」状态：它属于
+                // 排队而不是终态，落到未知分支会让任务直接停摆。
+                "NOT_START" | "SUBMITTED" | "QUEUED" | "PENDING" | "CREATED" => {
                     info!(
                         "[generation] {kind}任务远端排队中: taskId={}, 远端状态={}, 进度={:?}",
                         task_id, observation.remote_status, observation.progress
@@ -1444,11 +1594,11 @@ impl GenerationTaskService {
                                 call_id,
                                 tokens,
                                 observation: GenerationRemoteObservation::Succeeded {
-                                    result: Box::new(self.local_results.pending_text_result(
+                                    results: vec![self.local_results.pending_text_result(
                                         task_id,
                                         remote_task_id,
                                         text,
-                                    )),
+                                    )],
                                 },
                             },
                         )?;
@@ -1473,13 +1623,11 @@ impl GenerationTaskService {
                                         call_id,
                                         tokens,
                                         observation: GenerationRemoteObservation::Succeeded {
-                                            result: Box::new(
-                                                self.local_results.pending_video_result(
-                                                    task_id,
-                                                    remote_task_id,
-                                                    video_url,
-                                                ),
-                                            ),
+                                            results: vec![self.local_results.pending_video_result(
+                                                task_id,
+                                                remote_task_id,
+                                                video_url,
+                                            )],
                                         },
                                     },
                                 )?;
@@ -1531,12 +1679,12 @@ impl GenerationTaskService {
                                         call_id,
                                         tokens,
                                         observation: GenerationRemoteObservation::Succeeded {
-                                            result: Box::new(
+                                            results: vec![
                                                 self.local_results.pending_video_content_result(
                                                     task_id,
                                                     remote_task_id,
                                                 ),
-                                            ),
+                                            ],
                                         },
                                     },
                                 )?;

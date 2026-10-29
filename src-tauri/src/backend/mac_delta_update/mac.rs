@@ -55,11 +55,18 @@ struct Descriptor {
 }
 
 fn set_status(change: impl FnOnce(&mut MacDeltaUpdateStatus)) {
-    change(&mut STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    change(
+        &mut STATUS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
 }
 
 pub fn status() -> MacDeltaUpdateStatus {
-    STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    STATUS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 fn trusted_origin() -> Result<Url, String> {
@@ -567,7 +574,9 @@ pub async fn prepare(app: &AppHandle, version: &str) -> Result<bool, String> {
         return Err("macOS 差分更新已在进行中".into());
     }
     let _guard = RunningGuard;
-    *READY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    *READY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     set_status(|status| {
         *status = MacDeltaUpdateStatus {
             preparing: true,
@@ -577,7 +586,9 @@ pub async fn prepare(app: &AppHandle, version: &str) -> Result<bool, String> {
     let result = prepare_inner(app, version).await;
     match result {
         Ok(Some(prepared)) => {
-            *READY.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
+            *READY
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(prepared);
             set_status(|status| {
                 status.preparing = false;
                 status.ready = true;

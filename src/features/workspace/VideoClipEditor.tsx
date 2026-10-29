@@ -5,6 +5,7 @@ import { placeFloatingLayer } from "../../components/floatingLayer";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { CanvasChromeIcon } from "./CanvasChromeIcons";
 import { PromptMentionInput } from "./PromptNodeViews";
+import { CanvasReferenceTools } from "./CanvasReferenceTools";
 import type { PromptContentEditorSession } from "../../lib/promptContent";
 import type { MentionCandidate, VideoClipInput, VideoClipNodeData } from "./workspaceModel";
 import {
@@ -61,7 +62,6 @@ export interface VideoClipEditorProps {
   readonly onModeChange: (modeKey: VideoClipModeKey) => void;
   readonly onParamsChange: (params: VideoClipParams) => void;
   readonly onSubmit: () => void;
-  readonly onOpenReferencePicker: () => void;
   readonly onUnlink: (edgeId: string) => void;
 }
 
@@ -77,37 +77,22 @@ export function VideoClipEditor({
   onModeChange,
   onParamsChange,
   onSubmit,
-  onOpenReferencePicker,
   onUnlink,
 }: VideoClipEditorProps) {
   const promptLabelId = `video-clip-prompt-label-${node.key}`;
   const promptHintId = `video-clip-prompt-hint-${node.key}`;
 
   return (
-    <div className="video-node-editor video-clip-editor" aria-busy={busy || undefined}>
+    <div className="video-clip-editor" aria-busy={busy || undefined}>
       <div className="video-node-editor__form">
         <div className="canvas-gen-node__tool-chips" role="group" aria-label="智能剪辑素材">
-          <button
-            type="button"
-            className="canvas-gen-node__tool-chip"
-            aria-label="添加参考素材"
-            // 悬停提示要与点击后的实际行为一致：素材选择器尚未接入，
-            // 不能写成「从素材库选参考」——素材库是有的，选完连到本节点这条链没有。
-            data-tooltip="添加参考素材（选择器后端暂未接入）"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onOpenReferencePicker();
-            }}
-          >
-            <CanvasChromeIcon name="plus" size={12} />
-            <span>参考</span>
-          </button>
+          <VideoClipReferenceButton node={node} disabled={busy} />
           {inputs.map((input, index) => (
             <VideoClipMaterialTile
               key={input.key}
               input={input}
               index={index + 1}
+              disabled={busy}
               onUnlink={() => onUnlink(input.edgeId)}
             />
           ))}
@@ -188,10 +173,12 @@ function VideoClipMaterialTile({
   input,
   index,
   onUnlink,
+  disabled,
 }: {
   readonly input: VideoClipInput;
   readonly index: number;
   readonly onUnlink: () => void;
+  readonly disabled: boolean;
 }) {
   return (
     <span className="video-clip-editor__tile" title={input.name}>
@@ -212,6 +199,7 @@ function VideoClipMaterialTile({
         type="button"
         className="video-clip-editor__tile-remove"
         aria-label={`解除连线：${input.name}`}
+        disabled={disabled}
         onMouseDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
@@ -289,8 +277,7 @@ function useFloatingPanel(
         maxHeight: 520,
       });
       /*
-       * 只在真的动了才 setState：画布缩放 / 节点拖动时每帧都会重算，
-       * 位置没变却每帧触发一次 React 重渲染，浮层会在低端机上抖。
+       * 只在真的动了才 setState，避免跟随轮询在位置没变时反复重渲染。
        */
       setPlacement((current) =>
         current &&
@@ -313,9 +300,8 @@ function useFloatingPanel(
     /*
      * 浮层挂在 body 上，而触发器在编辑层里——编辑层被重新定位（节点移动、
      * 视口缩放、编辑层首次测量）时，触发器的屏幕坐标会变而浮层不会自己跟。
-     * 这里在浮层打开期间按帧比对触发器位置，变了就重贴一次。
+     * 这里在浮层打开期间低频比对触发器位置，变了就重贴一次。
      */
-    let frame = 0;
     let lastRect = "";
     const track = () => {
       const anchorElement = anchorRef.current;
@@ -327,14 +313,13 @@ function useFloatingPanel(
           update();
         }
       }
-      frame = requestAnimationFrame(track);
     };
-    frame = requestAnimationFrame(track);
+    const followTimer = window.setInterval(track, 120);
     return () => {
       observer.disconnect();
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
-      if (frame) cancelAnimationFrame(frame);
+      window.clearInterval(followTimer);
     };
   }, [open, gap, minWidth, measuredHeight, panelRef]);
 
@@ -346,7 +331,8 @@ function useFloatingPanel(
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      event.preventDefault();
       event.stopPropagation();
       closeAndRestoreFocus();
     };
@@ -389,6 +375,29 @@ function useFloatingPanel(
   };
 }
 
+function VideoClipReferenceButton({ node, disabled }: { readonly node: VideoClipNodeData; readonly disabled: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
+  const { anchorRef, panelRef, panelElement, placement } = useFloatingPanel(open, 8, 260, () => setOpen(false));
+  useEffect(() => {
+    if (!open) return;
+    const outside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !anchorRef.current?.contains(event.target) && !panelElement?.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", outside, true);
+    return () => document.removeEventListener("pointerdown", outside, true);
+  }, [open, anchorRef, panelElement]);
+  // Keep the tools mounted while picking: closing the popover must not cancel canvas picking.
+  return <>
+    <button ref={anchorRef as React.RefObject<HTMLButtonElement | null>} type="button" className="canvas-gen-node__tool-chip" aria-label="添加参考素材" aria-expanded={open} aria-haspopup="dialog" disabled={disabled} onClick={() => setOpen(value => !value)}><CanvasChromeIcon name="plus" size={12} /><span>参考</span></button>
+    <FloatingPanel keepMounted open={open} panelRef={panelRef} placement={placement} className="video-clip-editor__reference-panel" role="dialog" ariaLabel="添加剪辑参考">
+      <CanvasReferenceTools node={node} active disabled={disabled} onError={setReferenceError} />
+    </FloatingPanel>
+    {referenceError ? <ErrorAlert error={referenceError} variant="inline" hint="检查素材后重新添加；添加参考不会发起生成。" /> : null}
+  </>;
+}
+
 /** 浮层外壳：portal 到 body，跟随触发器定位。 */
 function FloatingPanel({
   open,
@@ -398,6 +407,7 @@ function FloatingPanel({
   role,
   ariaLabel,
   children,
+  keepMounted = false,
 }: {
   readonly open: boolean;
   readonly panelRef: React.Dispatch<React.SetStateAction<HTMLDivElement | null>>;
@@ -407,8 +417,9 @@ function FloatingPanel({
   readonly role?: "menu" | "dialog";
   readonly ariaLabel?: string;
   readonly children: ReactNode;
+  readonly keepMounted?: boolean;
 }) {
-  if (!open || !placement) return null;
+  if ((!open && !keepMounted) || !placement) return null;
   return createPortal(
     <div
       ref={panelRef}
@@ -416,12 +427,13 @@ function FloatingPanel({
       role={role}
       aria-label={ariaLabel}
       style={{
+        display: open ? undefined : "none",
         position: "fixed",
         top: placement.top,
         left: placement.left,
         width: placement.width,
         maxHeight: placement.maxHeight,
-        zIndex: 90,
+        zIndex: "calc(var(--z-modal) + 20)",
       }}
     >
       {children}
@@ -442,6 +454,7 @@ function VideoClipModeButton({
   readonly onModeChange: (modeKey: VideoClipModeKey) => void;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const mode = videoClipMode(modeKey);
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const activeIndex = Math.max(
@@ -591,6 +604,7 @@ function VideoClipParamsButton({
   readonly onParamsChange: (params: VideoClipParams) => void;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
   const { anchorRef, panelRef, panelElement, placement } = useFloatingPanel(open, 0, 341.3, () =>
     setOpen(false),
   );

@@ -834,6 +834,7 @@
 }
 
 .create-dock__surface {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
@@ -847,6 +848,37 @@
   );
   backdrop-filter: blur(80px);
   box-shadow: var(--shadow-create-input-hover);
+}
+
+/*
+ * 素材从资产库抽屉拖进来时的落点状态。
+ *
+ * 指针停在浮坞上就把外壳点亮，并在左上角给一句「松手会发生什么」——
+ * 没有这句提示时，用户只能靠猜松手之后素材去哪了。
+ */
+.create-dock__surface.is-drop-target {
+  border-color: var(--color-create-brand);
+}
+
+.create-dock__surface.is-drop-target .create-dock__references {
+  border-radius: var(--radius-xs);
+  outline: 1px dashed var(--color-create-brand);
+  outline-offset: 2px;
+}
+
+.create-dock__drop-hint {
+  position: absolute;
+  top: -1.75rem;
+  left: var(--space-md);
+  z-index: 1;
+  padding: 0 8px;
+  border-radius: var(--radius-create-pill);
+  background: var(--color-create-brand);
+  color: var(--color-create-canvas);
+  font-size: var(--text-2xs);
+  line-height: 1.25rem;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .create-dock__content {
@@ -956,6 +988,20 @@
   font-family: var(--font-jimeng-montserrat);
   font-size: var(--create-text-sm);
   line-height: 1.714rem;
+}
+
+/*
+ * 聚焦时不画焦点框（即梦实测：提示词框聚焦后仍是无边框的）。
+ *
+ * 上面那条 `outline: none` 会被 `src/styles/studio-shell.css` 里的全局
+ * `textarea:focus-visible` 盖掉——两者优先级相同（都是「一个类 + 一个元素」），
+ * 而 studio 层在组件样式之后加载，胜出的是全局那条，于是创作台一点输入就冒出
+ * 一圈近白色（--color-focus: #eeeeee）2px 外框。
+ * 这里用更高的优先级显式关掉，不依赖两层的加载顺序。
+ * 焦点提示改由插入光标承担：文本框聚焦时光标可见，键盘用户能定位。
+ */
+.create-dock__prompt textarea:focus-visible {
+  outline: none;
 }
 
 .create-dock__placeholder {
@@ -1457,6 +1503,22 @@
 }
 
 /*
+ * 参数区外壳：滚动容器与两块滚动浮层的共同父级。
+ *
+ * 浮层的定位基准必须是**参数区**，不是整条工具条：工具条的右缘是动作区
+ * （消耗位 + 提交键），浮层若按工具条定位就会盖在提交键上——那枚
+ * `opacity: 0` 的滚动按钮会吃掉提交键的点击（实测两者矩形只差 3px），
+ * 表现就是「点发送没反应」，后端连一条日志都没有。
+ */
+.create-toolbar__params {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/*
  * 左半区：参数多时横向滚动，不换行、不把右侧动作挤走。
  * 46px 高是因为内容区上下各留 7px，让 32px 的控件有呼吸位。
  */
@@ -1561,6 +1623,15 @@
   align-items: center;
   gap: var(--space-xs);
   flex-shrink: 0;
+  /*
+   * 动作区永远压在滚动浮层之上。
+   *
+   * 兜底：滚动浮层是 z-index 9 的绝对定位浮层，哪天又被挂到工具条上，
+   * 提交键就会再次被隐形按钮盖住（那正是「点发送没反应」的根因）。
+   * 这里把动作区抬到 10，命中测试永远先落在提交键上。
+   */
+  position: relative;
+  z-index: 10;
 }
 
 /*
@@ -1606,9 +1677,22 @@
   background: var(--color-dock-tile);
   color: var(--color-text);
   cursor: pointer;
-  pointer-events: auto;
+  /*
+   * 默认**不接管指针事件**。
+   *
+   * 这枚按钮是 `opacity: 0` 的隐形浮层，却一直 `pointer-events: auto`：
+   * 那一侧没有可滚内容时，点击会被它吃掉——它只做 scrollBy，参数没溢出时
+   * 什么也不发生。「创作类型」下拉最左侧 49px 因此点不开（实测），
+   * 用户看到的就是「点了没反应」。
+   * 只有真的能往那一侧滚时才接管点击。
+   */
+  pointer-events: none;
   opacity: 0;
   transition: opacity var(--dur-short) var(--ease-out);
+}
+
+.create-toolbar__scroll[data-active="true"] {
+  pointer-events: auto;
 }
 
 .create-toolbar:hover .create-toolbar__scroll {
@@ -1694,6 +1778,20 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/*
+ * 「平台 → 模型」两级选择的容器。
+ *
+ * 工具条里它是一个整体（两枚下拉并排），Agent 偏好面板里也是并排。
+ * 间距跟工具条里其它控件一致（--space-2xs），两枚下拉看起来仍是
+ * 工具条上的一排，而不是被圈起来的另一个控件组。
+ */
+.create-model-select {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-width: 0;
 }
 
 /* 下拉浮层：挂在 document.body 上，按视口定位。
@@ -1828,6 +1926,14 @@
  * 不换行（换行会把 36px 的行高顶开）。
  */
 .create-select__option-label {
+  /*
+   * min-width: 0：允许它在浮层宽度不够时被压缩。
+   *
+   * flex 项的默认 min-width 是 auto（= 内容宽度），名称一长就顶得
+   * 浮层出横向滚动条（模型下拉里一长串同名模型时最明显）。
+   * 压到 0 之后由 overflow + ellipsis 收尾，浮层不再横向溢出。
+   */
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1857,9 +1963,18 @@
   box-shadow: inset var(--rule-active) 0 0 0 var(--color-brand-accent);
 }
 
-/* 模型项的副标题（即梦的「卖点」行）：比名称暗一档，说明这个模型是什么来路。
-   实测即梦：12/20、色 rgba(255,255,255,.35)。 */
+/* 选项的副标题：比名称暗一档，说明这个条目是什么来路。
+   实测即梦：12/20、色 rgba(255,255,255,.35)。
+   模型项已经不用这一行了（平台被拆成独立下拉），现在是平台下拉在用：
+   「海外平台 · 18 个模型」。 */
 .create-select__option-description {
+  /* 同上：说明行也要能被压缩，否则它会把名称挤出浮层。 */
+  min-width: 0;
+  /*
+   * 说明行不参与收缩：宽度不够时先让名称省略（名称决定「选哪个」），
+   * 说明行（「N 个模型」这种计数）保持完整可读。
+   */
+  flex: 0 0 auto;
   color: var(--color-create-text-ghost);
   font-size: var(--create-text-xs);
   line-height: 1.667;

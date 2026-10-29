@@ -41,7 +41,8 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 | `pnpm update:manifest`       | 根据指定版本的 updater 产物生成 `latest.json`                                   |
 | `pnpm lint`                  | 执行类型感知 ESLint 检查                                                        |
 | `pnpm format`                | 使用 Prettier 格式化工程文件                                                    |
-| `pnpm check`                 | 执行前端、Rust 格式化及 Clippy 全量检查                                         |
+| `pnpm check`                 | 执行前端全量检查（格式、ESLint、类型、doctor、设计令牌）                      |
+| `pnpm rust:check`            | 编译 Rust 代码（`cargo check`），CI 里也会跑这一步                              |
 | `pnpm codegen`               | 重新生成 Rust ↔ TypeScript 的类型绑定（`src/lib/bindings/`）                    |
 | `pnpm ffmpeg:prepare`        | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`                      |
 | `pnpm macos:verify-bundle`   | 校验 macOS 产物签名与内置可执行文件签名                                         |

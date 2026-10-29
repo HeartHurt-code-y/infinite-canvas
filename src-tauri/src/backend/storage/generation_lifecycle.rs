@@ -191,7 +191,14 @@ pub enum GenerationLifecycleFact {
 pub enum GenerationRemoteObservation {
     Queued { progress: Option<f64> },
     Running { progress: Option<f64> },
-    Succeeded { result: Box<GenerationResultRecord> },
+    /// 远端任务成功时要登记的结果。**可能有多条**：Atlas 上的 Midjourney V8.2
+    /// 一次任务实测返回过 4 张、也返回过 3 张，张数由上游当次决定。
+    ///
+    /// 必须把全部结果一次登记进去：写库时的守卫（`validate_result_change`）
+    /// 只允许改写「已由生命周期登记过」的行，少登记一条，后续那张图写库就会
+    /// 被判为「未登记」而失败——任务却已经进了成功终态，于是图一张都落不了
+    /// 盘，用户只看到一个「成功」但没有任何产物。
+    Succeeded { results: Vec<GenerationResultRecord> },
     Failed { progress: Option<f64>, error: Value },
     Unknown { progress: Option<f64>, error: Value },
 }
@@ -226,17 +233,35 @@ pub struct GenerationLifecycleReceipt {
 pub enum GenerationTaskTransition {
     BeginSubmitting,
     ScheduleSubmissionRetry,
-    AcceptRemoteVideo { remote_task_id: String },
-    ObserveQueued { progress: Option<f64> },
-    ObserveRunning { progress: Option<f64> },
+    AcceptRemoteVideo {
+        remote_task_id: String,
+    },
+    ObserveQueued {
+        progress: Option<f64>,
+    },
+    ObserveRunning {
+        progress: Option<f64>,
+    },
     Succeed,
-    Fail { progress: Option<f64>, error: Value },
-    BecomeUnknown { progress: Option<f64>, error: Value },
-    Interrupt { error: Value },
+    Fail {
+        progress: Option<f64>,
+        error: Value,
+    },
+    BecomeUnknown {
+        progress: Option<f64>,
+        error: Value,
+    },
+    Interrupt {
+        error: Value,
+    },
     /// 取消：与 Interrupt 不同，允许取消已经拿到远端身份的任务——
     /// 远端任务由供应商继续跑完，我们只是不再认领它的结果。
-    Cancel { reason: Value },
-    ChangeQueryHealth { health: QueryHealth },
+    Cancel {
+        reason: Value,
+    },
+    ChangeQueryHealth {
+        health: QueryHealth,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -581,9 +606,18 @@ impl Storage {
                     GenerationRemoteObservation::Running { progress } => {
                         GenerationTaskTransition::ObserveRunning { progress }
                     }
-                    GenerationRemoteObservation::Succeeded { result } => {
-                        require_pending_result(task_id, &result)?;
-                        upsert_result(&transaction, &result)?;
+                    GenerationRemoteObservation::Succeeded { results } => {
+                        if results.is_empty() {
+                            return Err(BackendError::protocol(
+                                "successful observation carried no result to register",
+                                json!({ "taskId": task_id }),
+                            ));
+                        }
+                        // 全部结果都要登记：只登记第一条会让其余结果写库时被守卫拒绝。
+                        for result in &results {
+                            require_pending_result(task_id, result)?;
+                            upsert_result(&transaction, result)?;
+                        }
                         GenerationTaskTransition::Succeed
                     }
                     GenerationRemoteObservation::Failed { progress, error } => {
@@ -1064,7 +1098,7 @@ fn validate_result_change(
     }
     let sp25_recovery = matches!(current.3.as_str(), "failed" | "local_missing" | "conflict")
         && result.save_status == SaveStatus::Writing
-        && is_sp25_video_result_task(transaction, task_id, result)?;
+        && is_reobservable_video_result_task(transaction, task_id, result)?;
     let allowed = match current.3.as_str() {
         "pending" => matches!(
             result.save_status,
@@ -1152,7 +1186,12 @@ fn allowed_sp25_signed_url_refresh(
     is_sp25_video_result_task(transaction, task_id, result)
 }
 
-fn is_sp25_video_result_task(
+/// 该结果属于「可以按远程任务重查后重新保存」的视频结果。
+///
+/// 判据：视频、有远程任务号、且任务所属家族已登记协议。**不要求产物是签名直链**——
+/// Atlas Cloud 的视频产物是公开托管链接（重查任务拿到的是同一个链接），同样允许
+/// 「failed → writing」的恢复重跑；把它排除在外会让一次成功的生成再也无法落盘。
+fn is_reobservable_video_result_task(
     transaction: &Transaction<'_>,
     task_id: &str,
     result: &GenerationResultRecord,
@@ -1167,6 +1206,27 @@ fn is_sp25_video_result_task(
     )?;
     Ok(
         GatewayProfile::for_frozen_snapshot(model_id.as_deref(), &adapter_id).is_some()
+            && task_remote_id == result.remote_task_id,
+    )
+}
+
+/// 该结果属于「产物是带签名的直链」家族：链接会过期，允许重查任务换新链接。
+fn is_sp25_video_result_task(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+    result: &GenerationResultRecord,
+) -> BackendResult<bool> {
+    if result.media_type != MediaType::Video || result.remote_task_id.is_none() {
+        return Ok(false);
+    }
+    let (model_id, task_remote_id, adapter_id): (Option<String>, Option<String>, String) = transaction.query_row(
+        "SELECT remote_model_id_snapshot, remote_task_id, adapter_id_snapshot FROM generation_tasks WHERE id = ?1",
+        params![task_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    Ok(
+        GatewayProfile::for_frozen_snapshot(model_id.as_deref(), &adapter_id)
+            .is_some_and(GatewayProfile::uses_signed_result_url)
             && task_remote_id == result.remote_task_id,
     )
 }

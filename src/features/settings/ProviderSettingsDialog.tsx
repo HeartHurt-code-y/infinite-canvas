@@ -35,6 +35,8 @@ import { TosStagingSettings } from "./TosStagingSettings";
 import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
 import {
   ARK_ADAPTER_ID,
+  ATLASCLOUD_ADAPTER_ID,
+  ATLASCLOUD_BASE_URL,
   BAILIAN_ADAPTER_ID,
   DOUBAO_VOICE_ADAPTER_ID,
   DOUBAO_VOICE_BASE_URL,
@@ -134,10 +136,25 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     baseUrl: "https://mai.anquan.info/v1",
     adapterId: MOYU_ADAPTER_ID,
   },
+  {
+    id: "atlascloud",
+    displayName: "Atlas Cloud",
+    baseUrl: ATLASCLOUD_BASE_URL,
+    adapterId: ATLASCLOUD_ADAPTER_ID,
+  },
 ];
 
 /** 新建连接时是否启用预置模板选择。 */
 const CUSTOM_PRESET_ID = "__custom__";
+
+/** 生成操作 → 中文标签（用于说明哪些能力被按模型契约收窄）。 */
+const OPERATION_LABELS: Readonly<Record<string, string>> = {
+  text_to_image: "文生图",
+  image_to_image: "图生图",
+  video_generation: "视频生成",
+  text_generation: "文本生成",
+  speech_generation: "语音生成",
+};
 
 interface ModelUsage {
   readonly kind: "none" | "image" | "video" | "text" | "speech";
@@ -674,10 +691,35 @@ export function ProviderSettingsDialog({
           tokenGroup: modelTokenGroups[model.id] ?? null,
         };
       });
-      await client.replaceProviderModelBindings(draft.id, selections);
+      const bindings = await client.replaceProviderModelBindings(draft.id, selections);
       await onCatalogChanged();
+      /*
+       * 后端以**最终契约**为准收窄启用能力（例如 Atlas Cloud 的文生图成员没有
+       * 参考图形态）。这里把被收窄的部分讲清楚，别让它变成「勾了却没生效」的
+       * 静默降级。
+       */
+      const narrowed = remoteModels.flatMap((model) => {
+        const requested = selections.find(
+          (selection) => selection.remoteModelId === model.id,
+        );
+        const saved = bindings.find(
+          (binding) => binding.remoteModelId === model.id,
+        );
+        if (!requested || !saved) return [];
+        const dropped = requested.enabledOperations.filter(
+          (operation) => !saved.enabledOperations.includes(operation),
+        );
+        return dropped.length === 0
+          ? []
+          : [`${model.displayName}（${dropped
+              .map((operation) => OPERATION_LABELS[operation] ?? operation)
+              .join("、")}该模型不支持，已按模型能力保存）`];
+      });
       setSuccessMessage(
-        `已保存 ${modelTypeCounts.image} 个图片模型、${modelTypeCounts.video} 个视频模型、${modelTypeCounts.text} 个文本模型、${modelTypeCounts.speech} 个语音模型。`,
+        [
+          `已保存 ${modelTypeCounts.image} 个图片模型、${modelTypeCounts.video} 个视频模型、${modelTypeCounts.text} 个文本模型、${modelTypeCounts.speech} 个语音模型。`,
+          ...narrowed,
+        ].join(" "),
       );
       // 保存成功后自动做一次真实请求的连通性测试；无论结果如何都提示用户。
       // 测试失败不影响已保存的配置，因此失败只降级为提示而不是错误。

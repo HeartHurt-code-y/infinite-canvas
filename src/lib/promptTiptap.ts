@@ -483,7 +483,7 @@ const MarkReference = Node.create({
   },
 });
 
-export function createPromptTiptapExtensions(placeholder: string): Extensions {
+export function createPromptTiptapExtensions(placeholder: string | (() => string)): Extensions {
   return [
     // StarterKit 覆盖段落/文本/硬换行与全部富格式标记（标题、列表、引用、代码块、
     // 粗斜下划删除线等）；undoRedo 关闭——会话统一使用 @tiptap/extensions 的 UndoRedo。

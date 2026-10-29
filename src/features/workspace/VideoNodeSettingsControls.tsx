@@ -43,6 +43,8 @@ export function VideoNodeSettingsControls({
   model,
   parameters,
   advanced,
+  modeControl,
+  inlineAdvanced = false,
 }: {
   readonly kind?: "image" | "video";
   readonly modelLabel: string;
@@ -52,6 +54,8 @@ export function VideoNodeSettingsControls({
   readonly model: ReactNode;
   readonly parameters: ReactNode;
   readonly advanced: ReactNode;
+  readonly modeControl?: ReactNode;
+  readonly inlineAdvanced?: boolean;
 }) {
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -124,7 +128,7 @@ export function VideoNodeSettingsControls({
 
   useEffect(() => {
     if (!active || section == null) return;
-    const dismiss = (event: PointerEvent) => {
+    const dismiss = (event: PointerEvent | FocusEvent) => {
       if (!(event.target instanceof Node)) return;
       if (rootRef.current?.contains(event.target)) return;
       const layer = section === "model" ? modelLayerRef.current : parameterLayerRef.current;
@@ -137,7 +141,12 @@ export function VideoNodeSettingsControls({
       setSection(null);
     };
     document.addEventListener("pointerdown", dismiss, true);
-    return () => document.removeEventListener("pointerdown", dismiss, true);
+    // 图片预设同样挂在 body；键盘把焦点移到另一块浮层时也应收起本面板。
+    document.addEventListener("focusin", dismiss);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss, true);
+      document.removeEventListener("focusin", dismiss);
+    };
   }, [active, section]);
 
   const panelFor = (key: SettingsSection) =>
@@ -210,7 +219,7 @@ export function VideoNodeSettingsControls({
                   </button>
                 </div>
                 <div className="canvas-gen-node__settings">{panel.content}</div>
-                {key === "parameters" ? (
+                {key === "parameters" && !inlineAdvanced ? (
                   <section className="video-settings-advanced">
                     <button
                       type="button"
@@ -246,7 +255,7 @@ export function VideoNodeSettingsControls({
         全能参考：原站底栏的第二项（本项目后端没有这个能力，按项目约定
         结构定死、交互做全、点击给出明确说明）。
       */}
-      <button
+      {modeControl ?? <button
         type="button"
         className="video-settings-control__trigger video-settings-control__trigger--universal"
         aria-label="全能参考"
@@ -256,7 +265,7 @@ export function VideoNodeSettingsControls({
         <CanvasChromeIcon name="universal" size={14} />
         <span>全能参考</span>
         <Icon name="caret-down" size="xs" aria-hidden="true" />
-      </button>
+      </button>}
       <span className="video-settings-controls__divider" aria-hidden="true" />
       {trigger(
         "parameters",

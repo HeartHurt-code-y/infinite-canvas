@@ -219,25 +219,6 @@
   object-fit: cover;
 }
 
-/*
- * 「AI生成」标记：原站是位图水印（watermark.png，48×23，媒体左上角 10px/10px，
- * z-index 10，pointer-events none）。位图资源不能照搬，保留同位置、同权重的
- * 文字胶囊。
- */
-.canvas-node-preview__badge {
-  position: absolute;
-  top: 10px;
-  left: 10px;
-  z-index: 10;
-  padding: 2px 6px;
-  color: var(--nt-text-default);
-  font-size: 11px;
-  line-height: 1.4;
-  background: var(--nt-bg-overlay);
-  border-radius: 6px;
-  pointer-events: none;
-}
-
 .canvas-node-preview__empty {
   display: grid;
   justify-items: center;
@@ -386,6 +367,17 @@
    共享：提示词 / 剧本卡片（CanvasContentNode）复用同一批类名，
    这里保留它们原有的观感，媒体卡自己不再有摘要行。
    ══════════════════════════════════════════════════════════════ */
+
+/*
+ * 卡片**可见内容**的包裹层。
+ *
+ * 为什么需要它：`.canvas-gen-node.canvas-node-preview` 是 622×400 的透明外壳
+ * （媒体卡的高度底座），提示词 / 剧本卡片的实际内容比它矮一截。贴在卡片下沿的
+ * 浮层若以外壳为锚点，会挂在几十像素的空白下面，看着像脱开了卡片。
+ */
+.canvas-content-preview__surface {
+  position: relative;
+}
 
 .canvas-node-preview__meta {
   display: flex;

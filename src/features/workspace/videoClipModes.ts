@@ -274,14 +274,14 @@ export function resolveVideoClipParams(config: {
       ? Math.round(config.durationSeconds)
       : null;
   return {
-    aspectRatio: config.aspectRatio?.trim() || VIDEO_CLIP_DEFAULT_PARAMS.aspectRatio,
+    aspectRatio: VIDEO_CLIP_ASPECT_RATIOS.some(value => value === config.aspectRatio?.trim()) ? config.aspectRatio!.trim() : VIDEO_CLIP_DEFAULT_PARAMS.aspectRatio,
     durationSeconds:
       rawDuration !== null &&
       rawDuration >= VIDEO_CLIP_DURATION_RANGE.min &&
       rawDuration <= VIDEO_CLIP_DURATION_RANGE.max
         ? rawDuration
         : VIDEO_CLIP_DEFAULT_PARAMS.durationSeconds,
-    resolution: config.resolution?.trim() || VIDEO_CLIP_DEFAULT_PARAMS.resolution,
+    resolution: VIDEO_CLIP_RESOLUTIONS.some(value => value === config.resolution?.trim()) ? config.resolution!.trim() : VIDEO_CLIP_DEFAULT_PARAMS.resolution,
   };
 }
 

@@ -24,7 +24,7 @@ import {
   readCreateSizeTokenPx,
   type AgentPreferences,
 } from "./createAgentModel";
-import { CreateSelect } from "./CreateSelect";
+import { CreateModelSelect } from "./CreateModelSelect";
 import { useControllableOpen } from "./useControllableOpen";
 import { useDismissOnOutside, useCreateFloatingLayerAnchor } from "./useFloatingLayerAnchor";
 import type { CreateModelOption } from "./useCreateSession";
@@ -57,6 +57,12 @@ export function CreateAgentPreferences({
    * 即梦的偏好面板宽 486（实测 `lv-popover-content` 486×303，padding 16、
    * 圆角 16、底 #262626）。面板顶边由实测高度推出，底边贴触发器顶边。
    * 宽度取自 tokens.css 的 `--size-create-agentic-popup-preferences`。
+   *
+   * 高度上限给到 420：本面板内容实测 389 高（三个分区 + 内边距），
+   * 而面板是 `overflow: hidden`，上限 320 时最后一行被**直接切掉且滚不到**
+   * （「其他设置」下面那句「未指定模型时按目录里的默认模型提交」正好被切）。
+   * 上限取 420 让内容完整露出；视口不够时 `placeFloatingLayer` 仍会按
+   * 可用空间收紧。
    */
   const popupWidth = useMemo(
     () => readCreateSizeTokenPx(AGENT_POPUP_WIDTH_TOKENS.preferences, 486),
@@ -66,7 +72,7 @@ export function CreateAgentPreferences({
     open,
     anchorRef: triggerRef,
     minWidth: popupWidth,
-    maxHeight: 320,
+    maxHeight: 420,
   });
   useDismissOnOutside(open, popoverRef, triggerRef, () => setOpen(false));
 
@@ -193,19 +199,15 @@ export function CreateAgentPreferences({
                     {AGENT_COPY.preferencesOtherTitle}
                   </header>
                   <div className="create-agent-preferences__other">
-                    <CreateSelect
-                      ariaLabel="模型"
-                      value={preferences.modelDefinitionId}
-                      options={models.map((model) => ({
-                        value: model.modelDefinitionId,
-                        label: model.displayName,
-                        description: `${model.providerName} · ${model.remoteModelId}`,
-                      }))}
-                      onChange={(id) => {
-                        const picked = models.find((model) => model.modelDefinitionId === id);
-                        if (picked) onModelChange(picked);
-                      }}
-                      className="create-agent-preferences__model"
+                    <CreateModelSelect
+                      models={models}
+                      /* 未指定模型时传 null：组件会落到第一个平台的第一个模型，
+                         与「未指定就按目录默认模型提交」的口径一致。 */
+                      model={selectedModel ?? null}
+                      onModelChange={onModelChange}
+                      className="create-agent-preferences__models"
+                      platformClassName="create-agent-preferences__platform"
+                      modelClassName="create-agent-preferences__model"
                     />
                     {selectedModel ? null : (
                       <p className="create-agent-preferences__model-hint">

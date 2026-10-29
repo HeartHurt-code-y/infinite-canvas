@@ -1,11 +1,15 @@
 import {
+  AlignLeft,
   ArrowUp,
+  Aperture,
   AudioLines,
+  Box,
   Briefcase,
   Camera,
   CaptionsOff,
   CircleHelp,
   Clapperboard,
+  ChevronDown,
   Clock,
   Crosshair,
   Download,
@@ -17,9 +21,13 @@ import {
   Keyboard,
   Layers,
   LayoutGrid,
+  LibraryBig,
+  Languages,
   Magnet,
   Maximize,
+  Maximize2,
   MousePointer2,
+  Music4,
   Orbit,
   Pencil,
   Plus,
@@ -29,10 +37,15 @@ import {
   Smile,
   SlidersHorizontal,
   Sparkles,
+  ScanFace,
+  SquareUserRound,
+  Grid2X2,
   Sun,
   Table2,
   User,
   Video,
+  X,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 
@@ -77,8 +90,23 @@ export type CanvasChromeIconName =
   | "replace"
   | "titlecard"
   | "camera"
+  | "aperture"
+  | "chevron-down"
+  | "storyboard"
+  | "portrait"
+  | "face"
+  | "grid2"
+  | "product"
+  | "close"
   | "download"
   | "fullscreen"
+  /** 文本节点「尝试：」卡片：文本行 / 音乐。 */
+  | "text-lines"
+  | "music"
+  /** 文本节点悬浮生成器面板：翻译 / 闪电消耗位 / 展开。 */
+  | "translate"
+  | "lightning"
+  | "expand"
   /** 编辑层工具 chips：参考 / 标记 / 角色库 / 运镜。 */
   | "crosshair"
   | "universal"
@@ -118,8 +146,21 @@ const ICONS: Record<CanvasChromeIconName, LucideIcon> = {
   replace: Replace,
   titlecard: Shapes,
   camera: Camera,
+  aperture: Aperture,
+  "chevron-down": ChevronDown,
+  storyboard: LibraryBig,
+  portrait: SquareUserRound,
+  face: ScanFace,
+  grid2: Grid2X2,
+  product: Box,
+  close: X,
   download: Download,
   fullscreen: Maximize,
+  "text-lines": AlignLeft,
+  music: Music4,
+  translate: Languages,
+  lightning: Zap,
+  expand: Maximize2,
   crosshair: Crosshair,
   universal: Sparkles,
   grid2plus: Grid2x2Plus,

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
@@ -22,16 +22,30 @@ use super::{
     error::{BackendError, BackendResult},
     gateway_profile::GatewayProfile,
     model_schema::{
-        FZY_IMAGE_OBSERVE_TEMPLATE, FZY_IMAGE_PROFILE, GRSAI_IMAGE_PROFILE, RequestDialect,
-        apply_request_dialect, default_model_schema, grsai_pixel_dimensions, infer_catalog_schema,
-        is_grsai_pixel_image_model, is_pixverse_video_model, is_seedance_25_video_model,
-        is_seedance_draft_video_model, operations_from_schema, provider_scoped_model_definition_id,
-        schema_for_enabled_operations,
+        ATLASCLOUD_FLUX3_IMAGE_MODEL, ATLASCLOUD_GROK_IMAGE_EDIT_MODEL, ATLASCLOUD_IMAGE_PROFILE,
+        ATLASCLOUD_KLING_VIDEO_MAX_IMAGES, ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS,
+        ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS_NON_ASCII, ATLASCLOUD_KLING_VIDEO_MAX_VIDEOS,
+        ATLASCLOUD_KLING_VIDEO_MODEL, ATLASCLOUD_MIDJOURNEY_IMAGE_MODEL,
+        ATLASCLOUD_QWEN_IMAGE_MODEL, ATLASCLOUD_VIDU_VIDEO_MODEL, FZY_IMAGE_OBSERVE_TEMPLATE,
+        FZY_IMAGE_PROFILE, GATEWAY_TTS_PATH, GATEWAY_TTS_REQUEST_PROFILE, GRSAI_IMAGE_PROFILE,
+        RequestDialect, apply_request_dialect, default_model_schema, grsai_pixel_dimensions,
+        infer_catalog_schema, is_atlascloud_flux3_image_model, is_atlascloud_kling_video_model,
+        is_atlascloud_midjourney_image_model, is_atlascloud_qwen_image_model,
+        is_atlascloud_registered_image_model, is_atlascloud_vidu_video_model,
+        is_gateway_tts_model, is_grsai_pixel_image_model, is_pixverse_video_model,
+        is_seedance_25_video_model, is_seedance_draft_video_model, operations_from_schema,
+        provider_scoped_model_definition_id, schema_for_enabled_operations,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
-        self, ARK_ADAPTER_ID, FZY_ADAPTER_ID, ProviderAdapterKind, catalog_path_for_adapter,
-        extra_headers_for_adapter, finalize_video_body,
+        self, ARK_ADAPTER_ID, ATLASCLOUD_ADAPTER_ID, FZY_ADAPTER_ID, ProviderAdapterKind,
+        catalog_path_for_adapter, extra_headers_for_adapter, finalize_video_body,
+    },
+    speech::{
+        GatewayTtsReply, MAX_GATEWAY_ERROR_BYTES, MAX_SPEECH_RESPONSE_BYTES, SpeechAudioConfig,
+        SpeechWire, collect_capped, encode_gateway_reference_audio, gateway_audio_plan,
+        gateway_request_body, parse_gateway_tts_reply, resolve_speech_binding,
+        response_holds_audio, validate_gateway_speaker,
     },
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
@@ -369,6 +383,13 @@ pub enum GenerationSubmission {
     },
     RemoteVideoTask {
         task_id: String,
+    },
+    /// 语音合成是同步返回：响应体直接是音频二进制，没有远程任务号，也没有
+    /// 可轮询的第二跳。字节在提交阶段就拿到了，保存阶段只负责落盘。
+    Audio {
+        bytes: Vec<u8>,
+        mime_type: String,
+        extension: String,
     },
 }
 
@@ -1465,6 +1486,9 @@ impl ProviderRuntime {
                     build_fzy_image_body(task, resolved)?
                 } else if resolved.operation_schema["requestProfileId"] == GRSAI_IMAGE_PROFILE {
                     build_grsai_image_body(task, resolved)?
+                } else if resolved.operation_schema["requestProfileId"] == ATLASCLOUD_IMAGE_PROFILE
+                {
+                    build_atlascloud_image_body(task, resolved)?
                 } else {
                     build_text_to_image_body(task, resolved)?
                 };
@@ -1485,7 +1509,9 @@ impl ProviderRuntime {
                 // 顶层 `image` 字段传 URL）；Gemini 图生图同样走 JSON，但 `image`
                 // 传 data URI（`data:<mime>;base64,<DATA>`，见 https://doc.moyu.info/
                 // 9280683m0.md）；Grsai 图生图与文生图共用 `POST /v1/api/generate`，
-                // 参考图以顶层 `images` 数组传 URL 或 data URI；
+                // 参考图以顶层 `images` 数组传 URL 或 data URI；Atlas Cloud 走
+                // `POST /api/v1/model/generateImage`，参考图以顶层 `image_urls`
+                // 数组传 URL 或 data URI；
                 // 其余模型沿用 multipart edits 契约。
                 let encoding = resolved
                     .operation_schema
@@ -1504,6 +1530,16 @@ impl ProviderRuntime {
                         }
                         "grsai_image_inputs" => build_grsai_image_body(task, resolved)?,
                         "fzy_image_inputs" => build_fzy_image_body(task, resolved)?,
+                        "atlascloud_image_inputs" => build_atlascloud_image_body(task, resolved)?,
+                        "atlascloud_midjourney_image_inputs" => {
+                            build_atlascloud_midjourney_image_body(task, resolved)?
+                        }
+                        "atlascloud_flux3_image_inputs" => {
+                            build_atlascloud_flux3_image_body(task, resolved)?
+                        }
+                        "atlascloud_qwen_image_inputs" => {
+                            build_atlascloud_qwen_image_body(task, resolved)?
+                        }
                         _ => build_seedream_image_to_image_body(task, resolved)?,
                     };
                     self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
@@ -1531,10 +1567,19 @@ impl ProviderRuntime {
                     Some(
                         family @ (GatewayProfile::Sp25PerUse
                         | GatewayProfile::RdVideo
-                        | GatewayProfile::PixVerse),
+                        | GatewayProfile::PixVerse
+                        | GatewayProfile::AtlasCloudVideo),
                     ) => Some(family),
                     _ if seedance_draft_task => Some(GatewayProfile::SeedanceDraft),
-                    _ => None,
+                    _ => {
+                        // 兜底：Atlas 视频家族的冻结档案可能仍是旧版本按模型名推导出的
+                        // 魔芋 Vidu 契约（`/v1/video/generations` + 顶层 `images`），
+                        // 而那个端点在 Atlas 上并不存在。按任务快照（远端模型 id +
+                        // 连接适配器）裁决家族，避免把付费请求发到不存在的路径。
+                        (GatewayProfile::from_task(task)
+                            == Some(GatewayProfile::AtlasCloudVideo))
+                        .then_some(GatewayProfile::AtlasCloudVideo)
+                    }
                 };
                 let body = match family {
                     Some(GatewayProfile::FzyVideo) => {
@@ -1552,6 +1597,17 @@ impl ProviderRuntime {
                     Some(GatewayProfile::PixVerse) => {
                         self.prepare_pixverse_video_body(task, attempt_id, &context, resolved)
                             .await?
+                    }
+                    Some(GatewayProfile::AtlasCloudVideo) => {
+                        // Atlas 的视频家族各自一份契约（参数表与媒体字段不同），
+                        // 按模型成员分发到对应的组包路径。
+                        if is_atlascloud_kling_video_model(
+                            task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
+                        ) {
+                            build_atlascloud_kling_video_body(task, resolved)?
+                        } else {
+                            build_atlascloud_vidu_video_body(task, resolved)?
+                        }
                     }
                     Some(GatewayProfile::SeedanceDraft) | None => finalize_video_body(
                         &context.adapter_id,
@@ -1584,6 +1640,9 @@ impl ProviderRuntime {
                         Some(GatewayProfile::SeedanceDraft) => {
                             seedance_ambiguous_submission_error(error)
                         }
+                        Some(GatewayProfile::AtlasCloudVideo) => {
+                            atlascloud_ambiguous_submission_error(error)
+                        }
                         _ => sp25_ambiguous_submission_error(error),
                     })?
                 } else {
@@ -1598,6 +1657,14 @@ impl ProviderRuntime {
                     Some(GatewayProfile::Sp25PerUse) => parse_sp25_video_task_id(&response)?,
                     Some(GatewayProfile::PixVerse) => parse_pixverse_video_task_id(&response)?,
                     Some(GatewayProfile::SeedanceDraft) => parse_seedance_draft_task_id(&response)?,
+                    /*
+                     * Atlas Cloud 视频的回执是平台自有信封（`data.id` 即 prediction
+                     * id），没有通用网关那种「任务号 + 进行中状态」的组合，通用解析
+                     * 要求 HTTP 202 或明确的进行中状态，因此单独解析。
+                     */
+                    Some(GatewayProfile::AtlasCloudVideo) => {
+                        parse_atlascloud_video_task_id(&response)?
+                    }
                     /*
                      * RD 视频与通用网关共用同一个回执解析，而两者的付费提交都可能
                      * 在上游 5xx 时已经建过任务并计费——回执解析阶段必须同样按提交
@@ -1621,13 +1688,171 @@ impl ProviderRuntime {
             // 文本模型不通过生成任务管线提交：提示词优化等功能按各自流程直接调用
             // 文本接口适配层，不会构造 TextGeneration 的生成任务。此分支防御性拦截
             // 意外流入的任务，避免走到图片/视频的请求构造导致格式不匹配。
-            GenerationOperation::TextGeneration | GenerationOperation::SpeechGeneration => {
+            GenerationOperation::TextGeneration => {
                 Err(BackendError::validation(
                     "text generation is not a canvas generation task; it is invoked directly by text-model features",
                     json!({ "operation": task.operation.as_str(), "taskId": task.id }),
                 ))
             }
+            GenerationOperation::SpeechGeneration => {
+                // 网关 TTS 是一次同步 POST，成功响应体就是音频二进制：同样要按
+                // 「提交阶段」判定回执是否不明确，否则 5xx 会被任务层当成可重试，
+                // 再 POST 一遍同一份付费请求体。
+                let (submission, response) = self
+                    .submit_speech(task, attempt_id, &context, resolved)
+                    .await
+                    .map_err(|error| ambiguous_paid_submission(&task.id, error))?;
+                Ok((submission, response))
+            }
         }
+    }
+
+    /// 网关语音合成（`POST /v1/tts/create`）：一次同步 POST，成功响应体是音频二进制。
+    ///
+    /// 线上协议（请求体字段、参数区间、错误信封、字幕响应头）全部复用
+    /// `speech.rs` 里配音命令用的那一份实现，这里只负责「画布任务」特有的部分：
+    /// 冻结任务的凭据与档案、从任务参数映射 `audio_config`、以及把二进制响应
+    /// 交给保存层。
+    async fn submit_speech(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        resolved: &ResolvedGeneration,
+    ) -> BackendResult<(GenerationSubmission, CapturedHttpResponse)> {
+        // 绑定与协议归属：模型绑定必须启用语音生成，连接类型决定走哪条合成协议。
+        let binding = resolve_speech_binding(
+            self.storage.as_ref(),
+            self,
+            &task.provider_connection_id,
+            &task.model_definition_id,
+        )?;
+        if binding.wire != SpeechWire::Gateway {
+            return Err(BackendError::validation(
+                "豆包语音模型不支持画布音频节点，请改用网关 TTS 模型（seed-audio 系）。",
+                json!({
+                    "taskId": task.id,
+                    "adapterId": context.adapter_id,
+                    "modelDefinitionId": task.model_definition_id,
+                }),
+            ));
+        }
+        // 冻结档案是本任务的请求权威：端点与请求档案都取冻结值，不用绑定回读的
+        // 活档案（活档案可能在任务创建之后被改过）。
+        let profile = resolved
+            .operation_schema
+            .get("requestProfileId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if profile != GATEWAY_TTS_REQUEST_PROFILE {
+            return Err(BackendError::validation(
+                "该语音模型的请求档案不是网关 /v1/tts/create 契约，无法在画布音频节点上提交。",
+                json!({ "taskId": task.id, "requestProfileId": profile }),
+            ));
+        }
+        let path = request_path(&resolved.operation_schema, GATEWAY_TTS_PATH)?;
+        // 远端模型 ID 以任务冻结的快照为准：任务创建之后改绑定不应改变这次提交。
+        let remote_model_id = task
+            .remote_model_id_snapshot
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(binding.remote_model_id.as_str());
+        if !is_gateway_tts_model(remote_model_id) {
+            return Err(BackendError::validation(
+                "网关语音合成当前只接入 seed-audio 系模型，请选用供应商目录发布的 seed-audio 型号。",
+                json!({ "taskId": task.id, "remoteModelId": remote_model_id }),
+            ));
+        }
+        // 要合成的文本只取提示词里的文字片段。`rendered_prompt` 里 @ 引用的参考
+        // 音频是一段占位说明（`[音频1：xxx]`），把它原样送去合成，模型会把占位
+        // 符当台词念出来。
+        let text = resolved
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                CompiledContentItem::Text(text) => Some(text.as_str()),
+                CompiledContentItem::Media { .. } => None,
+            })
+            .collect::<String>();
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(BackendError::validation(
+                "音频生成需要一段要合成的文本，请填写提示词。",
+                json!({ "taskId": task.id }),
+            ));
+        }
+        // 音色复刻：画布音频节点最多带一段参考音频，作为 `audio_data` 内联进请求体。
+        let audio_data = match resolved.audios.first() {
+            Some(reference) => {
+                let bytes = reference.bytes.as_ref().ok_or_else(|| {
+                    BackendError::validation(
+                        "音色复刻的参考音频必须以本地字节形式提供，请重新选择素材。",
+                        json!({
+                            "taskId": task.id,
+                            "displayName": reference.display_name,
+                            "mediaType": reference.media_type,
+                        }),
+                    )
+                })?;
+                Some(encode_gateway_reference_audio(
+                    bytes,
+                    Some(reference.file_name.as_str()),
+                )?)
+            }
+            None => None,
+        };
+        let (audio_config, speaker) = speech_audio_config(&resolved.parameters)?;
+        let plan = gateway_audio_plan(Some(&audio_config))?;
+        let body = gateway_request_body(
+            remote_model_id,
+            text,
+            speaker.as_deref(),
+            audio_data.as_deref(),
+            &plan,
+        );
+        let (response, bytes) = self
+            .send_submission_bytes(task, attempt_id, context, "submit", &path, &body)
+            .await?;
+        let content_type = content_type_header(&response.headers);
+        let reply = parse_gateway_tts_reply(
+            response.status,
+            &content_type,
+            header_value(&response.headers, "x-subtitle").as_deref(),
+            &bytes,
+        )
+        .map_err(|error| {
+            // 2xx 但响应体不是音频：上游已受理（成功状态），可能已经计费，只是
+            // 回执不可用。按「失败」呈现会让用户再点一次生成——那是第二次付费
+            // 请求，因此按图片路径的同一口径落成「已受理但拿不到结果」。
+            if (200..300).contains(&response.status) {
+                return accepted_without_remote_id_error(
+                    "语音网关已返回成功状态，但响应不是音频数据。平台可能已受理并计费，本机也没有可查询的任务号；请先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
+                    json!({
+                        "httpStatus": response.status,
+                        "contentType": content_type,
+                        "source": error.runtime_record(),
+                    }),
+                );
+            }
+            error
+        })?;
+        let (mime_type, extension) = audio_content_type(&reply, plan.container_extension);
+        info!(
+            "[provider] 语音合成完成: taskId={}, MIME={}, 扩展名={}, 字节 {}",
+            task.id,
+            mime_type,
+            extension,
+            reply.audio.len()
+        );
+        Ok((
+            GenerationSubmission::Audio {
+                bytes: reply.audio,
+                mime_type,
+                extension,
+            },
+            response,
+        ))
     }
 
     /// 按次系列的本地参考素材直接上传到生成平台。上传沿用任务冻结的连接和令牌；
@@ -1997,6 +2222,26 @@ impl ProviderRuntime {
                 .await
                 .map_err(fzy_ambiguous_submission_error);
         }
+        if is_atlascloud_image_task(task) {
+            // Atlas Cloud 出图按张计费，同样不做「剥离字段后重发」：
+            // ① 重发可能变成第二次计费（响应丢失时上游可能已建好 prediction）；
+            // ② 静默丢掉用户选中的画幅/分辨率/质量，比直接报错更糟——
+            //    用户以为拿到了 2K 的图，实际拿到的是上游默认值。
+            // 上游点名拒绝字段时，响应原样返回，由既有失败路径把原因带给用户。
+            return self
+                .captured_json(
+                    task,
+                    attempt_id,
+                    context,
+                    CapturedJsonRequest {
+                        phase,
+                        method: Method::POST,
+                        path,
+                        body: &body,
+                    },
+                )
+                .await;
+        }
         let mut body = body;
         self.drop_rejected_fields(task, &mut body);
         for _round in 0..MAX_STRIP_RESEND_ROUNDS {
@@ -2040,6 +2285,152 @@ impl ProviderRuntime {
             body: &body,
         };
         self.captured_json(task, attempt_id, context, request).await
+    }
+
+    /// 提交类请求的字节级发送：响应体是二进制（语音合成的音频），不能走
+    /// `captured_json` / `send_captured`——那条路径把响应体按 UTF-8 解成字符串，
+    /// 音频字节会被替换符毁掉。
+    ///
+    /// 诊断归档沿用同一套 `provider_calls` 三态（prepared / sent / responded），
+    /// 但响应正文只留一句占位说明：几十兆的音频塞进 SQLite 没有意义，也会把
+    /// 「复制报错」变成一堆乱码。
+    ///
+    /// 读取上限与语音模块共用一套（音频 96 MiB、错误信封 1 MiB），避免两条入口
+    /// 对同一个响应体给出不同的分类。
+    async fn send_submission_bytes(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        phase: &str,
+        path: &str,
+        body: &Value,
+    ) -> BackendResult<(CapturedHttpResponse, Vec<u8>)> {
+        let url = endpoint(&context.base_url, path)?;
+        let extra_headers = extra_headers_for_adapter(&context.adapter_id, &Method::POST);
+        let mut archived_headers = json!({
+            "authorization": "已排除敏感凭据",
+            "content-type": "application/json"
+        });
+        if let Some(headers) = archived_headers.as_object_mut() {
+            for (name, value) in extra_headers {
+                headers.insert((*name).to_ascii_lowercase(), json!(*value));
+            }
+        }
+        let archive = json!({
+            "providerConnectionId": context.provider_connection_id,
+            "adapterId": context.adapter_id,
+            "credentialReference": context.api_key_ref,
+            "method": Method::POST.as_str(),
+            "url": sanitize_url(&url),
+            "headers": archived_headers,
+            "bodyType": "json",
+            "body": redact_request_value(body),
+        });
+        let call_id = Uuid::new_v4().to_string();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallPrepared {
+                call_id: call_id.clone(),
+                attempt_id: attempt_id.to_string(),
+                phase: phase.to_string(),
+                request: archive,
+            },
+        )?;
+        let sanitized_url = sanitize_url(&url);
+        let mut request = self
+            .client
+            .request(Method::POST, url)
+            .bearer_auth(&context.api_key)
+            // 网关 TTS 是同步长请求：文档 p50 约 12 秒，长文本更久。客户端默认的
+            // 300 秒总时限对长台词偏紧，这里按语音模块的口径放宽到 10 分钟。
+            .timeout(std::time::Duration::from_secs(600));
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
+        request = request.json(body);
+        info!(
+            "[provider] 发起供应商请求（二进制响应）: taskId={}, phase={phase}, callId={}, POST {}",
+            task.id,
+            call_id,
+            sanitized_url
+        );
+        // sent_at 在发送之前写库：请求构造失败也要留下「有没有发出去」的痕迹。
+        let sent_at = now_ms();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallSent {
+                call_id: call_id.clone(),
+                sent_at,
+            },
+        )?;
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                let dispatch_failed = is_dispatch_failure(&error);
+                let backend_error = BackendError::Transport(error);
+                self.lifecycle.commit(
+                    &task.id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.clone(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                        dispatch_failed,
+                    },
+                )?;
+                return Err(backend_error);
+            }
+        };
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let content_type = content_type_header(&headers);
+        let expects_audio = response_holds_audio(status, &content_type);
+        let bytes = match collect_capped(
+            response,
+            if expects_audio {
+                MAX_SPEECH_RESPONSE_BYTES
+            } else {
+                MAX_GATEWAY_ERROR_BYTES
+            },
+            "语音响应超过单句大小限制。",
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                // 响应体读不下来：上游已经回包并可能计费，不算「未发出」。
+                self.lifecycle.commit(
+                    &task.id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.clone(),
+                        sent_at,
+                        error: error.runtime_record(),
+                        dispatch_failed: false,
+                    },
+                )?;
+                return Err(error);
+            }
+        };
+        let placeholder = format!("<binary audio: {} bytes>", bytes.len());
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallResponded {
+                call_id: call_id.clone(),
+                sent_at,
+                status,
+                headers: headers.clone(),
+                raw_response: placeholder.clone(),
+            },
+        )?;
+        Ok((
+            CapturedHttpResponse {
+                call_id,
+                status,
+                headers,
+                body: placeholder,
+            },
+            bytes,
+        ))
     }
 
     /// 通过 `GET {base_url}/v1/videos/{remote_task_id}/content` 获取海外平台视频
@@ -3288,6 +3679,24 @@ impl ProviderRuntime {
                 }),
             });
         }
+        if kind == Some(ProviderAdapterKind::AtlasCloud) {
+            // Atlas Cloud 只开放出图与轮询（外加一次性素材上传），没有目录或探测
+            // 端点；不能为了测连接发一次计费请求，凭据留待首次真实生成验证。
+            let credential = self.resolve_token_group(provider_connection_id, token_group);
+            return Ok(ConnectivityTestResult {
+                ok: false,
+                http_status: None,
+                elapsed_ms: elapsed_ms(),
+                reason: Some("generation-only-api".into()),
+                detail: Some(match credential {
+                    Ok(_) => {
+                        "Atlas Cloud 凭据已配置；官方只有计费的出图与查询接口，连接测试留待首次真实生成时验证。"
+                            .into()
+                    }
+                    Err(error) => error.to_string(),
+                }),
+            });
+        }
         let probe_query = kind
             .map(ProviderAdapterKind::catalog_probe_query)
             .unwrap_or_default();
@@ -3389,6 +3798,79 @@ impl ProviderRuntime {
                             model,
                             &operations,
                             RequestDialect::Grsai,
+                        ),
+                        token_group: token_group.map(ToOwned::to_owned),
+                    }
+                })
+                .collect()
+        } else if kind == Some(ProviderAdapterKind::AtlasCloud) {
+            // Atlas Cloud 没有公开的模型目录接口（平台只开放生成与查询），这里按
+            // 平台目录里已登记的成员返回固定清单；契约由 Atlas 方言改写生成
+            // （端点、轮询、参数、成员能力各不相同）。
+            self.resolve_token_group(provider_connection_id, token_group)?;
+            const ATLASCLOUD_MODELS: [(&str, &str, &str, &[GenerationOperation]); 7] = [
+                (
+                    "xai/grok-imagine-image-2.0/text-to-image",
+                    "Grok Imagine Image 2.0（文生图）",
+                    "xAI",
+                    &[GenerationOperation::TextToImage],
+                ),
+                (
+                    "xai/grok-imagine-image-2.0-developer/edit",
+                    "Grok Imagine Image 2.0 编辑（参考图）",
+                    "xAI",
+                    &[GenerationOperation::ImageToImage],
+                ),
+                (
+                    "midjourney/v8.2/image-to-image",
+                    "Midjourney V8.2（参考图）",
+                    "Midjourney",
+                    &[GenerationOperation::ImageToImage],
+                ),
+                (
+                    "black-forest-labs/flux-3/edit",
+                    "FLUX 3 编辑（参考图）",
+                    "Black Forest Labs",
+                    &[GenerationOperation::ImageToImage],
+                ),
+                (
+                    "qwen-image-3.0-pro/edit",
+                    "Qwen Image 3.0 Pro 编辑（参考图）",
+                    "Alibaba",
+                    &[GenerationOperation::ImageToImage],
+                ),
+                (
+                    "vidu/q4-preview/reference-to-video",
+                    "Vidu Q4（参考图生视频）",
+                    "Vidu",
+                    &[GenerationOperation::VideoGeneration],
+                ),
+                (
+                    "kwaivgi/kling-v4.0/reference-to-video",
+                    "Kling 4.0（参考生视频）",
+                    "Kuaishou",
+                    &[GenerationOperation::VideoGeneration],
+                ),
+            ];
+            ATLASCLOUD_MODELS
+                .into_iter()
+                .map(|(model, display_name, owner, operations)| {
+                    RemoteModelOption {
+                        id: model.into(),
+                        model_definition_id: provider_scoped_model_definition_id(
+                            provider_connection_id,
+                            model,
+                        ),
+                        display_name: display_name.into(),
+                        owned_by: Some(owner.into()),
+                        has_configured_binding: false,
+                        configured_operations: vec![],
+                        suggested_operations: operations.to_vec(),
+                        operation_schema: schema_for_enabled_operations(
+                            &Value::Null,
+                            model,
+                            operations,
+                            RequestDialect::AtlasCloud,
                         ),
                         token_group: token_group.map(ToOwned::to_owned),
                     }
@@ -4114,6 +4596,1222 @@ fn build_grsai_image_body(
     Ok(Value::Object(body))
 }
 
+/// Atlas Cloud 图片生成请求体（`POST /api/v1/model/generateImage`）：
+/// `model` / `prompt` / `num_images` / `enable_base64_output` 放顶层，参考图走
+/// 顶层 `image_urls` 数组——公网 URL 原样透传，本地图片编码为 data URI（文档
+/// 声明 base64 与 URL 均可）。`aspect_ratio` / `resolution` / `quality` 由参数
+/// 表原样透传。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "Atlas Cloud 出图只能编码图片参考；请只连接图片素材。",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存图片模型。", json!({ "taskId": task.id }))
+        })?;
+    // Midjourney V8.2 家族的契约与 Grok 家族**不同**（单值 `image` 字段、提示词
+    // 上限 1024、没有 `num_images`、参数表也换了），走自己那条组包路径。
+    if is_atlascloud_midjourney_image_model(model) {
+        return build_atlascloud_midjourney_image_body(task, resolved);
+    }
+    // FLUX 3 家族同理（`reference_images` 数组、1–10 张、参数表又不一样），而且它
+    // **没有文生图形态**——必须在落到 Grok 的通用组包之前拦下来，否则文生图请求
+    // 会被套上 Grok 的请求体发出去。
+    if is_atlascloud_flux3_image_model(model) {
+        return build_atlascloud_flux3_image_body(task, resolved);
+    }
+    // Qwen Image 3.0 Pro 编辑同理（`reference_image_urls` 数组、1–3 张、参数表
+    // 又不一样），而且它**没有文生图形态**——必须在落到 Grok 的通用组包之前拦
+    // 下来，否则文生图请求会被套上 Grok 的请求体发出去。
+    if is_atlascloud_qwen_image_model(model) {
+        return build_atlascloud_qwen_image_body(task, resolved);
+    }
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if !is_atlascloud_registered_image_model(model) {
+        // 家族前缀命中但本站没有登记请求体的成员：派发前明确拒绝，
+        // 不套用别的成员的请求体，也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的请求体，请改用已登记的 Grok Imagine Image 2.0 模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    let edit_model = model.eq_ignore_ascii_case(ATLASCLOUD_GROK_IMAGE_EDIT_MODEL);
+    if task.operation == GenerationOperation::TextToImage {
+        if edit_model {
+            // 该成员只有「参考图编辑」形态，没有文生图；文生图请求必然被上游拒绝，
+            // 与其发一次付费请求再失败，不如在本地说明。
+            return Err(BackendError::validation(
+                "Grok Imagine Image 2.0 编辑模型必须带 1–3 张参考图：请连接参考图片，或改选文生图模型。",
+                json!({ "taskId": task.id, "model": model }),
+            ));
+        }
+        if !resolved.images.is_empty() {
+            return Err(BackendError::validation(
+                "Atlas Cloud 文生图不接受参考图；请使用参考图编辑模型，或解绑参考图片。",
+                resolved.archive(),
+            ));
+        }
+    } else {
+        if !edit_model {
+            // 文生图成员没有参考图形态；发过去必然被上游拒绝。
+            return Err(BackendError::validation(
+                "该模型不支持参考图编辑；请改用 Grok Imagine Image 2.0 编辑模型。",
+                json!({ "taskId": task.id, "model": model }),
+            ));
+        }
+        // 文档：编辑成员必须带 1–3 张参考图。
+        if resolved.images.is_empty() {
+            return Err(BackendError::validation(
+                "Grok Imagine Image 2.0 编辑模型必须带 1–3 张参考图：请先连接参考图片。",
+                json!({ "taskId": task.id, "model": model }),
+            ));
+        }
+        if resolved.images.len() > 3 {
+            return Err(BackendError::validation(
+                "Grok Imagine Image 2.0 编辑模型最多接受 3 张参考图，请先解绑多余的素材。",
+                json!({
+                    "taskId": task.id,
+                    "model": model,
+                    "images": resolved.images.len()
+                }),
+            ));
+        }
+    }
+    // 文档：提示词上限 8000 字符。
+    let prompt = resolved.rendered_prompt.clone();
+    if prompt.chars().count() > 8000 {
+        return Err(BackendError::validation(
+            "提示词超过 8000 字符上限，请精简后再生成。",
+            json!({ "taskId": task.id, "length": prompt.chars().count() }),
+        ));
+    }
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(prompt));
+    // 平台按张计费：一次提交一张，多张由应用侧拆成多个任务。
+    body.insert("num_images".into(), json!(1));
+    // 只要托管链接：结果落盘阶段再下载，不让平台回传 Base64 字节。
+    body.insert("enable_base64_output".into(), json!(false));
+
+    if task.operation == GenerationOperation::ImageToImage {
+        let image_field = request_field(&resolved.operation_schema, "mediaField", "image_urls")?;
+        let inputs = resolved
+            .images
+            .iter()
+            .map(|image| {
+                if let Some(reference) = image
+                    .remote_reference
+                    .as_deref()
+                    .filter(|reference| !reference.is_empty())
+                {
+                    return Ok(Value::String(reference.to_string()));
+                }
+                let bytes = image.bytes.clone().ok_or_else(|| {
+                    BackendError::validation(
+                        "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+                        image.archive(),
+                    )
+                })?;
+                Ok(Value::String(format!(
+                    "data:{};base64,{}",
+                    image.mime_type,
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )))
+            })
+            .collect::<BackendResult<Vec<_>>>()?;
+        body.insert(image_field, Value::Array(inputs));
+    }
+
+    // aspect_ratio / resolution / quality 由参数表声明在顶层（root）。
+    //
+    // 只发送**本契约声明**的参数：画布节点上可能残留着上一个模型的参数（例如
+    // dall-e 的 `size`/`n`），把它们塞进 Atlas 请求体会被上游以「未知字段」
+    // 拒绝，或更糟——被上游静默忽略，用户却以为自己设了。这里按契约白名单
+    // 过滤：本模型声明的参数一个不丢，别的模型的残留参数不带过去（那些参数
+    // 本来就不属于这个模型，不是丢弃用户对当前模型的选择）。
+    insert_atlascloud_declared_parameters(&mut body, resolved, false)?;
+    Ok(Value::Object(body))
+}
+
+/// Atlas Cloud **Midjourney V8.2 图生图**请求体（`POST /api/v1/model/generateImage`）。
+///
+/// 与同平台的 Grok Imagine 家族有四处**契约级**差异（都来自平台文档，不是推测）：
+///
+/// 1. 参考图走顶层**单值** `image` 字段（不是 `image_urls` 数组），且**只能 1 张**；
+/// 2. 提示词上限 **1024** 字符（Grok 是 8000）；
+/// 3. **不发** `num_images`：平台每次任务固定返回 4 张图，文档里没有这个参数；
+/// 4. 参数表换成 `aspect_ratio` / `hd` / `quality` / `stylize` / `chaos` /
+///    `weird` / `seed` / `sref`，**没有** `resolution`（原生 2K 由 `hd` 控制）。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_midjourney_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "Midjourney V8.2 图生图只能编码图片参考；请只连接图片素材。",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存图片模型。", json!({ "taskId": task.id }))
+        })?;
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if !model.eq_ignore_ascii_case(ATLASCLOUD_MIDJOURNEY_IMAGE_MODEL) {
+        // 家族前缀命中但本站没有登记请求体的成员：派发前明确拒绝，
+        // 不套用别的成员的请求体，也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的请求体，请改用已登记的 Midjourney V8.2 图生图模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if task.operation != GenerationOperation::ImageToImage {
+        // 该成员只有「参考图」形态，没有文生图；文生图请求必然被上游拒绝，
+        // 与其发一次付费请求再失败，不如在本地说明。
+        return Err(BackendError::validation(
+            "Midjourney V8.2 图生图模型必须带 1 张参考图：请连接 1 张参考图片，或改选文生图模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    // 文档：输入图是**单张**（`image` 是字符串字段，不是数组）。
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "Midjourney V8.2 图生图模型必须带 1 张参考图：请先连接参考图片。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if resolved.images.len() > 1 {
+        return Err(BackendError::validation(
+            "Midjourney V8.2 图生图模型只接受 1 张参考图，请先解绑多余的素材。",
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "images": resolved.images.len()
+            }),
+        ));
+    }
+    // 文档：提示词上限 1024 字符。
+    //
+    // 实测（2026-10-28，真实 Key）：平台**入口不校验**这个上限——1030 字符照样
+    // 受理并成功出图，而 1166 字符会被受理、在下游跑满约 105 秒后以一句
+    // 不可读的 `Origin service encountered an error` 失败（3/3 失败；882 与 1030
+    // 共 4 次全部成功）。所以真实边界落在 1030–1166 之间，文档的 1024 偏保守。
+    //
+    // 这里仍守 1024：只放行已验证可用的区间，且平台随时可能把 schema 里的
+    // `maxLength` 变成真正的入口校验——那时放行更长的提示词等于发一次必然失败
+    // 的付费请求。报错带上实际字数，用户才知道要砍多少。
+    let prompt = resolved.rendered_prompt.clone();
+    let prompt_length = prompt.chars().count();
+    if prompt_length > 1024 {
+        return Err(BackendError::validation(
+            format!("提示词 {prompt_length} 字符，超过 1024 字符上限，请精简后再生成。"),
+            json!({ "taskId": task.id, "length": prompt_length, "limit": 1024 }),
+        ));
+    }
+    validate_atlascloud_parameters(task, resolved, &["sref"])?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(prompt));
+    // 只要托管链接：结果落盘阶段再下载，不让平台回传 Base64 字节。
+    body.insert("enable_base64_output".into(), json!(false));
+
+    // 参考图：顶层单值 `image` 字段。公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "image")?;
+    let image = &resolved.images[0];
+    let image_value = if let Some(reference) = image
+        .remote_reference
+        .as_deref()
+        .filter(|reference| !reference.is_empty())
+    {
+        Value::String(reference.to_string())
+    } else {
+        let bytes = image.bytes.clone().ok_or_else(|| {
+            BackendError::validation(
+                "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+                image.archive(),
+            )
+        })?;
+        Value::String(format!(
+            "data:{};base64,{}",
+            image.mime_type,
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    };
+    body.insert(image_field, image_value);
+
+    // aspect_ratio / hd / quality / stylize / chaos / weird / seed / sref 由参数
+    // 表声明在顶层（root）。
+    //
+    // 只发送**本契约声明**的参数：画布节点上可能残留着上一个模型的参数（例如
+    // Grok 的 `resolution`/`num_images`），把它们塞进请求体会被上游以「未知字段」
+    // 拒绝，或更糟——被上游静默忽略，用户却以为自己设了。
+    insert_atlascloud_declared_parameters(&mut body, resolved, true)?;
+    Ok(Value::Object(body))
+}
+
+/// Atlas Cloud **FLUX 3 编辑**请求体（`POST /api/v1/model/generateImage`）。
+///
+/// 与同平台的 Grok Imagine、Midjourney V8.2 两个家族有**契约级**差异（都来自
+/// 平台文档，不是推测）：
+///
+/// 1. 参考图走顶层 **`reference_images` 数组**（不是 Grok 的 `image_urls`，也不是
+///    Midjourney 的单值 `image`），且接受 **1–10 张**——顺序即提示词里说的
+///    「图 1 … 图 10」；
+/// 2. **不发** `num_images`：平台文档没有这个参数（与 Midjourney 同一先例）；
+/// 3. 参数表是 `aspect_ratio` / `resolution` / `enable_prompt_expansion` /
+///    `output_format` / `safety_tolerance`，**没有** `quality`；`resolution` 多一档
+///    `768sq`（方图专用）并支持 `4k`。
+///
+/// 提示词长度：平台文档**没有**给 `prompt` 声明上限（对比 Grok 的 8000、Midjourney
+/// 的 1024），因此这里**不设**本地长度闸门——凭空造一个上限会拦掉上游实际接受的
+/// 提示词。文档只提示「短而直接的指令效果最好」。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_flux3_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "FLUX 3 编辑只能编码图片参考；请只连接图片素材。",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存图片模型。", json!({ "taskId": task.id }))
+        })?;
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if !model.eq_ignore_ascii_case(ATLASCLOUD_FLUX3_IMAGE_MODEL) {
+        // 家族前缀命中但本站没有登记请求体的成员：派发前明确拒绝，
+        // 不套用别的成员的请求体，也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的请求体，请改用已登记的 FLUX 3 编辑模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if task.operation != GenerationOperation::ImageToImage {
+        // 该成员只有「参考图编辑」形态，没有文生图；文生图请求必然被上游拒绝，
+        // 与其发一次付费请求再失败，不如在本地说明。
+        return Err(BackendError::validation(
+            "FLUX 3 编辑模型必须带 1–10 张参考图：请连接参考图片，或改选文生图模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    // 文档：参考图 1–10 张。
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "FLUX 3 编辑模型必须带 1–10 张参考图：请先连接参考图片。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if resolved.images.len() > 10 {
+        return Err(BackendError::validation(
+            "FLUX 3 编辑模型最多接受 10 张参考图，请先解绑多余的素材。",
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "images": resolved.images.len()
+            }),
+        ));
+    }
+    validate_atlascloud_parameters(task, resolved, &[])?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(resolved.rendered_prompt.clone()));
+    // 只要托管链接：结果落盘阶段再下载，不让平台回传 Base64 字节。
+    body.insert("enable_base64_output".into(), json!(false));
+
+    // 参考图：顶层 `reference_images` 数组。公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "reference_images")?;
+    let inputs = resolved
+        .images
+        .iter()
+        .map(|image| {
+            if let Some(reference) = image
+                .remote_reference
+                .as_deref()
+                .filter(|reference| !reference.is_empty())
+            {
+                return Ok(Value::String(reference.to_string()));
+            }
+            let bytes = image.bytes.clone().ok_or_else(|| {
+                BackendError::validation(
+                    "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+                    image.archive(),
+                )
+            })?;
+            Ok(Value::String(format!(
+                "data:{};base64,{}",
+                image.mime_type,
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    body.insert(image_field, Value::Array(inputs));
+
+    // aspect_ratio / resolution / enable_prompt_expansion / output_format /
+    // safety_tolerance 由参数表声明在顶层（root），原样透传。
+    insert_atlascloud_declared_parameters(&mut body, resolved, true)?;
+    Ok(Value::Object(body))
+}
+
+/// Atlas Cloud **Qwen Image 3.0 Pro 编辑**请求体
+/// （`POST /api/v1/model/generateImage`）。
+///
+/// 与同平台另三个家族有**契约级**差异（都来自平台文档，不是推测）：
+///
+/// 1. 参考图走顶层 **`reference_image_urls` 数组**（1–3 张）——既不是 Grok 的
+///    `image_urls`、也不是 Midjourney 的单值 `image`，也不是 FLUX 3 的
+///    `reference_images`（字段名不同、张数上限也不同：3 vs 10）；
+/// 2. **不发** `num_images`（文档没有这个参数）：一次请求出几张由 **`n`**
+///    表达（1–4）；
+/// 3. **不发** `enable_base64_output`（文档的入参表里没有这个字段）：只发契约
+///    声明的参数，否则上游可能以「未知字段」拒绝；
+/// 4. 参数表是 `size` / `n` / `negative_prompt` / `seed` / `prompt_extend` /
+///    `prompt_extend_mode`，**没有** `aspect_ratio` / `resolution` / `quality`；
+/// 5. 提示词长度：平台文档**没有**给 `prompt` 声明上限（对比 Grok 的 8000、
+///    Midjourney 的 1024），因此这里**不设**本地长度闸门——凭空造一个上限会拦掉
+///    上游实际接受的提示词。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_qwen_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "Qwen Image 3.0 Pro 编辑只能编码图片参考；请只连接图片素材。",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存图片模型。", json!({ "taskId": task.id }))
+        })?;
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if !model.eq_ignore_ascii_case(ATLASCLOUD_QWEN_IMAGE_MODEL) {
+        // 家族前缀命中但本站没有登记请求体的成员（例如文档默认值
+        // `qwen-image-3.0/edit`）：派发前明确拒绝，不套用 Pro 成员的请求体，
+        // 也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的请求体，请改用已登记的 Qwen Image 3.0 Pro 编辑模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if task.operation != GenerationOperation::ImageToImage {
+        // 该成员只有「参考图编辑」形态，没有文生图；文生图请求必然被上游拒绝，
+        // 与其发一次付费请求再失败，不如在本地说明。
+        return Err(BackendError::validation(
+            "Qwen Image 3.0 Pro 编辑模型必须带 1–3 张参考图：请连接参考图片，或改选文生图模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    // 文档：参考图 1–3 张（单图编辑给 1 张，多图参考 / 主体驱动给到 3 张）。
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "Qwen Image 3.0 Pro 编辑模型必须带 1–3 张参考图：请先连接参考图片。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if resolved.images.len() > 3 {
+        return Err(BackendError::validation(
+            "Qwen Image 3.0 Pro 编辑模型最多接受 3 张参考图，请先解绑多余的素材。",
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "images": resolved.images.len()
+            }),
+        ));
+    }
+    // `prompt_extend_mode` 的取值单独说：上游对**参考图编辑**只接受 `direct`。
+    // `agent`（APE）虽然写在文档的参数描述里，但实测被上游拒绝
+    // （`prompt_extend_mode=agent is not supported for i2i requests`），所以本地
+    // 先拦下来并说明原因，而不是发一次必然失败的付费请求。
+    //
+    // 这条检查**排在通用枚举校验之前**：通用校验只会说「取值不在模型契约允许的范
+    // 围内」，不会告诉用户「为什么 agent 不行」。
+    validate_atlascloud_qwen_prompt_extend_mode(task, resolved)?;
+    validate_atlascloud_parameters(task, resolved, &[])?;
+    // `size` 是契约里唯一的自由格式参数（`宽*高`），通用校验只管类型/枚举/数值，
+    // 格式与取值范围在这里单独校。
+    validate_atlascloud_qwen_size(task, resolved)?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(resolved.rendered_prompt.clone()));
+
+    // 参考图：顶层 `reference_image_urls` 数组。公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "reference_image_urls")?;
+    let inputs = resolved
+        .images
+        .iter()
+        .map(|image| {
+            if let Some(reference) = image
+                .remote_reference
+                .as_deref()
+                .filter(|reference| !reference.is_empty())
+            {
+                return Ok(Value::String(reference.to_string()));
+            }
+            let bytes = image.bytes.clone().ok_or_else(|| {
+                BackendError::validation(
+                    "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+                    image.archive(),
+                )
+            })?;
+            Ok(Value::String(format!(
+                "data:{};base64,{}",
+                image.mime_type,
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            )))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    body.insert(image_field, Value::Array(inputs));
+
+    // size / n / negative_prompt / seed / prompt_extend / prompt_extend_mode 由
+    // 参数表声明在顶层（root）。
+    //
+    // 只发送**本契约声明**的参数：画布节点上可能残留着上一个模型的参数（例如
+    // Grok 的 `resolution`/`quality`、Midjourney 的 `stylize`），把它们塞进请求体
+    // 会被上游以「未知字段」拒绝，或更糟——被上游静默忽略，用户却以为自己设了。
+    insert_atlascloud_declared_parameters(&mut body, resolved, true)?;
+    Ok(Value::Object(body))
+}
+
+/// Atlas Cloud **Vidu Q4 参考图生视频**请求体（`POST /api/v1/model/generateVideo`）。
+///
+/// 与同平台四个图片家族的契约差异（都来自平台文档，不是推测）：
+///
+/// 1. 端点是 `generateVideo`（图片家族是 `generateImage`）；
+/// 2. 参考图走顶层 `reference_images` **数组**（1–15 张，顺序即提示词里的「图 1 …
+///    图 15」），不是 Grok 的 `image_urls`、也不是 Midjourney 的单值 `image`；
+/// 3. 多出 `reference_audios` 数组（0–3 段参考音频）；
+/// 4. 参数表是 `duration` / `aspect_ratio` / `resolution` / `generate_audio` /
+///    `seed`，没有 `num_images`、没有 `quality`、没有 `enable_base64_output`。
+///
+/// 参考图与参考音频：公网 URL 原样透传，本地文件编码为 data URI（文档声明
+/// base64 与 URL 均可）。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_vidu_video_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.videos.is_empty() {
+        // 文档的输入参数表里没有视频素材位（只有参考图与参考音频）。发过去必然被
+        // 上游拒绝，不如在本地说明。
+        return Err(BackendError::validation(
+            "Vidu Q4 参考图生视频只接受参考图与参考音频，不能连接视频素材。",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+            }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存视频模型。", json!({ "taskId": task.id }))
+        })?;
+    if !is_atlascloud_vidu_video_model(model) {
+        // 家族前缀命中但本站没有登记请求体的成员：派发前明确拒绝，不套用别的
+        // 成员的请求体，也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的视频请求体，请改用已登记的 Vidu Q4 参考图生视频模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if !model.eq_ignore_ascii_case(ATLASCLOUD_VIDU_VIDEO_MODEL) {
+        // 同前缀但未登记的成员：与图片家族同一口径，宁可显式拒绝。
+        return Err(BackendError::validation(
+            "该 Vidu Q4 模型尚未登记 Atlas Cloud 的视频请求体，请改用 Vidu Q4 参考图生视频模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    // 文档：必须 1–15 张参考图（reference_images 是必填项，最少 1 张、最多 15 张）。
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "Vidu Q4 参考图生视频必须带 1–15 张参考图：请先连接参考图片。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if resolved.images.len() > 15 {
+        return Err(BackendError::validation(
+            "Vidu Q4 参考图生视频最多接受 15 张参考图，请先解绑多余的素材。",
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "images": resolved.images.len(),
+                "limit": 15,
+            }),
+        ));
+    }
+    // 文档：参考音频 0–3 段。
+    if resolved.audios.len() > 3 {
+        return Err(BackendError::validation(
+            "Vidu Q4 参考图生视频最多接受 3 段参考音频，请先解绑多余的素材。",
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "audios": resolved.audios.len(),
+                "limit": 3,
+            }),
+        ));
+    }
+    // 文档：提示词必填，上限 20000 字符。
+    let prompt = video_prompt(resolved);
+    if prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "Vidu Q4 参考图生视频需要提示词：请先填写画面描述。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if prompt.chars().count() > 20000 {
+        return Err(BackendError::validation(
+            "提示词超过 20000 字符上限，请精简后再生成。",
+            json!({ "taskId": task.id, "length": prompt.chars().count(), "limit": 20000 }),
+        ));
+    }
+    // 参数取值（类型 / 枚举 / 最小最大）在派发前本地校验：上游对越界取值会直接
+    // 拒绝，而那已经是一次付费请求。
+    validate_atlascloud_parameters(task, resolved, &[])?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(prompt));
+
+    // 参考图：顶层 `reference_images` 数组。公网 URL 原样透传，本地图片编码为
+    // data URI（文档声明 base64 与 URL 均可）。
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "reference_images")?;
+    let images = resolved
+        .images
+        .iter()
+        .map(|image| atlascloud_video_reference(image, "参考图片无法读取，请重新选择本地图片或有效的图片链接。"))
+        .collect::<BackendResult<Vec<_>>>()?;
+    body.insert(image_field, Value::Array(images));
+
+    // 参考音频：顶层 `reference_audios` 数组（文档标注为可选，0–3 段）。
+    let audio_field = request_field(&resolved.operation_schema, "audioField", "reference_audios")?;
+    if !resolved.audios.is_empty() {
+        let audios = resolved
+            .audios
+            .iter()
+            .map(|audio| {
+                atlascloud_video_reference(
+                    audio,
+                    "参考音频无法读取，请重新选择本地音频或有效的音频链接。",
+                )
+            })
+            .collect::<BackendResult<Vec<_>>>()?;
+        body.insert(audio_field, Value::Array(audios));
+    }
+
+    // duration / aspect_ratio / resolution / generate_audio / seed 由参数表声明在
+    // 顶层（root）。
+    //
+    // 只发送**本契约声明的参数**：画布节点上可能残留着上一个模型的参数（例如
+    // 魔芋 Vidu 的 `watermark`、MiniMax 的 `aigc_watermark`），把它们塞进请求体会
+    // 被上游以「未知字段」拒绝，或更糟——被上游静默忽略，用户却以为自己设了。
+    insert_atlascloud_declared_parameters(&mut body, resolved, true)?;
+    Ok(Value::Object(body))
+}
+
+/// Atlas Cloud **Kling 4.0 参考生视频**请求体（`POST /api/v1/model/generateVideo`）。
+///
+/// 与同平台 Vidu Q4 家族的**契约级**差异（都来自平台文档，不是推测）：
+///
+/// 1. 媒体槽位不同：参考图走顶层 `reference_images`（≤10 张，含首尾关键帧）、
+///    参考视频走顶层 `reference_videos`（≤5 条）、首帧走单值 `image`、尾帧走单值
+///    `last_image`；**没有** `reference_audios`；
+/// 2. 参数表是 `duration` / `aspect_ratio` / `resolution` 三项，没有
+///    `generate_audio`、没有 `seed`；
+/// 3. 提示词里的素材指代是 `@image_N` / `@video_N`（Vidu 用「图 N」这类自然
+///    语言指代）。
+///
+/// 参考图与参考视频：公网 URL 原样透传，本地文件编码为 data URI（文档声明
+/// base64 与 URL 均可）。
+///
+/// 提交换 prediction id，再轮询 `GET /api/v1/model/prediction/{id}` 取结果。
+fn build_atlascloud_kling_video_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation("请先选择并保存视频模型。", json!({ "taskId": task.id }))
+        })?;
+    if !is_atlascloud_kling_video_model(model) {
+        // 家族前缀命中但本站没有登记请求体的成员：派发前明确拒绝，不套用别的
+        // 成员的请求体，也不退回通用形态盲发。
+        return Err(BackendError::validation(
+            "该模型尚未登记 Atlas Cloud 的视频请求体，请改用已登记的 Kling 4.0 参考生视频模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if !model.eq_ignore_ascii_case(ATLASCLOUD_KLING_VIDEO_MODEL) {
+        // 同前缀但未登记的成员：与图片家族同一口径，宁可显式拒绝。
+        return Err(BackendError::validation(
+            "该 Kling 4.0 模型尚未登记 Atlas Cloud 的视频请求体，请改用 Kling 4.0 参考生视频模型。",
+            json!({ "taskId": task.id, "model": model }),
+        ));
+    }
+    if !resolved.audios.is_empty() {
+        // 文档的输入参数表里没有音频素材位：它的语音位是 `voice_ids`（Kling 音色
+        // ID），不是音频文件。静默丢掉等于让用户以为音色被采纳了。
+        return Err(BackendError::validation(
+            "Kling 4.0 参考生视频不接受音频素材：它的语音位是 Kling 音色 ID，不是音频文件。请先解绑音频素材。",
+            json!({
+                "taskId": task.id,
+                "audios": resolved.audios.len(),
+            }),
+        ));
+    }
+    let slots = kling_media_slots(resolved)?;
+    // 文档：图片素材合计（首帧 + 尾帧 + 参考图）最多 10 张。
+    if slots.image_count > ATLASCLOUD_KLING_VIDEO_MAX_IMAGES {
+        return Err(BackendError::validation(
+            format!(
+                "Kling 4.0 参考生视频最多接受 {ATLASCLOUD_KLING_VIDEO_MAX_IMAGES} 张图片素材（首帧、尾帧与参考图合计），请先解绑多余的素材。"
+            ),
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "images": slots.image_count,
+                "limit": ATLASCLOUD_KLING_VIDEO_MAX_IMAGES,
+            }),
+        ));
+    }
+    // 文档：参考视频最多 5 条。
+    if slots.videos.len() > ATLASCLOUD_KLING_VIDEO_MAX_VIDEOS {
+        return Err(BackendError::validation(
+            format!(
+                "Kling 4.0 参考生视频最多接受 {ATLASCLOUD_KLING_VIDEO_MAX_VIDEOS} 条参考视频，请先解绑多余的素材。"
+            ),
+            json!({
+                "taskId": task.id,
+                "model": model,
+                "videos": slots.videos.len(),
+                "limit": ATLASCLOUD_KLING_VIDEO_MAX_VIDEOS,
+            }),
+        ));
+    }
+    // 文档：提示词必填，长度上限按语言分档（英文 26000、非英文 11000）。
+    let prompt = kling_prompt(resolved, &slots)?;
+    let prompt_limit = kling_prompt_limit(&prompt);
+    if prompt.chars().count() > prompt_limit {
+        return Err(BackendError::validation(
+            "提示词超过 Kling 4.0 的长度上限，请精简后再生成。",
+            json!({
+                "taskId": task.id,
+                "length": prompt.chars().count(),
+                "limit": prompt_limit,
+            }),
+        ));
+    }
+    // 参数取值（类型 / 枚举 / 最小最大）在派发前本地校验：上游对越界取值会直接
+    // 拒绝，而那已经是一次付费请求。
+    validate_atlascloud_parameters(task, resolved, &[])?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(prompt));
+    // 首帧 / 尾帧：顶层单值字段（文档的 `image` / `last_image`）。
+    if let Some(first_frame) = slots.first_frame {
+        body.insert("image".into(), first_frame);
+    }
+    if let Some(last_frame) = slots.last_frame {
+        body.insert("last_image".into(), last_frame);
+    }
+    // 参考图：顶层 `reference_images` 数组（文档标注为可选，没有就不发这个键）。
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "reference_images")?;
+    if !slots.reference_images.is_empty() {
+        body.insert(image_field, Value::Array(slots.reference_images));
+    }
+    // 参考视频：顶层 `reference_videos` 数组（文档标注为可选）。
+    let video_field = request_field(&resolved.operation_schema, "videoField", "reference_videos")?;
+    if !slots.videos.is_empty() {
+        body.insert(video_field, Value::Array(slots.videos));
+    }
+    // duration / aspect_ratio / resolution 由参数表声明在顶层（root）。
+    //
+    // 只发送**本契约声明的参数**：画布节点上可能残留着上一个模型的参数（例如
+    // Vidu 的 `generate_audio` / `seed`、魔芋 Vidu 的 `watermark`），把它们塞进
+    // 请求体会被上游以「未知字段」拒绝，或更糟——被上游静默忽略，用户却以为
+    // 自己设了。
+    insert_atlascloud_declared_parameters(&mut body, resolved, true)?;
+    Ok(Value::Object(body))
+}
+
+/// Kling 4.0 请求体里的素材分槽，以及提示词里素材的指代记号。
+///
+/// 文档的编号规则：关键帧先编号（首帧 → 中间帧 → 尾帧），参考图接着编号；
+/// 参考视频单独按 `@video_N` 编号。本画布没有「中间帧」槽位，因此实际顺序是
+/// 首帧、尾帧、参考图。
+struct KlingMediaSlots {
+    /// 首帧（顶层 `image` 字段）。
+    first_frame: Option<Value>,
+    /// 尾帧（顶层 `last_image` 字段）。
+    last_frame: Option<Value>,
+    /// 参考图（顶层 `reference_images` 数组）。
+    reference_images: Vec<Value>,
+    /// 参考视频（顶层 `reference_videos` 数组）。
+    videos: Vec<Value>,
+    /// 素材身份 → 提示词里的指代记号（`@image_N` / `@video_N`）。
+    tokens: HashMap<(MediaType, u32), String>,
+    /// 图片素材总张数（首帧 + 尾帧 + 参考图），用于对照文档的上限。
+    image_count: usize,
+}
+
+/// 把画布素材分到 Kling 4.0 的四个槽位，并算出提示词里的 `@image_N` /
+/// `@video_N` 记号。
+///
+/// 槽位按素材**用途**（`role`）判定：画布上标成「首帧 / 尾帧」的图片进关键帧
+/// 槽位，其余图片都是参考图；视频一律进参考视频槽位。用途相同的第二张图片
+/// （例如用户连了两张首帧）退化成参考图，不静默丢弃。
+fn kling_media_slots(resolved: &ResolvedGeneration) -> BackendResult<KlingMediaSlots> {
+    let mut first_frame: Option<&ResolvedMedia> = None;
+    let mut last_frame: Option<&ResolvedMedia> = None;
+    let mut references: Vec<&ResolvedMedia> = Vec::new();
+    for image in &resolved.images {
+        match image.role.as_str() {
+            "first_frame" if first_frame.is_none() => first_frame = Some(image),
+            "last_frame" if last_frame.is_none() => last_frame = Some(image),
+            _ => references.push(image),
+        }
+    }
+    let mut tokens: HashMap<(MediaType, u32), String> = HashMap::new();
+    let mut image_index = 0usize;
+    let mut first_frame_value = None;
+    if let Some(media) = first_frame {
+        image_index += 1;
+        tokens.insert(
+            (MediaType::Image, media.type_position),
+            format!("@image_{image_index}"),
+        );
+        first_frame_value = Some(atlascloud_video_reference(
+            media,
+            "首帧图片无法读取，请重新选择本地图片或有效的图片链接。",
+        )?);
+    }
+    let mut last_frame_value = None;
+    if let Some(media) = last_frame {
+        image_index += 1;
+        tokens.insert(
+            (MediaType::Image, media.type_position),
+            format!("@image_{image_index}"),
+        );
+        last_frame_value = Some(atlascloud_video_reference(
+            media,
+            "尾帧图片无法读取，请重新选择本地图片或有效的图片链接。",
+        )?);
+    }
+    let mut reference_images = Vec::with_capacity(references.len());
+    for media in references {
+        image_index += 1;
+        tokens.insert(
+            (MediaType::Image, media.type_position),
+            format!("@image_{image_index}"),
+        );
+        reference_images.push(atlascloud_video_reference(
+            media,
+            "参考图片无法读取，请重新选择本地图片或有效的图片链接。",
+        )?);
+    }
+    let mut videos = Vec::with_capacity(resolved.videos.len());
+    for (index, media) in resolved.videos.iter().enumerate() {
+        tokens.insert(
+            (MediaType::Video, media.type_position),
+            format!("@video_{}", index + 1),
+        );
+        videos.push(atlascloud_video_reference(
+            media,
+            "参考视频无法读取，请重新选择本地视频或有效的视频链接。",
+        )?);
+    }
+    Ok(KlingMediaSlots {
+        first_frame: first_frame_value,
+        last_frame: last_frame_value,
+        reference_images,
+        videos,
+        tokens,
+        image_count: image_index,
+    })
+}
+
+/// Kling 4.0 的提示词：把画布提示词里的素材占位换成平台认识的 `@image_N` /
+/// `@video_N` 指代。
+///
+/// 平台的输入参数表明确要求用 `@image_N` / `@video_N` 指代参考素材。画布侧渲染
+/// 出来的是「图片1」「[图片1：文件名]」这类自然语言占位，直接发过去模型无法把
+/// 参考图和文字描述对上。这里按结构化 `content` 重建：文字原样保留，素材位置
+/// 换成对应记号。
+fn kling_prompt(resolved: &ResolvedGeneration, slots: &KlingMediaSlots) -> BackendResult<String> {
+    let mut prompt = String::new();
+    for item in &resolved.content {
+        match item {
+            CompiledContentItem::Text(text) => prompt.push_str(text),
+            CompiledContentItem::Media {
+                media_type,
+                type_position,
+            } => match slots.tokens.get(&(*media_type, *type_position)) {
+                Some(token) => prompt.push_str(token),
+                None => {
+                    // 素材没进请求体（例如被用途判定挡下），提示词里不留悬空占位，
+                    // 退回通用标签，至少不会让模型去引用一个不存在的图。
+                    let label = match media_type {
+                        MediaType::Image => "图片",
+                        MediaType::Video => "视频",
+                        MediaType::Audio => "音频",
+                        MediaType::Text => "文本",
+                    };
+                    prompt.push_str(&format!("{label}{type_position}"));
+                }
+            },
+        }
+    }
+    if prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "Kling 4.0 参考生视频需要提示词：请先填写画面描述。",
+            json!({}),
+        ));
+    }
+    Ok(prompt)
+}
+
+/// Kling 4.0 的提示词长度上限：英文 26000 字符，非英文 11000 字符（文档口径）。
+///
+/// 文档把两个上限并列为「26,000 English characters (11,000 non-English)」，
+/// 这里按「提示词里只要出现非英文字符就按较严的那一档判定」执行——混合文本按
+/// 上限的严格者处理，不会因为混了几个英文单词就放行到 26000。
+fn kling_prompt_limit(prompt: &str) -> usize {
+    if prompt.chars().any(|character| !character.is_ascii()) {
+        ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS_NON_ASCII
+    } else {
+        ATLASCLOUD_KLING_VIDEO_MAX_PROMPT_CHARS
+    }
+}
+
+/// 把一个已解析的素材变成 Atlas Cloud 视频接口的参考素材取值：公网 URL 原样透传，
+/// 本地文件编码为 data URI（`data:<mime>;base64,…`）。
+///
+/// 平台文档声明参考图可以给 URL 或 Base64；参考音频一栏写的是「音频片段 URL」，
+/// 但同一份文档的 Notes 说明文件形式支持 URL、base64 data URI 与上传接口三种，
+/// 因此本地音频同样按 data URI 内联（否则本地音频根本没有可投递的形态）。
+fn atlascloud_video_reference(media: &ResolvedMedia, message: &str) -> BackendResult<Value> {
+    if let Some(reference) = media
+        .remote_reference
+        .as_deref()
+        .filter(|reference| !reference.is_empty())
+    {
+        return Ok(Value::String(reference.to_string()));
+    }
+    let bytes = media.bytes.clone().ok_or_else(|| {
+        BackendError::validation(message.to_string(), media.archive())
+    })?;
+    Ok(Value::String(format!(
+        "data:{};base64,{}",
+        media.mime_type,
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )))
+}
+
+/// 校验 Qwen 的 `prompt_extend_mode`：参考图编辑只接受 `direct`（单遍改写 DPE）。
+///
+/// 平台文档的参数描述里提到了 `agent`（APE，agentic 改写管线），但 `Options` 只列
+/// 了 `direct`。实测（2026-10-29，真实 Key，协议层直打）：`agent` 会被受理
+/// （提交回执 `data.status = processing`），随后在轮询阶段失败，`data.error` 为
+/// `prompt_extend_mode=agent is not supported for i2i requests`（信封 `code = 400`，
+/// 失败响应里没有 `price` 字段）。也就是说：**参考图编辑这条路只有 `direct` 能用**，
+/// `agent` 是文生图侧的能力。
+///
+/// 因此本地在派发前拦下 `agent`，并把原因说清楚——而不是发一次必然失败的付费
+/// 请求，再让用户去读一句英文上游错误。
+fn validate_atlascloud_qwen_prompt_extend_mode(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<()> {
+    let Some(value) = resolved
+        .parameters
+        .get("prompt_extend_mode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    if value.eq_ignore_ascii_case("direct") {
+        return Ok(());
+    }
+    Err(BackendError::validation(
+        format!(
+            "「改写方式」当前只支持 direct（单遍改写）。上游不支持参考图编辑用 {value} 改写，请改选 direct。"
+        ),
+        json!({ "taskId": task.id, "parameter": "prompt_extend_mode", "value": value }),
+    ))
+}
+
+/// 校验 Qwen 的 `size` 参数：形如 `宽*高`（例如 `1280*720`），宽高各 512–1440。
+///
+/// 文档把取值范围写成「512*512–1440*1440」，因此本地按**每一维**落在
+/// [512, 1440] 判定（`512*512` 是最小的一档，`1440*1440` 是最大的一档）。
+/// 留空 = 用户没填 = 让模型自选分辨率，这个键不进请求体，因此不校验。
+fn validate_atlascloud_qwen_size(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<()> {
+    let Some(raw) = resolved
+        .parameters
+        .get("size")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let invalid = |detail: &str| {
+        BackendError::validation(
+            format!("「输出尺寸」需要写成 宽*高（例如 1280*720），宽与高各 512–1440。{detail}"),
+            json!({ "taskId": task.id, "parameter": "size", "value": raw }),
+        )
+    };
+    let Some((width, height)) = raw.split_once('*') else {
+        return Err(invalid("当前写法缺少「*」。"));
+    };
+    let parse_dimension = |text: &str| -> Option<u32> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || !trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        trimmed.parse::<u32>().ok()
+    };
+    let (Some(width), Some(height)) = (parse_dimension(width), parse_dimension(height)) else {
+        return Err(invalid("宽与高都要是整数。"));
+    };
+    if !(512..=1440).contains(&width) || !(512..=1440).contains(&height) {
+        return Err(invalid("超出 512–1440 的范围。"));
+    }
+    Ok(())
+}
+
+/// 把契约声明的参数按白名单写进 Atlas 请求体的顶层（root）。
+///
+/// 只发送**本契约声明**的参数：画布节点上可能残留着上一个模型的参数（例如
+/// dall-e 的 `size`/`n`，或 Grok 的 `resolution`），把它们塞进 Atlas 请求体会被
+/// 上游以「未知字段」拒绝，或更糟——被上游静默忽略，用户却以为自己设了。这里按
+/// 契约白名单过滤：本模型声明的参数一个不丢，别的模型的残留参数不带过去（那些
+/// 参数本来就不属于这个模型，不是丢弃用户对当前模型的选择）。
+///
+/// `skip_blank`：可选参数留空 = 用户没填时，这个键**不进**请求体（上游收到空串
+/// 会直接拒绝「期望整数」这类取值）。
+fn insert_atlascloud_declared_parameters(
+    body: &mut Map<String, Value>,
+    resolved: &ResolvedGeneration,
+    skip_blank: bool,
+) -> BackendResult<()> {
+    let declared_fields = resolved
+        .operation_schema
+        .get("parameters")
+        .and_then(Value::as_object)
+        .map(|parameters| {
+            parameters
+                .iter()
+                .map(|(key, definition)| {
+                    definition
+                        .get("requestField")
+                        .and_then(Value::as_str)
+                        .unwrap_or(key.as_str())
+                        .to_string()
+                })
+                .collect::<BTreeSet<String>>()
+        })
+        .unwrap_or_default();
+    let parameters = mapped_parameters(resolved, "root")?
+        .into_iter()
+        .filter(|parameter| declared_fields.contains(&parameter.field))
+        .filter(|parameter| {
+            !skip_blank
+                || !parameter
+                    .value
+                    .as_str()
+                    .is_some_and(|value| value.trim().is_empty())
+        })
+        .collect::<Vec<_>>();
+    insert_mapped_parameters(body, "root", parameters)
+}
+
+/// 按契约声明校验 Atlas 家族成员的参数取值（类型 / 枚举 / 最小 / 最大）。
+///
+/// 上游对越界或类型不符的取值会直接拒绝，而那已经是一次付费请求；因此在派发前
+/// 本地拦住。判据取自模型档案 `parameters` 的声明（不另写一份数值表——档案改了
+/// 这里跟着改），空字符串视为「用户没填」，不算取值错误。
+///
+/// `https_only_fields` 列出「必须是公网可达 https 地址」的参数名（Midjourney 的
+/// `sref`）；其余家族没有这类参数，传空切片。
+fn validate_atlascloud_parameters(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+    https_only_fields: &[&str],
+) -> BackendResult<()> {
+    let Some(definitions) = resolved
+        .operation_schema
+        .get("parameters")
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    let Some(values) = resolved.parameters.as_object() else {
+        return Ok(());
+    };
+    for (key, definition) in definitions {
+        let Some(definition) = definition.as_object() else {
+            continue;
+        };
+        let Some(value) = values.get(key) else {
+            continue;
+        };
+        if value.as_str().is_some_and(|text| text.trim().is_empty()) {
+            continue;
+        }
+        let label = definition
+            .get("label")
+            .and_then(Value::as_str)
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or(key.as_str());
+        // 期望整数但拿到小数：单独说，别混进「类型不符」。
+        if definition.get("type").and_then(Value::as_str) == Some("integer")
+            && value.is_number()
+            && value.as_i64().is_none()
+            && value.as_u64().is_none()
+        {
+            return Err(BackendError::validation(
+                format!("「{label}」需要整数。"),
+                json!({ "taskId": task.id, "parameter": key, "value": value }),
+            ));
+        }
+        let wrong_type = match definition.get("type").and_then(Value::as_str) {
+            Some("boolean") => !value.is_boolean(),
+            Some("integer") => value.as_i64().is_none() && value.as_u64().is_none(),
+            Some("number") => !value.is_number(),
+            Some("string") | None => !value.is_string(),
+            Some(_) => false,
+        };
+        if wrong_type {
+            return Err(BackendError::validation(
+                format!("「{label}」的取值与当前模型契约不符，请在参数区重新选择。"),
+                json!({
+                    "taskId": task.id,
+                    "parameter": key,
+                    "value": value,
+                    "expected": definition.get("type")
+                }),
+            ));
+        }
+        if let Some(allowed) = definition.get("enum").and_then(Value::as_array)
+            && !allowed.contains(value)
+        {
+            return Err(BackendError::validation(
+                format!("「{label}」的取值不在模型契约允许的范围内，请重新选择。"),
+                json!({
+                    "taskId": task.id,
+                    "parameter": key,
+                    "value": value,
+                    "allowed": allowed
+                }),
+            ));
+        }
+        if let Some(number) = value.as_f64() {
+            if let Some(minimum) = definition.get("minimum").and_then(Value::as_f64)
+                && number < minimum
+            {
+                return Err(BackendError::validation(
+                    format!("「{label}」不能小于 {minimum}。"),
+                    json!({
+                        "taskId": task.id,
+                        "parameter": key,
+                        "value": number,
+                        "minimum": minimum
+                    }),
+                ));
+            }
+            if let Some(maximum) = definition.get("maximum").and_then(Value::as_f64)
+                && number > maximum
+            {
+                return Err(BackendError::validation(
+                    format!("「{label}」不能大于 {maximum}。"),
+                    json!({
+                        "taskId": task.id,
+                        "parameter": key,
+                        "value": number,
+                        "maximum": maximum
+                    }),
+                ));
+            }
+        }
+        // 风格参考图：文档明确要求**公网可达的 https 图片地址**。本地图片或
+        // http 地址会被上游拒绝，在派发前拦下来（同样是为了不浪费一次付费请求）。
+        if https_only_fields.contains(&key.as_str()) {
+            let reference = value.as_str().unwrap_or_default().trim();
+            if !reference.starts_with("https://") {
+                return Err(BackendError::validation(
+                    "「风格参考图 URL」必须是公网可达的 https 图片地址。",
+                    json!({ "taskId": task.id, "parameter": key, "value": reference }),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 计算视频任务的状态轮询路径。
 ///
 /// 默认使用 `GET /v1/video/generations/{task_id}`；模型定义可在操作 schema 的
@@ -4139,12 +5837,23 @@ fn video_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendR
 
 /// 解析模型声明的视频轮询路径模板（默认 `/v1/video/generations/{task_id}`），
 /// 替换 `{task_id}` 占位符并做合法性校验。
+///
+/// 存档里的操作契约有**两种形状**：按操作分组的
+/// `{"video_generation": {"request": {...}}}`（模型定义的常规形状），以及扁平的单
+/// 操作对象 `{"request": {...}}`。两种都要认——只认扁平形状时，按操作分组的存档
+/// 读不到 `observePath`，会静默退回通用网关的 `/v1/video/generations/{task_id}`，
+/// 而那个端点在 Atlas Cloud 上根本不存在（轮询 404，任务永远拿不到产物）。
+/// 图片侧的 `image_observe_path` 早已同时探测这两种形状，视频侧此前没有。
 fn video_observe_path_from_schema(
     operation_schema: Option<&Value>,
     remote_task_id: &str,
 ) -> BackendResult<String> {
     let observe_path = operation_schema
-        .and_then(|schema| schema.pointer("/request/observePath"))
+        .and_then(|schema| {
+            schema
+                .pointer("/video_generation/request/observePath")
+                .or_else(|| schema.pointer("/request/observePath"))
+        })
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     let path = match observe_path {
@@ -5372,9 +7081,96 @@ fn is_fzy_image_task(task: &TaskExecutionRecord) -> bool {
         )
 }
 
+fn is_atlascloud_image_task(task: &TaskExecutionRecord) -> bool {
+    task.adapter_id_snapshot == ATLASCLOUD_ADAPTER_ID
+        && matches!(
+            task.operation,
+            GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+        )
+}
+
+/// Atlas Cloud 提交回执：平台只回 `{"data":{"id":"<prediction id>"}}`——没有任务
+/// 状态、没有结果链接。结果要再轮询 `GET /api/v1/model/prediction/{id}` 取。
+///
+/// 通用回执解析要求「任务号 + 进行中状态」或 HTTP 202 才认异步任务单，而平台
+/// 这份回执只有 id，因此这里单独解析：拿不到 id 就按「已受理但没有远程身份」
+/// 处理（任务层不会自动重发，避免重复计费）。
+fn parse_atlascloud_image_submission(
+    response: &CapturedHttpResponse,
+) -> BackendResult<GenerationSubmission> {
+    require_success(response)?;
+    let value: Value = serde_json::from_str(&response.body).map_err(|error| {
+        accepted_without_remote_id_error(
+            "Atlas Cloud 已返回成功状态，但响应不是有效 JSON，无法读取 prediction id。平台可能已受理并计费，本机也没有任务号可查；请先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
+            json!({ "httpStatus": response.status, "parseError": error.to_string() }),
+        )
+    })?;
+    let task_id = value
+        .pointer("/data/id")
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            accepted_without_remote_id_error(
+                "Atlas Cloud 已返回成功状态，但响应里没有 prediction id。平台可能已受理并计费，本机也没有任务号可查；请先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
+                json!({ "httpStatus": response.status, "rawResponse": response.body }),
+            )
+        })?;
+    Ok(GenerationSubmission::RemoteImageTask {
+        task_id: task_id.to_string(),
+    })
+}
+
 fn fzy_ambiguous_submission_error(error: BackendError) -> BackendError {
     BackendError::protocol(
         "饭众烟出图的提交结果尚未确认，任务可能已经创建。请保留本次记录和请求编号，联系管理员核查回执后再决定是否重新生成。",
+        json!({ "ambiguousPaidSubmission": true, "source": error.runtime_record() }),
+    )
+}
+
+/// Atlas Cloud 视频提交回执：与出图同一层 `data` 信封，`data.id` 即 prediction id。
+///
+/// 平台实测的回执里**已经带了** `status`（`processing`）与 `outputs`（`null`），
+/// 但应用侧只用 `data.id` 当任务号，不依赖回执里的状态。
+///
+/// 通用回执解析要求「任务号 + 进行中状态」或 HTTP 202 才认异步任务单，而平台的
+/// 回执是 HTTP 200，因此单独解析：拿不到 id 就按「已受理但没有远程身份」处理
+/// （任务层不会自动重发，避免重复计费）。
+fn parse_atlascloud_video_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
+    require_success(response)?;
+    let value: Value = serde_json::from_str(&response.body).map_err(|error| {
+        accepted_without_remote_id_error(
+            "Atlas Cloud 已返回成功状态，但响应不是有效 JSON，无法读取 prediction id。平台可能已受理并计费，本机也没有任务号可查；请先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
+            json!({ "httpStatus": response.status, "parseError": error.to_string() }),
+        )
+    })?;
+    value
+        .pointer("/data/id")
+        .or_else(|| value.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            accepted_without_remote_id_error(
+                "Atlas Cloud 已返回成功状态，但响应里没有 prediction id。平台可能已受理并计费，本机也没有任务号可查；请先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
+                json!({ "httpStatus": response.status, "rawResponse": response.body }),
+            )
+        })
+}
+
+/// Atlas Cloud 视频提交结果不明确时的错误包装：平台可能已受理并计费，不能让
+/// 任务层自动重发（那会变成第二次计费）。本地校验类错误原样返回。
+fn atlascloud_ambiguous_submission_error(error: BackendError) -> BackendError {
+    if matches!(
+        error,
+        BackendError::Validation { .. } | BackendError::Url(_)
+    ) {
+        return error;
+    }
+    BackendError::protocol(
+        "Atlas Cloud 视频提交结果尚未确认，平台可能已受理并计费。请保留本次记录和请求编号，先到供应商后台确认这次请求是否扣费，再决定是否重新生成。",
         json!({ "ambiguousPaidSubmission": true, "source": error.runtime_record() }),
     )
 }
@@ -5383,6 +7179,9 @@ fn parse_task_image_submission(
     task: &TaskExecutionRecord,
     response: &CapturedHttpResponse,
 ) -> BackendResult<GenerationSubmission> {
+    if is_atlascloud_image_task(task) {
+        return parse_atlascloud_image_submission(response);
+    }
     if !is_fzy_image_task(task) {
         return parse_image_submission(response);
     }
@@ -5483,6 +7282,8 @@ fn parse_image_observation(
         .get("error")
         .filter(|value| !value.is_null())
         .cloned()
+        // Atlas Cloud 的失败原因写在 `data.error` 信封里。
+        .or_else(|| value.pointer("/data/error").cloned())
         .or_else(|| value.get("errorDetail").cloned())
         .or_else(|| value.get("message").cloned());
     // Grsai 把内容违规单独标记为 `violation`（终态，不再轮询）。
@@ -5570,6 +7371,8 @@ fn collect_additional_image_sources(value: &Value, sources: &mut Vec<ImageSource
         "/result/image_urls",
         "/image_urls",
         "/images",
+        // Atlas Cloud 的结果在 `data.outputs`（托管链接数组）。
+        "/data/outputs",
     ];
     const URLS: &[&str] = &[
         "/output/url",
@@ -5781,9 +7584,15 @@ fn has_paid_submission_marker(error: &BackendError) -> bool {
     let BackendError::Protocol { details, .. } = error else {
         return false;
     };
-    details.get("ambiguousPaidSubmission").and_then(Value::as_bool) == Some(true)
+    details
+        .get("ambiguousPaidSubmission")
+        .and_then(Value::as_bool)
+        == Some(true)
         || details.get("noChargeTerminal").and_then(Value::as_bool) == Some(true)
-        || details.get("acceptedWithoutRemoteId").and_then(Value::as_bool) == Some(true)
+        || details
+            .get("acceptedWithoutRemoteId")
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 /// 「上游已受理并计费，但回执里没有任务号」的错误。
@@ -5812,6 +7621,174 @@ fn accepted_without_remote_id_error(message: &str, details: Value) -> BackendErr
             "details": redact_request_value(&details),
         }),
     )
+}
+
+/// 网关 TTS 的 `audio_config` 采样率取值（文档声明的常用档位）。
+const SPEECH_SAMPLE_RATES: [u32; 4] = [8_000, 16_000, 24_000, 48_000];
+
+/// 画布音频节点的任务参数 → 网关 `audio_config` + 音色名。
+///
+/// 参数来自前端自带的键（`format` / `sample_rate` / `voice_setting_speed` /
+/// `voice_setting_pitch` / `voice_setting_vol` / `speaker`），不是模型 Schema 声明的
+/// 白名单键，因此这里按名字显式取；区间校验分两层：
+/// - 前端语义区间（语速 0.5～2、音调 -12～12、音量 0.01～10）越界 → 直接报错；
+/// - 换算成网关的整数区间后由 `speech::gateway_audio_plan` 兜底（它按文档声明的
+///   `[-50,100]` / `[-12,12]` 判定），越界同样报错，不做静默截断。
+///
+/// `language` 在这个端点上没有对应字段（网关 TTS 契约里没有语言项），按约定忽略。
+fn speech_audio_config(
+    parameters: &Value,
+) -> BackendResult<(SpeechAudioConfig, Option<String>)> {
+    let parameters = parameters.as_object().cloned().unwrap_or_default();
+    let format = parameters
+        .get("format")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("wav")
+        .to_ascii_lowercase();
+    if format == "pcm" {
+        return Err(BackendError::validation(
+            "pcm 是无头裸流，应用无法校验时长也不能安全配入音轨，请改用 mp3、wav、ogg_opus 或 flac。",
+            json!({ "parameter": "format", "value": format }),
+        ));
+    }
+    let sample_rate = match parameters.get("sample_rate") {
+        Some(Value::Null) | None => 24_000,
+        Some(value) => {
+            let rate = value.as_u64().ok_or_else(|| {
+                BackendError::validation(
+                    "语音采样率必须是整数。",
+                    json!({ "parameter": "sample_rate", "value": value }),
+                )
+            })? as u32;
+            if !SPEECH_SAMPLE_RATES.contains(&rate) {
+                return Err(BackendError::validation(
+                    "语音采样率只能是 8000、16000、24000 或 48000。",
+                    json!({
+                        "parameter": "sample_rate",
+                        "value": rate,
+                        "allowed": SPEECH_SAMPLE_RATES,
+                    }),
+                ));
+            }
+            rate
+        }
+    };
+    let speech_rate = speech_rate_parameter(parameters.get("voice_setting_speed"), "voice_setting_speed")?;
+    let loudness_rate =
+        speech_rate_parameter(parameters.get("voice_setting_vol"), "voice_setting_vol")?;
+    let pitch_rate = match parameters.get("voice_setting_pitch") {
+        Some(Value::Null) | None => 0,
+        Some(value) => {
+            let pitch = value.as_i64().ok_or_else(|| {
+                BackendError::validation(
+                    "音调必须是整数。",
+                    json!({ "parameter": "voice_setting_pitch", "value": value }),
+                )
+            })? as i32;
+            if !(-12..=12).contains(&pitch) {
+                return Err(BackendError::validation(
+                    "音调只能调整 -12～12。",
+                    json!({
+                        "parameter": "voice_setting_pitch",
+                        "value": pitch,
+                        "allowed": [-12, 12],
+                    }),
+                ));
+            }
+            pitch
+        }
+    };
+    let speaker = parameters
+        .get("speaker")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(speaker) = speaker.as_deref() {
+        // 音色名的合法性由语音模块统一判定（不能带空格与控制字符）。
+        validate_gateway_speaker(speaker)?;
+    }
+    Ok((
+        SpeechAudioConfig {
+            format: Some(format),
+            sample_rate: Some(sample_rate),
+            speech_rate: Some(speech_rate),
+            loudness_rate: Some(loudness_rate),
+            pitch_rate: Some(pitch_rate),
+            enable_subtitle: Some(false),
+        },
+        speaker,
+    ))
+}
+
+/// 语速 / 音量：前端是倍率（语速 0.5～2、音量 0.01～10），网关要的是整数
+/// `[-50,100]`，换算关系是 `round((倍率 - 1) * 100)`。
+fn speech_rate_parameter(value: Option<&Value>, parameter: &str) -> BackendResult<i32> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(0);
+    };
+    let rate = value.as_f64().ok_or_else(|| {
+        BackendError::validation(
+            "语音倍率必须是数字。",
+            json!({ "parameter": parameter, "value": value }),
+        )
+    })?;
+    if !rate.is_finite() {
+        return Err(BackendError::validation(
+            "语音倍率必须是有限数字。",
+            json!({ "parameter": parameter, "value": value }),
+        ));
+    }
+    let (minimum, maximum) = if parameter == "voice_setting_speed" {
+        (0.5_f64, 2.0_f64)
+    } else {
+        (0.01_f64, 10.0_f64)
+    };
+    if !(minimum..=maximum).contains(&rate) {
+        return Err(BackendError::validation(
+            format!(
+                "{} 只能调整 {}～{}。",
+                if parameter == "voice_setting_speed" {
+                    "语速"
+                } else {
+                    "音量"
+                },
+                minimum,
+                maximum
+            ),
+            json!({ "parameter": parameter, "value": rate, "allowed": [minimum, maximum] }),
+        ));
+    }
+    Ok(((rate - 1.0) * 100.0).round() as i32)
+}
+
+/// 合成结果的 MIME 与文件扩展名：优先按真实字节判定，认不出时退回请求里声明的
+/// 容器（网关按 `audio_config.format` 返回对应容器）。
+fn audio_content_type(reply: &GatewayTtsReply, container_extension: &str) -> (String, String) {
+    match infer::get(&reply.audio) {
+        Some(kind) => (
+            kind.mime_type().to_string(),
+            kind.extension().to_ascii_lowercase(),
+        ),
+        None => (
+            format!("audio/{}", container_extension),
+            container_extension.to_string(),
+        ),
+    }
+}
+
+/// 从归一后的响应头里取一个值（头名一律小写）。
+fn header_value(headers: &Value, name: &str) -> Option<String> {
+    match headers.get(name) {
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(Value::Array(values)) => values
+            .iter()
+            .find_map(Value::as_str)
+            .map(ToOwned::to_owned),
+        _ => None,
+    }
 }
 
 /// 通用网关付费提交阶段的统一判定：把「上游可能已经受理并计费、但我们没拿到
@@ -6106,6 +8083,8 @@ fn parse_video_observation(
         .or_else(|| value.pointer("/data/data/data/data/error"))
         .or_else(|| value.pointer("/data/data/data/error"))
         .or_else(|| value.pointer("/data/data/error"))
+        // Atlas Cloud 的失败原因写在 `data.error` 信封里（成功时是空字符串）。
+        .or_else(|| value.pointer("/data/error"))
         .cloned();
     let remote_failed = matches!(
         remote_status.to_ascii_uppercase().as_str(),
@@ -6169,6 +8148,19 @@ fn extract_video_url(value: &Value) -> Option<String> {
         {
             return Some(url.to_owned());
         }
+    }
+    // Atlas Cloud 的产物在 `data.outputs`（托管链接数组）：成功时是数组，处理中是
+    // `null`。图片链路已有同名分支，视频链路原本没有——不补这一条，任务会一路
+    // 轮询到「成功但没有产物链接」为止。
+    if let Some(url) = value
+        .pointer("/data/outputs")
+        .and_then(Value::as_array)
+        .and_then(|outputs| outputs.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        return Some(url.to_owned());
     }
     // content 可能以 JSON 字符串返回（内嵌 video_url / url），按同序深度的
     // content 位置二次解析，避免因序列化方式不同而漏掉产物。

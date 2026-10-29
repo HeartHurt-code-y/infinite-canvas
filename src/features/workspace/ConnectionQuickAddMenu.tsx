@@ -8,6 +8,13 @@ import "./ConnectionQuickAddMenu.css";
 export interface ConnectionQuickAddMenuProps {
   readonly position: { readonly x: number; readonly y: number };
   readonly connectionMode?: boolean;
+  /**
+   * 副标题覆盖文案。
+   *
+   * 「引用该节点生成」有两种方向（引用 / 接入），副标题要说清建出来的新节点与
+   * 被点按节点之间是哪一种关系——否则用户点完菜单才知道方向不对。
+   */
+  readonly hint?: string | undefined;
   readonly triggerElement?: HTMLElement | null;
   readonly onSelect: (kind: CanvasQuickAddKind) => void;
   readonly onClose: () => void;
@@ -18,6 +25,7 @@ const VIEWPORT_MARGIN = 8;
 export function ConnectionQuickAddMenu({
   position,
   connectionMode = false,
+  hint,
   triggerElement,
   onSelect,
   onClose,
@@ -146,7 +154,7 @@ export function ConnectionQuickAddMenu({
       <div className="connection-quick-add-menu__heading" role="presentation">
         <strong>添加节点</strong>
         <span id={descriptionId}>
-          {connectionMode ? "选择后创建并自动连线" : "选择后在画布创建节点"}
+          {hint ?? (connectionMode ? "选择后创建并自动连线" : "选择后在画布创建节点")}
         </span>
       </div>
       {CANVAS_QUICK_ADD_CHOICES.map(({ kind, label, icon, badge, available }, index) => (

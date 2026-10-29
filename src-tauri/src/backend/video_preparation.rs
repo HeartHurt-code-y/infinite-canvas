@@ -906,7 +906,7 @@ async fn run_ffmpeg(
     result
 }
 
-async fn probe_path(ffmpeg: &Path, path: &str) -> BackendResult<VideoPreparationProbe> {
+pub(crate) async fn probe_path(ffmpeg: &Path, path: &str) -> BackendResult<VideoPreparationProbe> {
     let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
         "ffprobe.exe"
     } else {

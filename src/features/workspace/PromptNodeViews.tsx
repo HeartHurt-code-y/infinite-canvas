@@ -12,6 +12,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -67,7 +68,8 @@ import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection
 import { resolveGreenScreen } from "../../lib/greenScreen";
 import { preferredPanoramaParameters } from "../../lib/panorama";
 import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
-import { VideoNodeSettingsControls } from "./VideoNodeSettingsControls";
+import { CanvasVideoSettings } from "./CanvasVideoSettings";
+import { CanvasImageSettings, CanvasImageParameterOptions, canvasImageHasOptionButtons } from "./CanvasImageSettings";
 
 import type {
   AssetKind,
@@ -277,6 +279,7 @@ export function PromptMentionInput({
   onTextChange,
   placeholder,
   onSession,
+  autoLink = false,
 }: {
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
@@ -304,9 +307,11 @@ export function PromptMentionInput({
    * 回调把会话交给上层，瓦片才能调用 `insertReference`。
    */
   readonly onSession?: ((session: PromptContentEditorSession | null) => void) | undefined;
+  readonly autoLink?: boolean;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
   const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
+  useLayoutEffect(() => { promptSession.setPlaceholder(placeholder); }, [promptSession, placeholder]);
   const sessionRef = useRef(promptSession);
   useEffect(() => {
     onSession?.(promptSession);
@@ -694,7 +699,7 @@ export function PromptMentionInput({
       mode: "explicit" | "names" = "explicit",
       resolved?: ReturnType<PromptContentEditorSession["autoResolve"]>,
     ) => {
-      if (resolved == null && mode === "explicit" && (menuOpen || composingRef.current)) return;
+      if (resolved == null && (menuOpen || composingRef.current)) return;
       const input = inputRef.current;
       if (input == null) return;
       if (autoDetectTimerRef.current != null) {
@@ -795,9 +800,14 @@ export function PromptMentionInput({
     }
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
-      runAutoDetect();
+      runAutoDetect(autoLink ? "names" : "explicit");
     }, PROMPT_AUTO_DETECT_DEBOUNCE_MS);
-  }, [menuOpen, runAutoDetect]);
+  }, [autoLink, menuOpen, runAutoDetect]);
+
+  useEffect(() => () => {
+    if (autoDetectTimerRef.current != null) window.clearTimeout(autoDetectTimerRef.current);
+    autoDetectTimerRef.current = null;
+  }, [autoLink]);
 
   const chooseMention = useCallback(
     (candidate: MentionCandidate) => {
@@ -1545,6 +1555,7 @@ function providerOptionLabels(
 export function ImageNodeSettings({
   presentation = "full",
   active = true,
+  advancedHostId,
   config,
   providerCatalog,
   hasMediaInputs,
@@ -1552,12 +1563,13 @@ export function ImageNodeSettings({
 }: {
   readonly presentation?: "full" | "compact";
   readonly active?: boolean;
+  readonly advancedHostId?: string;
   readonly config: ImageNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
   readonly onChange: (config: ImageNodeConfig) => void;
 }) {
-  const operation: GenerationOperation = hasMediaInputs ? "image_to_image" : "text_to_image";
+  const operation: GenerationOperation = hasMediaInputs || (config.imageMode != null && config.imageMode !== "auto") ? "image_to_image" : "text_to_image";
   const availableProviders = providerCatalog.filter(
     (entry) => entry.provider.enabled && entry.models.some(isImageGenerationModel),
   );
@@ -1576,11 +1588,19 @@ export function ImageNodeSettings({
         selectedModel.remoteModelId,
       )
     : [];
-  const supportsBatchCount = parameterCapabilities.some(
+  const batchCountCapability = parameterCapabilities.find(
     (capability) => capability.key === "n" && capability.type === "integer",
   );
-  // Remote n is one request; only the local multi-request fanout has an application cap.
-  const countMaximum = supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT;
+  const supportsBatchCount = batchCountCapability != null;
+  /*
+   * Remote n is one request; the cap comes from the **contract's own maximum**
+   * (Qwen Image 3.0 Pro: 1–4, GPT-Image: 1–10). A contract that does not declare
+   * a maximum stays uncapped. The backend rejects an out-of-range `n` locally
+   * (no charge), but clamping here keeps the node's own count usable.
+   */
+  const countMaximum =
+    batchCountCapability?.maximum ??
+    (supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT);
   // `n` 由上方「生成数量」字段承载，避免与模型参数区重复渲染。
   // Seedream 组图数量 `max_images` 仅在组图模式为 auto 时展示。
   const sequentialMode = String(
@@ -1672,9 +1692,11 @@ export function ImageNodeSettings({
   );
   const parameterFields = (
     <>
-      <label className="canvas-gen-node__field canvas-gen-node__field--count">
+      <div className="canvas-gen-node__field canvas-gen-node__field--count">
         <span>生成数量</span>
+        {presentation === "compact" ? <span className="canvas-video-options" role="group" aria-label="图片数量">{[1, 2, 4].map(count => <button key={count} type="button" aria-pressed={config.generationCount === count} onClick={() => onChange({ ...config, generationCount: count })}>{count}张</button>)}</span> : null}
         <input
+          aria-label="图片生成数量"
           type="number"
           inputMode="numeric"
           min={1}
@@ -1687,9 +1709,11 @@ export function ImageNodeSettings({
             })
           }
         />
-      </label>
+      </div>
 
-      {modelParameterCapabilitiesWithoutCount.map((capability) => (
+      {modelParameterCapabilitiesWithoutCount.map((capability) => presentation === "compact" && canvasImageHasOptionButtons(capability) ? (
+        <CanvasImageParameterOptions key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => onChange({ ...config, parameterValues: { ...config.parameterValues, [capability.key]: value }, ...((capability.key === "resolution" || capability.key === "image_size") && ["1K", "2K", "4K"].includes(String(value).toUpperCase()) ? { upscaleResolution: String(value).toUpperCase() as "1K" | "2K" | "4K" } : {}) })} />
+      ) : (
         <GenerationParameterField
           key={capability.key}
           capability={capability}
@@ -1731,6 +1755,7 @@ export function ImageNodeSettings({
               onChange({
                 ...config,
                 panoramaEnabled: enabled,
+                ...(enabled ? { imagePreset: undefined } : {}),
                 parameterValues: enabled
                   ? {
                       ...config.parameterValues,
@@ -1745,23 +1770,19 @@ export function ImageNodeSettings({
       </div>
     </>
   );
-  if (presentation === "compact")
+  if (presentation === "compact" && advancedHostId)
     return (
-      <VideoNodeSettingsControls
-        kind="image"
+      <CanvasImageSettings
+        advancedHostId={advancedHostId}
+        triggerHostId={advancedHostId.replace("image-advanced-", "image-settings-")}
         active={active}
+        config={config}
+        capabilities={modelParameterCapabilitiesWithoutCount}
         modelLabel={selectedModel?.displayName ?? "选择图片模型"}
-        parameterLabel={[
-          ...modelParameterCapabilitiesWithoutCount.flatMap((capability) => {
-            const value = resolvedParameterValue(capability, config.parameterValues);
-            return value === "" || typeof value === "boolean" ? [] : [String(value)];
-          }),
-          `${config.generationCount} 张`,
-        ].join(" · ")}
-        modeLabel={config.panoramaEnabled ? "全景图" : hasMediaInputs ? "参考素材生成" : "文生图"}
         model={modelFields}
         parameters={parameterFields}
         advanced={advancedFields}
+        onChange={onChange}
       />
     );
   return (
@@ -1788,9 +1809,21 @@ function GenerationParameterField({
   readonly onChange: (value: ModelParameterValue) => void;
 }) {
   const disabled = locked;
+  /*
+   * 参数说明（`capability.description`）来自模型契约。
+   *
+   * 挂在**字段容器**上而不是控件上，有两个好处：
+   *   - 悬停标签文字（`<span>`）也能出说明，不必精确移到控件上；
+   *   - 焦点落在容器内的控件上时，说明层的 `findAnchor` 用 `closest()`
+   *     找到这个容器，而 `aria-describedby` 会挂到**真正聚焦的元素**
+   *     （事件 target）上——读屏因此能读到这条说明。
+   *
+   * 没有说明的参数不写这个属性：说明层会把它当成「这里没有说明」。
+   */
+  const description = capability.description;
   if (capability.type === "boolean" && capability.optional && allowAutomatic) {
     return (
-      <div className="canvas-gen-node__field canvas-gen-node__field--half">
+      <div className="canvas-gen-node__field canvas-gen-node__field--half" data-tooltip={description}>
         <span>{capability.label}</span>
         <CanvasSelect
           ariaLabel={capability.label}
@@ -1809,7 +1842,7 @@ function GenerationParameterField({
   if (capability.type === "boolean") {
     const checked = !disabled && value === true;
     return (
-      <label className="canvas-gen-node__field canvas-gen-node__field--half">
+      <label className="canvas-gen-node__field canvas-gen-node__field--half" data-tooltip={description}>
         <span>{capability.label}</span>
         <span className="canvas-gen-node__toggle-control">
           <input
@@ -1829,7 +1862,7 @@ function GenerationParameterField({
     const keepAutomatic = capability.optional && allowAutomatic;
     const currentIsListed = capability.options.some((option) => option.value === value);
     return (
-      <div className="canvas-gen-node__field canvas-gen-node__field--half">
+      <div className="canvas-gen-node__field canvas-gen-node__field--half" data-tooltip={description}>
         <span>{capability.label}</span>
         <CanvasSelect
           ariaLabel={capability.label}
@@ -1861,7 +1894,7 @@ function GenerationParameterField({
 
   const numeric = capability.type === "integer" || capability.type === "number";
   return (
-    <label className="canvas-gen-node__field canvas-gen-node__field--half">
+    <label className="canvas-gen-node__field canvas-gen-node__field--half" data-tooltip={description}>
       <span>{capability.label}</span>
       <input
         type={numeric ? "number" : "text"}
@@ -1904,9 +1937,11 @@ export function VideoNodeSettings({
   greenScreenBusy,
   presentation = "full",
   active = true,
+  advancedHostId,
 }: {
   readonly presentation?: "full" | "compact";
   readonly active?: boolean;
+  readonly advancedHostId?: string | undefined;
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
@@ -2192,18 +2227,17 @@ export function VideoNodeSettings({
                 value: option.value,
                 label: option.label,
               }))}
-              onChange={(mode) =>
-                onChange(
-                  selectSeedanceTask(
+              onChange={(mode) => {
+                const next = selectSeedanceTask(
                     selectedModel?.remoteModelId ?? "",
                     parameterCapabilities,
                     config,
                     mediaInputs ?? [],
                     mode as SeedanceTaskMode,
                     selectedModel?.operationSchema,
-                  ),
-                )
-              }
+                  );
+                onChange({ ...next, videoMode: mode as SeedanceTaskMode });
+              }}
             />
           </div>
           <div className="canvas-gen-node__media-roles" role="status" aria-live="polite">
@@ -2402,45 +2436,17 @@ export function VideoNodeSettings({
     </>
   );
 
-  const parameterLabel = [
-    ...taskState.parameterCapabilities
-      .filter(({ key }) =>
-        [
-          "duration",
-          "duration_seconds",
-          "seconds",
-          "ratio",
-          "aspect_ratio",
-          "resolution",
-          "quality",
-        ].includes(key),
-      )
-      .flatMap((capability) => {
-        const value = resolvedParameterValue(capability, taskState.parameterValues);
-        if (value === "") return [];
-        const label = capability.options.find((option) => option.value === value)?.label;
-        return [
-          label ??
-            (typeof value === "number" && /duration|seconds/u.test(capability.key)
-              ? value + " 秒"
-              : String(value)),
-        ];
-      }),
-    config.generationCount + " 段",
-  ].join(" · ");
   if (presentation === "compact")
     return (
-      <VideoNodeSettingsControls
+      <CanvasVideoSettings
+        config={config}
+        onChange={onChange}
         active={active}
+        advancedHostId={advancedHostId}
+        providerCatalog={providerCatalog}
         modelLabel={selectedModel?.displayName ?? "选择视频模型"}
-        parameterLabel={parameterLabel}
-        modeLabel={
-          taskState.enabled && taskState.mode !== "auto"
-            ? (currentTaskLabel ?? "视频生成")
-            : hasMediaInputs
-              ? "参考素材生成"
-              : "文生视频"
-        }
+        capabilities={taskState.parameterCapabilities}
+        inputs={mediaInputs ?? []}
         model={modelFields}
         parameters={parameterFields}
         advanced={advancedFields}

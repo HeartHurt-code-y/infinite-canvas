@@ -21,6 +21,9 @@ export interface CreateSelectOption {
    * 即梦的模型下拉每一项都是「名称 + 卖点」两行（实测：封面图 + 模式角标 +
    * 名称 + 一句能力描述）。这里保留同样的信息层级：名称决定「选哪个」，
    * 说明行决定「为什么选它」。
+   *
+   * 本项目里模型项已经不用这一行（平台被拆成独立下拉，见 `CreateModelSelect`），
+   * 现在是平台下拉在用：「海外平台 · 18 个模型」。
    */
   readonly description?: string;
   /**
@@ -64,6 +67,9 @@ export interface CreateSelectProps {
    * 即梦的下拉分两种：带标题的（创作类型 → 标题「创作类型」）与不带标题的
    * （模型、参数）。实测标题为 12/12、色 rgba(255,255,255,.35)、
    * 内边距 12px 12px 8px。
+   *
+   * 本项目的模型下拉是**例外**：模型拆成「平台 → 模型」两级后，两枚下拉
+   * 并排放在工具条上，不加标题分不清谁是谁，所以两枚都带标题。
    */
   readonly title?: string;
   /** 选中项右侧打勾。实测即梦的创作类型下拉有，模型下拉没有。 */
@@ -78,6 +84,10 @@ export interface CreateSelectProps {
    *   `.trigger-wc2vGe.lv-trigger .lv-select-popup .lv-select-option{ border-radius:12px }`
    * 且模型下拉的触发器宽 440px → 浮层也是 440。
    * 创作类型下拉保持 200 / 圆角 12。
+   *
+   * 宽度仍由调用方给 `popoverWidth`：即梦那 440 是「一屏塞下所有模型」的宽度，
+   * 本项目的模型下拉只列当前平台下的模型（见 `CreateModelSelect`），320 就够，
+   * 浮层不用空着一大片。
    */
   readonly wide?: boolean;
   /**

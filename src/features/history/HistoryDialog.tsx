@@ -920,8 +920,20 @@ export function HistoryDialog({
   const sourceDraftTaskId = detail ? seedanceDraftSourceTaskId(detail) : null;
   const isDraft = detail ? isSeedanceDraftTask(detail) : false;
   const frozenCommand = useMemo(() => (detail ? frozenStartCommand(detail) : null), [detail]);
+  /*
+   * 长视频的片段任务不能从这里「重新生成」。
+   *
+   * 片段的 source_node_id 是 `long-video:<任务>:<镜头>`，画布上没有对应节点：
+   * 重新生成会创建一个全新任务，却不会挂到任何节点上（没有占位卡片），
+   * 编排器也不会认领它（不在镜头的 attempts 里）——用户付了钱，成片却不会包含它。
+   * 要重做某一段，去长视频的创作过程里点「重试失败片段」。
+   */
+  const isLongVideoSegment = detail?.summary.sourceNodeId?.startsWith("long-video:") === true;
   const canRegenerate =
-    detail != null && sourceDraftTaskId == null && isRegenerableOperation(summary?.operation ?? "");
+    detail != null &&
+    sourceDraftTaskId == null &&
+    !isLongVideoSegment &&
+    isRegenerableOperation(summary?.operation ?? "");
   const promptSegments = useMemo(() => (detail ? promptSegmentsFromDetail(detail) : []), [detail]);
   const resultErrorsExist = detail?.results.some((result) => result.error != null) === true;
   const attempts = useMemo(

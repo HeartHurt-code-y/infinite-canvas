@@ -89,6 +89,21 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
           position={Position.Left}
           className={`canvas-flow-handle canvas-flow-handle--target${data.highlightTarget ? " canvas-flow-handle--highlight" : ""}`}
           aria-label="节点输入端口"
+          /*
+           * 手柄进入 Tab 序列（仅节点被选中时），这样「引用该节点生成」不只有鼠标
+           * 一条路：焦点落在手柄上按 Enter / Space 即弹出同一张「添加节点」菜单。
+           * 每个节点都有两个手柄，全量可聚焦会让大画布上的 Tab 变得很长，所以
+           * 只有选中节点的两个手柄参与 Tab 序列。
+           *
+           * 手柄现在**有动作**了（打开菜单），所以要按可交互控件报读：
+           * role=button 让读屏说「按钮」，aria-haspopup=menu 说明它会弹出菜单，
+           * aria-keyshortcuts 给出按键。缺了 role 的话，读屏只会报一个无名的分组，
+           * 键盘用户根本不知道这里能按。
+           */
+          role="button"
+          aria-haspopup="menu"
+          aria-keyshortcuts="Enter Space"
+          tabIndex={selected ? 0 : -1}
         >
           <CanvasHandleKnob />
         </Handle>
@@ -100,6 +115,10 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
           position={Position.Right}
           className="canvas-flow-handle canvas-flow-handle--source"
           aria-label={data.sourceHandleLabel ?? "节点输出端口"}
+          role="button"
+          aria-haspopup="menu"
+          aria-keyshortcuts="Enter Space"
+          tabIndex={selected ? 0 : -1}
         >
           <CanvasHandleKnob />
         </Handle>

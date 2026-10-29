@@ -12,7 +12,7 @@ fn main() {
             let new_val = if existing.is_empty() {
                 "--disable-features=TrackingPrevention".to_string()
             } else {
-                format!("{} --disable-features=TrackingPrevention", existing)
+                format!("{existing} --disable-features=TrackingPrevention")
             };
             // SAFETY: 程序入口处设置环境变量，此时尚无其他线程运行，无数据竞争
             unsafe {

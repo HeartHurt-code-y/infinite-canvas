@@ -36,7 +36,6 @@ export const VideoClipNode = memo(function VideoClipNode({
   onSubmit,
   onTryMode,
   onOpenEditor,
-  onOpenReferencePicker,
   onUnlink,
 }: {
   readonly node: VideoClipNodeData;
@@ -67,7 +66,6 @@ export const VideoClipNode = memo(function VideoClipNode({
   readonly onSubmit: (nodeKey: string) => void;
   readonly onTryMode: (nodeKey: string, modeKey: string) => void;
   readonly onOpenEditor: (nodeKey: string) => void;
-  readonly onOpenReferencePicker: (nodeKey: string) => void;
   readonly onUnlink: (edgeId: string) => void;
 }) {
   if (presentation === "card") {
@@ -76,6 +74,7 @@ export const VideoClipNode = memo(function VideoClipNode({
         node={node}
         inputs={inputs}
         selected={selected}
+        busy={busy}
         dragging={dragging}
         onSelect={onSelect}
         onNodeDragStart={onNodeDragStart}
@@ -110,7 +109,6 @@ export const VideoClipNode = memo(function VideoClipNode({
         onModeChange={(modeKey) => onModeChange(node.key, modeKey)}
         onParamsChange={(params) => onParamsChange(node.key, params)}
         onSubmit={() => onSubmit(node.key)}
-        onOpenReferencePicker={() => onOpenReferencePicker(node.key)}
         onUnlink={onUnlink}
       />
     </CanvasNodeEditorShell>

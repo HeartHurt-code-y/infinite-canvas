@@ -1,0 +1,52 @@
+.canvas-camera-panel {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 10);
+  box-sizing: border-box;
+  overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--nt-text-default);
+  background: var(--panel-background);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--canvas-camera-panel-shadow);
+}
+.canvas-camera-panel > header { position: sticky; top: 0; z-index: 2; display: flex; height: var(--canvas-camera-header-height); align-items: center; justify-content: space-between; padding: 0 var(--space-md); font-size: var(--text-sm); font-weight: 500; background: var(--panel-background); border-bottom: var(--rule-thin) solid var(--canvas-controls-border); }
+.canvas-camera-panel > header button { display: grid; width: 24px; height: 24px; place-items: center; padding: 0; color: var(--nt-text-muted); background: transparent; border: 0; border-radius: var(--radius-sm); }
+.canvas-camera-panel > header button:hover { color: var(--nt-text-default); background: var(--canvas-chip-hover); }
+.canvas-camera-panel__columns { display: flex; align-items: flex-start; justify-content: center; gap: var(--space-2xs); padding: 20px 24px; }
+.canvas-camera-panel__separator { display: flex; width: 16px; height: 56px; flex: 0 0 auto; align-self: center; justify-content: center; }
+.canvas-camera-panel__separator::before { width: var(--rule-thin); height: 100%; content: ""; background: var(--canvas-controls-border); }
+.canvas-camera-column { display: flex; width: var(--canvas-camera-column-width); min-width: 0; flex: 0 0 auto; flex-direction: column; align-items: center; }
+.canvas-camera-column__step { display: grid; width: 20px; height: 20px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--nt-text-muted); background: transparent; border: 0; }
+.canvas-camera-column__step.is-up svg { transform: rotate(180deg); }
+.canvas-camera-column__step:hover { color: var(--nt-text-default); }
+.canvas-camera-column__step[aria-disabled="true"] { cursor: not-allowed; opacity: .4; }
+.canvas-camera-column__window { position: relative; width: 100%; height: var(--canvas-camera-wheel-height); outline: none; }
+.canvas-camera-column__selection { position: absolute; z-index: 1; top: var(--canvas-camera-wheel-inset); right: 16px; left: 16px; height: var(--canvas-camera-item-height); pointer-events: none; text-align: center; background: radial-gradient(ellipse at center, rgb(255 255 255 / .05), rgb(255 255 255 / .02)); border: var(--rule-thin) solid var(--canvas-camera-item-border); border-radius: var(--radius-ll-float); }
+.canvas-camera-column__selection > span { display: block; margin-top: var(--space-xs); color: var(--nt-text-muted); font-size: 11px; line-height: 16px; }
+.canvas-camera-column__window:focus-visible .canvas-camera-column__selection { border-color: var(--nt-text-secondary); outline: 2px solid var(--nt-text-brand); outline-offset: 2px; }
+.canvas-camera-column__clip { position: absolute; inset: 0; overflow: hidden; }
+.canvas-camera-column__track { display: flex; flex-direction: column; align-items: center; transition: transform 300ms cubic-bezier(0, 0, .2, 1); }
+.canvas-camera-column__item { display: flex; width: 100%; height: var(--canvas-camera-item-height); min-height: var(--canvas-camera-item-height); flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; padding: 16px 0 0; background: transparent; border: 0; }
+.canvas-camera-column__item.has-image { justify-content: flex-end; padding: 0 0 16px; }
+.canvas-camera-column__item > img { width: 40px; height: 40px; object-fit: cover; border-radius: var(--radius-xs); opacity: .5; transition: width 200ms, height 200ms, opacity 200ms; }
+.canvas-camera-column__item.is-selected > img { width: 48px; height: 48px; opacity: 1; }
+.canvas-camera-column__item > span { max-width: 88px; overflow: hidden; color: var(--nt-text-default); font-size: 20px; font-weight: 600; line-height: 1; text-overflow: ellipsis; white-space: nowrap; opacity: .5; transition: font-size 200ms, opacity 200ms; }
+.canvas-camera-column__item.is-selected > span { font-size: 24px; opacity: 1; }
+.canvas-camera-column__caption { width: 100%; margin-top: var(--space-xs); overflow: hidden; color: var(--nt-text-muted); font-size: 11px; line-height: 16px; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-camera-panel > footer { position: sticky; bottom: 0; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-xs); padding: 0 var(--space-md) var(--space-md); color: var(--nt-text-muted); font-size: 13px; line-height: 20px; background: var(--panel-background); }
+.canvas-camera-panel .canvas-camera-panel__switch { width: var(--canvas-video-switch-width); min-height: var(--canvas-video-switch-height); }
+.canvas-camera-trigger[disabled] { opacity: .5; }
+.canvas-image-toolbar-actions > .canvas-camera-trigger[data-selected] { color: var(--nt-text-default); background: var(--canvas-controls-active); }
+.canvas-camera-badge { display: inline-flex; max-width: 100%; align-items: center; gap: var(--space-2xs); margin: 0 var(--space-2xs) var(--space-2xs) 0; padding: var(--space-2xs); color: var(--nt-text-default); background: var(--canvas-chip-bg); border-radius: var(--radius-sm); }
+.canvas-camera-badge > button { display: inline-flex; min-height: 20px; align-items: center; justify-content: center; gap: var(--space-2xs); padding: 0; color: inherit; font-size: var(--text-sm); background: transparent; border: 0; border-radius: var(--radius-xs); }
+.canvas-camera-badge > button:hover { background: var(--canvas-chip-hover); }
+.canvas-camera-panel__error { margin: var(--space-xs); }
+@media (max-width: 650px) {
+  .canvas-camera-panel__columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-sm); padding: var(--space-sm); }
+  .canvas-camera-panel__separator { display: none; }
+  .canvas-camera-column { width: min(100%, var(--canvas-camera-column-width)); justify-self: center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-camera-column__track, .canvas-camera-column__item > img, .canvas-camera-column__item > span { transition: none; }
+}

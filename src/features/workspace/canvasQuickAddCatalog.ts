@@ -1,16 +1,31 @@
 import type { IconName } from "../../components/Icon";
+import {
+  SCREENPLAY_NODE_COARSE_HEIGHT,
+  SCREENPLAY_NODE_HEIGHT,
+  SCREENPLAY_NODE_WIDTH,
+  VIDEO_CLIP_NODE_HEIGHT,
+  VIDEO_CLIP_NODE_WIDTH,
+  genNodeDimensions,
+  usesCoarsePointer,
+} from "./workspaceModel";
 
 /**
  * 画布「添加节点」菜单的条目。
  *
- * 清单与原站 liblib.tv 画布逐项对齐（实测：点击节点左侧手柄弹出的
+ * 清单与原站 liblib.tv 画布逐项对齐（实测：点击节点手柄弹出的
  * 「引用该节点生成」菜单，见 docs/integrations/liblib-canvas-re.md 第 3.3 节）：
  *
  *   文本 · 图片 · 视频 · 智能剪辑(Beta) · 导演台(NEW) · 逐帧拉片 · 音频 · 剧本 · 参考节点
  *
+ * 本项目的端口方向与原站相反：原站从**左侧**手柄「引用该节点生成」，这里输出端口在右、
+ * 输入端口在左，于是同一个菜单有两种方向——点右侧（输出）= 引用该节点生成（新节点在左），
+ * 点左侧（输入）= 接入该节点（新节点在右）。菜单副标题会写明当前是哪一种。
+ *
  * 原站没有的节点类型（网络爆款视频下载 / 视频抽帧 / 爆款视频复刻）已删除；
- * 原站有而本项目后端尚未提供的（导演台 / 逐帧拉片 / 音频 / 参考节点）
+ * 原站有而本项目后端尚未提供的（导演台 / 逐帧拉片 / 参考节点）
  * 保留条目与文案，点击给出「后端暂未接入」的明确说明，不静默失败。
+ * 音频节点已接入（走 `speech_generation` 任务），规格见
+ * `docs/integrations/liblib-audio-node-re.md`。
  */
 export type CanvasQuickAddKind =
   | "text"
@@ -51,10 +66,44 @@ export const CANVAS_QUICK_ADD_CHOICES: readonly CanvasQuickAddChoice[] = [
     badge: "SD 2.5",
     available: false,
   },
-  { kind: "audio", label: "音频", icon: "music-notes", available: false },
+  { kind: "audio", label: "音频", icon: "music-notes" },
   { kind: "screenplay", label: "剧本", icon: "book-open-text" },
   { kind: "reference", label: "参考节点", icon: "clipboard", available: false },
 ];
+
+/**
+ * 某一类新建节点的尺寸。
+ *
+ * 「引用该节点生成」从**手柄点按**进入时，落点不是松手处，而是被引用节点的**另一侧**——
+ * 那时需要先知道新节点有多宽，才能把它整整齐齐摆在端口对面（不压住原节点）。
+ * 这里的尺寸必须与真正建节点时用的那一份一致（`createGenNode` / 剧本 / 智能剪辑）。
+ */
+export function quickAddNodeDimensions(kind: CanvasQuickAddKind): {
+  readonly width: number;
+  readonly height: number;
+} {
+  switch (kind) {
+    case "text":
+      return genNodeDimensions("prompt");
+    case "image":
+      return genNodeDimensions("image");
+    case "video":
+      return genNodeDimensions("video");
+    case "audio":
+      return genNodeDimensions("audio");
+    case "screenplay":
+      return {
+        width: SCREENPLAY_NODE_WIDTH,
+        height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
+      };
+    case "video_clip":
+      return { width: VIDEO_CLIP_NODE_WIDTH, height: VIDEO_CLIP_NODE_HEIGHT };
+    default:
+      // 未接入的条目（导演台 / 逐帧拉片 / 参考节点）不会走到建节点这一步：
+      // 菜单在选中它们时就给出了「后端暂未接入」的说明。
+      return { width: 0, height: 0 };
+  }
+}
 
 /**
  * 空画布状态下的快捷创建入口（对齐原站 liblib）。

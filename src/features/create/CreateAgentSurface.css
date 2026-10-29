@@ -20,6 +20,7 @@
 }
 
 .create-agent-dock__surface {
+  position: relative;
   pointer-events: auto;
   display: flex;
   flex-direction: column;
@@ -37,6 +38,34 @@
   background: linear-gradient(180deg, rgb(26 26 26 / 0.72) 0, rgb(42 42 42 / 0.72) 106.67%);
   backdrop-filter: blur(80px);
   box-shadow: var(--shadow-create-input-hover);
+}
+
+/*
+ * 素材从资产库抽屉拖进来时的落点状态（与普通档浮坞同一套口径）。
+ */
+.create-agent-dock__surface.is-drop-target {
+  border-color: var(--color-create-brand);
+}
+
+.create-agent-dock__surface.is-drop-target .create-agent-dock__references {
+  border-radius: var(--radius-xs);
+  outline: 1px dashed var(--color-create-brand);
+  outline-offset: 2px;
+}
+
+.create-agent-dock__drop-hint {
+  position: absolute;
+  top: -1.75rem;
+  left: var(--space-md);
+  z-index: 1;
+  padding: 0 8px;
+  border-radius: var(--radius-create-pill);
+  background: var(--color-create-brand);
+  color: var(--color-create-canvas);
+  font-size: var(--text-2xs);
+  line-height: 1.25rem;
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .create-agent-dock__content {
@@ -169,6 +198,17 @@
   outline: none;
   white-space: pre-wrap;
   overflow-wrap: break-word;
+}
+
+/*
+ * 聚焦时不画焦点框（即梦实测：提示词框聚焦后仍是无边框的）。
+ *
+ * 原因与 `CreateSurface.css` 里的同名规则一致：`src/styles/studio-shell.css`
+ * 的全局 `textarea:focus-visible` 优先级相同且后加载，会盖掉上面的 `outline: none`，
+ * 点进输入框就冒出一圈近白色外框。这里用更高优先级显式关掉。
+ */
+.create-agent-dock__prompt textarea:focus-visible {
+  outline: none;
 }
 
 .create-agent-dock__placeholder {
@@ -969,9 +1009,35 @@
   gap: var(--space-xs);
 }
 
-.create-agent-preferences__model {
-  justify-content: space-between;
+/*
+ * 「平台 → 模型」两级：平台名短，给固定宽；模型名长，吃剩余空间。
+ *
+ * 选择器写成复合式（`.create-agent-preferences__models .create-model-select`），
+ * 而不是靠样式表的先后顺序压过 `.create-model-select` 自己那份
+ * display/gap —— 两份 CSS 的导入顺序一换，布局就悄悄变了。
+ *
+ * 两枚下拉各自保留偏好面板那套「36 高、底 rgba(255,255,255,.08)」的外观
+ * （与面板里其它控件同一档），只是并排放。
+ */
+.create-agent-preferences__models .create-model-select {
+  display: flex;
   width: 100%;
+  gap: var(--space-xs);
+}
+
+.create-agent-preferences__platform {
+  /* 平台名短：按内容宽，下限 7rem（名字太短时按钮不至于太窄）。 */
+  flex: 0 0 auto;
+  min-width: 7rem;
+  justify-content: space-between;
+  min-height: 2.25rem;
+  background: var(--color-create-block);
+}
+
+.create-agent-preferences__model {
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: space-between;
   min-height: 2.25rem;
   background: var(--color-create-block);
 }
@@ -998,6 +1064,20 @@
   gap: var(--space-xs);
   min-width: 0;
   flex: 1 1 auto;
+  /*
+   * max-width: 100%：宽度不许超过选项内容宽。
+   *
+   * 这一行是「名称 + 说明」的横排（平台下拉：平台名 + 「N 个模型」）。
+   * 它的宽度默认按 fit-content 算，而 flex 行的**固有最小宽度**是各子项
+   * 固有最小宽度之和——子项写了 `white-space: nowrap`，名称一长，固有最小
+   * 宽度就等于整行文字的宽度，`min-width: 0` 只解除了「收缩下限」、
+   * 没解除这个固有最小宽度。结果是长名称把整行顶宽、浮层冒出一条
+   * 横向滚动条（实测「饭众烟 AI（异步出图）」那一项就顶出了 21px）。
+   *
+   * 压到 100% 之后由 overflow + ellipsis 收尾：名称过长就省略，
+   * 浮层不再横向溢出。
+   */
+  max-width: 100%;
 }
 
 /*

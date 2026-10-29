@@ -1,5 +1,5 @@
 import { CanvasContentNode, type NodeEditingProps } from "./CanvasContentNode";
-import { usePromptSummary } from "./useNodePromptSummary";
+import { usePromptAttachmentCount, usePromptSummary } from "./useNodePromptSummary";
 import { Icon } from "../../components/Icon";
 import { AppUpdateBanner } from "./AppUpdateBanner";
 import { CanvasBottomDock, CanvasChromeControls } from "./CanvasChromeControls";
@@ -13,6 +13,11 @@ import { CanvasShortcutsDialog } from "./CanvasShortcutsDialog";
 import { CanvasContextMenu, type CanvasContextMenuItem } from "./CanvasContextMenu";
 import { openCreateStudio } from "../create/openCreateStudio";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { longVideoClient, resolveLongVideoSettings, resolveLongVideoSegmentSeconds, LONG_VIDEO_RESULTS_REQUEST_EVENT, type LongVideoJob } from "../../lib/longVideo";
+import { useLongVideoJobs } from "./useLongVideoJobs";
+import { VideoClipTimeline } from "./VideoClipTimeline";
+import { clipRenderClient, clipJobActive, type ClipEdit, type ClipRenderJob, type StartClipRender } from "../../lib/videoClipEditing";
+import { canvasImageClient } from "../../lib/canvasImage";
 import {
   Background,
   BackgroundVariant,
@@ -63,9 +68,11 @@ import {
   inferMediaKindFromName,
   isDesktopRuntime,
   loadProviderCatalog,
+  pickLocalImageFile,
   pickLocalMediaFiles,
   pickPromptMultimodalFiles,
   promptNodeClient,
+  translateCanvasTextClient,
   subscribeGenerationEvents,
   subscribeStagingEvents,
   toMediaSrc,
@@ -113,10 +120,19 @@ import {
 } from "../../lib/videoPreparation";
 import {
   assetLibraryProviders,
+  providerSupportsAssetLibrary,
   isDeletableCloudAssetGroupId,
   resolveActiveAssetLibraryProvider,
 } from "../../lib/assetLibrarySupport";
-import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
+import {
+  generationParameters,
+  modelParameterCapabilities,
+  type ModelParameterCapability,
+  type ModelParameterOption,
+  type ModelParameterValue,
+} from "../../lib/modelCapabilities";
+import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
+import { verifyGenerationMaterials } from "../../lib/generationMaterialVerification";
 import { perTaskVideoUrlConnection, perTaskVideoUrlIssue } from "../../lib/perTaskVideo";
 import type {
   PromptContentConnection,
@@ -169,6 +185,7 @@ import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
 import {
   CANVAS_QUICK_ADD_CHOICES,
   EMPTY_CANVAS_SHORTCUTS,
+  quickAddNodeDimensions,
   type CanvasQuickAddKind,
 } from "./canvasQuickAddCatalog";
 import { AssetPanel } from "./AssetPanelViews";
@@ -181,8 +198,41 @@ import {
   RealPersonAssetDialog,
 } from "./deferredDialogs";
 import { preloadHistoryDialog, preloadProviderSettingsDialog } from "./deferredDialogLoaders";
-import { saveMarkdownDocumentToDesktop } from "./desktopActions";
+import { copyTextToDesktopClipboard, saveMarkdownDocumentToDesktop } from "./desktopActions";
 import { CanvasDocumentSkillNode, CanvasPromptNode } from "./DocumentNodeViews";
+import {
+  IMAGE_TO_PROMPT_NODE_PROMPT,
+  TEXT_TO_MUSIC_NODE_PROMPT,
+  randomTextToVideoPrompt,
+  type CanvasTextTryActionKey,
+} from "./canvasTextTryActionCatalog";
+import {
+  CANVAS_TEXT_GENERATOR_PLACEHOLDER,
+  CanvasTextGeneratorPanel,
+  type CanvasTextGeneratorModelOption,
+} from "./CanvasTextGeneratorPanel";
+import { CanvasTextTryActions } from "./CanvasTextTryActions";
+import {
+  CanvasScriptEditor,
+  CanvasScriptTryActions,
+  ScriptReferenceToolbar,
+  scriptModelOptions,
+} from "./CanvasScriptGenerator";
+import {
+  emptyScriptGenerator,
+  emptyScriptShot,
+  matchingScriptAssets,
+  parseScriptComposition,
+  parseScriptGeneration,
+  replaceScriptTable,
+  scriptDocument,
+  scriptSourceSignature,
+  type ScriptBatchFrame,
+  type ScriptBatchItem,
+  type ScriptBatchRun,
+  type ScriptBatchStartRequest,
+  type ScriptGeneratorState,
+} from "./scriptGeneratorModel";
 import {
   CanvasAssetLightbox,
   CanvasAssetNode,
@@ -191,6 +241,7 @@ import {
   CanvasOutputNode,
   CanvasResultNode,
 } from "./MediaNodeViews";
+import { CanvasAudioNode } from "./CanvasAudioNode";
 import { VideoClipNode } from "./VideoClipNode";
 import { AssetGroupFrame, CanvasMarqueeSelectionReader } from "./AssetGroupFrame";
 import { classifyExternalMediaPaths, nativeDropClientPoint } from "./canvasExternalMediaDrop";
@@ -243,6 +294,7 @@ import type {
   CanvasGenNodeKind,
   CanvasNodeDimensions,
   CanvasNodeRect,
+  AudioNodeConfig,
   ConnectedAssetInput,
   ConnectedScreenplayInput,
   GenNodeData,
@@ -298,14 +350,17 @@ import {
   assetNodeReferenceTarget,
   assetNodeKey,
   abandonedUploadError,
+  AUDIO_GEN_NODE_WIDTH,
   cloudAssetAwaitingId,
   cloudAssetToItem,
+  createAudioNodeConfig,
   createImageNodeConfig,
   createPromptNodeConfig,
   createScreenplayNodeConfig,
   createVideoNodeConfig,
   documentSkillRoleLabel,
   fileNameFromPath,
+  firstTextModelSelection,
   formatTaskRawResponse,
   genNodeDimensions,
   genNodeKey,
@@ -334,6 +389,7 @@ import {
   nearestAvailableNodePosition,
   nextOutputSlot,
   nextPreparedMediaOutputSlot,
+  NEW_NODE_GAP,
   normalizeLocalPathKey,
   outputNodeDimensions,
   outputNodeKey,
@@ -712,7 +768,9 @@ function latestGenerationPreviewFor(state: CanvasReadModel, key: string): Output
     const previews = new Map<string, OutputNodeData>();
     for (const output of state.nodes.output) {
       if (
-        (output.mediaType === "image" || output.mediaType === "video") &&
+        (output.mediaType === "image" ||
+          output.mediaType === "video" ||
+          output.mediaType === "audio") &&
         (output.finalPath != null || output.previewSrc != null)
       )
         previews.set(output.sourceNodeId, output);
@@ -757,15 +815,15 @@ function promptSourceTextsToken(texts: readonly { edgeId: string }[]): string {
 function promptTargetsFor(
   state: CanvasReadModel,
   key: string,
-): { key: string; name: string; kind: "image" | "video"; edgeId: string }[] {
-  const targets: { key: string; name: string; kind: "image" | "video"; edgeId: string }[] = [];
+): { key: string; name: string; kind: "image" | "video" | "audio"; edgeId: string }[] {
+  const targets: { key: string; name: string; kind: "image" | "video" | "audio"; edgeId: string }[] = [];
   for (const edge of state.graph.edges) {
     if (edge.fromKey !== key) continue;
     const target = state.nodeByKey.gen.get(edge.toKey);
     if (target == null || target.kind === "prompt") continue;
     targets.push({
       key: target.key,
-      name: `${target.kind === "image" ? "图片" : "视频"}生成 ${target.key.slice(-6)}`,
+      name: `${target.kind === "image" ? "图片" : target.kind === "audio" ? "音频" : "视频"}生成 ${target.key.slice(-6)}`,
       kind: target.kind,
       edgeId: edge.id,
     });
@@ -897,21 +955,110 @@ type DocumentNodeCardSlotProps = Omit<
   ComponentProps<typeof CanvasDocumentSkillNode>,
   "node" | "selected" | "dragging" | "sourceInputs" | "connectedMedia"
 > &
-  NodeEditingProps & { readonly nodeKey: string; readonly selected: boolean };
+  NodeEditingProps & {
+    readonly nodeKey: string;
+    readonly canvasId: string;
+    readonly selected: boolean;
+    readonly onScriptUpdate: (key: string, update: (config: ScreenplayNodeConfig) => ScreenplayNodeConfig) => void;
+    readonly onScriptStory: (key: string) => void;
+    readonly onScriptTranslate: (key: string) => void;
+    readonly scriptTranslating: boolean;
+    readonly scriptEditorOpen: boolean;
+    readonly onScriptCreateMedia: (key: string, shotId: string, kind: "image" | "video") => void;
+    readonly onScriptCreateAsset: (key: string, assetId: string) => void;
+    readonly onScriptSmartCompose: (key: string, shotIds: readonly string[]) => void;
+    readonly onScriptBatchStart: (key: string, request: ScriptBatchStartRequest) => void;
+    readonly onScriptBatchResume: (key: string, batchId: string) => void;
+    readonly scriptBatchRunning: boolean;
+  };
 function CanvasDocumentNodeCardSlot(props: DocumentNodeCardSlotProps) {
   const {
     nodeKey,
+    canvasId,
     selected,
     presentation = "card",
     editorOpen,
     onEdit,
     onCloseEditor,
+    onScriptUpdate,
+    onScriptStory,
+    onScriptTranslate,
+    scriptTranslating,
+    scriptEditorOpen,
+    onScriptCreateMedia,
+    onScriptCreateAsset,
+    onScriptSmartCompose,
+    onScriptBatchStart,
+    onScriptBatchResume,
+    scriptBatchRunning,
     ...card
   } = props;
   const entry = useCanvasNodeEntry(nodeKey);
   const sourceInputs = useCanvasNodeDerived(nodeKey, documentInputsFor, documentInputsToken);
   const connectedMedia = useCanvas((state) => sharedCanvasInputResolver(state)(nodeKey).media);
   if (entry == null || entry.type !== "screenplay") return null;
+  const script = entry.data.config.scriptGenerator;
+  if (script) {
+    const node = entry.data;
+    const options = scriptModelOptions(card.providerCatalog);
+    const modelValue = `${node.config.modelSelection.providerId}::${node.config.modelSelection.modelDefinitionId}`;
+    const modelOptions = options.some((option) => option.value === modelValue) ? options : [
+      { value: modelValue, label: node.config.modelSelection.modelDefinitionId || "请选择文本模型" },
+      ...options,
+    ];
+    const onUpdate = (update: (config: ScreenplayNodeConfig) => ScreenplayNodeConfig) =>
+      onScriptUpdate(nodeKey, update);
+    const onPick = card.onPickMaterials ?? (async () => {});
+    const onRemoveMaterial = card.onRemoveMaterial ?? (() => {});
+    const toolbar = <ScriptReferenceToolbar node={node} running={card.running} onPick={onPick} onRemove={onRemoveMaterial} />;
+    return <>
+      <CanvasContentNode node={node} kindLabel="脚本生成器" icon="book-open-text" selected={selected}
+        presentation={presentation} editorOpen={editorOpen && scriptEditorOpen} expandEditorOnOpen
+        onEdit={onEdit} onCloseEditor={onCloseEditor}
+        onSelect={card.onSelect} onRemove={card.onRemove} onSizeChange={card.onSizeChange}
+        summary={card.running ? "正在处理分镜，请稍候…" : node.config.currentDocument || node.config.composer}
+        metadata={`${script.shots.length} 个镜头 · ${connectedMedia.length + (node.config.materials?.length ?? 0)} 项参考`}
+        status={card.running ? "正在生成" : card.error ? "需要处理" : script.shots.length ? "分镜已就绪" : "等待创作"}
+        busy={card.running} error={card.error}
+        cardBody={presentation === "card" && !script.shots.length && !card.running ? <CanvasScriptTryActions
+          onStory={() => onScriptStory(nodeKey)}
+          onCharacter={() => { card.onSelect(nodeKey); void onPick(nodeKey); }}
+          onManual={() => {
+            onUpdate((current) => {
+              if (!current.scriptGenerator || current.scriptGenerator.shots.length) return current;
+              const next = { ...current.scriptGenerator, step: "confirm-shots" as const, shots: [emptyScriptShot()] };
+              return { ...current, scriptGenerator: next, currentDocument: scriptDocument(next) };
+            });
+            card.onSelect(nodeKey);
+            onEdit(nodeKey);
+          }} /> : undefined}
+        floatingPanel={presentation === "card" && selected ? <CanvasTextGeneratorPanel
+          className="nodrag nowheel nopan" value={node.config.composer}
+          onValueChange={(value) => onUpdate((current) => ({ ...current, composer: value }))}
+          modelOptions={modelOptions} canChooseModel={options.length > 0} modelValue={modelValue}
+          onModelChange={(value) => {
+            const separator = value.indexOf("::");
+            if (separator <= 0) return;
+            onUpdate((current) => ({ ...current, modelSelection: {
+              providerId: value.slice(0, separator), modelDefinitionId: value.slice(separator + 2),
+            } }));
+          }}
+          onTranslate={() => onScriptTranslate(nodeKey)} translating={scriptTranslating}
+          onSubmit={() => card.onSend(nodeKey)} submitting={card.running} disabled={card.running}
+          allowEmpty={sourceInputs.some((input) => input.document.trim()) || connectedMedia.length > 0 || (node.config.materials?.length ?? 0) > 0}
+          submitLabel="生成分镜脚本" modelLabel="脚本生成模型" toolbar={toolbar}
+          placeholder="描述剧情片段、故事，或添加角色参考，为你生成分镜脚本" /> : undefined}>
+        <CanvasScriptEditor canvasId={canvasId} node={node} active={editorOpen && scriptEditorOpen}
+          running={card.running} batchRunning={scriptBatchRunning}
+          error={card.error} providerCatalog={card.providerCatalog}
+          sourceInputs={sourceInputs} connectedMedia={connectedMedia} onUpdate={onUpdate} onRun={card.onSend}
+          onPick={onPick} onRemoveMaterial={onRemoveMaterial} onUnlink={card.onUnlink}
+          onExport={card.onExport} onCreateMedia={onScriptCreateMedia} onCreateAsset={onScriptCreateAsset} onSmartCompose={onScriptSmartCompose}
+          onStartBatch={onScriptBatchStart} onResumeBatch={onScriptBatchResume} />
+      </CanvasContentNode>
+      {presentation === "card" ? <CanvasNodeInputBadge nodeKey={nodeKey} /> : null}
+    </>;
+  }
   const kindLabel = "剧本创作与优化";
   return (
     <>
@@ -1011,6 +1158,7 @@ function RetainedNodeEditor({
   return open || visited ? children : null;
 }
 type GenNodeCardSlotProps = {
+  readonly canvasId: string;
   readonly presentation?: "card" | "editor";
   readonly editorOpen: boolean;
   readonly onRename: (key: string, name: string) => void;
@@ -1039,9 +1187,35 @@ type GenNodeCardSlotProps = {
     nodeKey: string,
     config: Param0<PromptNodeCardProps["onChange"]>,
   ) => void;
-  readonly onRunPrompt: (nodeKey: string) => void;
+  /**
+   * 面板写入：只改一个字段，其余字段按**当前**值保留。
+   *
+   * 为什么不能拿渲染时的配置快照回写：模型生成完成与用户打字可能撞在一起，
+   * 面板与节点内的输入框是并存的第二个入口，拿旧快照回写会把刚生成的正文覆盖掉。
+   */
+  readonly onPromptFieldChange: (
+    nodeKey: string,
+    patch: Partial<PromptNodeConfig>,
+  ) => void;
+  readonly onRunPrompt: (nodeKey: string, generalText?: boolean) => void;
+  /** 「尝试：」四个入口；节点 key 由卡片自己带上。 */
+  readonly onTextTryAction: (nodeKey: string, action: CanvasTextTryActionKey) => void;
+  /** 悬浮生成器面板的「翻译提示词」。 */
+  readonly onTranslateCanvasText: (nodeKey: string) => void;
+  /** 本节点是否正在做提示词翻译（面板的翻译键显示忙碌态）。 */
+  readonly translating: boolean;
+  /** 打开后把光标放进正文编辑器（画布上的「自己编写内容」用）。 */
+  readonly autoFocusOutput: boolean;
+  readonly onPromptFocusRequest: (nodeKey: string) => void;
+  readonly onPromptFocusHandled: (nodeKey: string) => void;
   readonly onImageConfigChange: NonNullable<GenNodeCardProps["onImageConfigChange"]>;
   readonly onVideoConfigChange: NonNullable<GenNodeCardProps["onVideoConfigChange"]>;
+  /** 音频节点配置（模型 / 语种 / 采样率 / 输出格式 / 三档滑杆）。 */
+  readonly onAudioConfigChange: (key: string, config: AudioNodeConfig) => void;
+  /** 音频节点的「音频生视频」：在右侧建视频节点并连入这段音频。 */
+  readonly onAudioToVideo: (nodeKey: string) => void;
+  /** 音频节点的「翻译提示词」。 */
+  readonly onTranslateAudioPrompt: (nodeKey: string) => void;
   readonly onAnnotateVideo: NonNullable<GenNodeCardProps["onAnnotateVideo"]>;
   readonly onGreenScreenUseResult: (
     ...args: Parameters<NonNullable<GenNodeCardProps["onGreenScreenUseResult"]>>
@@ -1079,9 +1253,19 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
     onReorderInput,
     registerPromptInput,
     onPromptChange,
+    onPromptFieldChange,
     onRunPrompt,
+    onTextTryAction,
+    onTranslateCanvasText,
+    translating,
+    autoFocusOutput,
+    onPromptFocusRequest,
+    onPromptFocusHandled,
     onImageConfigChange,
     onVideoConfigChange,
+    onAudioConfigChange,
+    onAudioToVideo,
+    onTranslateAudioPrompt,
     onAnnotateVideo,
     onGreenScreenUseResult,
     onImportGreenScreenVideo,
@@ -1090,6 +1274,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
   } = props;
   const entry = useCanvasNodeEntry(nodeKey);
   const promptSummary = usePromptSummary(promptContents, nodeKey);
+  const promptAttachmentCount = usePromptAttachmentCount(promptContents, nodeKey);
   const previewOutput = useCanvasNodeDerived(
     nodeKey,
     latestGenerationPreviewFor,
@@ -1126,6 +1311,94 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         : [],
     greenScreenResultsToken,
   );
+  /**
+   * 悬浮生成器面板的模型下拉：列出项目里**已配置**的文本模型。
+   *
+   * 原站这一位是它自家的 SaaS 模型清单（截图里是「GVLM 3.1」）；
+   * 本项目按供应商目录里启用的文本模型列，模型名重复时补上供应商名，
+   * 免得下拉里两行同名分不清。
+   */
+  const textModelOptions = useMemo<readonly CanvasTextGeneratorModelOption[]>(() => {
+    const counts = new Map<string, number>();
+    for (const catalogEntry of providerCatalog) {
+      if (!catalogEntry.provider.enabled) continue;
+      for (const model of catalogEntry.models) {
+        if (!isTextGenerationModel(model)) continue;
+        counts.set(model.displayName, (counts.get(model.displayName) ?? 0) + 1);
+      }
+    }
+    const options: CanvasTextGeneratorModelOption[] = [];
+    for (const catalogEntry of providerCatalog) {
+      if (!catalogEntry.provider.enabled) continue;
+      for (const model of catalogEntry.models) {
+        if (!isTextGenerationModel(model)) continue;
+        options.push({
+          value: `${catalogEntry.provider.id}::${model.definitionId}`,
+          label:
+            (counts.get(model.displayName) ?? 0) > 1
+              ? `${catalogEntry.provider.displayName} · ${model.displayName}`
+              : model.displayName,
+        });
+      }
+    }
+    return options;
+  }, [providerCatalog]);
+  /**
+   * 悬浮生成器面板与节点状态的绑定。
+   *
+   * 面板不是一份独立状态：提示词框读写节点的「创意 / 需求」，模型下拉读写节点
+   * 选中的文本模型 —— 面板与节点内的输入框永远一致，不会各说各话。
+   */
+  const textGenerator = useMemo(() => {
+    const data = entry?.type === "gen" ? entry.data : null;
+    if (data?.kind !== "prompt") return null;
+    const modelValue = `${data.config.modelSelection.providerId}::${data.config.modelSelection.modelDefinitionId}`;
+    return {
+      value: data.config.sourcePrompt,
+      onValueChange: (value: string) => onPromptFieldChange(nodeKey, { sourcePrompt: value }),
+      modelOptions: textModelOptions.some((option) => option.value === modelValue)
+        ? textModelOptions
+        : [
+            {
+              value: modelValue,
+              label: data.config.modelSelection.modelDefinitionId
+                ? `${data.config.modelSelection.modelDefinitionId}（不可用）`
+                : textModelOptions.length > 0
+                  ? "请选择文本模型"
+                  : "没有可用文本模型",
+            },
+            ...textModelOptions,
+          ],
+      canChooseModel: textModelOptions.length > 0,
+      modelValue,
+      onModelChange: (value: string) => {
+        // 取值形如 `providerId::modelDefinitionId`；供应商 id 不含 `::`，
+        // 模型定义 id 可能含（`remote::供应商::远端模型`），所以按**第一个** `::` 切。
+        const separator = value.indexOf("::");
+        if (separator <= 0) return;
+        onPromptFieldChange(nodeKey, {
+          modelSelection: {
+            providerId: value.slice(0, separator),
+            modelDefinitionId: value.slice(separator + 2),
+          },
+        });
+      },
+      onTranslate: () => onTranslateCanvasText(nodeKey),
+      translating,
+      onSubmit: () => onRunPrompt(nodeKey, true),
+      submitting: running,
+      placeholder: CANVAS_TEXT_GENERATOR_PLACEHOLDER,
+    };
+  }, [
+    entry,
+    nodeKey,
+    onPromptFieldChange,
+    onRunPrompt,
+    onTranslateCanvasText,
+    running,
+    textModelOptions,
+    translating,
+  ]);
   if (entry?.type !== "gen") return null;
   const node = entry.data;
   const isPrompt = node.kind === "prompt";
@@ -1135,19 +1408,29 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
     node.config.modelSelection,
     node.kind === "video"
       ? "video_generation"
-      : node.kind === "image"
-        ? connectedInputs.some((input) => input.kind === "image" || input.kind === "video")
-          ? "image_to_image"
-          : "text_to_image"
-        : undefined,
+      : node.kind === "audio"
+        ? "speech_generation"
+        : node.kind === "image"
+          ? connectedInputs.some((input) => input.kind === "image" || input.kind === "video")
+            ? "image_to_image"
+            : "text_to_image"
+          : undefined,
   );
   if (isPrompt) {
+    const promptEmpty =
+      !running &&
+      !node.config.generatedPrompt.trim() &&
+      !promptSummary.trim() &&
+      promptAttachmentCount === 0 &&
+      !node.config.sourcePrompt.trim() &&
+      (node.config.conversation ?? []).length === 0 &&
+      connectedInputs.length === 0;
     return (
       <>
         <CanvasContentNode
           node={node}
-          kindLabel="提示词生成与优化"
-          icon="sparkle"
+          kindLabel="文本节点"
+          icon="file-text"
           selected={selected}
           presentation={presentation}
           editorOpen={editorOpen}
@@ -1156,6 +1439,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
           onSelect={onSelect}
           onRemove={onRemove}
           onSizeChange={onSizeChange}
+          onRename={onRename}
           summary={
             streamingText?.trim()
               ? streamingText
@@ -1177,6 +1461,39 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
           }
           busy={running}
           error={error}
+          cardBody={
+            presentation === "card" && promptEmpty ? (
+              <CanvasTextTryActions
+                compact
+                onAction={(action) => {
+                  if (action === "writeText") {
+                    onPromptFocusRequest(nodeKey);
+                    onEdit(nodeKey);
+                    return;
+                  }
+                  onTextTryAction(nodeKey, action);
+                }}
+              />
+            ) : undefined
+          }
+          floatingPanel={
+            presentation === "card" && selected && textGenerator ? (
+              <CanvasTextGeneratorPanel
+                className="nodrag nowheel nopan"
+                value={textGenerator.value}
+                onValueChange={textGenerator.onValueChange}
+                modelOptions={textGenerator.modelOptions}
+                canChooseModel={textGenerator.canChooseModel}
+                modelValue={textGenerator.modelValue}
+                onModelChange={textGenerator.onModelChange}
+                onTranslate={textGenerator.onTranslate}
+                translating={textGenerator.translating}
+                onSubmit={textGenerator.onSubmit}
+                submitting={textGenerator.submitting}
+                placeholder={textGenerator.placeholder}
+              />
+            ) : undefined
+          }
         >
           <CanvasPromptNode
             node={node}
@@ -1198,6 +1515,9 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
             expandable={false}
             onChange={(config) => onPromptChange(nodeKey, config)}
             onRun={() => onRunPrompt(nodeKey)}
+            onTryAction={(action) => onTextTryAction(nodeKey, action)}
+            autoFocusOutput={autoFocusOutput}
+            onOutputFocusHandled={onPromptFocusHandled}
             promptContents={promptContents}
             registerPromptInput={registerPromptInput}
             mentionCandidates={mentionCandidates}
@@ -1208,9 +1528,44 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
       </>
     );
   }
+  if (node.kind === "audio") {
+    return (
+      <>
+        <CanvasAudioNode
+          node={node}
+          selected={selected}
+          starting={running}
+          startError={error}
+          activeTask={activeTask}
+          latestTask={latestTask}
+          connectedInputs={connectedInputs}
+          mentionCandidates={mentionCandidates}
+          aliveCanvasNodeKeys={aliveCanvasNodeKeys}
+          registerPromptInput={registerPromptInput}
+          providerCatalog={providerCatalog}
+          onSelect={onSelect}
+          onStartGeneration={(key) => {
+            void onStartGeneration(key);
+          }}
+          onAudioConfigChange={onAudioConfigChange}
+          onAudioToVideo={onAudioToVideo}
+          onTranslatePrompt={onTranslateAudioPrompt}
+          translating={translating}
+          onRename={onRename}
+          presentation={presentation}
+          editorOpen={editorOpen}
+          onCloseEditor={onCloseEditor}
+          promptContents={promptContents}
+          previewOutput={previewOutput}
+        />
+        {presentation === "card" ? <CanvasNodeInputBadge nodeKey={nodeKey} /> : null}
+      </>
+    );
+  }
   return (
     <>
       <CanvasGenNode
+        canvasId={props.canvasId}
         presentation={presentation}
         editorOpen={editorOpen}
         onCloseEditor={onCloseEditor}
@@ -1549,6 +1904,72 @@ function screenplayMultimodalInputs(
   }));
 }
 
+function scriptBatchShotFingerprint(script: ScriptGeneratorState, shotId: string): string | null {
+  const shot = script.shots.find((item) => item.id === shotId);
+  return shot ? JSON.stringify({ shot, assets: matchingScriptAssets(shot, script.assets) }) : null;
+}
+
+function scriptBatchNodeFingerprint(document: CanvasDocumentV2, nodeKey: string): string | null {
+  const node = document.genNodes.find((item) => item.key === nodeKey);
+  if (!node || node.kind === "prompt") return null;
+  const inputs = createCanvasInputResolver(canvasNodesByKeyFromDocument(document), document.assetEdges)(nodeKey);
+  return JSON.stringify({ kind: node.kind, config: node.config, prompt: document.promptContents[nodeKey] ?? null,
+    media: inputs.media.map((input) => ({ key: input.key, target: input.target })) });
+}
+
+/**
+ * 把镜头时长落到模型支持的时长档位。
+ *
+ * 模型往往只接受固定档位（5/10/15 秒），镜头写了 8 秒就只能取最近的档位；
+ * 取值与镜头不一致时给出说明，随批次条目一起显示，不静默改时长。
+ */
+function scriptShotDurationValue(
+  capability: ModelParameterCapability,
+  duration: string,
+): { readonly value: ModelParameterValue; readonly note: string | null } | null {
+  const seconds = Number.parseFloat(duration.trim());
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const numeric = (value: ModelParameterValue): number | null =>
+    typeof value === "number" ? value : Number.parseFloat(String(value));
+  if (capability.options.length) {
+    let best: ModelParameterOption | null = null;
+    let bestGap = Number.POSITIVE_INFINITY;
+    for (const option of capability.options) {
+      const value = numeric(option.value);
+      if (value == null || !Number.isFinite(value)) continue;
+      const gap = Math.abs(value - seconds);
+      if (gap < bestGap) { best = option; bestGap = gap; }
+    }
+    if (!best) return null;
+    const applied = numeric(best.value);
+    return { value: best.value,
+      note: applied != null && Math.abs(applied - seconds) < 0.001 ? null : `镜头时长 ${seconds} 秒已按模型档位取为 ${best.label}` };
+  }
+  if (capability.type !== "integer" && capability.type !== "number") return null;
+  const value = capability.type === "integer" ? Math.round(seconds) : seconds;
+  if (capability.minimum != null && value < capability.minimum) return null;
+  if (capability.maximum != null && value > capability.maximum) return null;
+  return { value, note: null };
+}
+
+/**
+ * 批量首帧的来源节点：画布上已有的图片，或上一批生成出来的产物卡片。
+ *
+ * 产物按 `taskId#resultIndex` 精确定位：同一批多出几张图时不会连错那一张。
+ * 找不到（节点被删、产物尚未保存）时返回 null，调用方不提交这一镜。
+ */
+function scriptBatchFrameSourceKey(frame: ScriptBatchFrame, document: CanvasDocumentV2): string | null {
+  const outputs = document.outputNodes ?? [];
+  if (frame.kind === "canvas") {
+    const exists = document.assetNodes.some((node) => node.key === frame.sourceKey) ||
+      outputs.some((node) => node.key === frame.sourceKey);
+    return exists ? frame.sourceKey : null;
+  }
+  const resultKey = `${frame.taskId}#${frame.resultIndex}`;
+  const output = outputs.find((node) => node.taskId === frame.taskId && node.resultKey === resultKey);
+  return output && output.mediaType === "image" && output.finalPath ? output.key : null;
+}
+
 function screenplayConversationUserMessage(
   userPrompt: string,
   materials: ScreenplayNodeConfig["materials"],
@@ -1848,10 +2269,42 @@ export function WorkspaceApp({
   );
   // 正在提交生成任务的节点 key；不同节点可以同时提交。
   const [startingNodeKeys, setStartingNodeKeys] = useState<ReadonlySet<string>>(() => new Set());
+  // 正在做提示词翻译的节点 key；悬浮生成器面板的翻译键用它显示忙碌态。
+  const [translatingNodeKeys, setTranslatingNodeKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  /**
+   * 待聚焦正文的节点 key。
+   *
+   * 画布卡片上的「自己编写内容」要先把独立编辑区打开、再把光标落进正文；
+   * 编辑区是下一帧才挂上的，所以这里先记一笔，挂上后由节点回报。
+   */
+  const [pendingPromptFocusKey, setPendingPromptFocusKey] = useState<string | null>(null);
+  const [scriptEditorKey, setScriptEditorKey] = useState<string | null>(null);
+  const mediaSubmissionGuardRef = useRef(new Set<string>());
+  const promptSubmissionGuardRef = useRef(new Set<string>());
+  const textTranslationGuardRef = useRef(new Set<string>());
+  const textImageImportGuardRef = useRef(new Set<string>());
+  const scriptMediaCreationGuardRef = useRef(new Set<string>());
+  const scriptBatchSubmissionGuardRef = useRef(new Set<string>());
+  const [scriptBatchRunningKeys, setScriptBatchRunningKeys] = useState<ReadonlySet<string>>(() => new Set());
   // 正在提交智能剪辑合成请求的节点 key；原站同款：合成进行中不允许重复发起。
   const [startingVideoClipKeys, setStartingVideoClipKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const clipSubmissionsRef = useRef(new Set<string>());
+  const clipRemoteBusyRef = useRef(new Set<string>());
+  const [clipTimeline, setClipTimeline] = useState<{ key: string; autoStart: boolean } | null>(null);
+  const clipRenderJobs = useQuery({
+    queryKey: ["clip-renders", canvasId], queryFn: () => clipRenderClient.list(canvasId), enabled: isDesktopRuntime(),
+    refetchInterval: query => active && query.state.data?.some(clipJobActive) ? 1500 : false,
+  });
+  const clipJobsRef = useRef<readonly ClipRenderJob[]>([]);
+  const clipRenderRequestRef = useRef<StartClipRender | null>(null);
+  useEffect(() => {
+    clipJobsRef.current = clipRenderJobs.data ?? [];
+    if (clipRenderJobs.data?.some(job => job.id === clipRenderRequestRef.current?.requestId)) clipRenderRequestRef.current = null;
+  }, [clipRenderJobs.data]);
   /**
    * 文本模型正在生成的正文（按节点 key 累加）。
    *
@@ -1885,6 +2338,12 @@ export function WorkspaceApp({
   const clearStreamingText = useCallback(
     (nodeKey: string) => {
       streamingTextTaskByNodeRef.current.delete(nodeKey);
+      const batch = streamingTextBatchRef.current;
+      batch.entries.delete(nodeKey);
+      if (batch.entries.size === 0 && batch.timer !== null) {
+        window.clearTimeout(batch.timer);
+        batch.timer = null;
+      }
       setStreamingTextByNode((current) => {
         if (!(nodeKey in current)) return current;
         const next = { ...current };
@@ -2131,6 +2590,18 @@ export function WorkspaceApp({
   const mediaInputTargetKeysRef = useRef<ReadonlySet<string>>(new Set());
   // 提示内容 module 持有 canonical documents 与节点级 handle；视口裁剪不会丢内容。
   const [promptContents] = useState(createPromptContentModule);
+  const programmaticPromptWriteRef = useRef(new Set<string>());
+  const replaceGeneratedPrompt = useCallback(
+    (nodeKey: string, text: string, candidates: readonly MentionCandidate[]) => {
+      programmaticPromptWriteRef.current.add(nodeKey);
+      try {
+        promptContents.replaceText(nodeKey, text, candidates);
+      } finally {
+        programmaticPromptWriteRef.current.delete(nodeKey);
+      }
+    },
+    [promptContents],
+  );
   const deletedPromptContentsRef = useRef(new Map<string, PromptContentDocumentV1>());
   /*
    * 持有提示内容的节点成员 key 订阅：删除的提示词文档在同类节点复用时恢复。
@@ -2233,10 +2704,24 @@ export function WorkspaceApp({
         URL.revokeObjectURL(node.previewSrc);
       }
     }
+    /*
+     * 清空是整体替换节点状态，不走逐节点的删除路径，所以长视频编排的界面入口会一起消失，
+     * 而后端并不知道。不叫停的话，它们会继续每 1.2 秒提交一个片段、继续花钱。
+     */
+    void longVideoClient.cancelForCanvas(canvasId).then(cancelled => {
+      if (cancelled > 0) toast.info(`已结束这张画布上的 ${cancelled} 个长视频编排。`);
+    }).catch((error: unknown) => {
+      frontendLog("warn", `[long-video] 叫停画布 ${canvasId} 上的长视频编排失败：${backendErrorMessage(error)}`);
+      toast.error("没能叫停这张画布上的长视频编排", { description: "它们可能仍在按额度提交片段，直到额度用尽才会停下。" });
+    });
+    for (const job of clipJobsRef.current.filter(clipJobActive)) {
+      void clipRenderClient.cancel(job.id).catch((error: unknown) => toast.error(`取消剪辑失败：${backendErrorMessage(error)}`));
+    }
+    setClipTimeline(null);
     clearCanvasState();
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
-  }, [clearCanvasState, canvasStore, setGenNodeSizes, setPreviewOutputNodeKey]);
+  }, [clearCanvasState, canvasStore, setGenNodeSizes, setPreviewOutputNodeKey, canvasId]);
 
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
     /*
@@ -2251,9 +2736,10 @@ export function WorkspaceApp({
      * 改成「画布里现存的节点 key」求交集后，登记表整个不需要了：新增节点类型
      * 天然被覆盖，也不可能再漏登记。
      */
-    const promptContentKeys = new Set<string>(promptContentNodeKeys);
+    // 即时提交前可能刚插入节点、React 还没完成一次重渲染；落盘必须读 store 当前 key。
+    const promptContentKeys = new Set(Object.keys(canvasStore.getState().nodesById));
     return snapshotV2(promptContents.snapshotAll(promptContentKeys));
-  }, [promptContentNodeKeys, promptContents, snapshotV2]);
+  }, [canvasStore, promptContents, snapshotV2]);
 
   const restoreCanvasDocument = useCallback(
     (raw: unknown) => {
@@ -2314,7 +2800,7 @@ export function WorkspaceApp({
   );
 
   const validateCanvasDelete = useCallback(async () => {
-    if (startingNodeKeys.size > 0) {
+    if (startingNodeKeys.size > 0 || scriptBatchSubmissionGuardRef.current.size > 0) {
       throw new Error("此画布仍有任务正在执行，请先暂停工作流或等待任务完成后再删除。");
     }
     if (!isDesktopRuntime()) return;
@@ -4405,23 +4891,31 @@ export function WorkspaceApp({
               config: createVideoNodeConfig(nodeModelSelections.video, providerCatalogLoaded),
               ...position,
             }
-          : kind === "prompt"
+          : kind === "audio"
             ? {
                 key: genNodeKey(),
                 kind,
-                config: createPromptNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
+                config: createAudioNodeConfig(nodeModelSelections.audio, providerCatalogLoaded),
                 ...position,
               }
-            : {
-                key: genNodeKey(),
-                kind,
-                config: createImageNodeConfig(nodeModelSelections.image, providerCatalogLoaded),
-                ...position,
-              };
+            : kind === "prompt"
+              ? {
+                  key: genNodeKey(),
+                  kind,
+                  config: createPromptNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
+                  ...position,
+                }
+              : {
+                  key: genNodeKey(),
+                  kind,
+                  config: createImageNodeConfig(nodeModelSelections.image, providerCatalogLoaded),
+                  ...position,
+                };
       return node;
     },
     [
       dropPosition,
+      nodeModelSelections.audio,
       nodeModelSelections.image,
       nodeModelSelections.prompt,
       nodeModelSelections.video,
@@ -4437,7 +4931,10 @@ export function WorkspaceApp({
         key: screenplayNodeKey(),
         kind: "screenplay",
         ...position,
-        config: createScreenplayNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
+        config: {
+          ...createScreenplayNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
+          scriptGenerator: emptyScriptGenerator(),
+        },
       };
       return node;
     },
@@ -4476,13 +4973,14 @@ export function WorkspaceApp({
         return { type: "gen", data: createGenNode("image", x, y) };
       case "video":
         return { type: "gen", data: createGenNode("video", x, y) };
+      case "audio":
+        return { type: "gen", data: createGenNode("audio", x, y) };
       case "screenplay":
         return { type: "screenplay", data: createScreenplayNode(x, y) };
       case "video_clip":
         return { type: "videoClip", data: createVideoClipNode(x, y) };
       case "director":
       case "shot_breakdown":
-      case "audio":
       case "reference":
         // 原站有、本项目后端尚未提供的节点类型：入口在菜单里已给出说明。
         throw new Error("该节点类型后端暂未接入");
@@ -4492,6 +4990,14 @@ export function WorkspaceApp({
   const updateImageNodeConfig = useCallback(
     (key: string, config: ImageNodeConfig) => {
       patchNode("gen", key, (node) => (node.kind === "image" ? { ...node, config } : node));
+    },
+    [patchNode],
+  );
+
+  /** 音频节点配置（模型 / 语种 / 采样率 / 输出格式 / 三档滑杆）。 */
+  const updateAudioNodeConfig = useCallback(
+    (key: string, config: AudioNodeConfig) => {
+      patchNode("gen", key, (node) => (node.kind === "audio" ? { ...node, config } : node));
     },
     [patchNode],
   );
@@ -4507,6 +5013,7 @@ export function WorkspaceApp({
   /** 切换剪辑模式；模式变了，参数保持原站默认组合（比例 / 时长 / 清晰度不随模式变）。 */
   const changeVideoClipMode = useCallback(
     (key: string, modeKey: VideoClipModeKey) => {
+      if (clipSubmissionsRef.current.has(key) || clipRemoteBusyRef.current.has(key) || clipJobsRef.current.some(job => job.sourceNodeId === key && clipJobActive(job))) return;
       updateVideoClipConfig(key, { modeKey });
     },
     [updateVideoClipConfig],
@@ -4515,6 +5022,7 @@ export function WorkspaceApp({
   /** 改参数：比例 / 时长 / 清晰度。 */
   const changeVideoClipParams = useCallback(
     (key: string, params: VideoClipParams) => {
+      if (clipSubmissionsRef.current.has(key) || clipRemoteBusyRef.current.has(key) || clipJobsRef.current.some(job => job.sourceNodeId === key && clipJobActive(job))) return;
       updateVideoClipConfig(key, {
         aspectRatio: params.aspectRatio,
         durationSeconds: params.durationSeconds,
@@ -4537,10 +5045,12 @@ export function WorkspaceApp({
    */
   const applyVideoClipPreset = useCallback(
     (key: string, modeKey: string) => {
+      if (clipSubmissionsRef.current.has(key) || clipRemoteBusyRef.current.has(key) || clipJobsRef.current.some(job => job.sourceNodeId === key && clipJobActive(job))) return;
       const mode = videoClipMode(modeKey);
       updateVideoClipConfig(key, { modeKey: mode.modeKey });
       if (mode.preset?.prompt) {
         promptContents.replaceText(key, mode.preset.prompt, []);
+        scheduleCanvasSaveRef.current();
       }
       setNodeMarquee(false);
       setMarqueeNodeKeys(new Set());
@@ -4549,19 +5059,9 @@ export function WorkspaceApp({
     [promptContents, updateVideoClipConfig, selectNode],
   );
 
-  /**
-   * 「打开智能剪辑」：原站由此进入视频剪辑时间轴编辑器（多层时间轴 / 字幕 / 转场 /
-   * 导出工程）。本项目后端尚未接入该编辑器，按项目约定给出明确说明，不静默失败。
-   */
-  const handleOpenVideoClipEditor = useCallback(() => {
-    toast.error("视频剪辑时间轴编辑器后端暂未接入", {
-      description: "当前只能按提示词合成成片；字幕轨、转场与工程导出尚未接入。",
-    });
-  }, []);
-
-  /** 「＋参考」：从素材库选参考的入口后端暂未接入，提示词节点连线仍可传素材。 */
-  const handleOpenVideoClipReferencePicker = useCallback(() => {
-    toast.error("参考素材选择后端暂未接入：可从节点左侧手柄的「引用该节点生成」接入素材");
+  /** 打开本地剪辑时间轴，剪辑决策按节点持久化。 */
+  const handleOpenVideoClipEditor = useCallback((key: string) => {
+    setClipTimeline({ key, autoStart: false });
   }, []);
 
   /**
@@ -4575,7 +5075,7 @@ export function WorkspaceApp({
     async (nodeKey: string) => {
       const node = canvasNodesNow("videoClip").find((item) => item.key === nodeKey);
       if (!node) return;
-      if (startingVideoClipKeys.has(nodeKey)) {
+      if (clipSubmissionsRef.current.has(nodeKey) || clipRemoteBusyRef.current.has(nodeKey) || clipJobsRef.current.some(job => job.sourceNodeId === nodeKey && clipJobActive(job))) {
         setNodeStartError(nodeKey, "智能剪辑进行中，完成后可再次发起。");
         return;
       }
@@ -4610,6 +5110,11 @@ export function WorkspaceApp({
         );
         return;
       }
+      if (mode.modeKey === "default" || mode.modeKey === "smartMixCut") {
+        setNodeStartError(nodeKey, null);
+        setClipTimeline({ key: nodeKey, autoStart: true });
+        return;
+      }
       const selection = resolveGenerationSelection(
         "video",
         nodeModelSelections.video,
@@ -4634,9 +5139,18 @@ export function WorkspaceApp({
         }));
       });
       setNodeStartError(nodeKey, null);
+      clipSubmissionsRef.current.add(nodeKey);
       setStartingVideoClipKeys((current) => new Set(current).add(nodeKey));
       try {
+        const fingerprint = JSON.stringify({ prompt, materials, params: resolveVideoClipParams(node.config), selection: nodeModelSelections.video, mode: mode.modeKey, outputName: node.config.outputName });
+        if (node.config.submission && node.config.submission.fingerprint !== fingerprint) {
+          throw new Error("上次剪辑回执尚待核对，请先在生成历史确认原任务，再发起内容不同的剪辑。");
+        }
+        const clientTaskId = node.config.submission?.id ?? crypto.randomUUID();
+        updateVideoClipConfig(nodeKey, { submission: { id: clientTaskId, fingerprint } });
+        scheduleCanvasSaveRef.current();
         const taskId = await videoClipClient.start({
+          clientTaskId,
           canvasId,
           sourceNodeId: nodeKey,
           mode: VIDEO_CLIP_BACKEND_MODES[mode.modeKey] as VideoClipMode,
@@ -4648,7 +5162,12 @@ export function WorkspaceApp({
           operation: "video_generation",
           outputName: node.config.outputName,
         });
-        addOutput((current, nodesById) => ({
+        if (canvasStore.getState().nodesById[nodeKey]?.type !== "videoClip") {
+          // The single paid request is already accepted. Keep its result recoverable in history.
+          return;
+        }
+        clipRemoteBusyRef.current.add(nodeKey);
+        if (!canvasNodesNow("output").some(output => output.taskId === taskId)) addOutput((current, nodesById) => ({
           key: outputNodeKey(),
           resultKey: null,
           sourceNodeId: nodeKey,
@@ -4670,8 +5189,12 @@ export function WorkspaceApp({
         }));
         toast.success("智能剪辑已提交，完成后会生成成片。");
       } catch (error) {
+        if (error != null && typeof error === "object" && "kind" in error && error.kind === "validation") {
+          updateVideoClipConfig(nodeKey, { submission: null });
+        }
         setNodeStartError(nodeKey, backendErrorMessage(error));
       } finally {
+        clipSubmissionsRef.current.delete(nodeKey);
         setStartingVideoClipKeys((current) => {
           const next = new Set(current);
           next.delete(nodeKey);
@@ -4689,12 +5212,59 @@ export function WorkspaceApp({
       promptContents,
       providerCatalog,
       setNodeStartError,
-      startingVideoClipKeys,
+      updateVideoClipConfig,
     ],
   );
 
+  const saveClipTimeline = useCallback((key: string, clips: readonly ClipEdit[]) => {
+    updateVideoClipConfig(key, { timeline: clips });
+    scheduleCanvasSaveRef.current();
+  }, [updateVideoClipConfig]);
+
+  const renderClipTimeline = useCallback(async (clips: readonly ClipEdit[], intelligent: boolean) => {
+    const key = clipTimeline?.key;
+    if (!key || clipSubmissionsRef.current.has(key)) return;
+    const entry = canvasStore.getState().nodesById[key];
+    if (entry?.type !== "videoClip") throw new Error("剪辑节点已不存在，请重新打开。 ");
+    if (clipJobsRef.current.some(job => job.sourceNodeId === key && clipJobActive(job))) throw new Error("智能剪辑进行中，请等待完成。");
+    const prepared = promptContents.preparePlainText(key);
+    if (intelligent && (!prepared?.ok || !prepared.text.trim())) throw new Error("请先在节点里填写剪辑提示词。");
+    const selection = intelligent && providerCatalog.some(entry => entry.provider.enabled && entry.provider.id === nodeModelSelections.prompt.providerId && entry.models.some(model => model.definitionId === nodeModelSelections.prompt.modelDefinitionId && model.operations.includes("text_generation")));
+    if (intelligent && !selection) throw new Error("请先在文本节点中选好供应商与文本模型，再使用智能剪辑；手动导出可直接使用。");
+    clipSubmissionsRef.current.add(key);
+    setStartingVideoClipKeys(current => new Set(current).add(key));
+    try {
+      const planner = intelligent ? {
+        clientTaskId: "", canvasId, sourceNodeId: key, operation: "text_generation" as const,
+        providerConnectionId: nodeModelSelections.prompt.providerId, modelDefinitionId: nodeModelSelections.prompt.modelDefinitionId,
+        prompt: [{ kind: "text" as const, text: prepared?.ok ? prepared.text : "" }], explicitMedia: [], parameters: {}, generationCount: 1,
+      } : null;
+      const body = { canvasId, sourceNodeId: key, name: entry.data.config.outputName, params: resolveVideoClipParams(entry.data.config), clips, planner };
+      const previous = clipRenderRequestRef.current;
+      const same = previous && JSON.stringify({ ...previous, requestId: "", planner: previous.planner ? { ...previous.planner, clientTaskId: "" } : null }) === JSON.stringify({ ...body, requestId: "" });
+      if (previous && !same) throw new Error("上次剪辑请求的回执待核对，请先重新读取任务记录，再提交不同内容。");
+      const command: StartClipRender = same ? previous : { ...body, requestId: crypto.randomUUID(), planner: planner ? { ...planner, clientTaskId: crypto.randomUUID() } : null };
+      clipRenderRequestRef.current = command;
+      const accepted = await clipRenderClient.start(command).catch((error: unknown) => {
+        // A rejected request has no receipt to reconcile; corrected inputs may use a new ID.
+        if (error != null && typeof error === "object" && "kind" in error && error.kind === "validation") {
+          clipRenderRequestRef.current = null;
+        }
+        throw error;
+      });
+      if (canvasStore.getState().nodesById[key]?.type !== "videoClip") { await clipRenderClient.cancel(accepted.id); return; }
+      const result = await clipRenderJobs.refetch();
+      if (result.error) throw new Error(`剪辑已受理，但读取进度失败：${backendErrorMessage(result.error)}。请重新打开编辑器查看原任务。`);
+    } finally {
+      clipSubmissionsRef.current.delete(key);
+      setStartingVideoClipKeys(current => { const next = new Set(current); next.delete(key); return next; });
+    }
+  }, [clipTimeline?.key, canvasStore, promptContents, nodeModelSelections.prompt, providerCatalog, canvasId, clipRenderJobs.refetch]);
+
   const updatePromptNodeConfig = useCallback(
     (key: string, config: PromptNodeConfig) => {
+      // 程序化替换会同步派发 input；由发起者把 canonical 与节点镜像同批写入。
+      if (programmaticPromptWriteRef.current.has(key)) return;
       /*
        * 提示词**打字**要合并历史；**离散设置**（换模型 / 换模式 / 换任务）不要。
        *
@@ -4752,9 +5322,34 @@ export function WorkspaceApp({
     [canvasNodesNow, patchNode, promptContents, runWithCoalescedHistory],
   );
 
+  /**
+   * 提示词节点的**按字段**写入：只改传入的字段，其余字段按当前值保留。
+   *
+   * 画布上的悬浮生成器面板与节点内的输入框是同一个「创意 / 需求」的两个入口。
+   * 若面板拿渲染时的配置快照回写，模型生成完成与用户打字撞在一起时，
+   * 刚生成的正文会被旧快照覆盖掉 —— 所以这里按当前值合并。
+   */
+  const patchPromptNodeConfigField = useCallback(
+    (key: string, patch: Partial<PromptNodeConfig>) => {
+      const previousNode = canvasNodesNow("gen").find((node) => node.key === key);
+      const previous = previousNode?.kind === "prompt" ? previousNode.config : undefined;
+      if (previous == null) return;
+      updatePromptNodeConfig(key, { ...previous, ...patch });
+    },
+    [canvasNodesNow, updatePromptNodeConfig],
+  );
+
   const updateScreenplayNodeConfig = useCallback(
     (key: string, config: ScreenplayNodeConfig) => {
       patchNode("screenplay", key, (node) => ({ ...node, config }));
+    },
+    [patchNode],
+  );
+
+  /** 按当前配置更新，避免面板和编辑器的旧快照覆盖彼此的修改。 */
+  const updateScreenplayNode = useCallback(
+    (key: string, update: (config: ScreenplayNodeConfig) => ScreenplayNodeConfig) => {
+      patchNode("screenplay", key, (node) => ({ ...node, config: update(node.config) }));
     },
     [patchNode],
   );
@@ -4848,8 +5443,8 @@ export function WorkspaceApp({
 
   /** 提示词节点调用已配置的文本模型，返回结果写入节点输出并由连线自动下发。 */
   const handleRunPromptNode = useCallback(
-    (nodeKey: string) => {
-      if (startingNodeKeys.has(nodeKey)) return;
+    (nodeKey: string, generalText = false) => {
+      if (startingNodeKeys.has(nodeKey) || promptSubmissionGuardRef.current.has(nodeKey)) return;
       const node = canvasNodesNow("gen").find(
         (item): item is Extract<GenNodeData, { kind: "prompt" }> =>
           item.key === nodeKey && item.kind === "prompt",
@@ -4862,9 +5457,9 @@ export function WorkspaceApp({
       }
       const visionImages = promptVisionImages(nodeKey);
       const videoMaterials = promptVideoMaterials(nodeKey);
-      const isFpvPath = node.config.mode === "fpv_path";
-      const isFightPromptMaster = node.config.mode === "fight_prompt_master";
-      const isCinematicDialogue = node.config.mode === "cinematic_dialogue";
+      const isFpvPath = !generalText && node.config.mode === "fpv_path";
+      const isFightPromptMaster = !generalText && node.config.mode === "fight_prompt_master";
+      const isCinematicDialogue = !generalText && node.config.mode === "cinematic_dialogue";
       const dialogueGuard: CinematicDialogueGuard = node.config.cinematicDialogueGuard ?? {
         lockedLines: "",
         targetDurationSeconds: null,
@@ -4934,11 +5529,14 @@ export function WorkspaceApp({
         failWith("请先在当前提示词节点中选择可用的文本模型。");
         return;
       }
+      const outputBeforeRequest = JSON.stringify(
+        promptContents.read(nodeKey)?.document ?? { schema: "prompt-content", version: 1, items: [] },
+      );
       // 多轮对话：把全部已完成轮次逐条注入系统上下文，本轮输入作为新的用户消息。
       const conversation = node.config.conversation ?? [];
       const contextHistory: PromptOptimizationContextEntry[] = conversation.map((entry, index) => ({
         role:
-          isCinematicDialogue && (entry.role === "user" || entry.role === "assistant")
+          (generalText || isCinematicDialogue) && (entry.role === "user" || entry.role === "assistant")
             ? entry.role
             : `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
         content: entry.content,
@@ -4998,6 +5596,7 @@ export function WorkspaceApp({
         }
       }
       setNodeStartError(nodeKey, null);
+      promptSubmissionGuardRef.current.add(nodeKey);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
@@ -5010,6 +5609,7 @@ export function WorkspaceApp({
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
           mode: resolvePromptOptimizationMode(node.config.mode),
+          generalText,
           task: node.config.task,
           userPrompt: sourcePrompt,
           contextHistory,
@@ -5023,22 +5623,54 @@ export function WorkspaceApp({
             : null;
           const outputPrompt = dialogueResponse
             ? dialogueResponse.downstreamPrompt
-            : cleanGeneratedPrompt(result.optimizedPrompt);
+            : generalText ? result.optimizedPrompt.trim() : cleanGeneratedPrompt(result.optimizedPrompt);
           const assistantText = dialogueResponse?.displayText ?? outputPrompt ?? "";
-          /*
-           * AI 生成的提示词是**整篇替换**：先把提示词模块里的文档清空。
-           *
-           * 不清的话会留下旧附件：撤销回灌那条路径用的是「保留附件」的版本
-           * （`replaceTextKeepingAttachments`）—— 那是为撤销保数据的，代价是
-           * 「整篇替换」时旧附件会残留。这里提前清空，模块里就没有可保留的东西。
-           */
-          promptContents.replaceText(nodeKey, "", []);
-          /*
-           * 快照与节点写入**同批**落下：zundo 记录的是 set 之前的切片，分两次写
-           * 的话历史里已经是新快照，撤销恢复回来的是当前内容 —— 等于没撤销。
-           * （同批的快照取的是「模块清空之后」的状态，也就是 AI 生成的纯文本 ——
-           * 与撤销要恢复的「AI 生成之前」那份由 zundo 自己保留。）
-           */
+          const currentNode = canvasNodesNow("gen").find((item) => item.key === nodeKey);
+          if (currentNode?.kind !== "prompt") {
+            toast.info("文本生成已完成", { description: "原节点已移除，结果可在任务历史中查看。" });
+            return;
+          }
+          const currentOutput = JSON.stringify(
+            promptContents.read(nodeKey)?.document ?? { schema: "prompt-content", version: 1, items: [] },
+          );
+          if (currentOutput !== outputBeforeRequest) {
+            patchNode("gen", nodeKey, (item) => item.kind === "prompt"
+              ? {
+                  ...item,
+                  config: {
+                    ...item.config,
+                    conversation: [
+                      ...(item.config.conversation ?? []),
+                      { id: promptMessageId(), role: "user", content: sourcePrompt },
+                      { id: promptMessageId(), role: "assistant", content: assistantText },
+                    ],
+                  },
+                }
+              : item);
+            toast.info("文本生成已完成，已保留你修改的正文", {
+              description: "生成结果已加入对话，也可在任务历史中查看。",
+              duration: 10000,
+              action: {
+                label: "复制结果",
+                onClick: () => {
+                  void copyTextToDesktopClipboard(assistantText).then(
+                    () => toast.success("结果已复制"),
+                    (error: unknown) => toast.error("复制结果失败", { description: backendErrorMessage(error) }),
+                  );
+                },
+              },
+            });
+            return;
+          }
+          // 整篇结果先写入 canonical 文档，再与镜像同批存入画布；编辑区未挂载时
+          // 也不能只保存空文档，否则重开会丢失 @ 素材身份。没有新输出时保留原文。
+          if (outputPrompt != null) {
+            replaceGeneratedPrompt(
+              nodeKey,
+              outputPrompt,
+              canvasInputsFor(nodeKey).media.map(generationInputMentionCandidate),
+            );
+          }
           const promptDocuments = promptContents.snapshotAll();
           patchNode(
             "gen",
@@ -5086,6 +5718,7 @@ export function WorkspaceApp({
         .finally(() => {
           // 完整结果已写入节点（或已失败），流式草稿不再需要。
           clearStreamingText(nodeKey);
+          promptSubmissionGuardRef.current.delete(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -5098,6 +5731,8 @@ export function WorkspaceApp({
       canvasNodesNow,
       promptVideoMaterials,
       promptVisionImages,
+      promptContents,
+      replaceGeneratedPrompt,
       providerCatalog,
       canvasInputsFor,
       setNodeStartError,
@@ -5111,17 +5746,18 @@ export function WorkspaceApp({
   /** 剧本对话：双技能全文由后端每轮重新载入，节点内全部历史逐条注入系统上下文。 */
   const handleRunScreenplayNode = useCallback(
     (nodeKey: string) => {
-      if (startingNodeKeys.has(nodeKey)) return;
+      if (startingNodeKeys.has(nodeKey) || promptSubmissionGuardRef.current.has(nodeKey)) return;
       const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
       if (!node) return;
+      const script = node.config.scriptGenerator;
       const failWith = (message: string) => setNodeStartError(nodeKey, message);
       if (!isDesktopRuntime()) {
         failWith("剧本模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
         return;
       }
       const materials = node.config.materials ?? [];
-      const userPrompt =
-        node.config.composer.trim() || "请分析附带的参考素材，并据此创作或优化剧本。";
+      const userPrompt = node.config.composer.trim() ||
+        (script ? "请依据已连接的文本和参考素材制作分镜脚本。" : "请分析附带的参考素材，并据此创作或优化剧本。");
       const connected = canvasInputsFor(nodeKey);
       if (
         !node.config.composer.trim() &&
@@ -5145,13 +5781,13 @@ export function WorkspaceApp({
         failWith("请先在当前剧本节点中选择可用的文本模型。");
         return;
       }
-      const contextHistory: PromptOptimizationContextEntry[] = node.config.conversation.map(
+      const contextHistory: PromptOptimizationContextEntry[] = script ? [] : node.config.conversation.map(
         (entry, index) => ({
           role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "screenplay")}`,
           content: entry.content,
         }),
       );
-      if (node.config.currentDocument.trim()) {
+      if (!script && node.config.currentDocument.trim()) {
         contextHistory.push({
           role: "当前剧本文档",
           content: node.config.currentDocument,
@@ -5164,7 +5800,18 @@ export function WorkspaceApp({
         })),
       );
       const multimodalInputs = screenplayMultimodalInputs(node.config);
+      const frozenScriptConfig = script ? JSON.stringify({
+        shots: script.shots, assets: script.assets,
+        composer: node.config.composer, modelSelection: node.config.modelSelection,
+        materials: node.config.materials ?? [],
+      }) : null;
+      const fingerprintInputs = (inputs: typeof connected) => JSON.stringify({
+        texts: inputs.texts.map((input) => ({ key: input.key, text: input.text })),
+        media: inputs.media.map((input) => ({ key: input.key, target: input.target })),
+      });
+      const frozenInputs = script ? fingerprintInputs(connected) : null;
       setNodeStartError(nodeKey, null);
+      promptSubmissionGuardRef.current.add(nodeKey);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
@@ -5177,6 +5824,7 @@ export function WorkspaceApp({
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
           mode: "screenplay",
+          scriptGenerator: Boolean(script),
           task: "generate",
           userPrompt,
           contextHistory,
@@ -5187,6 +5835,26 @@ export function WorkspaceApp({
           })),
         })
         .then((result) => {
+          if (script) {
+            const parsed = parseScriptGeneration(result.optimizedPrompt);
+            let applied = false;
+            patchNode("screenplay", nodeKey, (item) => {
+              const current = item.config.scriptGenerator;
+              if (!current || JSON.stringify({
+                shots: current.shots, assets: current.assets,
+                composer: item.config.composer, modelSelection: item.config.modelSelection,
+                materials: item.config.materials ?? [],
+              }) !== frozenScriptConfig || fingerprintInputs(canvasInputsFor(nodeKey)) !== frozenInputs) return item;
+              const next = { ...replaceScriptTable(current, parsed.shots, parsed.assets), step: "confirm-shots" as const };
+              applied = true;
+              return { ...item, config: { ...item.config, scriptGenerator: next, currentDocument: scriptDocument(next) } };
+            });
+            if (!applied) toast.info("分镜已生成，但节点内容已变化", {
+              description: "已保留当前编辑内容；模型原始结果可在任务历史中查看。",
+            });
+            else toast.success("分镜已生成", { description: "打开脚本节点即可核对镜头、资产和提示词。" });
+            return;
+          }
           patchNode("screenplay", nodeKey, (item) => ({
             ...item,
             config: {
@@ -5221,6 +5889,7 @@ export function WorkspaceApp({
         .finally(() => {
           // 完整结果已写入节点（或已失败），流式草稿不再需要。
           clearStreamingText(nodeKey);
+          promptSubmissionGuardRef.current.delete(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -5239,6 +5908,83 @@ export function WorkspaceApp({
       clearStreamingText,
     ],
   );
+
+  /** 智能合成只更新明确选择的镜头；请求期间编辑或素材变化时保留当前内容。 */
+  const handleScriptSmartCompose = useCallback((nodeKey: string, shotIds: readonly string[]) => {
+    if (startingNodeKeys.has(nodeKey) || promptSubmissionGuardRef.current.has(nodeKey)) return;
+    const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+    const script = node?.config.scriptGenerator;
+    if (!node || !script) return;
+    const ids = [...new Set(shotIds)];
+    const selected = script.shots.filter((shot) => ids.includes(shot.id));
+    if (!ids.length || selected.length !== ids.length) return;
+    if (selected.some((shot) => shot.unresolvedAssetRefs?.length)) {
+      setNodeStartError(nodeKey, "部分镜头的模型资产关联尚未确认，请先核对并清除提示。"); return;
+    }
+    if (selected.some((shot) => (shot.assetIds ?? []).some((id) => !script.assets.some((asset) => asset.id === id)))) {
+      setNodeStartError(nodeKey, "部分镜头关联的资产已删除，请先清除失效关联。"); return;
+    }
+    if (!isDesktopRuntime()) { setNodeStartError(nodeKey, "智能合成只能在桌面应用中调用。"); return; }
+    const provider = providerCatalog.find((entry) => entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId);
+    const model = provider?.models.find((item) => item.definitionId === node.config.modelSelection.modelDefinitionId && isTextGenerationModel(item));
+    if (!provider || !model) { setNodeStartError(nodeKey, "请先选择可用的文本模型。"); return; }
+    const connected = canvasInputsFor(nodeKey);
+    const fingerprint = (config: ScreenplayNodeConfig, inputs: typeof connected) => JSON.stringify({
+      shots: config.scriptGenerator?.shots.filter((shot) => ids.includes(shot.id)),
+      assets: config.scriptGenerator?.assets, model: config.modelSelection, materials: config.materials ?? [],
+      media: inputs.media.map((input) => ({ key: input.key, target: input.target })),
+    });
+    const frozen = fingerprint(node.config, connected);
+    promptSubmissionGuardRef.current.add(nodeKey);
+    setNodeStartError(nodeKey, null);
+    setStartingNodeKeys((current) => new Set(current).add(nodeKey));
+    let completedChunks = 0;
+    void (async () => {
+      const prompts = new Map<string, { imagePrompt: string; videoPrompt: string; imageToVideoPrompt: string }>();
+      for (let offset = 0; offset < selected.length; offset += 20) {
+        const current = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+        if (!current?.config.scriptGenerator || fingerprint(current.config, canvasInputsFor(nodeKey)) !== frozen) {
+          throw new Error("镜头或参考已变化，已停止后续合成。");
+        }
+        const chunk = selected.slice(offset, offset + 20);
+        const assets = script.assets.filter((asset) => chunk.some((shot) => (shot.assetIds ?? []).includes(asset.id)));
+        const result = await promptNodeClient.run({
+          canvasId, sourceNodeId: nodeKey, providerConnectionId: provider.provider.id,
+          modelDefinitionId: model.definitionId, mode: "screenplay", task: "generate", scriptPromptCompose: true,
+          userPrompt: JSON.stringify({ shots: chunk, assets }), multimodalInputs: screenplayMultimodalInputs(node.config),
+          referenceInputs: connected.media.map((input) => ({ target: input.target, displayName: input.name })),
+        });
+        completedChunks += 1;
+        for (const [id, prompt] of parseScriptComposition(result.optimizedPrompt, chunk.map((shot) => shot.id))) {
+          prompts.set(id, prompt);
+        }
+      }
+      let applied = false;
+      patchNode("screenplay", nodeKey, (current) => {
+        const currentScript = current.config.scriptGenerator;
+        if (!currentScript || fingerprint(current.config, canvasInputsFor(nodeKey)) !== frozen) return current;
+        const shots = currentScript.shots.map((shot) => {
+          const composed = prompts.get(shot.id);
+          return composed ? { ...shot, ...composed, composedFrom: scriptSourceSignature(shot, currentScript.assets) } : shot;
+        });
+        const next = replaceScriptTable(currentScript, shots);
+        applied = true;
+        return { ...current, config: { ...current.config, scriptGenerator: next, currentDocument: scriptDocument(next) } };
+      });
+      if (applied) toast.success("提示词已合成", { description: "可逐镜核对，或撤回上一次替换。" });
+      else toast.info("提示词已合成，但镜头或参考已变化", { description: "已保留当前内容；模型结果可在任务历史中查看。" });
+    })().catch((error: unknown) => {
+      const message = backendErrorMessage(error);
+      setNodeStartError(nodeKey, message);
+      toast.error("提示词合成未完成", { description: completedChunks
+        ? `${message}；已完成的 ${completedChunks} 次结果可从本节点任务历史恢复，不会自动重发。`
+        : message });
+    }).finally(() => {
+      clearStreamingText(nodeKey);
+      promptSubmissionGuardRef.current.delete(nodeKey);
+      setStartingNodeKeys((current) => { const next = new Set(current); next.delete(nodeKey); return next; });
+    });
+  }, [canvasId, canvasInputsFor, canvasNodesNow, clearStreamingText, patchNode, providerCatalog, setNodeStartError, startingNodeKeys]);
 
   const handleExportScreenplay = useCallback(
     async (nodeKey: string) => {
@@ -5453,6 +6199,17 @@ export function WorkspaceApp({
   const removeGenNode = useCallback(
     (key: string) => {
       const removed = removeCanvasNode(key);
+      /*
+       * 删掉节点只是前端状态变化，后端并不知道。长视频的编排会继续每 1.2 秒提交一个片段
+       * （有额度上限，但每一段都是真金白银），而它的界面入口是按节点过滤的——节点没了，
+       * 用户连暂停/结束都点不到，编排就成了一个还在烧钱的隐形任务。所以删节点时叫停它。
+       */
+      void longVideoClient.cancelForNode(canvasId, key).then(cancelled => {
+        if (cancelled > 0) toast.info(`已结束该节点上的 ${cancelled} 个长视频编排；撤销恢复节点后需要重新发起。`);
+      }).catch((error: unknown) => {
+        frontendLog("warn", `[long-video] 叫停节点 ${key} 上的长视频编排失败：${backendErrorMessage(error)}`);
+        toast.error("没能叫停该节点上的长视频编排", { description: "它可能仍在按额度提交片段，请到长视频的创作过程里结束它。" });
+      });
       setGenNodeSizes((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
@@ -5477,7 +6234,7 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [promptContents, removeCanvasNode],
+    [promptContents, removeCanvasNode, canvasId],
   );
 
   const removeScreenplayNode = useCallback(
@@ -5516,6 +6273,9 @@ export function WorkspaceApp({
   /** 删除智能剪辑节点（连同它的提示词内容与在途状态）。 */
   const removeVideoClipNode = useCallback(
     (key: string) => {
+      for (const job of clipJobsRef.current.filter(job => job.sourceNodeId === key && clipJobActive(job))) {
+        void clipRenderClient.cancel(job.id).catch((error: unknown) => toast.error(`取消剪辑失败：${backendErrorMessage(error)}`));
+      }
       removeCanvasNode(key);
       // 智能剪辑的提示词住在提示词模块里，不随节点删除清理就会残留；
       // 存进 deletedPromptContentsRef 才能被撤销恢复。
@@ -5562,9 +6322,14 @@ export function WorkspaceApp({
   /** 解除某条连线。 */
   const removeAssetEdge = useCallback(
     (edgeId: string) => {
+      const edge = canvasStore.getState().assetEdges.find(item => item.id === edgeId);
+      if (edge && canvasStore.getState().nodesById[edge.toKey]?.type === "videoClip" && (clipSubmissionsRef.current.has(edge.toKey) || clipRemoteBusyRef.current.has(edge.toKey) || clipJobsRef.current.some(job => job.sourceNodeId === edge.toKey && clipJobActive(job)))) {
+        toast.error("智能剪辑进行中，暂时无法断开素材连线");
+        return;
+      }
       disconnectCanvasEdge(edgeId);
     },
-    [disconnectCanvasEdge],
+    [disconnectCanvasEdge, canvasStore],
   );
 
   /** 所有上游路径共用身份、顺序和循环去重规则。 */
@@ -6117,6 +6882,37 @@ export function WorkspaceApp({
       EMPTY_GENERATION_TASKS,
     [generationTasksQuery.data, canvasId],
   );
+  useEffect(() => {
+    clipRemoteBusyRef.current = new Set(generationTasks.filter(task => !isTerminalTaskStatus(task.status)).map(task => task.sourceNodeId));
+    for (const task of generationTasks) {
+      if (!["succeeded", "failed", "cancelled"].includes(task.status)) continue;
+      const node = canvasStore.getState().nodesById[task.sourceNodeId];
+      if (node?.type === "videoClip" && node.data.config.submission?.id === task.id) {
+        updateVideoClipConfig(node.data.key, { submission: null });
+      }
+    }
+  }, [generationTasks, canvasStore, updateVideoClipConfig]);
+  // A node's accepted task can fall outside the paginated history. Reconcile its
+  // durable ID directly; a history read never creates another generation.
+  useEffect(() => {
+    const visibleIds = new Set(generationTasks.map(task => task.id));
+    const pending = canvasNodesOfState(canvasStore.getState(), "videoClip").filter(node => node.config.submission && !visibleIds.has(node.config.submission.id) && !startingVideoClipKeys.has(node.key));
+    if (!pending.length || !isDesktopRuntime()) return;
+    let disposed = false;
+    void Promise.allSettled(pending.map(node => generationClient.getProgress(node.config.submission!.id))).then(results => {
+      if (disposed) return;
+      results.forEach((result, index) => {
+        const node = pending[index]!;
+        if (result.status === "fulfilled" && ["succeeded", "failed", "cancelled"].includes(result.value.summary.status)) {
+          const live = canvasStore.getState().nodesById[node.key];
+          if (live?.type === "videoClip" && live.data.config.submission?.id === node.config.submission?.id) updateVideoClipConfig(node.key, { submission: null });
+        } else if (result.status === "rejected") {
+          setNodeStartError(node.key, `原剪辑任务回执待核对：${backendErrorMessage(result.reason)}。任务身份已保留，请先在历史中核对。`);
+        }
+      });
+    });
+    return () => { disposed = true; };
+  }, [videoClipNodeLayoutTokens, generationTasks, startingVideoClipKeys, canvasStore, updateVideoClipConfig, setNodeStartError]);
 
   const refreshTasks = useCallback(() => {
     if (!isDesktopRuntime()) return;
@@ -6220,7 +7016,7 @@ export function WorkspaceApp({
     (record: GenerationResultRecord, previewSrc: string | null = null): boolean => {
       if (!isDesktopRuntime()) return false;
       const mediaType = record.mediaType;
-      if (mediaType !== "image" && mediaType !== "video" && mediaType !== "text") return false;
+      if (mediaType !== "image" && mediaType !== "video" && mediaType !== "text" && mediaType !== "audio") return false;
       const resultKey = `${record.taskId}#${record.resultIndex}`;
       const saved = record.saveStatus === "succeeded" && record.finalPath != null;
       if (!saved && previewSrc == null && mediaType !== "text") return false;
@@ -6667,13 +7463,18 @@ export function WorkspaceApp({
   }, [outputCardSignature, canvasNodesNow, taskById, taskResults, rawResponses, loadRawResponse]);
 
   const handleStartGeneration = useCallback(
-    (nodeKey: string) => {
-      if (startingNodeKeys.has(nodeKey)) return;
+    (nodeKey: string, options?: { readonly clientTaskId?: string }) => {
+      if (startingNodeKeys.has(nodeKey) || mediaSubmissionGuardRef.current.has(nodeKey)) return;
       const liveCanvas = snapshotV2({});
       const genNode = liveCanvas.genNodes.find((node) => node.key === nodeKey);
       if (!genNode) return;
       // 提示词节点通过自身的文本模型按钮执行，不创建媒体生成任务。
       if (genNode.kind === "prompt") return;
+      const isLongVideo = genNode.kind === "video" && genNode.config.videoMode === "longVideo2video";
+      if (options?.clientTaskId && (isLongVideo || genNode.config.generationCount !== 1)) {
+        setNodeStartError(nodeKey, "批量镜头任务必须使用单次生成，请检查节点设置。");
+        return;
+      }
       /*
        * 该节点已有在途任务时拒绝再次提交。
        *
@@ -6724,7 +7525,9 @@ export function WorkspaceApp({
           nodeKey,
           genNode.kind === "video"
             ? "请先在当前视频节点卡片中选择供应商和模型。"
-            : "请先在当前图片节点卡片中选择供应商和模型。",
+            : genNode.kind === "audio"
+              ? "请先在当前音频节点卡片中选择供应商和语音模型。"
+              : "请先在当前图片节点卡片中选择供应商和模型。",
         );
         return;
       }
@@ -6754,12 +7557,20 @@ export function WorkspaceApp({
       const hasMediaInput = connectedAssets.some(
         (input) => input.kind === "image" || input.kind === "video",
       );
+      const promptDocument = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
+      const hasPromptMedia = promptDocument?.items.some(item =>
+        item.kind === "media_reference"
+          ? item.target.mediaType === "image" || item.target.mediaType === "video"
+          : item.kind === "attachment" && (item.mediaType === "image" || item.mediaType === "video"),
+      ) ?? false;
       const operation: GenerationOperation =
         genNode.kind === "video"
           ? "video_generation"
-          : hasMediaInput
-            ? "image_to_image"
-            : "text_to_image";
+          : genNode.kind === "audio"
+            ? "speech_generation"
+            : hasMediaInput || hasPromptMedia || (genNode.config.imageMode != null && genNode.config.imageMode !== "auto")
+              ? "image_to_image"
+              : "text_to_image";
       const resolvedSelection = resolveGenerationSelection(
         genNode.kind,
         selection,
@@ -6770,7 +7581,9 @@ export function WorkspaceApp({
           nodeKey,
           genNode.kind === "video"
             ? "当前视频节点所选供应商或模型不可用，请在节点卡片中重新选择。"
-            : `当前图片节点所选供应商或模型不支持${operation === "image_to_image" ? "图片参考生成" : "文生图"}，请在节点卡片中重新选择。`,
+            : genNode.kind === "audio"
+              ? "当前音频节点所选供应商或模型不支持语音生成，请在节点卡片中重新选择。"
+              : `当前图片节点所选供应商或模型不支持${operation === "image_to_image" ? "图片参考生成" : "文生图"}，请在节点卡片中重新选择。`,
         );
         return;
       }
@@ -6786,20 +7599,48 @@ export function WorkspaceApp({
         }
         connections = [...connections, ...publicUrlInputs.map(perTaskVideoUrlConnection)];
       }
+      if (genNode.kind === "audio") {
+        /*
+         * 音频节点只吃**一段**音频作为音色参考。
+         *
+         * 后端也会拒（media.rs 的 speech 分支），但前端先拦一道：用户看到的是
+         * 「解绑哪个素材」而不是一句后端返回的校验失败。
+         */
+        const foreignReferences = connections.filter(
+          (connection) => connection.target.mediaType !== "audio",
+        );
+        if (foreignReferences.length > 0) {
+          setNodeStartError(
+            nodeKey,
+            "音频节点只接受音频素材作为音色参考，请先解绑图片或视频素材。",
+          );
+          return;
+        }
+        if (connections.length > 1) {
+          setNodeStartError(
+            nodeKey,
+            "音频节点最多只能引用 1 段参考音频，请先解绑多余的素材。",
+          );
+          return;
+        }
+      }
       const parameterCapabilities = modelParameterCapabilities(
         resolvedSelection.model.operationSchema,
         operation,
         resolvedSelection.model.remoteModelId,
       );
+      const videoIntent = genNode.kind === "video" && genNode.config.videoMode
+        ? compileCanvasVideoMode(genNode.config.videoMode, connections, genNode.config.mediaRoles)
+        : null;
+      if (videoIntent) connections = connections.map(connection => ({ ...connection, role: videoIntent.mediaRoles[connection.key] ?? connection.role ?? "" }));
       const greenScreen =
-        genNode.kind === "video" && genNode.config.greenScreen?.enabled
+        !isLongVideo && genNode.kind === "video" && genNode.config.greenScreen?.enabled
           ? genNode.config.greenScreen
           : null;
       if (greenScreen && genNode.kind === "video" && genNode.config.whiteModelControl?.enabled) {
         setNodeStartError(nodeKey, "绿幕流程与白模控制不能同时启用，请关闭其中一项后生成。");
         return;
       }
-      const promptDocument = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
       const greenScreenPreparation = greenScreen
         ? prepareGreenScreenGeneration(
             greenScreen,
@@ -6824,7 +7665,7 @@ export function WorkspaceApp({
               parameterCapabilities,
               greenScreenPreparation
                 ? { ...genNode.config, seedanceTaskMode: greenScreenPreparation.taskMode }
-                : genNode.config,
+                : videoIntent ? { ...genNode.config, seedanceTaskMode: videoIntent.taskMode, mediaRoles: videoIntent.mediaRoles } : genNode.config,
               seedanceTaskInputs(connections),
               resolvedSelection.model.operationSchema,
             )
@@ -6840,7 +7681,7 @@ export function WorkspaceApp({
         }));
       }
       const whiteModel =
-        genNode.kind === "video" && genNode.config.whiteModelControl?.enabled
+        !isLongVideo && genNode.kind === "video" && genNode.config.whiteModelControl?.enabled
           ? prepareWhiteModelGeneration(
               genNode.config.whiteModelControl,
               connections,
@@ -6854,7 +7695,11 @@ export function WorkspaceApp({
         return;
       }
       // Media-only acceptance is a remote capability, not a cached catalog policy.
-      const allowMediaOnly = true;
+      /*
+       * 音频节点例外：语音合成的**内容就是正文**，只有一段音色参考而没有正文
+       * 是一次「合成空字符串」——既没有产物，又已经付了费。所以这里要求有正文。
+       */
+      const allowMediaOnly = genNode.kind !== "audio";
       const panorama =
         genNode.kind === "image" && genNode.config.panoramaEnabled
           ? preparePanoramaGeneration(promptDocument, connections, allowMediaOnly)
@@ -6872,6 +7717,7 @@ export function WorkspaceApp({
             : promptContents.prepareGeneration(nodeKey, {
                 connections,
                 allowMediaOnly,
+                autoLink: genNode.config.autoLink !== false,
               });
       if (preparedPrompt == null || !preparedPrompt.ok) {
         const issue = preparedPrompt?.issues[0] ?? ({ kind: "empty_prompt" } as const);
@@ -6881,37 +7727,89 @@ export function WorkspaceApp({
       }
       const promptSegments = preparedPrompt.frozen.segments;
       const explicitMedia = preparedPrompt.frozen.explicitMedia;
+      if (genNode.kind === "audio") {
+        /*
+         * 语音合成必须**有要念的文字**。
+         *
+         * `prepareGeneration` 把「正文里 @ 引用了素材」也算作有内容，但音频节点的
+         * @引用是**音色参考**，不是要念的内容 —— 只写一个 @引用就提交，等于合成
+         * 一段空音频（付了费、拿不到东西）。这里按「文本片段里有没有字」再判一道。
+         */
+        const hasSpeakableText = promptSegments.some(
+          (segment) => segment.kind === "text" && segment.text.trim().length > 0,
+        );
+        if (!hasSpeakableText) {
+          const issue = { kind: "empty_prompt" } as const;
+          setNodeStartError(nodeKey, promptContentIssueMessage(issue));
+          promptContents.focusIssue(nodeKey, issue);
+          return;
+        }
+      }
 
       setNodeStartError(nodeKey, null);
+      mediaSubmissionGuardRef.current.add(nodeKey);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
-      const parameters: Record<string, unknown> = seedanceTask?.enabled
-        ? seedanceTask.parameters
-        : generationParameters(
-            parameterCapabilities,
-            genNode.kind === "image" && genNode.config.panoramaEnabled
-              ? {
-                  ...genNode.config.parameterValues,
-                  ...preferredPanoramaParameters(parameterCapabilities),
-                }
-              : genNode.config.parameterValues,
-            connections.length > 0,
-          );
+      /*
+       * 音频节点的参数走自己的键（与原站 liblib 的请求体同名）：
+       * language / sample_rate / format / voice_setting_speed / voice_setting_pitch /
+       * voice_setting_vol。后端按名字显式取（网关 TTS 契约里没有 language 项，
+       * 那一项会被忽略），所以这里**不能**过 `generationParameters` 的能力白名单 ——
+       * 白名单只保留模型 Schema 声明过的键，会把这六个全部筛掉。
+       */
+      const parameters: Record<string, unknown> =
+        genNode.kind === "audio"
+          ? {
+              ...generationParameters(
+                parameterCapabilities,
+                genNode.config.parameterValues,
+                connections.length > 0,
+              ),
+              language: genNode.config.language,
+              sample_rate: genNode.config.sampleRate,
+              format: genNode.config.format,
+              voice_setting_speed: genNode.config.voiceSettingSpeed,
+              voice_setting_pitch: genNode.config.voiceSettingPitch,
+              voice_setting_vol: genNode.config.voiceSettingVolume,
+            }
+          : seedanceTask?.enabled
+            ? seedanceTask.parameters
+            : generationParameters(
+                parameterCapabilities,
+                genNode.kind === "image" && genNode.config.panoramaEnabled
+                  ? {
+                      ...genNode.config.parameterValues,
+                      ...preferredPanoramaParameters(parameterCapabilities),
+                    }
+                  : genNode.config.parameterValues,
+                connections.length > 0,
+              );
+      if (genNode.kind === "image" && genNode.config.imageMode === "upscale") {
+        const resolution = parameterCapabilities.find(capability => capability.key === "resolution" || capability.key === "image_size");
+        const target = genNode.config.upscaleResolution ?? "2K";
+        const option = resolution?.options.find(option => String(option.value).toUpperCase() === target);
+        if (resolution && option) parameters[resolution.key] = option.value;
+      }
 
       // GPT-Image 契约的模型支持 `n` 参数：一次请求生成 n 张图片，不再拆分任务。
       // 其余供应商 API 无数量参数：数量 > 1 时拆分为 N 个独立任务（每个任务数量 1），
       // 每个任务对应一张占位产物卡片，单独展示状态与执行细节。
-      const supportsBatchCount = parameterCapabilities.some(
+      const batchCountCapability = parameterCapabilities.find(
         (capability) => capability.key === "n" && capability.type === "integer",
       );
-      const countMaximum = supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT;
-      const generationCount = Math.min(
-        countMaximum,
-        Math.max(1, Math.floor(genNode.config.generationCount) || 1),
-      );
+      const supportsBatchCount = batchCountCapability != null;
+      // 远端 n 是一次请求：上限取**契约声明的 maximum**（契约没声明才不设限）。
+      const countMaximum =
+        batchCountCapability?.maximum ??
+        (supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT);
+      // 语音合成一次只产出一段音频：数量恒为 1，拆成多个任务只是重复扣费。
+      const generationCount =
+        genNode.kind === "audio"
+          ? 1
+          : Math.min(countMaximum, Math.max(1, Math.floor(genNode.config.generationCount) || 1));
       if (supportsBatchCount) {
         parameters["n"] = generationCount;
       }
-      const taskCount = supportsBatchCount ? 1 : generationCount;
+      const taskCount = isLongVideo || supportsBatchCount ? 1 : generationCount;
       frontendLog(
         "info",
         `[generation] 发起画布生成: node=${nodeKey}（${genNode.kind}）, operation=${operation}, 提示词片段 ${promptSegments.length} 个（含 ${promptSegments.filter((s) => s.kind === "media_reference").length} 个 @引用）, 显式媒体输入 ${explicitMedia.length} 个, 生成数量 ${generationCount}${supportsBatchCount ? `（作为 n 参数一次请求提交）` : `（拆分为 ${taskCount} 个任务）`}`,
@@ -6919,10 +7817,19 @@ export function WorkspaceApp({
       const startErrors: string[] = [];
       const startedTaskIds: string[] = [];
       const submissions: Promise<unknown>[] = [];
+      // Share one import/review run across every output. A failed review never reaches start_generation.
+      const verificationLibraries = providerCatalog.filter(entry => entry.provider.enabled && providerSupportsAssetLibrary(entry.provider));
+      const verificationProviderId = genNode.kind === "video"
+        ? genNode.config.verificationProviderId ?? verificationLibraries.find(entry => entry.provider.id === selection.providerId)?.provider.id ?? verificationLibraries[0]?.provider.id ?? null
+        : null;
+      const preparedMaterials = genNode.kind === "video" && genNode.config.autoVerifyMaterials !== false
+        ? verifyGenerationMaterials(promptSegments, explicitMedia, verificationProviderId)
+        : Promise.resolve({ prompt: promptSegments, explicitMedia });
       let remaining = taskCount;
       const settleOne = () => {
         remaining -= 1;
         if (remaining > 0) return;
+        mediaSubmissionGuardRef.current.delete(nodeKey);
         setStartingNodeKeys((current) => {
           const next = new Set(current);
           next.delete(nodeKey);
@@ -6937,25 +7844,71 @@ export function WorkspaceApp({
           );
         }
       };
+      if (isLongVideo && genNode.kind === "video") {
+        const settings = resolveLongVideoSettings(genNode.config.longVideo, providerCatalog);
+        // 单片段时长夹到模型真正允许的档位：后端会再夹一次（冻结档案才是权威），
+        // 前端先夹是为了让「镜头数」和实际请求一致。
+        const durationCapability = parameterCapabilities.find(capability => /^(duration|duration_seconds|seconds)$/.test(capability.key));
+        const durationParameter = durationCapability?.key ?? "duration";
+        const longSettings = { ...settings, segmentSeconds: resolveLongVideoSegmentSeconds(durationCapability, settings.segmentSeconds) };
+        return preparedMaterials.then(async materials => {
+          const currentNode = snapshotV2({}).genNodes.find(node => node.key === nodeKey);
+          if (currentNode?.kind !== "video") throw new Error("素材准备期间原长视频节点已移除，本次没有提交生成。");
+          const generation: StartGenerationCommand = {
+            canvasId, sourceNodeId: nodeKey, ...(genNode.name ? { outputName: genNode.name } : {}),
+            operation: "video_generation", providerConnectionId: selection.providerId, modelDefinitionId: selection.modelDefinitionId,
+            prompt: materials.prompt, explicitMedia: materials.explicitMedia,
+            parameters: { ...parameters, [durationParameter]: longSettings.segmentSeconds }, generationCount: 1,
+          };
+          const fingerprint = JSON.stringify({ settings: longSettings, durationParameter, generation });
+          const requestId = currentNode.config.longVideoRequest?.fingerprint === fingerprint ? currentNode.config.longVideoRequest.id : crypto.randomUUID();
+          patchNode("gen", nodeKey, node => node.kind === "video" ? { ...node, config: { ...node.config, longVideoRequest: { id: requestId, fingerprint } } } : node);
+          const job = await longVideoClient.start({ ...longSettings, durationParameter, generation, requestId });
+          patchNode("gen", nodeKey, node => node.kind === "video" && node.config.longVideoRequest?.id === requestId ? { ...node, config: { ...node.config, longVideoRequest: null } } : node);
+          window.dispatchEvent(new CustomEvent("canvas:long-video-created", { detail: { canvasId, jobId: job.id } }));
+          return { taskIds: [job.id], errors: [] as string[] };
+        }).catch((error: unknown) => {
+          startErrors.push(backendErrorMessage(error));
+          return { taskIds: [] as string[], errors: startErrors };
+        }).finally(settleOne);
+      }
       for (let index = 0; index < taskCount; index += 1) {
         const outputName = genNode.name
           ? taskCount > 1
             ? `${genNode.name}_${String(index + 1).padStart(2, "0")}`
             : genNode.name
           : null;
-        const submission = generationClient
-          .start({
+        const submission = preparedMaterials
+          .then(materials => {
+            const currentNode = snapshotV2({}).genNodes.find(node => node.key === nodeKey);
+            if (currentNode?.kind !== genNode.kind) {
+              throw new Error("素材准备期间原生成节点已移除，本次没有提交生成。");
+            }
+            const command: StartGenerationCommand = {
+            ...(options?.clientTaskId ? { clientTaskId: options.clientTaskId } : {}),
             canvasId: canvasId,
             sourceNodeId: nodeKey,
             ...(outputName ? { outputName } : {}),
             operation,
             providerConnectionId: selection.providerId,
             modelDefinitionId: selection.modelDefinitionId,
-            prompt: promptSegments,
-            explicitMedia,
+            prompt: materials.prompt,
+            explicitMedia: materials.explicitMedia,
             parameters,
-            ...(seedanceTask?.enabled ? { videoTaskType: seedanceTask.mode } : {}),
+            ...(seedanceTask?.enabled ? { videoTaskType: seedanceTask.mode } : videoIntent ? { videoTaskType: videoIntent.taskMode } : {}),
             generationCount: 1,
+            };
+            return genNode.kind === "image"
+              ? canvasImageClient.start({
+                  generation: command,
+                  mode: genNode.config.imageMode ?? "auto",
+                  ...(genNode.config.imageMode === "upscale" ? { targetResolution: genNode.config.upscaleResolution ?? "2K" } : {}),
+                  ...(genNode.config.style ? { style: genNode.config.style } : {}),
+                  ...(genNode.config.imagePreset ? { preset: genNode.config.imagePreset } : {}),
+                  ...(genNode.config.cameraControl?.enabled === true ? { cameraControl: genNode.config.cameraControl } : {}),
+                  ...(genNode.config.panoramaEnabled ? { panorama: true } : {}),
+                })
+              : generationClient.start(command);
           })
           .then((taskId) => {
             startedTaskIds.push(taskId);
@@ -6963,6 +7916,7 @@ export function WorkspaceApp({
               ? Math.min(generationCount, GPT_IMAGE_MAX_GENERATION_COUNT)
               : 1;
             const publish = () => {
+              if (options?.clientTaskId && canvasNodesOfState(canvasStore.getState(), "output").some((output) => output.taskId === taskId)) return;
               if (greenScreenSignature) {
                 patchNode("gen", nodeKey, (node) =>
                   node.kind === "video" && node.config.greenScreen
@@ -6995,7 +7949,12 @@ export function WorkspaceApp({
                   resultKey: supportsBatchCount ? `${taskId}#${resultIndex}` : null,
                   sourceNodeId: genNode.key,
                   taskId,
-                  mediaType: genNode.kind === "video" ? "video" : "image",
+                  mediaType:
+                    genNode.kind === "video"
+                      ? "video"
+                      : genNode.kind === "audio"
+                        ? "audio"
+                        : "image",
                   finalPath: null,
                   previewSrc: null,
                   name: outputName
@@ -7031,6 +7990,7 @@ export function WorkspaceApp({
     },
     [
       canvasId,
+      canvasStore,
       snapshotV2,
       patchNode,
       generationTasks,
@@ -7312,6 +8272,937 @@ export function WorkspaceApp({
   useEffect(() => {
     if (canvasHydrated) synchronizePromptSources(promptSourceByTarget, mentionCandidatesFor);
   }, [canvasHydrated, mentionCandidatesFor, promptSourceByTarget, synchronizePromptSources]);
+
+  /*
+   * 「尝试：」动作与面板翻译用到的易变值。
+   *
+   * 这两个动作回调必须**永远拿到最新状态**：画布节点的卡片内容由外壳缓存
+   * （`stableCanvasFlowNode` 按签名逐项比对）复用，元素一旦创建，props 就被冻住。
+   * 若把 `genNodeSizes`（每拖一次节点就变）这类值放进 `useCallback` 依赖，
+   * 回调身份跟着抖，而卡片内容又不会重建 —— 节点拿到的就是**上一次**的回调，
+   * 动作会作用在旧状态上（比如把视频节点建到已经挪走的老位置旁边）。
+   *
+   * 所以这里把易变值收进 ref，回调本身保持身份恒定。
+   */
+  const textTryStateRef = useRef({
+    genNodeSizes,
+    occupiedNodeRects,
+    nodeModelSelections,
+    providerCatalogLoaded,
+    providerCatalog,
+  });
+  useLayoutEffect(() => {
+    textTryStateRef.current = {
+      genNodeSizes,
+      occupiedNodeRects,
+      nodeModelSelections,
+      providerCatalogLoaded,
+      providerCatalog,
+    };
+  }, [
+    genNodeSizes,
+    occupiedNodeRects,
+    nodeModelSelections,
+    providerCatalogLoaded,
+    providerCatalog,
+  ]);
+
+  /**
+   * 「尝试：」四个入口（liblib.tv 文本节点空态的快捷方式）。
+   *
+   * 逆向来源：docs/integrations/liblib-text-node-re.md 第 3 节。
+   * 原站四个动作各自改写文本节点并在旁边建节点；本项目把它们落到提示词节点上：
+   *  - writeText     → 由节点视图自己处理（聚焦节点内的输出编辑器）
+   *  - textToVideo   → 写入一段爆款脚本 → 右侧建视频节点 → 连线（文本 → 视频）
+   *  - imageToPrompt → 选择并导入本地图片 → 连线（图片 → 文本）→ 写入看图指令
+   *  - textToMusic   → 写入音乐提示词 → 音频节点本项目尚未接入，给出明确说明
+   */
+  const handleTextTryAction = useCallback(
+    (nodeKey: string, action: CanvasTextTryActionKey) => {
+      // 「自己编写内容」是纯本地交互：聚焦节点内已有的编辑器，由节点视图处理。
+      if (action === "writeText") return;
+      const node = canvasNodesNow("gen").find(
+        (item): item is Extract<GenNodeData, { kind: "prompt" }> =>
+          item.key === nodeKey && item.kind === "prompt",
+      );
+      if (!node) return;
+      const existingContent = promptContents.read(nodeKey);
+      if (
+        node.config.sourcePrompt.trim() ||
+        node.config.generatedPrompt.trim() ||
+        (node.config.conversation ?? []).length > 0 ||
+        (existingContent && (existingContent.plainText.trim() || existingContent.referenceCount ||
+          existingContent.pendingCount || existingContent.attachmentCount))
+      ) {
+        toast.info("节点内容已变化，请继续编辑现有内容。");
+        return;
+      }
+      const state = textTryStateRef.current;
+      const candidates = mentionCandidatesFor(nodeKey);
+      /** 整篇改写节点正文：先落模块里的文档，再把 config 与快照同批写下。 */
+      const writeNodeContent = (text: string) => {
+        replaceGeneratedPrompt(nodeKey, text, candidates);
+        patchNode(
+          "gen",
+          nodeKey,
+          (item) =>
+            item.kind === "prompt"
+              ? { ...item, config: { ...item.config, generatedPrompt: text } }
+              : item,
+          promptContents.snapshotAll(),
+        );
+      };
+      const sourceWidth =
+        state.genNodeSizes[nodeKey]?.width ?? genNodeDimensions("prompt").width;
+      if (action === "textToVideo") {
+        const story = randomTextToVideoPrompt();
+        const { width, height } = genNodeDimensions("video");
+        const position = nearestAvailableNodePosition(
+          { x: node.x + sourceWidth + NEW_NODE_GAP, y: node.y, width, height },
+          state.occupiedNodeRects,
+        );
+        const video: GenNodeData = {
+          key: genNodeKey(),
+          kind: "video",
+          config: createVideoNodeConfig(state.nodeModelSelections.video, state.providerCatalogLoaded),
+          ...position,
+        };
+        // 边是「文本 → 视频」：视频节点消费文本节点的输出（正文由连线自动同步过去）。
+        try {
+          const result = insertSubgraph(
+            [{ type: "gen", data: video }],
+            [{ id: `${nodeKey}->${video.key}`, fromKey: nodeKey, toKey: video.key }],
+            { selectNodeKey: video.key },
+          );
+          if (result !== "applied") {
+            toast.error("未能创建视频节点", { description: "请重试，或手动添加视频节点。" });
+            return;
+          }
+        } catch (error: unknown) {
+          toast.error("未能创建视频节点", { description: backendErrorMessage(error) });
+          return;
+        }
+        writeNodeContent(story);
+        toast.success("已写入故事脚本，并在右侧建好视频节点", {
+          description: "在视频节点里选好模型即可生成。",
+        });
+        return;
+      }
+      if (action === "imageToPrompt") {
+        if (!isDesktopRuntime()) {
+          toast("请在桌面应用中选择本地图片。");
+          return;
+        }
+        if (textImageImportGuardRef.current.has(nodeKey)) return;
+        textImageImportGuardRef.current.add(nodeKey);
+        let savedAsset = false;
+        void (async () => {
+          const path = await pickLocalImageFile();
+          if (!path) return;
+          const record = await localBase64AssetClient.importAsset({ localPath: path });
+          savedAsset = true;
+          refreshLocalAssets("upload-finished");
+          if (record.mediaType !== "image") {
+            toast.error("所选文件不是图片", { description: "请重新选择图片文件。" });
+            return;
+          }
+          const current = canvasStore.getState().nodesById[nodeKey];
+          const content = promptContents.read(nodeKey);
+          if (
+            current?.type !== "gen" || current.data.kind !== "prompt" ||
+            current.data.config.sourcePrompt.trim() || current.data.config.generatedPrompt.trim() ||
+            (current.data.config.conversation ?? []).length > 0 ||
+            (content && (content.plainText.trim() || content.referenceCount ||
+              content.pendingCount || content.attachmentCount))
+          ) {
+            toast.info("图片已保存到本地素材库", {
+              description: "原节点已改变，请从素材库手动连接图片。",
+            });
+            return;
+          }
+          const position = nearestAvailableNodePosition(
+            { x: current.data.x - ASSET_NODE_WIDTH - NEW_NODE_GAP, y: current.data.y,
+              width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT },
+            textTryStateRef.current.occupiedNodeRects,
+          );
+          const image: AssetNodeData = {
+            key: assetNodeKey(),
+            assetId: record.id,
+            providerConnectionId: "",
+            source: "local",
+            kind: "image",
+            name: record.name,
+            previewUrl: record.previewUrl,
+            videoUrl: null,
+            ...position,
+          };
+          const result = insertSubgraph(
+            [{ type: "asset", data: image }],
+            [{ id: `${image.key}->${nodeKey}`, fromKey: image.key, toKey: nodeKey }],
+            { selectNodeKey: nodeKey },
+          );
+          if (result !== "applied") {
+            toast.error("图片已保存到本地素材库，但未能连接到节点", {
+              description: "请从素材库手动连接图片。",
+            });
+            return;
+          }
+          patchNode("gen", nodeKey, (item) => item.kind === "prompt"
+            ? { ...item, config: { ...item.config, sourcePrompt: IMAGE_TO_PROMPT_NODE_PROMPT } }
+            : item);
+          toast.success("参考图已连接", {
+            description: "选择支持图片理解的文本模型，然后生成提示词。",
+          });
+        })().catch((error: unknown) => {
+          toast.error(savedAsset ? "图片已保存，但未能连接到节点" : "导入参考图失败", {
+            description: savedAsset
+              ? "请从本地素材库手动连接图片。"
+              : backendErrorMessage(error),
+          });
+        }).finally(() => {
+          textImageImportGuardRef.current.delete(nodeKey);
+        });
+        return;
+      }
+      // textToMusic：音频节点本项目尚未接入，先把音乐提示词写进节点，别让用户的活儿丢掉。
+      writeNodeContent(TEXT_TO_MUSIC_NODE_PROMPT);
+      toast("音频节点后端暂未接入。", {
+        description: "音乐提示词已写进本节点，可以先用文本模型继续打磨。",
+      });
+    },
+    [canvasNodesNow, canvasStore, insertSubgraph, mentionCandidatesFor, patchNode, promptContents, refreshLocalAssets, replaceGeneratedPrompt],
+  );
+
+  /** 记一笔「编辑区挂上后把光标放进正文」。 */
+  const onPromptFocusRequest = useCallback((nodeKey: string) => {
+    setPendingPromptFocusKey(nodeKey);
+  }, []);
+
+  /** 正文已聚焦（或编辑器没挂上、落不进去）：清掉待办，免得标记一直挂着。 */
+  const onPromptFocusHandled = useCallback((nodeKey: string) => {
+    setPendingPromptFocusKey((current) => (current === nodeKey ? null : current));
+  }, []);
+
+  /**
+   * 悬浮生成器面板的「翻译提示词」。
+   *
+   * 逆向来源：docs/integrations/liblib-text-node-re.md 第 4.6 节。
+   * 原站是 `POST /api/canva/translate`；本项目走自己的文本模型链路
+   * （后端 `translate_canvas_text`），译文直接回填节点的「创意 / 需求」。
+   */
+  const handleTranslateCanvasText = useCallback(
+    (nodeKey: string) => {
+      const node = canvasNodesNow("gen").find(
+        (item): item is Extract<GenNodeData, { kind: "prompt" }> =>
+          item.key === nodeKey && item.kind === "prompt",
+      );
+      if (!node) return;
+      const sourceText = node.config.sourcePrompt;
+      const text = sourceText.trim();
+      if (!text) {
+        toast("提示词为空，请输入内容后点击");
+        return;
+      }
+      if (!isDesktopRuntime()) {
+        toast("提示词翻译只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
+        return;
+      }
+      const state = textTryStateRef.current;
+      if (textTranslationGuardRef.current.has(nodeKey)) return;
+      const provider = state.providerCatalog.find(
+        (entry) =>
+          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
+      );
+      const model = provider?.models.find(
+        (item) =>
+          item.definitionId === node.config.modelSelection.modelDefinitionId &&
+          isTextGenerationModel(item),
+      );
+      if (!provider || !model) {
+        toast("请先在当前提示词节点中选择可用的文本模型。");
+        return;
+      }
+      textTranslationGuardRef.current.add(nodeKey);
+      setTranslatingNodeKeys((current) => new Set(current).add(nodeKey));
+      void translateCanvasTextClient
+        .run({
+          canvasId,
+          sourceNodeId: nodeKey,
+          providerConnectionId: provider.provider.id,
+          modelDefinitionId: model.definitionId,
+          text,
+          targetLanguage: "English",
+        })
+        .then((result) => {
+          const translated = result.translatedText.trim();
+          if (!translated) {
+            toast("翻译结果为空，请重试。");
+            return;
+          }
+          const current = canvasNodesNow("gen").find((item) => item.key === nodeKey);
+          if (current?.kind !== "prompt" || current.config.sourcePrompt !== sourceText) {
+            toast.info("译文已生成，当前输入已变化", {
+              description: "保留了你正在编辑的内容；译文也可在任务历史中查看。",
+              duration: 10000,
+              action: {
+                label: "复制译文",
+                onClick: () => {
+                  void copyTextToDesktopClipboard(translated).then(
+                    () => toast.success("译文已复制"),
+                    (error: unknown) => toast.error("复制译文失败", { description: backendErrorMessage(error) }),
+                  );
+                },
+              },
+            });
+            return;
+          }
+          patchNode("gen", nodeKey, (item) =>
+            item.kind === "prompt" && item.config.sourcePrompt === sourceText
+              ? { ...item, config: { ...item.config, sourcePrompt: translated } }
+              : item,
+          );
+          toast.success("提示词已翻译成英文");
+        })
+        .catch((error: unknown) => {
+          toast.error("翻译失败", { description: backendErrorMessage(error) });
+        })
+        .finally(() => {
+          textTranslationGuardRef.current.delete(nodeKey);
+          setTranslatingNodeKeys((current) => {
+            const next = new Set(current);
+            next.delete(nodeKey);
+            return next;
+          });
+        });
+    },
+    [canvasId, canvasNodesNow, patchNode],
+  );
+
+  /**
+   * 音频节点的「翻译提示词」。
+   *
+   * 与文本节点走同一条后端链路（`translate_canvas_text`），差别只有两处：
+   * 正文在 `promptContents` 里（不在节点的 `sourcePrompt` 字段），而音频节点
+   * 本身没有文本模型，所以取供应商目录里第一个可用的文本模型。
+   */
+  const handleTranslateAudioPrompt = useCallback(
+    (nodeKey: string) => {
+      const node = canvasNodesNow("gen").find(
+        (item): item is Extract<GenNodeData, { kind: "audio" }> =>
+          item.key === nodeKey && item.kind === "audio",
+      );
+      if (!node) return;
+      const text = (promptContents.read(nodeKey)?.plainText ?? "").trim();
+      if (!text) {
+        toast("提示词为空，请输入内容后点击");
+        return;
+      }
+      if (!isDesktopRuntime()) {
+        toast("提示词翻译只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
+        return;
+      }
+      if (textTranslationGuardRef.current.has(nodeKey)) return;
+      const state = textTryStateRef.current;
+      const selection = firstTextModelSelection(state.providerCatalog);
+      if (!selection.providerId || !selection.modelDefinitionId) {
+        toast("还没有可用的文本模型，请先在全局设置里绑定一个支持文本生成的模型。");
+        return;
+      }
+      textTranslationGuardRef.current.add(nodeKey);
+      setTranslatingNodeKeys((current) => new Set(current).add(nodeKey));
+      void translateCanvasTextClient
+        .run({
+          canvasId,
+          sourceNodeId: nodeKey,
+          providerConnectionId: selection.providerId,
+          modelDefinitionId: selection.modelDefinitionId,
+          text,
+          targetLanguage: "English",
+        })
+        .then((result) => {
+          const translated = result.translatedText.trim();
+          if (!translated) {
+            toast.info("译文为空", {
+              description: "当前提示词可能已经是英文，或模型没有返回内容。",
+            });
+            return;
+          }
+          // 保留附件与 @引用：翻译只换文字，不该把引用身份一起抹掉。
+          promptContents.replaceTextKeepingAttachments(
+            nodeKey,
+            translated,
+            mentionCandidatesFor(nodeKey),
+          );
+          toast.success("提示词已翻译成英文");
+        })
+        .catch((error: unknown) => {
+          toast.error("翻译失败", { description: backendErrorMessage(error) });
+        })
+        .finally(() => {
+          textTranslationGuardRef.current.delete(nodeKey);
+          setTranslatingNodeKeys((current) => {
+            const next = new Set(current);
+            next.delete(nodeKey);
+            return next;
+          });
+        });
+    },
+    [canvasId, canvasNodesNow, mentionCandidatesFor, promptContents],
+  );
+
+  /**
+   * 音频节点的「音频生视频」。
+   *
+   * 只建节点、连上线，**不自动发起付费生成**：用户还没写提示词、也没确认模型，
+   * 自动提交等于替用户按下付费按钮。原站的这个入口同样是「建好节点让你接着填」。
+   *
+   * 方向：音频是上游，视频是下游 —— 视频节点摆在音频节点**右边**，
+   * 边是「音频 → 视频」（音频节点的输出端口喂给视频节点的输入端口）。
+   */
+  const handleAudioToVideo = useCallback(
+    (nodeKey: string) => {
+      const node = canvasNodesNow("gen").find(
+        (item): item is Extract<GenNodeData, { kind: "audio" }> =>
+          item.key === nodeKey && item.kind === "audio",
+      );
+      if (!node) return;
+      const state = textTryStateRef.current;
+      const { width, height } = genNodeDimensions("video");
+      const position = nearestAvailableNodePosition(
+        { x: node.x + AUDIO_GEN_NODE_WIDTH + NEW_NODE_GAP, y: node.y, width, height },
+        state.occupiedNodeRects,
+      );
+      const video: GenNodeData = {
+        key: genNodeKey(),
+        kind: "video",
+        config: createVideoNodeConfig(state.nodeModelSelections.video, state.providerCatalogLoaded),
+        ...position,
+      };
+      insertSubgraph(
+        [{ type: "gen", data: video }],
+        [{ id: `audio-${node.key}-${video.key}`, fromKey: node.key, toKey: video.key }],
+        { selectNodeKey: video.key },
+      );
+      toast.success("已建好视频节点", {
+        description: "这段音频已连入视频节点；写好提示词并确认模型后再点生成。",
+      });
+    },
+    [canvasNodesNow, insertSubgraph],
+  );
+
+  /** 新建一份上游文本，由用户填写故事，再通过连线供脚本生成器读取。 */
+  const handleScriptStory = useCallback((nodeKey: string) => {
+    const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+    if (!node?.config.scriptGenerator) return;
+    const state = textTryStateRef.current;
+    const { width, height } = genNodeDimensions("prompt");
+    const position = nearestAvailableNodePosition(
+      { x: node.x - width - NEW_NODE_GAP, y: node.y, width, height }, state.occupiedNodeRects,
+    );
+    const source: GenNodeData = {
+      key: genNodeKey(), kind: "prompt", name: "故事文本", ...position,
+      config: createPromptNodeConfig(state.nodeModelSelections.prompt, state.providerCatalogLoaded),
+    };
+    const result = insertSubgraph(
+      [{ type: "gen", data: source }],
+      [{ id: `${source.key}->${nodeKey}`, fromKey: source.key, toKey: nodeKey }],
+      { selectNodeKey: source.key },
+    );
+    if (result !== "applied") {
+      toast.error("未能创建故事文本节点，请重试。");
+      return;
+    }
+    setPendingPromptFocusKey(source.key);
+    setNodeMarquee(false);
+    setMarqueeNodeKeys(new Set());
+    selectEdge(null);
+    selectNode(source.key);
+  }, [canvasNodesNow, insertSubgraph, selectEdge, selectNode]);
+
+  /** 只替换仍未被编辑过的输入；翻译任务本身会记入历史。 */
+  const handleScriptTranslate = useCallback((nodeKey: string) => {
+    const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+    if (!node?.config.scriptGenerator || textTranslationGuardRef.current.has(nodeKey)) return;
+    const sourceText = node.config.composer;
+    if (!sourceText.trim()) { toast("提示词为空，请输入内容后点击"); return; }
+    if (!isDesktopRuntime()) { toast("提示词翻译只能在桌面应用中调用。"); return; }
+    const provider = textTryStateRef.current.providerCatalog.find((entry) =>
+      entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId);
+    const model = provider?.models.find((item) => item.definitionId === node.config.modelSelection.modelDefinitionId && isTextGenerationModel(item));
+    if (!provider || !model) { toast("请先选择可用的文本模型。"); return; }
+    textTranslationGuardRef.current.add(nodeKey);
+    setTranslatingNodeKeys((current) => new Set(current).add(nodeKey));
+    void translateCanvasTextClient.run({
+      canvasId, sourceNodeId: nodeKey, providerConnectionId: provider.provider.id,
+      modelDefinitionId: model.definitionId, text: sourceText.trim(), targetLanguage: "English",
+    }).then((result) => {
+      const translated = result.translatedText.trim();
+      if (!translated) { toast("翻译结果为空，请重试。"); return; }
+      let applied = false;
+      patchNode("screenplay", nodeKey, (current) => {
+        if (!current.config.scriptGenerator || current.config.composer !== sourceText) return current;
+        applied = true;
+        return { ...current, config: { ...current.config, composer: translated } };
+      });
+      if (applied) toast.success("提示词已翻译成英文");
+      else toast.info("译文已生成，当前输入已变化", {
+        description: "保留了当前输入；译文可在任务历史中查看。",
+        action: { label: "复制译文", onClick: () => {
+          void copyTextToDesktopClipboard(translated).then(
+            () => toast.success("译文已复制"),
+            (error: unknown) => toast.error("复制译文失败", { description: backendErrorMessage(error) }),
+          );
+        } },
+      });
+    }).catch((error: unknown) => toast.error("翻译失败", { description: backendErrorMessage(error) }))
+      .finally(() => {
+        textTranslationGuardRef.current.delete(nodeKey);
+        setTranslatingNodeKeys((current) => {
+          const next = new Set(current); next.delete(nodeKey); return next;
+        });
+      });
+  }, [canvasId, canvasNodesNow, patchNode]);
+
+  /**
+   * 为某个镜头创建图片/视频生成节点。
+   *
+   * 单镜「创建图片节点」与批量生图/生视频共用这一条链路：参考图解析、本地素材导入、
+   * 指纹核对、节点落位都集中在这里；批量只是额外指定模型、参数与首帧。
+   *
+   * 返回新节点 key；无法创建时返回原因，由调用方决定是提示用户还是把这一镜标记为阻塞。
+   */
+  const createScriptMediaNode = useCallback(async (options: {
+    readonly nodeKey: string;
+    readonly shotId: string;
+    readonly kind: "image" | "video";
+    /** 批量指定的模型；缺省时沿用画布上当前选中的模型。 */
+    readonly modelSelection?: { readonly providerId: string; readonly modelDefinitionId: string };
+    readonly parameterValues?: Readonly<Record<string, ModelParameterValue>>;
+    /** 首帧：画布上的图片或上一批生成出来的产物。 */
+    readonly frame?: ScriptBatchFrame | null;
+    /** 首帧在请求里的角色（如 first_frame）；缺省时由后端按素材类型推导。 */
+    readonly frameRole?: string | undefined;
+    /** 是否带上镜头关联资产的参考图；批量生视频带首帧时不再重复带参考图。 */
+    readonly useAssetReferences?: boolean;
+  }): Promise<{ readonly key: string } | { readonly reason: string }> => {
+    const { nodeKey, shotId, kind } = options;
+    const scriptNode = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+    const script = scriptNode?.config.scriptGenerator;
+    const shot = script?.shots.find((item) => item.id === shotId);
+    if (!scriptNode || !script || !shot) return { reason: "脚本节点已不存在。" };
+    if (shot.unresolvedAssetRefs?.length) {
+      return { reason: "镜头的资产关联尚未确认，请在镜头行核对资产并清除提示。" };
+    }
+    if ((shot.assetIds ?? []).some((id) => !script.assets.some((asset) => asset.id === id))) {
+      return { reason: "镜头关联的资产已删除，请清除失效关联或重新选择资产。" };
+    }
+    const prompt = kind === "image" ? shot.imagePrompt : (shot.videoPrompt || shot.imageToVideoPrompt);
+    if (!prompt.trim()) return { reason: "镜头缺少可用的提示词。" };
+    const assets = matchingScriptAssets(shot, script.assets);
+    const snapshot = JSON.stringify({ shot, assets });
+    const useAssetReferences = options.useAssetReferences !== false;
+    const nodeKeys = new Set(useAssetReferences
+      ? assets.flatMap((asset) => asset.reference?.kind === "canvas" ? [asset.reference.sourceKey] : [])
+      : []);
+    const materialIds = new Set(useAssetReferences
+      ? assets.flatMap((asset) => asset.reference?.kind === "material" ? [asset.reference.materialId] : [])
+      : []);
+    const connected = canvasInputsFor(nodeKey).media;
+    if ([...nodeKeys].some((key) => !connected.some((input) => input.sourceKey === key && input.kind === "image"))) {
+      return { reason: "参考图已断开，请在准备资产步骤重新关联参考图。" };
+    }
+    const referenceTargets = (inputs: typeof connected) => JSON.stringify([...nodeKeys].map((key) => ({
+      key, target: inputs.find((input) => input.sourceKey === key && input.kind === "image")?.target ?? null,
+    })));
+    const frozenTargets = referenceTargets(connected);
+    const materials = [...materialIds].map((id) => (scriptNode.config.materials ?? []).find((item) => item.id === id));
+    if (materials.some((item) => !item || item.kind !== "image")) {
+      return { reason: "本地参考图不可用，请重新添加并关联参考图。" };
+    }
+    const frozenMaterials = JSON.stringify(materials);
+    if (materials.length && !isDesktopRuntime()) return { reason: "请在桌面应用中使用本地参考图。" };
+    const imported: Awaited<ReturnType<typeof localBase64AssetClient.importAsset>>[] = [];
+    for (const material of materials) {
+      const record = await localBase64AssetClient.importAsset({ localPath: material!.localPath });
+      refreshLocalAssets("upload-finished");
+      if (record.mediaType !== "image") throw new Error("所选参考素材不是图片。");
+      imported.push(record);
+    }
+    // 首帧在导入之后解析：期间画布可能已变化，过期的首帧不再接进新节点。
+    const frameSourceKey = options.frame
+      ? scriptBatchFrameSourceKey(options.frame, snapshotV2(promptContents.snapshotAll()))
+      : null;
+    const current = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+    const currentScript = current?.config.scriptGenerator;
+    const currentShot = currentScript?.shots.find((item) => item.id === shotId);
+    if (!current || !currentScript || !currentShot ||
+      JSON.stringify({ shot: currentShot, assets: matchingScriptAssets(currentShot, currentScript.assets) }) !== snapshot ||
+      referenceTargets(canvasInputsFor(nodeKey).media) !== frozenTargets ||
+      JSON.stringify([...materialIds].map((id) => (current.config.materials ?? []).find((item) => item.id === id))) !== frozenMaterials) {
+      return { reason: "镜头或参考图已变化，请重新发起。" };
+    }
+    const state = textTryStateRef.current;
+    const { width, height } = genNodeDimensions(kind);
+    const occupied = Object.values(canvasStore.getState().nodesById).map(liveCanvasNodeRect);
+    const position = nearestAvailableNodePosition({
+      x: current.x + (current.measured?.width ?? 350) + NEW_NODE_GAP,
+      y: current.y, width, height,
+    }, occupied);
+    const index = currentScript.shots.findIndex((item) => item.id === shotId) + 1;
+    const key = genNodeKey();
+    const selection = options.modelSelection;
+    const parameterValues = options.parameterValues ? { ...options.parameterValues } : undefined;
+    const media: GenNodeData = kind === "image"
+      ? { key, kind, name: `镜头 ${index} 图片`, ...position,
+          config: {
+            ...createImageNodeConfig(selection ?? state.nodeModelSelections.image, state.providerCatalogLoaded),
+            ...(parameterValues ? { parameterValues } : {}),
+          } }
+      : { key, kind, name: `镜头 ${index} 视频`, ...position,
+          config: {
+            ...createVideoNodeConfig(selection ?? state.nodeModelSelections.video, state.providerCatalogLoaded),
+            ...(parameterValues ? { parameterValues } : {}),
+            ...(frameSourceKey && options.frameRole ? { mediaRoles: { [frameSourceKey]: options.frameRole } } : {}),
+          } };
+    const entries: CanvasNodeEntry[] = [{ type: "gen", data: media }];
+    const placed = [...occupied, { ...position, width, height }];
+    const sources = [...nodeKeys];
+    if (frameSourceKey) sources.push(frameSourceKey);
+    for (const record of imported) {
+      const assetPosition = nearestAvailableNodePosition({
+        x: position.x - ASSET_NODE_WIDTH - NEW_NODE_GAP, y: position.y,
+        width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT,
+      }, placed);
+      const asset: AssetNodeData = {
+        key: assetNodeKey(), assetId: record.id, providerConnectionId: "", source: "local",
+        kind: "image", name: record.name, previewUrl: record.previewUrl, videoUrl: null, ...assetPosition,
+      };
+      entries.push({ type: "asset", data: asset });
+      sources.push(asset.key);
+      placed.push({ ...assetPosition, width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT });
+    }
+    const edges = sources.map((source) => ({ id: `${source}->${key}`, fromKey: source, toKey: key }));
+    if (insertSubgraph(entries, edges, { selectNodeKey: key }) !== "applied") {
+      return { reason: "未能创建媒体节点，请重试。" };
+    }
+    promptContents.replaceText(key, prompt, []);
+    patchNode("gen", key, (item) => ({ ...item }), promptContents.snapshotAll());
+    scheduleCanvasSaveRef.current();
+    return { key };
+  }, [canvasNodesNow, canvasInputsFor, canvasStore, insertSubgraph, patchNode, promptContents, refreshLocalAssets, snapshotV2]);
+
+  /** 用单镜提示词创建待配置的媒体节点，不自动提交生成任务。 */
+  const handleScriptCreateMedia = useCallback((nodeKey: string, shotId: string, kind: "image" | "video") => {
+    const operationKey = `${nodeKey}:${shotId}:${kind}`;
+    if (scriptMediaCreationGuardRef.current.has(operationKey)) return;
+    scriptMediaCreationGuardRef.current.add(operationKey);
+    void (async () => {
+      const created = await createScriptMediaNode({ nodeKey, shotId, kind });
+      if ("reason" in created) {
+        toast.error("未能创建媒体节点", { description: created.reason });
+        return;
+      }
+      const index = Math.max(0, canvasNodesNow("screenplay").find((item) => item.key === nodeKey)?.config.scriptGenerator?.shots
+        .findIndex((item) => item.id === shotId) ?? 0) + 1;
+      toast.success(`已创建镜头 ${index} 的${kind === "image" ? "图片" : "视频"}节点`, {
+        description: "提示词与已关联的参考图已填入；选择模型后可自行生成。",
+      });
+    })().catch((error: unknown) => toast.error("创建媒体节点失败", {
+      description: `${backendErrorMessage(error)}；已导入的图片可在本地素材库中查看。`,
+    })).finally(() => scriptMediaCreationGuardRef.current.delete(operationKey));
+  }, [canvasNodesNow, createScriptMediaNode]);
+
+  /** 为角色、场景或道具准备一张可继续编辑的图片生成节点。 */
+  const handleScriptCreateAsset = useCallback((nodeKey: string, assetId: string) => {
+    const operationKey = `${nodeKey}:asset:${assetId}`;
+    if (scriptMediaCreationGuardRef.current.has(operationKey)) return;
+    scriptMediaCreationGuardRef.current.add(operationKey);
+    void (async () => {
+      const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+      const asset = node?.config.scriptGenerator?.assets.find((item) => item.id === assetId);
+      if (!node || !asset?.description.trim()) return;
+      const reference = asset.reference;
+      const sourceKey = reference?.kind === "canvas" ? reference.sourceKey : null;
+      const sourceInput = sourceKey ? canvasInputsFor(nodeKey).media.find((input) => input.sourceKey === sourceKey && input.kind === "image") : null;
+      if (sourceKey && !sourceInput) {
+        toast.error("参考图已断开", { description: "请重新选择资产参考图。" }); return;
+      }
+      const frozenTarget = JSON.stringify(sourceInput?.target ?? null);
+      const material = reference?.kind === "material"
+        ? (node.config.materials ?? []).find((item) => item.id === reference.materialId) : undefined;
+      if (reference?.kind === "material" && (!material || material.kind !== "image")) {
+        toast.error("本地参考图不可用", { description: "请重新添加并关联参考图。" }); return;
+      }
+      const snapshot = JSON.stringify({ asset, material });
+      let imported: Awaited<ReturnType<typeof localBase64AssetClient.importAsset>> | null = null;
+      if (material) {
+        if (!isDesktopRuntime()) { toast("请在桌面应用中使用本地参考图。"); return; }
+        imported = await localBase64AssetClient.importAsset({ localPath: material.localPath });
+        refreshLocalAssets("upload-finished");
+        if (imported.mediaType !== "image") throw new Error("所选参考素材不是图片。");
+      }
+      const current = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+      const latestAsset = current?.config.scriptGenerator?.assets.find((item) => item.id === assetId);
+      const latestMaterial = reference?.kind === "material"
+        ? (current?.config.materials ?? []).find((item) => item.id === reference.materialId) : undefined;
+      if (!current || JSON.stringify({ asset: latestAsset, material: latestMaterial }) !== snapshot ||
+        (sourceKey && JSON.stringify(canvasInputsFor(nodeKey).media.find((input) => input.sourceKey === sourceKey && input.kind === "image")?.target ?? null) !== frozenTarget)) {
+        toast.info("资产或参考图已变化", { description: "已保留当前内容；导入的图片可在本地素材库中查看。" }); return;
+      }
+      const state = textTryStateRef.current;
+      const { width, height } = genNodeDimensions("image");
+      const occupied = Object.values(canvasStore.getState().nodesById).map(liveCanvasNodeRect);
+      const position = nearestAvailableNodePosition({
+        x: current.x + (current.measured?.width ?? 350) + NEW_NODE_GAP, y: current.y, width, height,
+      }, occupied);
+      const label = asset.kind === "character" ? "角色" : asset.kind === "scene" ? "场景" : "道具";
+      const key = genNodeKey();
+      const image: GenNodeData = {
+        key, kind: "image", name: `${label}：${asset.name || "未命名"}`, ...position,
+        config: createImageNodeConfig(state.nodeModelSelections.image, state.providerCatalogLoaded),
+      };
+      const entries: CanvasNodeEntry[] = [{ type: "gen", data: image }];
+      const sources = sourceKey ? [sourceKey] : [];
+      if (imported) {
+        const assetPosition = nearestAvailableNodePosition({
+          x: position.x - ASSET_NODE_WIDTH - NEW_NODE_GAP, y: position.y,
+          width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT,
+        }, [...occupied, { ...position, width, height }]);
+        const source: AssetNodeData = {
+          key: assetNodeKey(), assetId: imported.id, providerConnectionId: "", source: "local",
+          kind: "image", name: imported.name, previewUrl: imported.previewUrl, videoUrl: null, ...assetPosition,
+        };
+        entries.push({ type: "asset", data: source });
+        sources.push(source.key);
+      }
+      const edges = sources.map((source) => ({ id: `${source}->${key}`, fromKey: source, toKey: key }));
+      // 生成节点先接回脚本：产物完成后会出现在资产参考选项中，由用户明确选择。
+      edges.push({ id: `${key}->${nodeKey}`, fromKey: key, toKey: nodeKey });
+      if (insertSubgraph(entries, edges, { selectNodeKey: key }) !== "applied") {
+        toast.error("未能创建资产图片节点，请重试。"); return;
+      }
+      promptContents.replaceText(key, `${label}设定：${asset.name || ""}\n${asset.description}`, []);
+      patchNode("gen", key, (item) => ({ ...item }), promptContents.snapshotAll());
+      scheduleCanvasSaveRef.current();
+      toast.success("已创建资产图片节点", { description: "选择模型生成后，可在脚本节点为该资产选择生成的图片。" });
+    })().catch((error: unknown) => toast.error("创建资产图片节点失败", {
+      description: `${backendErrorMessage(error)}；已导入的图片可在本地素材库中查看。`,
+    })).finally(() => scriptMediaCreationGuardRef.current.delete(operationKey));
+  }, [canvasNodesNow, canvasInputsFor, canvasStore, insertSubgraph, patchNode, promptContents, refreshLocalAssets]);
+
+  /**
+   * 批量生图/生视频：每个镜头一个独立生成节点、一个独立任务。
+   *
+   * 任务身份（clientTaskId）在提交前就写进画布：重复点击或恢复时后端按同一身份定位原任务，
+   * 不会再发第二笔付费请求；镜头或节点在期间被改动时身份失效，这一镜标记为阻塞而不是重发。
+   */
+  const handleScriptBatchStart = useCallback((nodeKey: string, request: ScriptBatchStartRequest) => {
+    if (scriptBatchSubmissionGuardRef.current.has(nodeKey)) return;
+    scriptBatchSubmissionGuardRef.current.add(nodeKey);
+    setScriptBatchRunningKeys((current) => new Set(current).add(nodeKey));
+    void (async () => {
+      let items: readonly ScriptBatchItem[] = [];
+      let submitted = 0;
+      let blocked = 0;
+      try {
+        if (!isDesktopRuntime()) { toast("批量生成只能在桌面应用中发起。"); return; }
+        const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+        const script = node?.config.scriptGenerator;
+        if (!node || !script) return;
+        const provider = providerCatalog.find((entry) => entry.provider.enabled && entry.provider.id === request.providerId);
+        const model = provider?.models.find((item) => item.definitionId === request.modelDefinitionId);
+        if (!provider || !model) {
+          toast.error("所选模型不可用", { description: "请重新选择供应商与模型后再发起批量生成。" });
+          return;
+        }
+        const batchId = crypto.randomUUID();
+        const run: ScriptBatchRun = {
+          id: batchId, kind: request.kind, createdAt: Date.now(),
+          providerId: request.providerId, modelDefinitionId: request.modelDefinitionId,
+          modelLabel: `${provider.provider.displayName} · ${model.displayName}`,
+          providerFingerprint: JSON.stringify({ providerId: request.providerId,
+            modelDefinitionId: request.modelDefinitionId, parameters: request.parameters }),
+          items: [],
+        };
+        const writeItems = (next: readonly ScriptBatchItem[]) => {
+          items = next;
+          updateScreenplayNode(nodeKey, (config) => {
+            if (!config.scriptGenerator) return config;
+            const batches = (config.scriptGenerator.batches ?? []).map((batch) =>
+              batch.id === batchId ? { ...batch, items: next } : batch);
+            return { ...config, scriptGenerator: { ...config.scriptGenerator, batches } };
+          });
+        };
+        // 批次先落画布：中途退出后任务身份仍在，可以继续或核对，不会重复计费。
+        updateScreenplayNode(nodeKey, (config) => {
+          if (!config.scriptGenerator) return config;
+          return { ...config, scriptGenerator: {
+            ...config.scriptGenerator, batches: [...(config.scriptGenerator.batches ?? []), run],
+          } };
+        });
+        const capabilities = modelParameterCapabilities(model.operationSchema,
+          request.kind === "video" ? "video_generation"
+            : model.operations.includes("text_to_image") ? "text_to_image" : "image_to_image",
+          model.remoteModelId);
+        const durationCapability = request.kind === "video"
+          ? capabilities.find((capability) => /^(duration|duration_seconds|seconds)$/.test(capability.key))
+          : undefined;
+        for (const shotId of request.shotIds) {
+          const shot = script.shots.find((item) => item.id === shotId);
+          if (!shot) continue;
+          const shotNumber = script.shots.findIndex((item) => item.id === shotId) + 1;
+          const taskId = crypto.randomUUID();
+          const frame = request.kind === "video" ? (request.frames[shotId] ?? null) : null;
+          const parameterValues: Record<string, ModelParameterValue> = { ...request.parameters };
+          let note: string | null = null;
+          if (request.kind === "video" && request.useShotDuration && durationCapability) {
+            const applied = scriptShotDurationValue(durationCapability, shot.duration);
+            if (applied) {
+              parameterValues[durationCapability.key] = applied.value;
+              note = applied.note;
+            }
+          }
+          const created = await createScriptMediaNode({
+            nodeKey, shotId, kind: request.kind,
+            modelSelection: { providerId: request.providerId, modelDefinitionId: request.modelDefinitionId },
+            parameterValues, frame, frameRole: frame ? "first_frame" : undefined,
+            // 视频带首帧时不再重复带资产参考图：多数图生视频模型只接受一张图片。
+            useAssetReferences: !(frame && request.kind === "video"),
+          });
+          const liveScript = canvasNodesNow("screenplay").find((item) => item.key === nodeKey)?.config.scriptGenerator;
+          // 指纹按「真正建节点那一刻」的镜头内容记录：中途改过镜头，恢复时身份就对不上了。
+          const shotFingerprint = liveScript ? (scriptBatchShotFingerprint(liveScript, shotId) ?? "") : "";
+          if ("reason" in created) {
+            writeItems([...items, { id: crypto.randomUUID(), shotId, shotNumber, nodeKey: "", taskId,
+              shotFingerprint, nodeFingerprint: "", phase: "blocked" as const, error: created.reason, note }]);
+            blocked += 1;
+            continue;
+          }
+          const nodeFingerprint = scriptBatchNodeFingerprint(snapshotV2(promptContents.snapshotAll()), created.key) ?? "";
+          const item: ScriptBatchItem = { id: crypto.randomUUID(), shotId, shotNumber, nodeKey: created.key,
+            taskId, shotFingerprint, nodeFingerprint, phase: "prepared" as const, error: null, note };
+          writeItems([...items, item]);
+          // 提交：身份固定，后端按同一身份去重，重复提交只会拿回同一个任务。
+          const outcome = await handleStartGeneration(created.key, { clientTaskId: taskId });
+          const ok = Boolean(outcome?.taskIds.includes(taskId));
+          writeItems(items.map((entry) => entry.id === item.id ? {
+            ...entry,
+            phase: (ok ? "submitted" : outcome ? "uncertain" : "blocked") as ScriptBatchItem["phase"],
+            error: ok ? null : outcome?.errors[0]
+              ?? "生成节点未通过校验，请在该镜头的生成节点上查看原因后重新发起。",
+          } : entry));
+          if (ok) submitted += 1; else blocked += 1;
+        }
+        if (submitted) {
+          toast.success(`已提交 ${submitted} 个${request.kind === "image" ? "图片" : "视频"}任务`, {
+            description: blocked ? `另有 ${blocked} 个镜头未提交，结果按镜头归集在下方。` : "结果按镜头归集在下方。",
+          });
+        } else if (blocked) {
+          toast.error("批量生成没有提交成功", { description: "请查看下方各镜头的失败原因。" });
+        }
+      } catch (error: unknown) {
+        toast.error("批量生成中断", { description: backendErrorMessage(error) });
+      } finally {
+        scriptBatchSubmissionGuardRef.current.delete(nodeKey);
+        setScriptBatchRunningKeys((current) => {
+          const next = new Set(current);
+          next.delete(nodeKey);
+          return next;
+        });
+      }
+    })();
+  }, [canvasNodesNow, createScriptMediaNode, handleStartGeneration, providerCatalog, promptContents, snapshotV2, updateScreenplayNode]);
+
+  /**
+   * 继续或核对未完成的批次提交。
+   *
+   * 先查任务是否已经存在：存在就只认领原任务，不重发；确实不存在才用同一身份重提。
+   * 镜头或生成节点被改动后原身份不可复用（请求内容变了），这一镜标记为阻塞而不是重发。
+   */
+  const handleScriptBatchResume = useCallback((nodeKey: string, batchId: string) => {
+    if (scriptBatchSubmissionGuardRef.current.has(nodeKey)) return;
+    scriptBatchSubmissionGuardRef.current.add(nodeKey);
+    setScriptBatchRunningKeys((current) => new Set(current).add(nodeKey));
+    void (async () => {
+      try {
+        const node = canvasNodesNow("screenplay").find((item) => item.key === nodeKey);
+        const script = node?.config.scriptGenerator;
+        const batch = script?.batches?.find((entry) => entry.id === batchId);
+        if (!node || !script || !batch) return;
+        let items = batch.items;
+        const writeItems = (next: readonly ScriptBatchItem[]) => {
+          items = next;
+          updateScreenplayNode(nodeKey, (config) => {
+            if (!config.scriptGenerator) return config;
+            const batches = (config.scriptGenerator.batches ?? []).map((entry) =>
+              entry.id === batchId ? { ...entry, items: next } : entry);
+            return { ...config, scriptGenerator: { ...config.scriptGenerator, batches } };
+          });
+        };
+        const document = snapshotV2(promptContents.snapshotAll());
+        let claimed = 0;
+        let resubmitted = 0;
+        let blocked = 0;
+        for (const item of batch.items) {
+          if (item.phase === "submitted") continue;
+          const shotFingerprint = scriptBatchShotFingerprint(script, item.shotId);
+          const nodeFingerprint = item.nodeKey ? scriptBatchNodeFingerprint(document, item.nodeKey) : null;
+          if (!item.nodeKey || shotFingerprint == null || nodeFingerprint == null ||
+            (item.shotFingerprint && shotFingerprint !== item.shotFingerprint) ||
+            (item.nodeFingerprint && nodeFingerprint !== item.nodeFingerprint)) {
+            writeItems(items.map((entry) => entry.id === item.id ? { ...entry,
+              phase: ("blocked" as ScriptBatchItem["phase"]),
+              error: "镜头或生成节点已变化，原任务身份不能复用；请重新发起批量生成。" } : entry));
+            blocked += 1;
+            continue;
+          }
+          // 任务已经存在就只认领，不再发请求。
+          const existing = await generationClient.get(item.taskId).catch(() => null);
+          if (existing) {
+            const matches = existing.summary.canvasId === canvasId &&
+              existing.summary.sourceNodeId === item.nodeKey &&
+              existing.summary.providerConnectionId === batch.providerId &&
+              existing.summary.modelDefinitionId === batch.modelDefinitionId;
+            // 已经结束的任务不能复用身份：重提只会拿回同一个失败任务，要重来只能重新发起。
+            const ended = existing.summary.status === "failed" ||
+              existing.summary.status === "cancelled" || existing.summary.status === "interrupted";
+            writeItems(items.map((entry) => entry.id === item.id ? { ...entry,
+              phase: (!matches || ended ? "blocked" : "submitted") as ScriptBatchItem["phase"],
+              error: !matches ? "任务身份与批次记录不一致，请在任务历史中核对。"
+                : ended ? `该任务已结束（${existing.summary.status}），原任务身份不能复用；请重新发起批量生成。`
+                  : null } : entry));
+            if (matches && !ended) claimed += 1; else blocked += 1;
+            continue;
+          }
+          // 任务确实不存在：从未创建过，用同一身份重提不会重复计费。
+          const outcome = await handleStartGeneration(item.nodeKey, { clientTaskId: item.taskId });
+          const ok = Boolean(outcome?.taskIds.includes(item.taskId));
+          writeItems(items.map((entry) => entry.id === item.id ? {
+            ...entry,
+            phase: (ok ? "submitted" : outcome ? "uncertain" : "blocked") as ScriptBatchItem["phase"],
+            error: ok ? null : outcome?.errors[0] ?? "生成节点未通过校验，请在该镜头的生成节点上查看原因。",
+          } : entry));
+          if (ok) resubmitted += 1; else blocked += 1;
+        }
+        if (claimed || resubmitted) {
+          toast.success(`已核对 ${claimed + resubmitted} 个任务`, {
+            description: blocked ? `另有 ${blocked} 个镜头需要处理。` : "已存在的任务直接认领，没有重复提交。",
+          });
+        } else if (blocked) {
+          toast.error("没有可继续的提交", { description: "请查看各镜头的失败原因。" });
+        }
+      } catch (error: unknown) {
+        toast.error("核对批次失败", { description: backendErrorMessage(error) });
+      } finally {
+        scriptBatchSubmissionGuardRef.current.delete(nodeKey);
+        setScriptBatchRunningKeys((current) => {
+          const next = new Set(current);
+          next.delete(nodeKey);
+          return next;
+        });
+      }
+    })();
+  }, [canvasId, canvasNodesNow, handleStartGeneration, promptContents, snapshotV2, updateScreenplayNode]);
 
   const nodeDescriptorContext = useMemo(
     () => ({ providerCatalog, nodeModelSelections }),
@@ -8225,6 +10116,128 @@ export function WorkspaceApp({
     [canvasStore, selectNode, addOutput, outputPlacementOptionsFor],
   );
 
+  const longVideoJobs = useLongVideoJobs(canvasId);
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    for (const job of clipRenderJobs.data ?? []) {
+      if (job.status !== "completed" || !job.outputPath) continue;
+      const entry = canvasStore.getState().nodesById[job.sourceNodeId];
+      if (entry?.type !== "videoClip" || entry.data.config.renderDeliveries?.includes(job.id)) continue;
+      if (!canvasNodesOfState(canvasStore.getState(), "output").some(output => output.taskId === job.id && output.finalPath === job.outputPath)) {
+        addOutput((current, nodesById) => ({
+          key: outputNodeKey(), resultKey: null, taskId: job.id, sourceNodeId: job.sourceNodeId,
+          origin: "composition", mediaType: "video", finalPath: job.outputPath, previewSrc: null, name: job.name,
+          ...nextOutputSlot({ x: entry.data.x, y: entry.data.y, measured: { width: entry.data.measured?.width ?? 566, height: 350 } }, current, outputPlacementOptionsFor(nodesById, job.sourceNodeId)),
+        }));
+      }
+      updateVideoClipConfig(job.sourceNodeId, { renderDeliveries: [...(entry.data.config.renderDeliveries ?? []), job.id] });
+    }
+  }, [canvasHydrated, clipRenderJobs.data, canvasStore, addOutput, outputPlacementOptionsFor, updateVideoClipConfig]);
+  /*
+   * 别的画布上可能还有长视频在跑。
+   *
+   * 长视频的界面入口是按画布的：切到这张画布后，另一张画布上的编排还在每 1.2 秒提交一个片段
+   * （每一段都是真金白银），而「结束编排」按钮在另一张画布上——不提示的话，
+   * 用户根本不知道还有钱在花。同一组任务只提示一次，避免每次切画布都弹。
+   */
+  const longVideoNoticeRef = useRef("");
+  // 画布清单是数组 prop，每次渲染都可能是新引用：放进 ref，避免它把下面的 effect 变成「每渲染一次查一次」。
+  const canvasCatalogRef = useRef(canvasCatalog);
+  canvasCatalogRef.current = canvasCatalog;
+  useEffect(() => {
+    if (!active) return;
+    void longVideoClient.listActive().then(jobs => {
+      const others = jobs.filter(job => job.canvasId !== canvasId);
+      if (others.length === 0) return;
+      // 提示的去重键要带上状态：同一个任务从「尚未结束」变成「正在生成」时，
+      // 光看 id 会认为「没变」而不再提示，用户看到的还是那句「尚未结束」。
+      const key = others.map(job => `${job.id}:${job.status}`).sort().join(",");
+      if (key === longVideoNoticeRef.current) return;
+      longVideoNoticeRef.current = key;
+      // 分开说「正在生成」与「尚未结束」：应用重启后的任务都是暂停状态，
+      // 一律说成「生成中」会让用户以为钱在白花。
+      const active = others.filter(job => ["planning", "generating", "composing"].includes(job.status)).length;
+      const idle = others.length - active;
+      const parts: string[] = [];
+      if (active > 0) parts.push(`${active} 个正在生成`);
+      if (idle > 0) parts.push(`${idle} 个尚未结束`);
+      const names = [...new Set(others.map(job => canvasCatalogRef.current?.find(item => item.id === job.canvasId)?.name ?? "另一张画布"))];
+      toast.info(`别的画布上还有长视频：${parts.join("、")}（${names.join("、")}），切回那张画布可以查看与暂停。`);
+    }).catch(() => undefined);
+  }, [active, canvasId]);
+  const putLongVideoResults = useCallback((job: LongVideoJob, kind: "segments" | "output") => {
+    // 返回新增数与总数：成片在任务完成时会自动放回画布，用户再点一次时新增数是 0，
+    // 但那不代表「没有成片」——只是已经在画布上了，提示要说清楚。
+    if (job.canvasId !== canvasId) return { added: 0, total: 0 };
+    const artifacts = kind === "output" && job.output ? [{
+      taskId: job.id, resultKey: null, finalPath: job.output.path, name: job.output.name,
+      origin: "long_video" as const, aspectRatio: job.output.width / job.output.height,
+    }] : kind === "segments" ? job.shots.flatMap((shot, index) => {
+      const taskId = shot.attempts.at(-1);
+      return shot.finalPath && taskId && shot.resultIndex != null ? [{
+        taskId, resultKey: `${taskId}#${shot.resultIndex}`, finalPath: shot.finalPath,
+        name: `${job.title} · 镜头 ${index + 1} · ${shot.title}`, origin: "generation" as const, aspectRatio: 16 / 9,
+      }] : [];
+    }) : [];
+    const keys: string[] = [];
+    let added = 0;
+    for (const artifact of artifacts) {
+      const existing = canvasNodesOfState(canvasStore.getState(), "output").find(node => node.taskId === artifact.taskId && node.finalPath === artifact.finalPath);
+      if (existing) { keys.push(existing.key); continue; }
+      const key = outputNodeKey();
+      addOutput((current, nodesById) => {
+        const source = nodesById[job.sourceNodeId]?.data;
+        return {
+          key, ...artifact, sourceNodeId: job.sourceNodeId, mediaType: "video", previewSrc: null,
+          ...nextOutputSlot({ x: source?.x ?? 80, y: source?.y ?? 80, measured: { width: 622, height: 350 } }, current, outputPlacementOptionsFor(nodesById, job.sourceNodeId)),
+        };
+      });
+      keys.push(key);
+      added += 1;
+    }
+    if (kind === "segments" && keys.length > 1) {
+      const groupId = `long-video-segments:${job.id}`;
+      groupNodes(keys, groupId);
+      canvasStore.getState().updateGroup(groupId, { name: `${job.title} · 成功片段` });
+    }
+    return { added, total: artifacts.length };
+  }, [canvasId, canvasStore, addOutput, outputPlacementOptionsFor, groupNodes]);
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    for (const job of longVideoJobs.data ?? []) {
+      if (!job.output) continue;
+      const source = canvasStore.getState().nodesById[job.sourceNodeId];
+      if (source?.type !== "gen" || source.data.kind !== "video" || source.data.config.longVideoDeliveries?.includes(job.id)) continue;
+      putLongVideoResults(job, "output");
+      patchNode("gen", job.sourceNodeId, node => node.kind === "video" ? { ...node, config: { ...node.config, longVideoDeliveries: [...(node.config.longVideoDeliveries ?? []), job.id] } } : node);
+    }
+  }, [canvasHydrated, longVideoJobs.data, putLongVideoResults, canvasStore, patchNode]);
+  useEffect(() => {
+    const created = (event: Event) => {
+      const detail = (event as CustomEvent<{ canvasId?: string }>).detail;
+      if (detail?.canvasId === canvasId) void longVideoJobs.refetch();
+    };
+    const recover = (event: Event) => {
+      const detail = (event as CustomEvent<{ jobId?: string; kind?: string }>).detail;
+      if (!detail?.jobId || (detail.kind !== "segments" && detail.kind !== "output")) return;
+      const kind = detail.kind;
+      void longVideoClient.get(detail.jobId).then(job => {
+        if (job.canvasId !== canvasId) return;
+        const placed = putLongVideoResults(job, kind);
+        // 没有产物可放回时不要报成功：那会让用户以为片段已经放上画布。
+        if (placed.added > 0) toast.success(kind === "segments" ? `已放回 ${placed.added} 个成功片段` : "成片已放回画布");
+        else if (placed.total > 0) toast.info("这些产物已经在画布上了");
+        else toast.info(kind === "segments" ? "还没有已保存的片段可以放回画布" : "还没有成片可以放回画布");
+      }).catch((error: unknown) => toast.error("读取长视频产物失败", { description: backendErrorMessage(error) }));
+    };
+    window.addEventListener("canvas:long-video-created", created);
+    window.addEventListener(LONG_VIDEO_RESULTS_REQUEST_EVENT, recover);
+    return () => {
+      window.removeEventListener("canvas:long-video-created", created);
+      window.removeEventListener(LONG_VIDEO_RESULTS_REQUEST_EVENT, recover);
+    };
+  }, [canvasId, longVideoJobs.refetch, putLongVideoResults]);
+
   const openNodeEditor = useCallback(
     (key: string) => {
       setNodeMarquee(false);
@@ -8246,6 +10259,27 @@ export function WorkspaceApp({
     button?.focus({ preventScroll: true });
     selectNode(null);
   }, [selectNode]);
+
+  const openDocumentEditor = useCallback((key: string) => {
+    const entry = canvasStore.getState().nodesById[key];
+    if (entry?.type === "screenplay" && entry.data.config.scriptGenerator) setScriptEditorKey(key);
+    openNodeEditor(key);
+  }, [canvasStore, openNodeEditor]);
+  const closeDocumentEditor = useCallback(() => {
+    const entry = scriptEditorKey ? canvasStore.getState().nodesById[scriptEditorKey] : null;
+    if (scriptEditorKey && entry?.type === "screenplay" && entry.data.config.scriptGenerator) {
+      const button = [...(canvasViewportRef.current?.querySelectorAll<HTMLElement>("[data-open-node-editor]") ?? [])]
+        .find((element) => element.dataset["openNodeEditor"] === scriptEditorKey);
+      setScriptEditorKey(null);
+      button?.focus({ preventScroll: true });
+      return;
+    }
+    setScriptEditorKey(null);
+    closeNodeEditor();
+  }, [scriptEditorKey, closeNodeEditor, canvasStore]);
+  useEffect(() => {
+    if (scriptEditorKey && editingNodeKey !== scriptEditorKey) setScriptEditorKey(null);
+  }, [editingNodeKey, scriptEditorKey]);
 
   const assetFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
@@ -8412,6 +10446,7 @@ export function WorkspaceApp({
           node.key,
           [
             screenplayNodeLayoutTokens[index] ?? node.key,
+            canvasId,
             selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
@@ -8419,8 +10454,9 @@ export function WorkspaceApp({
             startErrorsByNode[node.key] ?? null,
             providerCatalog,
             editingNodeKey === node.key,
-            openNodeEditor,
-            closeNodeEditor,
+            scriptEditorKey === node.key,
+            openDocumentEditor,
+            closeDocumentEditor,
             selectNode,
             ignoreLegacyNodeDrag,
             removeScreenplayNode,
@@ -8431,6 +10467,16 @@ export function WorkspaceApp({
             handleRemoveScreenplayMaterial,
             handleRunScreenplayNode,
             handleExportScreenplay,
+            updateScreenplayNode,
+            handleScriptStory,
+            handleScriptTranslate,
+            translatingNodeKeys.has(node.key),
+            handleScriptCreateMedia,
+            handleScriptCreateAsset,
+            handleScriptSmartCompose,
+            handleScriptBatchStart,
+            handleScriptBatchResume,
+            scriptBatchRunningKeys.has(node.key),
           ],
           () => ({
             id: node.key,
@@ -8444,9 +10490,10 @@ export function WorkspaceApp({
               content: (
                 <CanvasDocumentNodeCardSlot
                   nodeKey={node.key}
+                  canvasId={canvasId}
                   editorOpen={editingNodeKey === node.key}
-                  onEdit={openNodeEditor}
-                  onCloseEditor={closeNodeEditor}
+                  onEdit={openDocumentEditor}
+                  onCloseEditor={closeDocumentEditor}
                   selected={selectedCanvasNodeKeys.has(node.key)}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -8462,6 +10509,17 @@ export function WorkspaceApp({
                   onRemoveMaterial={handleRemoveScreenplayMaterial}
                   onSend={handleRunScreenplayNode}
                   onExport={handleExportScreenplay}
+                  onScriptUpdate={updateScreenplayNode}
+                  onScriptStory={handleScriptStory}
+                  onScriptTranslate={handleScriptTranslate}
+                  scriptTranslating={translatingNodeKeys.has(node.key)}
+                  scriptEditorOpen={scriptEditorKey === node.key}
+                  onScriptCreateMedia={handleScriptCreateMedia}
+                  onScriptCreateAsset={handleScriptCreateAsset}
+                  onScriptSmartCompose={handleScriptSmartCompose}
+                  onScriptBatchStart={handleScriptBatchStart}
+                  onScriptBatchResume={handleScriptBatchResume}
+                  scriptBatchRunning={scriptBatchRunningKeys.has(node.key)}
                 />
               ),
             },
@@ -8470,13 +10528,15 @@ export function WorkspaceApp({
       ),
     [
       screenplayNodeLayoutTokens,
+      canvasId,
       selectedCanvasNodeKeys,
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
       editingNodeKey,
-      openNodeEditor,
-      closeNodeEditor,
+      scriptEditorKey,
+      openDocumentEditor,
+      closeDocumentEditor,
       selectNode,
       ignoreLegacyNodeDrag,
       removeScreenplayNode,
@@ -8487,6 +10547,16 @@ export function WorkspaceApp({
       handleRemoveScreenplayMaterial,
       handleRunScreenplayNode,
       handleExportScreenplay,
+      updateScreenplayNode,
+      handleScriptStory,
+      handleScriptTranslate,
+      translatingNodeKeys,
+      handleScriptCreateMedia,
+      handleScriptCreateAsset,
+      handleScriptSmartCompose,
+      handleScriptBatchStart,
+      handleScriptBatchResume,
+      scriptBatchRunningKeys,
       streamingTextByNode,
       canvasStore,
     ],
@@ -8504,6 +10574,7 @@ export function WorkspaceApp({
           node.key,
           [
             genNodeLayoutTokens[index] ?? node.key,
+            canvasId,
             nodeDescriptorContext,
             selectedCanvasNodeKeys.has(node.key),
             editingNodeKey === node.key,
@@ -8525,7 +10596,12 @@ export function WorkspaceApp({
             ignoreLegacyConnectionStart,
             handleGenNodeSizeChange,
             updatePromptNodeConfig,
+            patchPromptNodeConfigField,
             handleRunPromptNode,
+            handleTextTryAction,
+            handleTranslateCanvasText,
+            onPromptFocusRequest,
+            onPromptFocusHandled,
             registerPromptInput,
             updateImageNodeConfig,
             updateVideoNodeConfig,
@@ -8534,10 +10610,15 @@ export function WorkspaceApp({
             importGreenScreenVideo,
             handleStartGeneration,
             promptContents,
+            // 面板的忙碌态与「自己编写内容」的聚焦待办都只跟**本节点**有关，
+            // 按节点粒度进签名：别的节点不会因为这两个值变化而重建卡片内容。
+            translatingNodeKeys.has(node.key),
+            pendingPromptFocusKey === node.key,
           ],
           () => {
             const content = (
               <CanvasGenNodeCardSlot
+                canvasId={canvasId}
                 nodeKey={node.key}
                 selected={selectedCanvasNodeKeys.has(node.key)}
                 editorOpen={editingNodeKey === node.key}
@@ -8561,10 +10642,20 @@ export function WorkspaceApp({
                 onReorderInput={reorderGenerationInput}
                 registerPromptInput={registerPromptInput}
                 onPromptChange={updatePromptNodeConfig}
+                onPromptFieldChange={patchPromptNodeConfigField}
                 onRunPrompt={handleRunPromptNode}
+                onTextTryAction={handleTextTryAction}
+                onTranslateCanvasText={handleTranslateCanvasText}
+                translating={translatingNodeKeys.has(node.key)}
+                autoFocusOutput={pendingPromptFocusKey === node.key}
+                onPromptFocusRequest={onPromptFocusRequest}
+                onPromptFocusHandled={onPromptFocusHandled}
                 onImageConfigChange={updateImageNodeConfig}
                 onRename={renameGenNode}
                 onVideoConfigChange={updateVideoNodeConfig}
+                onAudioConfigChange={updateAudioNodeConfig}
+                onAudioToVideo={handleAudioToVideo}
+                onTranslateAudioPrompt={handleTranslateAudioPrompt}
                 onAnnotateVideo={openVideoLocalEdit}
                 onGreenScreenUseResult={handleUseGreenScreenResult}
                 onImportGreenScreenVideo={importGreenScreenVideo}
@@ -8588,6 +10679,7 @@ export function WorkspaceApp({
       }),
     [
       genNodeLayoutTokens,
+      canvasId,
       editingNodeKey,
       openNodeEditor,
       closeNodeEditor,
@@ -8605,7 +10697,12 @@ export function WorkspaceApp({
       ignoreLegacyConnectionStart,
       handleGenNodeSizeChange,
       updatePromptNodeConfig,
+      patchPromptNodeConfigField,
       handleRunPromptNode,
+      handleTextTryAction,
+      handleTranslateCanvasText,
+      onPromptFocusRequest,
+      onPromptFocusHandled,
       activeTaskByNode,
       latestTaskByNode,
       aliveCanvasNodeKeys,
@@ -8613,15 +10710,26 @@ export function WorkspaceApp({
       updateImageNodeConfig,
       renameGenNode,
       updateVideoNodeConfig,
+      updateAudioNodeConfig,
+      handleAudioToVideo,
+      handleTranslateAudioPrompt,
       openVideoLocalEdit,
       handleUseGreenScreenResult,
       importGreenScreenVideo,
       handleStartGeneration,
       streamingTextByNode,
+      translatingNodeKeys,
+      pendingPromptFocusKey,
       canvasStore,
     ],
   );
 
+  const videoClipBusyKeys = useMemo(() => new Set([
+    ...startingVideoClipKeys,
+    ...generationTasks.filter(task => !isTerminalTaskStatus(task.status)).map(task => task.sourceNodeId),
+    ...(clipRenderJobs.data ?? []).filter(clipJobActive).map(job => job.sourceNodeId),
+    ...canvasNodesOfState(canvasStore.getState(), "videoClip").filter(node => node.config.submission).map(node => node.key),
+  ]), [startingVideoClipKeys, generationTasks, clipRenderJobs.data, videoClipNodeLayoutTokens, canvasStore]);
   const videoClipFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
       canvasNodesOfState(canvasStore.getState(), "videoClip").map((node, index) =>
@@ -8632,7 +10740,7 @@ export function WorkspaceApp({
           [
             videoClipNodeLayoutTokens[index] ?? node.key,
             selectedCanvasNodeKeys.has(node.key),
-            startingVideoClipKeys.has(node.key),
+            videoClipBusyKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             selectNode,
             ignoreLegacyNodeDrag,
@@ -8657,7 +10765,7 @@ export function WorkspaceApp({
                   nodeKey={node.key}
                   selected={selectedCanvasNodeKeys.has(node.key)}
                   editorOpen={editingNodeKey === node.key}
-                  busy={startingVideoClipKeys.has(node.key)}
+                  busy={videoClipBusyKeys.has(node.key)}
                   error={startErrorsByNode[node.key] ?? null}
                   onSelect={selectNode}
                   onNodeDragStart={ignoreLegacyNodeDrag}
@@ -8671,7 +10779,6 @@ export function WorkspaceApp({
                   }}
                   onTryMode={applyVideoClipPreset}
                   onOpenEditor={handleOpenVideoClipEditor}
-                  onOpenReferencePicker={handleOpenVideoClipReferencePicker}
                   onUnlink={removeAssetEdge}
                   registerPromptInput={registerPromptInput}
                 />
@@ -8687,7 +10794,6 @@ export function WorkspaceApp({
       closeNodeEditor,
       editingNodeKey,
       handleOpenVideoClipEditor,
-      handleOpenVideoClipReferencePicker,
       ignoreLegacyNodeDrag,
       registerPromptInput,
       removeAssetEdge,
@@ -8695,7 +10801,7 @@ export function WorkspaceApp({
       selectedCanvasNodeKeys,
       startErrorsByNode,
       startVideoClip,
-      startingVideoClipKeys,
+      videoClipBusyKeys,
       videoClipNodeLayoutTokens,
       canvasStore,
     ],
@@ -8768,6 +10874,11 @@ export function WorkspaceApp({
     connection: { nodeKey: string; handleType: "source" | "target" } | null;
     position: { x: number; y: number };
     boardPosition: { x: number; y: number };
+    /**
+     * 从**手柄点按**进入（而不是拖到空白处）：新节点落在端口的另一侧，
+     * 也就是原站「引用该节点生成」里新节点出现在被引用节点左边的位置。
+     */
+    besidePort?: boolean;
   } | null>(null);
 
   const closeConnectionQuickAdd = useCallback(() => setConnectionQuickAdd(null), []);
@@ -8808,6 +10919,132 @@ export function WorkspaceApp({
   useEffect(() => {
     if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
   }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
+
+  /*
+   * 手柄**点按** = 「引用该节点生成」的入口（拖拽仍然是连线手势）。
+   *
+   * 为什么必须自己接：React Flow 12.11 的手柄只在指针**位移超过阈值**
+   * （connectionDragThreshold，默认 1px）之后才派发 onConnectStart / onConnectEnd，
+   * 纯点按一个手柄，RF 一个事件都不发，连 onConnectEnd 都没有。
+   * 于是「点手柄弹菜单」这条路径在实现里从来就不存在，而报错文案恰恰让用户去点它，
+   * 点下去**毫无反应**：没有菜单、没有 toast、没有报错，只有「点了没反应」。
+   *
+   * 为什么用 pointerdown / pointerup 而不是 click：
+   *   · 位移阈值必须与 `handleConnectEnd` 对齐（4px），否则同一次手势会同时弹出两个
+   *     菜单（点按菜单 + 拖拽菜单），后写的 state 覆盖先写的，用户看到的落点随机。
+   *   · click 事件在拖拽结束后落在 mousedown 与 mouseup 的**共同祖先**上，靠它判定
+   *     「是不是还在手柄上」并不直观；pointerup 的 target 就是指针抬起处。
+   *   · 只认主键（`button === 0`），右键不会误触发。
+   *
+   * 手柄命中区在节点**外侧** 80px（`.canvas-flow-handle__hit`），视觉上不压节点。
+   * 所以 pointerdown / pointerup 本身不拦截（拖拽连线要靠它们），只有紧随其后的
+   * 那一次 click 需要拦——见下面 suppressClick 的注释。
+   *
+   * RF 在手柄 div 上写了 data-nodeid / data-handleid，点的是哪个节点、哪个端口
+   * 都能直接读出来，不用往节点组件里挂回调（节点视图被 memo 包裹，挂回调会让
+   * 每个节点的 data 引用都变，缓存全失效）。
+   */
+  useEffect(() => {
+    if (!active) return;
+    let pressed: {
+      nodeKey: string;
+      handleType: "source" | "target";
+      x: number;
+      y: number;
+      pointerId: number;
+    } | null = null;
+    // 手柄点按之后那一次 click 要拦掉：手柄的命中区在 `.react-flow__node` 内部
+    // （只是视觉上溢出到节点外侧），click 冒泡到节点上会让节点被选中、编辑层展开，
+    // 大面板正好盖住即将建在旁边的新节点。拦这一次 click，不拦其它。
+    let suppressClick = false;
+    const onClick = (event: MouseEvent) => {
+      if (!suppressClick) return;
+      suppressClick = false;
+      event.stopPropagation();
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      pressed = null;
+      suppressClick = false;
+      if (event.button !== 0) return;
+      if (!(event.target instanceof Element)) return;
+      const handle = event.target.closest<HTMLElement>(".react-flow__handle");
+      if (handle == null) return;
+      // 素材拾取模式（CanvasReferenceTools）下，手柄点击归它管，不弹创建菜单。
+      // 放在 closest 之后：全文档查询只在真的按到手柄时才发生。
+      if (document.querySelector(".canvas-reference-picking") != null) return;
+      const nodeKey = handle.dataset["nodeid"];
+      if (!nodeKey) return;
+      pressed = {
+        nodeKey,
+        handleType: handle.dataset["handleid"] === "source" ? "source" : "target",
+        x: event.clientX,
+        y: event.clientY,
+        pointerId: event.pointerId,
+      };
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      const start = pressed;
+      pressed = null;
+      if (start == null) return;
+      if (event.pointerId !== start.pointerId) return;
+      // 位移 ≥4px 就算拖拽：那条路径由 React Flow 自己派发 onConnectEnd 去弹菜单。
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) >= 4) return;
+      if (!(event.target instanceof Element)) return;
+      if (event.target.closest(".react-flow__handle") == null) return;
+      const boardPosition = dropClientPointToBoardRef.current(event.clientX, event.clientY);
+      // 这一手势紧接着的那次 click 要拦掉（见 suppressClick 的注释）。
+      suppressClick = true;
+      setConnectionQuickAdd({
+        connection: { nodeKey: start.nodeKey, handleType: start.handleType },
+        position: { x: event.clientX, y: event.clientY },
+        boardPosition: boardPosition ?? { x: event.clientX, y: event.clientY },
+        besidePort: true,
+      });
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    document.addEventListener("pointerup", onPointerUp, true);
+    document.addEventListener("click", onClick, true);
+    /*
+     * 键盘路径：手柄是纯鼠标手势，键盘用户原本**完全够不到**「引用该节点生成」。
+     * 手柄只在节点被选中时进入 Tab 序列（`CanvasFlowViews` 里按 selected 给
+     * tabIndex），所以这里的 Enter / Space 就是那个入口的等价物。
+     */
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      // 组合输入期间的按键归输入法。
+      if (event.isComposing || event.keyCode === 229) return;
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement)) return;
+      if (!active.classList.contains("react-flow__handle")) return;
+      const nodeKey = active.dataset["nodeid"];
+      if (!nodeKey) return;
+      if (document.querySelector(".canvas-reference-picking") != null) return;
+      const rect = active.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const boardPosition = dropClientPointToBoardRef.current(x, y);
+      event.preventDefault();
+      // 别让这次按键继续冒泡到 React Flow 的节点包装层：它把 Enter / Space 当成
+      // 「选中节点」，会让编辑层展开、盖住即将建在旁边的新节点。
+      event.stopPropagation();
+      setConnectionQuickAdd({
+        connection: {
+          nodeKey,
+          handleType: active.dataset["handleid"] === "source" ? "source" : "target",
+        },
+        position: { x, y },
+        boardPosition: boardPosition ?? { x, y },
+        besidePort: true,
+      });
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("pointerup", onPointerUp, true);
+      document.removeEventListener("click", onClick, true);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [active]);
 
   // 只订阅组织、几何与展示字段，后台进度和正文补丁不重建分组。
   const canvasGroupMetadata = useCanvas((state) => state.groups);
@@ -9461,12 +11698,44 @@ export function WorkspaceApp({
       });
       return;
     }
-    const { connection, boardPosition } = connectionQuickAdd;
+    const { connection, boardPosition, besidePort } = connectionQuickAdd;
+    const endpoint = connection ? canvasEntryByKey(connection.nodeKey) : null;
+    /*
+     * 落点：拖拽落在松手处；**手柄点按**落在端口的另一侧。
+     *
+     * 原站的「引用该节点生成」把新节点摆在被引用节点的**左边**（画布从左往右流，
+     * 新节点消费旧节点的产物）。本项目的输出端口在右、输入端口在左，所以：
+     *   · 点输出端口 → 新节点在左边，边是「原节点 → 新节点」（引用它生成）
+     *   · 点输入端口 → 新节点在右边，边是「新节点 → 原节点」（接入它）
+     * 边的方向沿用端口语义，两种落点方向与边的方向始终一致。
+     *
+     * 锚点优先取原节点的边缘（点手柄命中区有 80px 直径，直接用点击点会让新节点
+     * 偏上偏下几十像素）；原节点不在 store 里（素材组框是渲染出来的伪节点）时
+     * 退回点击点。素材组那条分支也走同一份落点，否则新节点会压在手柄上。
+     */
+    let landing = boardPosition;
+    if (besidePort) {
+      const size = quickAddNodeDimensions(kind);
+      if (size.width > 0) {
+        const rect = endpoint ? liveCanvasNodeRect(endpoint) : null;
+        const anchorX =
+          rect == null
+            ? boardPosition.x
+            : connection?.handleType === "source"
+              ? rect.x + rect.width
+              : rect.x;
+        const anchorY = rect == null ? boardPosition.y : rect.y + rect.height / 2;
+        landing =
+          connection?.handleType === "source"
+            ? { x: anchorX - NEW_NODE_GAP - size.width / 2, y: anchorY }
+            : { x: anchorX + NEW_NODE_GAP + size.width / 2, y: anchorY };
+      }
+    }
     const sourceGroupId =
       connection?.handleType === "source" ? assetGroupIdFromFlowId(connection.nodeKey) : null;
     if (sourceGroupId != null) {
       closeConnectionQuickAdd();
-      const entry = createQuickAddEntry(kind, boardPosition.x, boardPosition.y);
+      const entry = createQuickAddEntry(kind, landing.x, landing.y);
       insertSubgraph([entry], [], { selectNodeKey: entry.data.key });
       connectAssetGroup(sourceGroupId, entry.data.key);
       frontendLog(
@@ -9475,10 +11744,9 @@ export function WorkspaceApp({
       );
       return;
     }
-    const endpoint = connection ? canvasEntryByKey(connection.nodeKey) : null;
     closeConnectionQuickAdd();
     if (connection && !endpoint) return;
-    const entry = createQuickAddEntry(kind, boardPosition.x, boardPosition.y);
+    const entry = createQuickAddEntry(kind, landing.x, landing.y);
     const edges: AssetEdgeData[] = [];
     if (connection && endpoint) {
       const [source, target] =
@@ -9714,8 +11982,31 @@ export function WorkspaceApp({
 
   if (!active) return null;
 
+  const clipTimelineNode = clipTimeline ? canvasNodesOfState(canvasStore.getState(), "videoClip").find(node => node.key === clipTimeline.key) : null;
+  let clipTimelineInputs = clipTimelineNode ? videoClipInputsFor(canvasReadModelOfState(canvasStore.getState()), clipTimelineNode.key) : [];
+  if (clipTimelineNode && !clipTimelineInputs.some(input => input.nodeType === "video")) {
+    const result = canvasNodesOfState(canvasStore.getState(), "output").filter(output => output.sourceNodeId === clipTimelineNode.key && output.mediaType === "video" && output.finalPath).at(-1);
+    const target = result ? outputNodeReferenceTarget(result) : null;
+    if (result && target) clipTimelineInputs = [...clipTimelineInputs, { key: result.key, name: result.name ?? "剪辑成片", nodeType: "video", edgeId: "", previewUrl: result.finalPath ? toMediaSrc(result.finalPath) : null, target }];
+  }
+
   return (
     <main className="workspace-shell workspace-shell--immersive">
+      {clipTimelineNode && clipTimeline ? <VideoClipTimeline
+        key={clipTimelineNode.key}
+        name={clipTimelineNode.config.outputName}
+        inputs={clipTimelineInputs}
+        saved={clipTimelineNode.config.timeline}
+        jobs={(clipRenderJobs.data ?? []).filter(job => job.sourceNodeId === clipTimelineNode.key)}
+        autoStart={clipTimeline.autoStart}
+        readError={clipRenderJobs.error}
+        onRefresh={() => { void clipRenderJobs.refetch(); }}
+        onImportParams={params => changeVideoClipParams(clipTimelineNode.key, params)}
+        onSave={clips => saveClipTimeline(clipTimelineNode.key, clips)}
+        onRender={renderClipTimeline}
+        onCancelJob={async id => { await clipRenderClient.cancel(id); await clipRenderJobs.refetch(); }}
+        onClose={() => setClipTimeline(null)}
+      /> : null}
       {!canvasHydrated ? (
         <div className="canvas-load-notice" role="status">
           <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
@@ -10146,6 +12437,13 @@ export function WorkspaceApp({
               <ConnectionQuickAddMenu
                 position={connectionQuickAdd.position}
                 connectionMode={connectionQuickAdd.connection !== null}
+                hint={
+                  connectionQuickAdd.besidePort
+                    ? connectionQuickAdd.connection?.handleType === "source"
+                      ? "选择后创建并引用该节点"
+                      : "选择后创建并接入该节点"
+                    : undefined
+                }
                 triggerElement={nodeMenuTriggerElement}
                 onSelect={handleConnectionQuickAdd}
                 onClose={closeConnectionQuickAdd}

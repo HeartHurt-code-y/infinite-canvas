@@ -1,0 +1,116 @@
+/*
+ * 说明气泡（tooltip）的样式。
+ *
+ * 视觉沿用原 `[data-tooltip]::after` 的规格（studio-shell.css 里
+ * `.workspace-shell [data-tooltip]::after` 那一组）：
+ * surface-3 底色、rule 描边、raised 阴影、text-xs 字号。
+ *
+ * 为什么是独立的一层而不是伪元素：
+ *   - 伪元素挂在触发器内部，会被祖先的 `overflow: hidden` 裁掉
+ *     （`.canvas-stage` 是 `overflow: hidden`）；
+ *   - 伪元素永远朝下展开，贴底控件的说明会被视口下沿切掉；
+ *   - 伪元素在 React Flow 的缩放层里会跟着一起缩放。
+ * 渲染到 body 上（`position: fixed`）后这些问题都不存在。
+ */
+.tooltip-layer__bubble {
+  position: fixed;
+  /*
+   * `top` / `left` 必须显式给 0。
+   *
+   * `position: fixed` 且**不指定** `top`/`left` 时，元素落在它的**静态位置**
+   * （正常流里的位置）。气泡是 body 的最后一个子元素，而 body 高度就是视口
+   * 高度（`overflow: clip hidden`），于是静态位置在视口**下沿之外**
+   * （实测 `top: 800px`，视口高 800px）。
+   *
+   * 而 JS 只写 `transform: translate3d(x, y, 0)`——`placeTooltip` 返回的是
+   * **相对视口**的坐标，transform 却是相对**静态位置**的偏移，两者基准不一致，
+   * 于是气泡整体偏出视口一个屏高（实测 `top: 977px`），用户根本看不到说明。
+   *
+   * 给 `top: 0; left: 0` 后静态位置回到视口左上角，transform 才是真正的
+   * 视口坐标。
+   */
+  top: 0;
+  left: 0;
+  z-index: var(--z-tooltip);
+  /*
+   * 长文案允许换行，而不是溢出视口。
+   *
+   * 原伪元素是 `white-space: nowrap`，超长文案会直接伸出视口右沿——那正是
+   * 本次要修的那类问题（内容被切掉）。这里换成「先按视口宽度封顶、再换行」：
+   * 正常长度的说明仍是单行（视觉与原来一致），超长的也不会跑出屏幕。
+   * 换行会让气泡变高，但高度是**实测**的，翻面判断依然准确。
+   *
+   * 宽度基准用 `100%` 而不是 `100vw`：气泡是 `position: fixed`，它的包含块是
+   * **视口可见区**（不含滚动条），`100vw` 反而含滚动条。JS 侧夹取用的是
+   * `documentElement.clientWidth`（同样不含滚动条），两边基准一致。
+   */
+  max-width: calc(100% - 1rem);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  background: var(--color-surface-3);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-raised);
+  /*
+   * 隐藏时用 `visibility` 而不是 `display: none`：
+   * `display: none` 的元素宽高是 0，气泡常驻 DOM 时量不到真实尺寸；
+   * `visibility: hidden` 保留布局盒子，量出来的宽高是准的。
+   */
+  visibility: hidden;
+  opacity: 0;
+  transition:
+    opacity var(--dur-micro) var(--ease-out),
+    visibility 0s linear var(--dur-micro);
+}
+
+/* 显示时：可见 + 淡入。 */
+.tooltip-layer__bubble[data-open="true"] {
+  visibility: visible;
+  opacity: 1;
+  transition:
+    opacity var(--dur-micro) var(--ease-out),
+    visibility 0s;
+}
+
+/*
+ * 指向触发器的小箭头，标明说明挂在哪一侧。
+ *
+ * 水平位置由 JS 写入 `--tooltip-arrow-left`（触发器中心相对气泡左沿的偏移，
+ * 夹在气泡圆角内），不是写死的 50%——气泡被视口边缘夹住时，50% 会指错方向。
+ */
+.tooltip-layer__bubble::after {
+  position: absolute;
+  left: var(--tooltip-arrow-left, 50%);
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: var(--color-surface-3);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+/* 朝上：箭头在气泡下沿，指向下方的触发器。 */
+.tooltip-layer__bubble[data-side="top"]::after {
+  bottom: -4px;
+  border-right: var(--rule-thin) solid var(--color-rule);
+  border-bottom: var(--rule-thin) solid var(--color-rule);
+}
+
+/* 朝下：箭头在气泡上沿，指向上方的触发器。 */
+.tooltip-layer__bubble[data-side="bottom"]::after {
+  top: -4px;
+  border-top: var(--rule-thin) solid var(--color-rule);
+  border-left: var(--rule-thin) solid var(--color-rule);
+}
+
+/* 减少动态效果时不做淡入，直接出现。 */
+@media (prefers-reduced-motion: reduce) {
+  .tooltip-layer__bubble,
+  .tooltip-layer__bubble[data-open="true"] {
+    transition: none;
+  }
+}

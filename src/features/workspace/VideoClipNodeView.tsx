@@ -21,6 +21,7 @@ export const VideoClipNodeView = memo(function VideoClipNodeView({
   node,
   inputs,
   selected,
+  busy,
   dragging,
   onSelect,
   onNodeDragStart,
@@ -30,6 +31,7 @@ export const VideoClipNodeView = memo(function VideoClipNodeView({
   readonly node: VideoClipNodeData;
   readonly inputs: readonly VideoClipInput[];
   readonly selected: boolean;
+  readonly busy: boolean;
   readonly dragging: boolean;
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
@@ -50,6 +52,8 @@ export const VideoClipNodeView = memo(function VideoClipNodeView({
     <div
       id={`node-preview-${node.key}`}
       className={`video-clip-node${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
+      style={{ width: primary ? 566 : 350 }}
+      aria-busy={busy || undefined}
       data-connection-target={node.key}
       onMouseDown={(event) => {
         onSelect(node.key);
@@ -74,6 +78,7 @@ export const VideoClipNodeView = memo(function VideoClipNodeView({
                     type="button"
                     className="video-clip-node__try-item"
                     title={mode.description}
+                    disabled={busy}
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -89,6 +94,7 @@ export const VideoClipNodeView = memo(function VideoClipNodeView({
           </div>
         )}
       </div>
+      {busy ? <div className="video-clip-node__busy" role="status">剪辑中…</div> : null}
     </div>
   );
 });
@@ -105,8 +111,8 @@ function VideoClipConnectedBody({
   readonly onOpenEditor: () => void;
 }) {
   const duration = Math.max(0, primary.durationSeconds ?? 0);
-  const tickStep = 2;
-  const tickCount = Math.max(1, Math.floor(duration / tickStep) + 1);
+  const tickStep = Math.max(2, Math.ceil(duration / 16 / 2) * 2);
+  const tickCount = Math.min(17, Math.max(1, Math.floor(duration / tickStep) + 1));
   return (
     <div className="video-clip-node__body">
       <div className="video-clip-node__preview">

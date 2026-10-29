@@ -149,6 +149,7 @@ export function CreateAgentSkillSelect({
                   <input
                     ref={searchRef}
                     type="text"
+                    name="create-skill-search"
                     value={query}
                     placeholder={AGENT_COPY.skillSearchPlaceholder}
                     aria-label={AGENT_COPY.skillSearchPlaceholder}

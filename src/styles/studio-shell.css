@@ -486,21 +486,11 @@ button:active:focus-visible,
   transition: none;
 }
 
-.workspace-shell [data-tooltip]::after {
-  padding: var(--space-xs) var(--space-sm);
-  color: var(--color-text);
-  background: var(--color-surface-3);
-  border-color: var(--color-rule);
-  font-size: var(--text-xs);
-  line-height: var(--leading-body);
-  box-shadow: var(--shadow-raised);
-}
-
-.workspace-header .header-actions [data-tooltip]::after {
-  left: auto;
-  right: 0;
-  transform: none;
-}
+/*
+ * 说明气泡的视觉规格原先挂在 `.workspace-shell [data-tooltip]::after` 上，
+ * 现已改由 `src/components/TooltipLayer.css` 统一提供（渲染到 body 上，
+ * 不再受祖先 overflow 裁剪，也不再永远朝下展开）。
+ */
 
 [data-sonner-toaster].app-toaster {
   --border-radius: var(--radius-card);

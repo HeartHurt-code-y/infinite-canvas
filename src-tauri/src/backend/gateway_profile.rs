@@ -15,7 +15,8 @@ use std::time::Duration;
 use serde_json::Value;
 
 use super::model_schema::{
-    RequestDialect, is_pixverse_video_model, is_rd_video_model, is_seedance_draft_video_model,
+    RequestDialect, is_atlascloud_kling_video_model, is_atlascloud_vidu_video_model,
+    is_pixverse_video_model, is_rd_video_model, is_seedance_draft_video_model,
     is_sp25_per_use_video_model,
 };
 use super::storage::TaskExecutionRecord;
@@ -31,6 +32,9 @@ const MOYU_PIXVERSE_VIDEO_PROFILE: &str = "moyu_pixverse_video_v1";
 const MOYU_SEEDANCE_DRAFT_PROFILE: &str = "moyu_seedance_25_draft_v1";
 /// 饭众烟连接的全部视频模型使用统一任务与素材上传协议。
 const FZY_VIDEO_PROFILE: &str = "fzy_video_tasks_v1";
+/// Atlas Cloud 视频生成 API（Vidu Q4 家族）：自有协议
+/// （`POST /api/v1/model/generateVideo` 提交 + `GET /api/v1/model/prediction/{id}` 轮询）。
+const ATLASCLOUD_VIDEO_PROFILE: &str = "atlascloud_video_v1";
 
 /// 视频任务的默认轮询间隔。恒定节奏的家族档案与通用回退共用。
 pub(crate) const DEFAULT_VIDEO_POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -49,18 +53,21 @@ pub(crate) enum GatewayProfile {
     /// 魔芋 Seedance 2.5 草稿样片。
     SeedanceDraft,
     FzyVideo,
+    /// Atlas Cloud 视频（Vidu Q4 参考图生视频）。
+    AtlasCloudVideo,
 }
 
 impl GatewayProfile {
     /// 家族成员清单（遍历顺序即模型 ID 判定顺序）。已注册家族的模型 ID 互不
     /// 交叠；一旦出现子串包含关系（如 RD 的 `seedance-2.5` 含在通用 Seedance
     /// 系里），必须把更专属的家族排在前面。
-    pub(crate) const REGISTRY: [GatewayProfile; 5] = [
+    pub(crate) const REGISTRY: [GatewayProfile; 6] = [
         GatewayProfile::Sp25PerUse,
         GatewayProfile::RdVideo,
         GatewayProfile::PixVerse,
         GatewayProfile::SeedanceDraft,
         GatewayProfile::FzyVideo,
+        GatewayProfile::AtlasCloudVideo,
     ];
 
     pub(crate) fn profile_id(self) -> &'static str {
@@ -70,6 +77,7 @@ impl GatewayProfile {
             GatewayProfile::PixVerse => MOYU_PIXVERSE_VIDEO_PROFILE,
             GatewayProfile::SeedanceDraft => MOYU_SEEDANCE_DRAFT_PROFILE,
             GatewayProfile::FzyVideo => FZY_VIDEO_PROFILE,
+            GatewayProfile::AtlasCloudVideo => ATLASCLOUD_VIDEO_PROFILE,
         }
     }
 
@@ -82,6 +90,7 @@ impl GatewayProfile {
             MOYU_PIXVERSE_VIDEO_PROFILE => Some(Self::PixVerse),
             MOYU_SEEDANCE_DRAFT_PROFILE => Some(Self::SeedanceDraft),
             FZY_VIDEO_PROFILE => Some(Self::FzyVideo),
+            ATLASCLOUD_VIDEO_PROFILE => Some(Self::AtlasCloudVideo),
             _ => None,
         }
     }
@@ -112,6 +121,13 @@ impl GatewayProfile {
             GatewayProfile::SeedanceDraft => is_seedance_draft_video_model(model_id),
             // 连接决定协议；不能把同名型号在其他供应商上的协议改成饭众烟。
             GatewayProfile::FzyVideo => false,
+            // Atlas Cloud 视频家族：模型名命中**只是候选**，是否真走 Atlas 协议
+            // 由 `available_on` 按连接方言裁决（同名模型在兼容网关上仍是魔芋协议）。
+            // 平台上的视频家族目前有 Vidu Q4 与 Kling 4.0 两个，各自一份契约。
+            GatewayProfile::AtlasCloudVideo => {
+                is_atlascloud_vidu_video_model(model_id)
+                    || is_atlascloud_kling_video_model(model_id)
+            }
         }
     }
 
@@ -123,6 +139,8 @@ impl GatewayProfile {
         }
         match self {
             GatewayProfile::FzyVideo => false,
+            // Atlas 视频协议只在 Atlas Cloud 连接上成立。
+            GatewayProfile::AtlasCloudVideo => dialect == RequestDialect::AtlasCloud,
             GatewayProfile::Sp25PerUse | GatewayProfile::RdVideo => true,
             GatewayProfile::PixVerse | GatewayProfile::SeedanceDraft => {
                 dialect == RequestDialect::OpenAiCompatible
@@ -172,7 +190,21 @@ impl GatewayProfile {
                 | GatewayProfile::RdVideo
                 | GatewayProfile::PixVerse
                 | GatewayProfile::FzyVideo
+                | GatewayProfile::AtlasCloudVideo
         )
+    }
+
+    /// 该家族的产物是「带签名的直链」，需要按「查询原任务续签」的路径下载。
+    ///
+    /// 按次系列、RD、PixVerse、草稿样片与饭众烟的产物都是短时效签名直链，保存时
+    /// 要先重查原任务拿新链接。Atlas Cloud 的产物是**公开托管链接**（与它的出图
+    /// 链路同一套下载策略），走通用下载路径即可。
+    ///
+    /// 判错的后果是硬失败：Atlas 会被送去「查询原任务续签」，而续签用的是网关的
+    /// `/v1/video/generations/{id}`——这个端点在 Atlas 上不存在，必然 404，产物
+    /// 也就永远落不了盘。
+    pub(crate) fn uses_signed_result_url(self) -> bool {
+        !matches!(self, GatewayProfile::AtlasCloudVideo)
     }
 
     /// 轮询节奏。恒定家族（按次、RD、草稿样片）与通用网关一致：5 秒一查、不限时。
@@ -187,6 +219,7 @@ impl GatewayProfile {
             GatewayProfile::Sp25PerUse
             | GatewayProfile::RdVideo
             | GatewayProfile::FzyVideo
+            | GatewayProfile::AtlasCloudVideo
             | GatewayProfile::SeedanceDraft => {
                 GatewayPollCadence::uniform(DEFAULT_VIDEO_POLL_INTERVAL)
             }

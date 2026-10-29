@@ -49,6 +49,7 @@ import {
   type AgentSubject,
 } from "./createAgentModel";
 import { useControllableOpen } from "./useControllableOpen";
+import { useCreateAssetDrag } from "./createAssetDrag";
 import type { CreateModelOption, CreateReference } from "./useCreateSession";
 
 /**
@@ -146,6 +147,8 @@ export function CreateAgentComposer({
 
   const triggerRefs = useRef<{ kind: "skill" | "subject"; at: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  /* 素材从资产库抽屉拖进来时的落点状态（见 createAssetDrag.ts）。 */
+  const dropActive = useCreateAssetDrag().overTarget;
 
   const modeOptions = useMemo(
     () =>
@@ -257,7 +260,15 @@ export function CreateAgentComposer({
 
   return (
     <div className="create-agent-dock">
-      <div className="create-agent-dock__surface">
+      <div
+        className={`create-agent-dock__surface${dropActive ? " is-drop-target" : ""}`}
+        data-create-drop-zone="agent-dock"
+      >
+        {dropActive ? (
+          <span className="create-agent-dock__drop-hint" aria-hidden="true">
+            松开添加为参考素材
+          </span>
+        ) : null}
         <div className="create-agent-dock__content">
           <div className="create-agent-dock__references">
             {references.map((reference) => {

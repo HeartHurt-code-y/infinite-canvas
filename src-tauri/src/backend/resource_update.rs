@@ -104,7 +104,11 @@ impl Drop for RunningGuard {
 }
 
 fn update_status(change: impl FnOnce(&mut RuntimeResourceUpdateStatus)) {
-    change(&mut STATUS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+    change(
+        &mut STATUS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
 }
 
 pub async fn prepare_runtime_components_for_update(

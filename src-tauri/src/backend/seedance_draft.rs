@@ -75,6 +75,9 @@ pub(crate) fn prepare_promotion(
         .as_ref()
         .map(|name| format!("{}_正片", name.chars().take(97).collect::<String>()));
     let command = StartGenerationCommand {
+        client_task_id: None,
+        camera_control_snapshot: None,
+        image_preset_snapshot: None,
         output_name,
         workflow_run_id: None,
         canvas_id: source.canvas_id,

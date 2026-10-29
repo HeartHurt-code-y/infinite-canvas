@@ -6,6 +6,7 @@ import {
   formatRawBackendError,
   frontendLog,
   isDesktopRuntime,
+  windowCloseClient,
 } from "../../lib/backend";
 import {
   registerAppUpdateBeforeInstallFlush,
@@ -31,6 +32,46 @@ import "./CanvasWorkspace.css";
 interface CanvasTab {
   readonly id: string;
   readonly name: string;
+}
+
+/**
+ * 关闭时保存的时间上限。
+ *
+ * 保存走的是一次本地 SQLite 写入，正常是毫秒级；5 秒已经足够宽裕。上限的
+ * 意义是：**保存卡住不能让窗口永远关不掉**——那正是「点 ❌ 没反应、只能任务
+ * 管理器杀进程」的用户体验。
+ */
+const CLOSE_FLUSH_TIMEOUT_MS = 5_000;
+
+/**
+ * 「保存卡住」与「保存失败」是两回事：
+ *
+ * - 卡住（超时）：应用已经不可用，继续留着窗口也救不回来 → 强制关窗；
+ * - 失败（明确报错）：存档没写进去，但画布还在内存里 → 保留窗口让用户重试。
+ */
+class CloseFlushTimeoutError extends Error {
+  constructor() {
+    super("关闭时保存超时");
+    this.name = "CloseFlushTimeoutError";
+  }
+}
+
+/**
+ * 给「保存后关闭」加一个时间上限。
+ *
+ * 超时**不会**取消底层保存（它可能还在写库），但那个 promise 的失败会被
+ * `Promise.race` 接住，不会变成 unhandled rejection。
+ */
+async function withCloseFlushTimeout(work: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new CloseFlushTimeoutError()), CLOSE_FLUSH_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([work, guard]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export function CanvasWorkspace() {
@@ -188,18 +229,72 @@ export function CanvasWorkspace() {
       .then(async ({ getCurrentWindow }) => {
         if (disposed) return;
         const appWindow = getCurrentWindow();
+        /*
+         * 关闭流程的三个不变量：
+         *
+         * 1. **窗口一定要关得掉**。Tauri 侧只要发现本窗口注册过 close-requested
+         *    的 JS 监听器，就会无条件 prevent_close（原生 WM_CLOSE 被吞掉），
+         *    窗口能否关掉全看这里有没有跑到 `destroy()`。所以这里任何一条分支
+         *    都必须走到 destroy，不能存在「既不关窗口、又不复位闩锁」的出口。
+         * 2. **保存卡住 ≠ 保存失败**。卡住（超时）时应用已经不可用，强制关窗；
+         *    失败（明确报错）时画布还在内存里，保留窗口让用户重试。
+         * 3. **闩锁不能卡死**。`closing` 置位后必须在每条出口上复位，否则用户
+         *    再点一次 ❌ 会被 `if (closing) return` 静默吞掉——表现同样是「关不掉」。
+         */
+        // 退订函数要能从 handler 里拿到（销毁失败时要用），所以放在闭包变量里。
+        let unregisterCloseListener: (() => void) | undefined;
         const stop = await appWindow.onCloseRequested(async (event) => {
           event.preventDefault();
+          frontendLog("info", "[canvas] 收到关闭请求，开始保存");
           if (closing) return;
           closing = true;
+          let saved = false;
           try {
-            await flushAll();
-            await appWindow.destroy();
+            await withCloseFlushTimeout(flushAll());
+            saved = true;
           } catch (failure) {
             closing = false;
-            showFailure(failure, "画布保存失败，窗口保持打开");
+            if (!(failure instanceof CloseFlushTimeoutError)) {
+              // 保存明确失败：窗口保持打开，让用户重试。
+              // 同时撤掉 Rust 侧的关闭兜底，否则它会在几秒后强制销毁窗口，
+              // 与「窗口保持打开」的提示自相矛盾。
+              await windowCloseClient.cancelForcedClose().catch(() => undefined);
+              showFailure(failure, "画布保存失败，窗口保持打开");
+              return;
+            }
+            // 保存卡住：应用已经不可用，继续留着窗口也救不回来，只能强制关。
+            frontendLog(
+              "error",
+              `[canvas] 关闭时保存超时（${CLOSE_FLUSH_TIMEOUT_MS}ms），强制关闭窗口`,
+            );
+          }
+          try {
+            await appWindow.destroy();
+          } catch (failure) {
+            // 销毁失败就把闩锁复位：否则用户再点 ❌ 会被静默吞掉。
+            closing = false;
+            frontendLog("error", `[canvas] 关闭窗口失败：${formatRawBackendError(failure)}`);
+            /*
+             * 销毁失败几乎都是「Tauri 的事件循环代理失效」：这时 Tauri 的
+             * destroy/close 都发不出去（runtime error: failed to send message to
+             * the webview），Rust 侧的兜底看门狗同样发不出去——窗口会永远关不掉。
+             *
+             * 还有一条**不依赖事件循环代理**的路：原生关闭请求。只要本窗口不再
+             * 注册 close-requested 监听器，Tauri 就不会拦截它，tao 会直接销毁
+             * 窗口。所以这里把监听器摘掉——用户再点一次 ❌，窗口就真的关掉了。
+             * （画布此时要么已保存、要么本来就卡在保存上，不会更糟。）
+             */
+            unregisterCloseListener?.();
+            unregisterCloseListener = undefined;
+            showFailure(
+              failure,
+              saved
+                ? "关闭失败，画布已保存，请再点一次关闭按钮"
+                : "关闭失败，画布可能未保存，请再点一次关闭按钮",
+            );
           }
         });
+        unregisterCloseListener = stop;
         if (disposed) stop();
         else unlisten = stop;
       })
