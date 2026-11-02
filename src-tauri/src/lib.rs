@@ -543,6 +543,7 @@ pub fn run() {
             commands::start_clip_render,
             commands::list_clip_renders,
             commands::cancel_clip_render,
+            commands::resume_clip_render,
             commands::start_long_video,
             commands::list_long_video_jobs,
             commands::get_long_video_job,

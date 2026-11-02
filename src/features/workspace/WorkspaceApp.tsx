@@ -16,7 +16,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { longVideoClient, resolveLongVideoSettings, resolveLongVideoSegmentSeconds, LONG_VIDEO_RESULTS_REQUEST_EVENT, type LongVideoJob } from "../../lib/longVideo";
 import { useLongVideoJobs } from "./useLongVideoJobs";
 import { VideoClipTimeline } from "./VideoClipTimeline";
-import { clipRenderClient, clipJobActive, type ClipEdit, type ClipRenderJob, type StartClipRender } from "../../lib/videoClipEditing";
+import { clipRenderClient, clipJobActive, type ClipEdit, type ClipRenderJob, type StartClipRender, type ClipAgentModels, type ClipAgentModelOption, type ClipTimelineSettings } from "../../lib/videoClipEditing";
 import { canvasImageClient } from "../../lib/canvasImage";
 import {
   Background,
@@ -62,7 +62,6 @@ import {
   formatRawBackendError,
   frontendLog,
   generationClient,
-  videoClipClient,
   promoteSeedanceDraft,
   renameGenerationResult,
   inferMediaKindFromName,
@@ -2300,10 +2299,8 @@ export function WorkspaceApp({
     refetchInterval: query => active && query.state.data?.some(clipJobActive) ? 1500 : false,
   });
   const clipJobsRef = useRef<readonly ClipRenderJob[]>([]);
-  const clipRenderRequestRef = useRef<StartClipRender | null>(null);
   useEffect(() => {
     clipJobsRef.current = clipRenderJobs.data ?? [];
-    if (clipRenderJobs.data?.some(job => job.id === clipRenderRequestRef.current?.requestId)) clipRenderRequestRef.current = null;
   }, [clipRenderJobs.data]);
   /**
    * 文本模型正在生成的正文（按节点 key 累加）。
@@ -5010,6 +5007,12 @@ export function WorkspaceApp({
     [patchNode],
   );
 
+  const clipModelsFor = useCallback((config: VideoClipNodeConfig): ClipAgentModels => ({
+    text: config.agentModels?.text ?? nodeModelSelections.prompt,
+    video: config.agentModels?.video ?? nodeModelSelections.video,
+    speech: config.agentModels?.speech ?? nodeModelSelections.audio,
+  }), [nodeModelSelections]);
+
   /** 切换剪辑模式；模式变了，参数保持原站默认组合（比例 / 时长 / 清晰度不随模式变）。 */
   const changeVideoClipMode = useCallback(
     (key: string, modeKey: VideoClipModeKey) => {
@@ -5059,10 +5062,44 @@ export function WorkspaceApp({
     [promptContents, updateVideoClipConfig, selectNode],
   );
 
+  const closeNodeEditor = useCallback(() => {
+    const nodeKey =
+      document.activeElement?.closest<HTMLElement>(".video-node-editor")?.dataset["nodeKey"];
+    const button = [
+      ...(canvasViewportRef.current?.querySelectorAll<HTMLElement>("[data-open-node-editor]") ??
+        []),
+    ].find((element) => element.dataset["openNodeEditor"] === nodeKey);
+    button?.focus({ preventScroll: true });
+    selectNode(null);
+  }, [selectNode]);
+
   /** 打开本地剪辑时间轴，剪辑决策按节点持久化。 */
   const handleOpenVideoClipEditor = useCallback((key: string) => {
+    closeNodeEditor();
     setClipTimeline({ key, autoStart: false });
-  }, []);
+  }, [closeNodeEditor]);
+
+  const submitClipRender = useCallback(async (key: string, body: Omit<StartClipRender, "requestId">) => {
+    const node = canvasStore.getState().nodesById[key];
+    if (node?.type !== "videoClip") throw new Error("剪辑节点已不存在。");
+    const fingerprint = JSON.stringify({ ...body, planner: body.planner ? { ...body.planner, clientTaskId: "" } : null });
+    const previous = node.data.config.agentSubmission;
+    if (previous && previous.fingerprint !== fingerprint) throw new Error("上次请求的回执尚待核对。请重新读取原任务，或先还原原请求内容再提交。");
+    const requestId = previous?.id ?? crypto.randomUUID();
+    updateVideoClipConfig(key, { agentSubmission: { id: requestId, fingerprint } });
+    scheduleCanvasSaveRef.current();
+    const command: StartClipRender = { ...body, requestId, planner: body.planner ? { ...body.planner, clientTaskId: requestId } : null };
+    let accepted: ClipRenderJob;
+    try { accepted = await clipRenderClient.start(command); }
+    catch (error) {
+      if (error != null && typeof error === "object" && "kind" in error && error.kind === "validation") updateVideoClipConfig(key, { agentSubmission: null });
+      await clipRenderJobs.refetch();
+      throw error;
+    }
+    if (canvasStore.getState().nodesById[key]?.type !== "videoClip") { await clipRenderClient.cancel(accepted.id); return; }
+    const result = await clipRenderJobs.refetch();
+    if (result.error) throw new Error(`Agent已受理，但读取进度失败：${backendErrorMessage(result.error)}。请重新读取原任务记录。`);
+  }, [canvasStore, updateVideoClipConfig, clipRenderJobs.refetch]);
 
   /**
    * 发起智能剪辑合成。
@@ -5112,20 +5149,32 @@ export function WorkspaceApp({
       }
       if (mode.modeKey === "default" || mode.modeKey === "smartMixCut") {
         setNodeStartError(nodeKey, null);
+        closeNodeEditor();
         setClipTimeline({ key: nodeKey, autoStart: true });
         return;
       }
+      const models = clipModelsFor(node.config);
+      closeNodeEditor();
+      setClipTimeline({ key: nodeKey, autoStart: false });
       const selection = resolveGenerationSelection(
         "video",
-        nodeModelSelections.video,
+        models.video,
         providerCatalog,
       );
       if (!selection) {
         setNodeStartError(
           nodeKey,
-          "当前没有可用的视频模型，请先在「视频生成」节点里选好供应商与模型。",
+          "请在剪辑编辑器的 Agent 模型中选择可用的画面模型。",
         );
         return;
+      }
+      const textSelection = models.text;
+      if (!providerCatalog.some(entry => entry.provider.enabled && entry.provider.id === textSelection.providerId && entry.models.some(model => model.definitionId === textSelection.modelDefinitionId && model.operations.includes("text_generation")))) {
+        setNodeStartError(nodeKey, "请在 Agent 模型中选择可用的规划模型。"); return;
+      }
+      const needsVoice = mode.modeKey === "explainerVideo" || mode.modeKey === "talkingHeadVideo";
+      if (needsVoice && !resolveGenerationSelection("audio", models.speech, providerCatalog)) {
+        setNodeStartError(nodeKey, "请在 Agent 模型中选择可用的语音模型，再生成讲解或口播视频。"); return;
       }
       const materials = mode.materialSlots.flatMap((slot) => {
         const filled = slots.find((entry) => entry.slotKey === slot.slotKey)?.items ?? [];
@@ -5142,56 +5191,17 @@ export function WorkspaceApp({
       clipSubmissionsRef.current.add(nodeKey);
       setStartingVideoClipKeys((current) => new Set(current).add(nodeKey));
       try {
-        const fingerprint = JSON.stringify({ prompt, materials, params: resolveVideoClipParams(node.config), selection: nodeModelSelections.video, mode: mode.modeKey, outputName: node.config.outputName });
-        if (node.config.submission && node.config.submission.fingerprint !== fingerprint) {
-          throw new Error("上次剪辑回执尚待核对，请先在生成历史确认原任务，再发起内容不同的剪辑。");
-        }
-        const clientTaskId = node.config.submission?.id ?? crypto.randomUUID();
-        updateVideoClipConfig(nodeKey, { submission: { id: clientTaskId, fingerprint } });
-        scheduleCanvasSaveRef.current();
-        const taskId = await videoClipClient.start({
-          clientTaskId,
-          canvasId,
-          sourceNodeId: nodeKey,
-          mode: VIDEO_CLIP_BACKEND_MODES[mode.modeKey] as VideoClipMode,
-          prompt,
-          materials,
-          params: resolveVideoClipParams(node.config),
-          providerConnectionId: nodeModelSelections.video.providerId,
-          modelDefinitionId: nodeModelSelections.video.modelDefinitionId,
-          operation: "video_generation",
-          outputName: node.config.outputName,
+        await submitClipRender(nodeKey, {
+          canvasId, sourceNodeId: nodeKey, name: node.config.outputName, params: resolveVideoClipParams(node.config), clips: [],
+          planner: { clientTaskId: "", canvasId, sourceNodeId: nodeKey, operation: "text_generation", providerConnectionId: textSelection.providerId,
+            modelDefinitionId: textSelection.modelDefinitionId, prompt: [{ kind: "text", text: prompt }], explicitMedia: [], parameters: {}, generationCount: 1 },
+          agent: { mode: VIDEO_CLIP_BACKEND_MODES[mode.modeKey] as VideoClipMode, materials,
+            video: { providerId: models.video.providerId, modelId: models.video.modelDefinitionId },
+            speech: needsVoice ? { providerId: models.speech.providerId, modelId: models.speech.modelDefinitionId } : null },
         });
-        if (canvasStore.getState().nodesById[nodeKey]?.type !== "videoClip") {
-          // The single paid request is already accepted. Keep its result recoverable in history.
-          return;
-        }
-        clipRemoteBusyRef.current.add(nodeKey);
-        if (!canvasNodesNow("output").some(output => output.taskId === taskId)) addOutput((current, nodesById) => ({
-          key: outputNodeKey(),
-          resultKey: null,
-          sourceNodeId: nodeKey,
-          taskId,
-          mediaType: "video",
-          finalPath: null,
-          previewSrc: null,
-          name: node.config.outputName,
-          ...nextPreparedMediaOutputSlot(
-            {
-              x: node.x,
-              y: node.y,
-              width: node.measured?.width ?? VIDEO_CLIP_NODE_WIDTH,
-              height: 0,
-            },
-            current,
-            outputPlacementOptionsFor(nodesById, nodeKey),
-          ),
-        }));
-        toast.success("智能剪辑已提交，完成后会生成成片。");
+        setClipTimeline({ key: nodeKey, autoStart: false });
+        toast.success("创作Agent已开始，可在剪辑编辑器查看每一步与成片。");
       } catch (error) {
-        if (error != null && typeof error === "object" && "kind" in error && error.kind === "validation") {
-          updateVideoClipConfig(nodeKey, { submission: null });
-        }
         setNodeStartError(nodeKey, backendErrorMessage(error));
       } finally {
         clipSubmissionsRef.current.delete(nodeKey);
@@ -5203,63 +5213,54 @@ export function WorkspaceApp({
       }
     },
     [
-      addOutput,
       canvasId,
       canvasNodesNow,
       canvasStore,
-      nodeModelSelections.video,
-      outputPlacementOptionsFor,
+      clipModelsFor,
+      closeNodeEditor,
       promptContents,
       providerCatalog,
       setNodeStartError,
-      updateVideoClipConfig,
+      submitClipRender,
     ],
   );
 
-  const saveClipTimeline = useCallback((key: string, clips: readonly ClipEdit[]) => {
-    updateVideoClipConfig(key, { timeline: clips });
+  const saveClipTimeline = useCallback((key: string, clips: readonly ClipEdit[], settings?: ClipTimelineSettings) => {
+    updateVideoClipConfig(key, { timeline: clips, ...(settings ? { timelineSettings: settings } : {}) });
     scheduleCanvasSaveRef.current();
   }, [updateVideoClipConfig]);
 
-  const renderClipTimeline = useCallback(async (clips: readonly ClipEdit[], intelligent: boolean) => {
+  const renderClipTimeline = useCallback(async (clips: readonly ClipEdit[], intelligent: boolean, settings: ClipTimelineSettings, instructions: string) => {
     const key = clipTimeline?.key;
     if (!key || clipSubmissionsRef.current.has(key)) return;
     const entry = canvasStore.getState().nodesById[key];
     if (entry?.type !== "videoClip") throw new Error("剪辑节点已不存在，请重新打开。 ");
     if (clipJobsRef.current.some(job => job.sourceNodeId === key && clipJobActive(job))) throw new Error("智能剪辑进行中，请等待完成。");
     const prepared = promptContents.preparePlainText(key);
-    if (intelligent && (!prepared?.ok || !prepared.text.trim())) throw new Error("请先在节点里填写剪辑提示词。");
-    const selection = intelligent && providerCatalog.some(entry => entry.provider.enabled && entry.provider.id === nodeModelSelections.prompt.providerId && entry.models.some(model => model.definitionId === nodeModelSelections.prompt.modelDefinitionId && model.operations.includes("text_generation")));
-    if (intelligent && !selection) throw new Error("请先在文本节点中选好供应商与文本模型，再使用智能剪辑；手动导出可直接使用。");
+    if (intelligent && !instructions.trim() && (!prepared?.ok || !prepared.text.trim())) throw new Error("请填写本次改剪要求，或先在节点里填写剪辑提示词。");
+    const models = clipModelsFor(entry.data.config);
+    const selection = intelligent && providerCatalog.some(entry => entry.provider.enabled && entry.provider.id === models.text.providerId && entry.models.some(model => model.definitionId === models.text.modelDefinitionId && model.operations.includes("text_generation")));
+    if (intelligent && !selection) throw new Error("请在 Agent 模型中选择可用的规划模型；手动导出可直接使用。");
     clipSubmissionsRef.current.add(key);
     setStartingVideoClipKeys(current => new Set(current).add(key));
     try {
       const planner = intelligent ? {
         clientTaskId: "", canvasId, sourceNodeId: key, operation: "text_generation" as const,
-        providerConnectionId: nodeModelSelections.prompt.providerId, modelDefinitionId: nodeModelSelections.prompt.modelDefinitionId,
-        prompt: [{ kind: "text" as const, text: prepared?.ok ? prepared.text : "" }], explicitMedia: [], parameters: {}, generationCount: 1,
+        providerConnectionId: models.text.providerId, modelDefinitionId: models.text.modelDefinitionId,
+        prompt: [{ kind: "text" as const, text: [prepared?.ok ? prepared.text : "", instructions.trim() ? `本次改剪要求：${instructions.trim()}` : ""].filter(Boolean).join("\n") }], explicitMedia: [], parameters: {}, generationCount: 1,
       } : null;
-      const body = { canvasId, sourceNodeId: key, name: entry.data.config.outputName, params: resolveVideoClipParams(entry.data.config), clips, planner };
-      const previous = clipRenderRequestRef.current;
-      const same = previous && JSON.stringify({ ...previous, requestId: "", planner: previous.planner ? { ...previous.planner, clientTaskId: "" } : null }) === JSON.stringify({ ...body, requestId: "" });
-      if (previous && !same) throw new Error("上次剪辑请求的回执待核对，请先重新读取任务记录，再提交不同内容。");
-      const command: StartClipRender = same ? previous : { ...body, requestId: crypto.randomUUID(), planner: planner ? { ...planner, clientTaskId: crypto.randomUUID() } : null };
-      clipRenderRequestRef.current = command;
-      const accepted = await clipRenderClient.start(command).catch((error: unknown) => {
-        // A rejected request has no receipt to reconcile; corrected inputs may use a new ID.
-        if (error != null && typeof error === "object" && "kind" in error && error.kind === "validation") {
-          clipRenderRequestRef.current = null;
-        }
-        throw error;
-      });
-      if (canvasStore.getState().nodesById[key]?.type !== "videoClip") { await clipRenderClient.cancel(accepted.id); return; }
-      const result = await clipRenderJobs.refetch();
-      if (result.error) throw new Error(`剪辑已受理，但读取进度失败：${backendErrorMessage(result.error)}。请重新打开编辑器查看原任务。`);
+      const targets = clips.filter((clip, index) => !clips.slice(0, index).some(previous => previous.target.kind === "url"
+        ? clip.target.kind === "url" && previous.target.url === clip.target.url && previous.target.mediaType === clip.target.mediaType && previous.target.canvasNodeKey === clip.target.canvasNodeKey
+        : sameMediaReferenceTarget(previous.target, clip.target)));
+      const mix = entry.data.config.modeKey === "smartMixCut" && targets.length >= 5;
+      await submitClipRender(key, { canvasId, sourceNodeId: key, name: entry.data.config.outputName, params: resolveVideoClipParams(entry.data.config), clips, planner, settings,
+        agent: intelligent ? { mode: mix ? "smart_mix_cut" : "default", video: null, speech: null,
+          materials: targets.map(clip => ({ slotKey: mix ? "generatedVideo" : "video", nodeType: "video", displayName: clip.name, role: "reference_video", text: null, target: clip.target })) } : null });
     } finally {
       clipSubmissionsRef.current.delete(key);
       setStartingVideoClipKeys(current => { const next = new Set(current); next.delete(key); return next; });
     }
-  }, [clipTimeline?.key, canvasStore, promptContents, nodeModelSelections.prompt, providerCatalog, canvasId, clipRenderJobs.refetch]);
+  }, [clipTimeline?.key, canvasStore, promptContents, clipModelsFor, providerCatalog, canvasId, submitClipRender]);
 
   const updatePromptNodeConfig = useCallback(
     (key: string, config: PromptNodeConfig) => {
@@ -10120,17 +10121,22 @@ export function WorkspaceApp({
   useEffect(() => {
     if (!canvasHydrated) return;
     for (const job of clipRenderJobs.data ?? []) {
-      if (job.status !== "completed" || !job.outputPath) continue;
-      const entry = canvasStore.getState().nodesById[job.sourceNodeId];
-      if (entry?.type !== "videoClip" || entry.data.config.renderDeliveries?.includes(job.id)) continue;
-      if (!canvasNodesOfState(canvasStore.getState(), "output").some(output => output.taskId === job.id && output.finalPath === job.outputPath)) {
-        addOutput((current, nodesById) => ({
-          key: outputNodeKey(), resultKey: null, taskId: job.id, sourceNodeId: job.sourceNodeId,
-          origin: "composition", mediaType: "video", finalPath: job.outputPath, previewSrc: null, name: job.name,
-          ...nextOutputSlot({ x: entry.data.x, y: entry.data.y, measured: { width: entry.data.measured?.width ?? 566, height: 350 } }, current, outputPlacementOptionsFor(nodesById, job.sourceNodeId)),
-        }));
+      const source = canvasStore.getState().nodesById[job.sourceNodeId];
+      if (source?.type !== "videoClip") continue;
+      if (source.data.config.agentSubmission?.id === job.id) updateVideoClipConfig(job.sourceNodeId, { agentSubmission: null });
+      const outputs = job.agent ? job.agent.outputs : job.status === "completed" && job.outputPath ? [{ id: job.id, path: job.outputPath, name: job.name }] : [];
+      for (const output of outputs) {
+        const entry = canvasStore.getState().nodesById[job.sourceNodeId];
+        if (entry?.type !== "videoClip" || entry.data.config.renderDeliveries?.includes(output.id)) continue;
+        if (!canvasNodesOfState(canvasStore.getState(), "output").some(node => node.taskId === output.id && node.finalPath === output.path)) {
+          addOutput((current, nodesById) => ({
+            key: outputNodeKey(), resultKey: null, taskId: output.id, sourceNodeId: job.sourceNodeId,
+            origin: "composition", mediaType: "video", finalPath: output.path, previewSrc: null, name: output.name,
+            ...nextOutputSlot({ x: entry.data.x, y: entry.data.y, measured: { width: entry.data.measured?.width ?? 566, height: 350 } }, current, outputPlacementOptionsFor(nodesById, job.sourceNodeId)),
+          }));
+        }
+        updateVideoClipConfig(job.sourceNodeId, { renderDeliveries: [...(entry.data.config.renderDeliveries ?? []), output.id] });
       }
-      updateVideoClipConfig(job.sourceNodeId, { renderDeliveries: [...(entry.data.config.renderDeliveries ?? []), job.id] });
     }
   }, [canvasHydrated, clipRenderJobs.data, canvasStore, addOutput, outputPlacementOptionsFor, updateVideoClipConfig]);
   /*
@@ -10248,17 +10254,6 @@ export function WorkspaceApp({
     [selectEdge, selectNode],
   );
   const editingNodeKey = !nodeMarquee && selectedCanvasNodeKeys.size === 1 ? selectedNodeKey : null;
-
-  const closeNodeEditor = useCallback(() => {
-    const nodeKey =
-      document.activeElement?.closest<HTMLElement>(".video-node-editor")?.dataset["nodeKey"];
-    const button = [
-      ...(canvasViewportRef.current?.querySelectorAll<HTMLElement>("[data-open-node-editor]") ??
-        []),
-    ].find((element) => element.dataset["openNodeEditor"] === nodeKey);
-    button?.focus({ preventScroll: true });
-    selectNode(null);
-  }, [selectNode]);
 
   const openDocumentEditor = useCallback((key: string) => {
     const entry = canvasStore.getState().nodesById[key];
@@ -11983,6 +11978,7 @@ export function WorkspaceApp({
   if (!active) return null;
 
   const clipTimelineNode = clipTimeline ? canvasNodesOfState(canvasStore.getState(), "videoClip").find(node => node.key === clipTimeline.key) : null;
+  const clipModelOptions = (operation: "text_generation" | "video_generation" | "speech_generation"): readonly ClipAgentModelOption[] => providerCatalog.flatMap(entry => entry.provider.enabled ? entry.models.filter(model => model.operations.includes(operation)).map(model => ({ providerId: entry.provider.id, modelDefinitionId: model.definitionId, label: `${entry.provider.displayName} · ${model.displayName}` })) : []);
   let clipTimelineInputs = clipTimelineNode ? videoClipInputsFor(canvasReadModelOfState(canvasStore.getState()), clipTimelineNode.key) : [];
   if (clipTimelineNode && !clipTimelineInputs.some(input => input.nodeType === "video")) {
     const result = canvasNodesOfState(canvasStore.getState(), "output").filter(output => output.sourceNodeId === clipTimelineNode.key && output.mediaType === "video" && output.finalPath).at(-1);
@@ -11997,14 +11993,22 @@ export function WorkspaceApp({
         name={clipTimelineNode.config.outputName}
         inputs={clipTimelineInputs}
         saved={clipTimelineNode.config.timeline}
+        savedSettings={clipTimelineNode.config.timelineSettings}
+        params={resolveVideoClipParams(clipTimelineNode.config)}
         jobs={(clipRenderJobs.data ?? []).filter(job => job.sourceNodeId === clipTimelineNode.key)}
         autoStart={clipTimeline.autoStart}
+        models={clipModelsFor(clipTimelineNode.config)}
+        modelOptions={{ text: clipModelOptions("text_generation"), video: clipModelOptions("video_generation"), speech: clipModelOptions("speech_generation") }}
+        onModelChange={(kind, model) => { const live = canvasStore.getState().nodesById[clipTimelineNode.key]; if (live?.type === "videoClip") { updateVideoClipConfig(clipTimelineNode.key, { agentModels: { ...live.data.config.agentModels, [kind]: model } }); scheduleCanvasSaveRef.current(); } }}
+        onRunAgent={!["default", "smartMixCut"].includes(clipTimelineNode.config.modeKey) ? () => startVideoClip(clipTimelineNode.key) : undefined}
+        nodeError={startErrorsByNode[clipTimelineNode.key]}
         readError={clipRenderJobs.error}
         onRefresh={() => { void clipRenderJobs.refetch(); }}
         onImportParams={params => changeVideoClipParams(clipTimelineNode.key, params)}
-        onSave={clips => saveClipTimeline(clipTimelineNode.key, clips)}
+        onSave={(clips, settings) => saveClipTimeline(clipTimelineNode.key, clips, settings)}
         onRender={renderClipTimeline}
         onCancelJob={async id => { await clipRenderClient.cancel(id); await clipRenderJobs.refetch(); }}
+        onResumeJob={async id => { await clipRenderClient.resume(id); await clipRenderJobs.refetch(); }}
         onClose={() => setClipTimeline(null)}
       /> : null}
       {!canvasHydrated ? (

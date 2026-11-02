@@ -346,6 +346,30 @@
 }
 
 /*
+ * 提示词编辑面聚焦时不画焦点框。
+ *
+ * 编辑层的提示词区是**无边框**的（上面那条 border: 0 / background: transparent），
+ * 而 ProseMirror 编辑面同时命中两条全局焦点框规则：
+ *   ① `src/styles/studio-shell.css` 的 `[contenteditable="true"]:focus-visible`
+ *   ② 本文件开头的 `.video-node-editor :is(button, input, [role="textbox"]):focus-visible`
+ *      （Tiptap 的编辑面带 role="textbox"）
+ * 两条都声明 `outline: var(--rule-active) solid var(--color-focus)`，
+ * 于是「点一下提示词框」就会在整块提示词区外围冒出一圈 2px 近白色
+ * （--color-focus: #eeeeee）的方框——原站的提示词区聚焦后仍是无边框的，
+ * 这一圈框在深色面板上尤其扎眼。
+ *
+ * 焦点提示改由插入光标承担：文本编辑面聚焦时光标可见，键盘用户能定位
+ * （与创作台提示词框同一口径，见 src/features/create/CreateSurface.css）。
+ *
+ * 优先级：这条是「一个 class + 一个 class + 一个伪类」，与上面那条
+ * `:is(...)` 规则同为 (0,3,0)，靠**同文件内后写者胜出**；对 studio-shell.css
+ * 那条 (0,2,0) 的 `[contenteditable="true"]` 则是稳定压过。
+ */
+.video-node-editor .prompt-mention__input:focus-visible {
+  outline: none;
+}
+
+/*
  * 原站的提示词区里没有任何按钮：@ 在参考瓦片上，智能引用在「高级设置」里。
  * 本项目编辑层原来把「识别素材名」「@」摆在提示词区里，按「原站没有的
  * 直接删掉」的口径整行移除：@ 已挪到参考瓦片上（瓦片右下角 12×12 的 @ 圆钮），

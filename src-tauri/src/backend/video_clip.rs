@@ -343,7 +343,7 @@ fn slot_matches(slot: &VideoClipSlotSpec, material: &VideoClipMaterial) -> bool 
 /// 报错文案全部照抄原站 i18n：
 /// - 数量不足 → `还需添加{槽位名}（至少 {min} 个）`
 /// - 数量超限 → `{槽位名}最多 {max} 个`
-fn validate_materials(
+pub(crate) fn validate_materials(
     spec: &VideoClipModeSpec,
     materials: &[VideoClipMaterial],
 ) -> BackendResult<()> {

@@ -32,12 +32,13 @@ pub struct PreparedVideoEditSource {
 }
 
 trait SourceRecords: Send + Sync {
-    fn asset_url(&self, identity: CloudAssetIdentity) -> BoxFuture<'_, BackendResult<String>>;
-    fn local_asset_url(&self, job_id: &str) -> BackendResult<String>;
+    fn asset_url(&self, identity: CloudAssetIdentity, media_type: MediaType) -> BoxFuture<'_, BackendResult<String>>;
+    fn local_asset_url(&self, job_id: &str, media_type: MediaType) -> BackendResult<String>;
     fn local_result_path<'a>(
         &'a self,
         task_id: &'a str,
         result_index: u32,
+        media_type: MediaType,
     ) -> BoxFuture<'a, BackendResult<String>>;
 }
 
@@ -48,14 +49,14 @@ struct ProjectSourceRecords {
 }
 
 impl SourceRecords for ProjectSourceRecords {
-    fn asset_url(&self, identity: CloudAssetIdentity) -> BoxFuture<'_, BackendResult<String>> {
-        Box::pin(self.assets.preview_content_url(identity, MediaType::Video))
+    fn asset_url(&self, identity: CloudAssetIdentity, media_type: MediaType) -> BoxFuture<'_, BackendResult<String>> {
+        Box::pin(self.assets.preview_content_url(identity, media_type))
     }
 
-    fn local_asset_url(&self, job_id: &str) -> BackendResult<String> {
+    fn local_asset_url(&self, job_id: &str, media_type: MediaType) -> BackendResult<String> {
         Ok(self
             .staging
-            .local_asset_lease(job_id, MediaType::Video)?
+            .local_asset_lease(job_id, media_type)?
             .get_url)
     }
 
@@ -63,13 +64,14 @@ impl SourceRecords for ProjectSourceRecords {
         &'a self,
         task_id: &'a str,
         result_index: u32,
+        media_type: MediaType,
     ) -> BoxFuture<'a, BackendResult<String>> {
         Box::pin(async move {
             let record = self
                 .results
                 .verify_local_result(task_id, result_index)
                 .await?;
-            if record.save_status != SaveStatus::Succeeded || record.media_type != MediaType::Video
+            if record.save_status != SaveStatus::Succeeded || record.media_type != media_type
             {
                 return Err(BackendError::validation(
                     "本地视频结果不存在、已被修改或尚未保存完成。",
@@ -271,6 +273,13 @@ impl VideoEditSourceService {
                 json!({}),
             ));
         }
+        self.prepare_media(target).await
+    }
+
+    /// Resolve an Agent input through the same identity, download and lease rules as video editing.
+    pub(crate) async fn prepare_media(&self, target: &MediaReferenceTarget) -> BackendResult<PreparedVideoEditSource> {
+        let media_type = target.media_type();
+        if media_type == MediaType::Text { return Err(BackendError::validation("文字不是可下载媒体。", json!({}))); }
         let (path, owned) = match target {
             MediaReferenceTarget::LocalFile { path, .. } => {
                 (readable_local_path(path).await?, false)
@@ -282,7 +291,7 @@ impl VideoEditSourceService {
             } => {
                 let path = self
                     .records
-                    .local_result_path(generation_task_id, *result_index)
+                    .local_result_path(generation_task_id, *result_index, media_type)
                     .await?;
                 (readable_local_path(&path).await?, false)
             }
@@ -296,21 +305,21 @@ impl VideoEditSourceService {
                     .asset_url(CloudAssetIdentity {
                         provider_connection_id: provider_connection_id.clone(),
                         asset_id: asset_id.clone(),
-                    })
+                    }, media_type)
                     .await?;
-                (self.download(&url).await?, true)
+                (self.download(&url, media_type).await?, true)
             }
             MediaReferenceTarget::LocalAsset { staging_job_id, .. } => {
-                let url = self.records.local_asset_url(staging_job_id)?;
-                (self.download(&url).await?, true)
+                let url = self.records.local_asset_url(staging_job_id, media_type)?;
+                (self.download(&url, media_type).await?, true)
             }
             MediaReferenceTarget::LocalBase64Asset { asset_id, .. } => {
                 let library = self.local_base64_assets.as_ref().ok_or_else(|| {
                     BackendError::Conflict("local Base64 library is unavailable".into())
                 })?;
-                (library.decoded_path(asset_id, MediaType::Video)?, true)
+                (library.decoded_path(asset_id, media_type)?, true)
             }
-            MediaReferenceTarget::Url { url, .. } => (self.download(url).await?, true),
+            MediaReferenceTarget::Url { url, .. } => (self.download(url, media_type).await?, true),
         };
         let preview_id = Uuid::new_v4().to_string();
         self.leases
@@ -326,7 +335,7 @@ impl VideoEditSourceService {
         })
     }
 
-    async fn download(&self, url: &str) -> BackendResult<PathBuf> {
+    async fn download(&self, url: &str, media_type: MediaType) -> BackendResult<PathBuf> {
         let mut parsed = url::Url::parse(url)
             .map_err(|_| BackendError::validation("视频链接无效。", json!({})))?;
         let mut redirects = 0;
@@ -402,10 +411,10 @@ impl VideoEditSourceService {
             .read(&mut header)
             .await?;
         let detected = infer::get(&header[..read])
-            .filter(|kind| kind.mime_type().starts_with("video/"))
+            .filter(|kind| kind.mime_type().starts_with(&format!("{}/", media_type.as_str())))
             .ok_or_else(|| {
                 BackendError::validation(
-                    "下载内容不是可识别的视频文件，请确认链接指向视频正文。",
+                    "下载内容与素材类型不一致，请确认链接指向媒体正文。",
                     json!({}),
                 )
             })?;

@@ -2014,7 +2014,17 @@ class PromptContentModuleImplementation implements PromptContentModule {
   }
 
   preparePlainText(nodeKey: string): PromptPlainTextPreparation | null {
-    return this.sessions.get(nodeKey)?.preparePlainText() ?? null;
+    let session = this.sessions.get(nodeKey);
+    if (session == null) {
+      const pending = this.pendingRestore.get(nodeKey);
+      if (pending == null) return null;
+      session = createPromptContentEditorSession();
+      session.restore(pending);
+      this.pendingRestore.delete(nodeKey);
+      this.sessions.set(nodeKey, session);
+      this.observeSession(nodeKey, session);
+    }
+    return session.preparePlainText();
   }
 
   prepareGeneration(

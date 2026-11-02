@@ -760,6 +760,11 @@ pub async fn cancel_clip_render(state: State<'_, BackendState>, id: String) -> C
 }
 
 #[tauri::command]
+pub async fn resume_clip_render(state: State<'_, BackendState>, id: String) -> CommandResult<super::video_clip_render::ClipRenderJob> {
+    state.clip_render.resume(&id).command()
+}
+
+#[tauri::command]
 pub fn start_long_video(
     state: State<'_, BackendState>,
     command: super::long_video::model::StartLongVideoCommand,

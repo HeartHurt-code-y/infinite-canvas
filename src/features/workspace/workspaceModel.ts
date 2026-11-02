@@ -543,7 +543,10 @@ export type DocumentSkillNodeData = ScreenplayNodeData;
  * （promptContents）里，节点配置只记「用哪个模式」「参数是多少」。
  */
 export interface VideoClipNodeConfig {
+  readonly agentModels?: Partial<import("../../lib/videoClipEditing").ClipAgentModels>;
+  readonly agentSubmission?: { readonly id: string; readonly fingerprint: string } | null;
   readonly timeline?: readonly import("../../lib/videoClipEditing").ClipEdit[];
+  readonly timelineSettings?: import("../../lib/videoClipEditing").ClipTimelineSettings;
   readonly renderDeliveries?: readonly string[];
   readonly submission?: { readonly id: string; readonly fingerprint: string } | null;
   /** 剪辑模式键：default / explainerVideo / batchAd / talkingHeadVideo / smartMixCut。 */

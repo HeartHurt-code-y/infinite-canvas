@@ -290,7 +290,8 @@ export function CanvasSelect({
                 ))
               )}
             </div>,
-            document.body,
+            // 原生 modal dialog 外部会被浏览器置为 inert，菜单必须留在该对话框里。
+            triggerRef.current?.closest("dialog") ?? document.body,
           )
         : null}
     </>

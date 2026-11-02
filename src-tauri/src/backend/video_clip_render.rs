@@ -1,4 +1,8 @@
 //! Native smart editing. Every render has a durable identity; reading a job never submits work.
+mod agent;
+mod timeline;
+pub use agent::{ClipAgentRequest, ClipAgentReceipt};
+pub use timeline::{ClipTransition, ClipTimelineSettings};
 use std::{collections::HashMap, io::Write as _, path::{Path, PathBuf}, process::Stdio,
     sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
 use serde::{Deserialize, Serialize};
@@ -34,6 +38,7 @@ pub struct ClipEdit {
     pub volume: f64,
     pub fade: bool,
     pub caption: String,
+    #[serde(default)] pub transition: Option<ClipTransition>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +51,9 @@ pub struct StartClipRender {
     pub clips: Vec<ClipEdit>,
     /// Optional ordinary text task. Its ID and frozen request are persisted before dispatch.
     pub planner: Option<StartGenerationCommand>,
+    #[serde(default)]
+    pub agent: Option<ClipAgentRequest>,
+    #[serde(default)] pub settings: ClipTimelineSettings,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,9 +72,15 @@ pub struct ClipRenderJob {
     pub duration_seconds: Option<f64>,
     pub error: Option<String>,
     pub updated_at: i64,
+    #[serde(default)]
+    pub agent: Option<ClipAgentReceipt>,
+    #[serde(default)] pub settings: ClipTimelineSettings,
 }
 #[derive(Serialize, Deserialize)]
-struct Record { command: StartClipRender, job: ClipRenderJob, planner_profile: Option<super::tasks::FrozenGenerationProfile> }
+struct Record {
+    command: StartClipRender, job: ClipRenderJob, planner_profile: Option<super::tasks::FrozenGenerationProfile>,
+    #[serde(default)] agent_state: Option<agent::AgentState>,
+}
 struct Inner {
     directory: PathBuf, sources: VideoEditSourceService, engine: VideoCompositionService,
     tasks: GenerationTaskService, lock: Mutex<()>, running: Mutex<HashMap<String, Arc<AtomicBool>>>,
@@ -135,7 +149,8 @@ impl ClipRenderService {
     pub fn start(&self, mut command: StartClipRender) -> BackendResult<ClipRenderJob> {
         command.request_id = Uuid::parse_str(&command.request_id).map_err(|_| invalid("剪辑请求身份无效"))?.to_string();
         super::video_clip::validate_params(&command.params)?;
-        validate_clips(&command.clips, command.planner.is_some())?;
+        command.settings.validate()?;
+        if command.agent.is_none() { validate_clips(&command.clips, command.planner.is_some())?; }
         if command.canvas_id.trim().is_empty() || command.source_node_id.trim().is_empty() || command.name.trim().is_empty() || command.name.chars().count() > 120 {
             return Err(invalid("请提供画布、节点与有效的成片名称"));
         }
@@ -170,12 +185,20 @@ impl ClipRenderService {
         let job = ClipRenderJob { id: command.request_id.clone(), canvas_id: command.canvas_id.clone(), source_node_id: command.source_node_id.clone(),
             name: command.name.clone(), status: "queued".into(), progress: 0.0,
             planner_task_id: command.planner.as_ref().and_then(|plan| plan.client_task_id.clone()), clips: command.clips.clone(),
-            output_path: None, project_path: None, subtitle_path: None, duration_seconds: None, error: None, updated_at: stamp() };
+            output_path: None, project_path: None, subtitle_path: None, duration_seconds: None, error: None, updated_at: stamp(),
+            agent: command.agent.as_ref().map(agent::ClipAgentReceipt::new), settings: command.settings.clone() };
         let planner_profile = command.planner.as_ref().map(|plan| self.inner.tasks.freeze_profile(&plan.provider_connection_id, &plan.model_definition_id, GenerationOperation::TextGeneration)).transpose()?;
-        self.write(&Record { command, job: job.clone(), planner_profile })?;
+        let agent_state = self.freeze_agent(&command)?;
+        self.write(&Record { command, job: job.clone(), planner_profile, agent_state })?;
+        self.spawn(&job.id)?;
+        Ok(job)
+    }
+    fn spawn(&self, id: &str) -> BackendResult<()> {
         let cancel = Arc::new(AtomicBool::new(false));
-        self.inner.running.lock().map_err(|_| invalid("剪辑运行状态暂不可用"))?.insert(job.id.clone(), cancel.clone());
-        let service = self.clone(); let id = job.id.clone();
+        let mut running = self.inner.running.lock().map_err(|_| invalid("剪辑运行状态暂不可用"))?;
+        if running.contains_key(id) { return Ok(()); }
+        running.insert(id.to_string(), cancel.clone()); drop(running);
+        let service = self.clone(); let id = id.to_string();
         tauri::async_runtime::spawn(async move {
             let result = service.run(&id, &cancel).await;
             if let Err(error) = result {
@@ -183,6 +206,11 @@ impl ClipRenderService {
                     if record.job.status != "completed" {
                         record.job.status = if cancel.load(Ordering::SeqCst) { "cancelled" } else { "failed" }.into();
                         record.job.error = Some(serde_json::to_string(&error.payload()).unwrap_or_else(|failure| format!("{error}; 诊断保存失败：{failure}")));
+                        if let Some(agent) = &mut record.job.agent {
+                            for step in &mut agent.steps {
+                                if step.status == "running" { step.status = "failed".into(); step.detail = Some("本步骤已停止，请查看任务错误与原模型记录".into()); }
+                            }
+                        }
                     }
                 }) { tauri_plugin_log::log::error!("剪辑失败状态保存失败：{save_error}"); }
             }
@@ -191,6 +219,15 @@ impl ClipRenderService {
                 Err(error) => tauri_plugin_log::log::error!("剪辑运行状态清理失败：{error}"),
             }
         });
+        Ok(())
+    }
+    pub fn resume(&self, id: &str) -> BackendResult<ClipRenderJob> {
+        let _dispatch = self.inner.dispatch.lock().map_err(|_| invalid("剪辑调度暂不可用"))?;
+        let job = self.get(id)?;
+        if !matches!(job.status.as_str(), "interrupted" | "failed") { return Err(invalid("只有中断或失败的任务可以继续")); }
+        if self.inner.running.lock().map_err(|_| invalid("剪辑运行状态暂不可用"))?.contains_key(id) { return Err(invalid("原任务正在收尾，请稍后继续")); }
+        let job = self.update(id, |record| { record.job.status = "queued".into(); record.job.error = None; })?;
+        self.spawn(id)?;
         Ok(job)
     }
     pub fn cancel(&self, id: &str) -> BackendResult<ClipRenderJob> {
@@ -207,9 +244,11 @@ impl ClipRenderService {
             }
           }
         }
+        self.cancel_agent_children(id)?;
         self.update(id, |record| { if active(&record.job.status) { record.job.status = "cancelled".into(); } })
     }
     async fn run(&self, id: &str, cancel: &AtomicBool) -> BackendResult<()> {
+        if self.read(id)?.command.agent.is_some() { return self.run_agent(id, cancel).await; }
         let permit = self.inner.worker.acquire(); tokio::pin!(permit);
         let _permit = loop { tokio::select! { permit = &mut permit => break permit.map_err(|_| invalid("剪辑执行器已关闭"))?,
             _ = tokio::time::sleep(Duration::from_millis(200)) => check_cancel(cancel)? } };
@@ -299,18 +338,20 @@ impl ClipRenderService {
         }
         self.update(id, |record| { record.job.status = "rendering".into(); record.job.clips = clips.clone(); record.job.progress = 10.0; })?;
         let (width, height) = dimensions(&record.command.params);
-        let mut list = String::new(); let mut elapsed = 0.0; let mut srt = String::new();
+        let mut elapsed = 0.0;
         let mut rendered_clips = Vec::new();
         for (index, clip) in clips.iter().enumerate() {
             check_cancel(cancel)?;
             let source_index = record.command.clips.iter().position(|source| source.target == clip.target).ok_or_else(|| invalid("剪辑素材身份失效"))?;
             let (path, probe) = &sources[source_index];
             let mut duration = clip.end - clip.start;
-            if record.command.params.duration_seconds > 0 { duration = duration.min(record.command.params.duration_seconds as f64 - elapsed); }
+            let incoming = rendered_clips.last().map(|previous| timeline::overlap(previous, clip)).unwrap_or(0.0);
+            if record.command.params.duration_seconds > 0 { duration = duration.min(record.command.params.duration_seconds as f64 - elapsed + incoming); }
             if duration < 0.04 { break; }
             let name = format!("clip-{index}.mp4");
             let mut vf = format!("scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,setpts=PTS-STARTPTS");
-            let mut af = format!("aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS,volume={},apad,atrim=duration={duration}", clip.volume);
+            let volume = if record.command.settings.muted { 0.0 } else { clip.volume };
+            let mut af = format!("aresample=48000,aformat=channel_layouts=stereo,asetpts=PTS-STARTPTS,volume={volume},apad,atrim=duration={duration}");
             if clip.fade { let fade = 0.3_f64.min(duration / 2.0); vf.push_str(&format!(",fade=t=in:d={fade},fade=t=out:st={}:d={fade}", duration - fade)); af.push_str(&format!(",afade=t=in:d={fade},afade=t=out:st={}:d={fade}", duration - fade)); }
             let mut args = vec!["-ss".into(), clip.start.to_string(), "-i".into(), path.to_string_lossy().into_owned()];
             let has_audio = !probe.audio_streams.is_empty();
@@ -318,35 +359,12 @@ impl ClipRenderService {
             args.extend(["-t".into(), duration.to_string(), "-map".into(), "0:v:0".into(), "-map".into(), if has_audio { "0:a:0" } else { "1:a:0" }.into(),
                 "-vf".into(), vf, "-af".into(), af, "-c:v".into(), "libx264".into(), "-preset".into(), "fast".into(), "-crf".into(), "20".into(), "-pix_fmt".into(), "yuv420p".into(), "-c:a".into(), "aac".into(), "-ar".into(), "48000".into(), name.clone()]);
             self.ffmpeg(&ffmpeg, temp.path(), args, cancel).await?;
-            if !clip.caption.trim().is_empty() { srt.push_str(&format!("{}\n{} --> {}\n{}\n\n", index + 1, srt_time(elapsed), srt_time(elapsed + duration), clip.caption.replace('\r', ""))); }
             rendered_clips.push(ClipEdit { end: clip.start + duration, ..clip.clone() });
-            elapsed += duration; list.push_str(&format!("file '{name}'\n"));
+            elapsed += duration;
+            if index > 0 { elapsed -= timeline::overlap(&rendered_clips[index - 1], &rendered_clips[index]); }
             self.update(id, |record| { record.job.progress = 10.0 + 80.0 * (index + 1) as f64 / clips.len() as f64; })?;
         }
-        tokio::fs::write(temp.path().join("concat.txt"), list).await?;
-        tokio::fs::write(temp.path().join("captions.srt"), &srt).await?;
-        let mut args = vec!["-f".into(), "concat".into(), "-safe".into(), "1".into(), "-i".into(), "concat.txt".into()];
-        if !srt.is_empty() { args.extend(["-i".into(), "captions.srt".into()]); }
-        args.extend(["-map".into(), "0:v:0".into(), "-map".into(), "0:a:0".into(), "-c".into(), "copy".into()]);
-        if !srt.is_empty() { args.extend(["-map".into(), "1:0".into(), "-c:s".into(), "mov_text".into(), "-metadata:s:s:0".into(), "language=zho".into()]); }
-        args.extend(["-t".into(), elapsed.to_string(), "-movflags".into(), "+faststart".into(), "output.mp4".into()]);
-        self.ffmpeg(&ffmpeg, temp.path(), args, cancel).await?;
-        let probe = probe_path(&ffmpeg, &temp.path().join("output.mp4").to_string_lossy()).await?;
-        if probe.width != width || probe.height != height || (probe.duration_seconds - elapsed).abs() > 0.5 { return Err(invalid("成片轨道或时长校验失败，未登记异常文件")); }
-        check_cancel(cancel)?;
-        let output = self.inner.directory.join(format!("{id}.mp4"));
-        let project = self.inner.directory.join(format!("{id}.timeline.json"));
-        let subtitles = self.inner.directory.join(format!("{id}.srt"));
-        tokio::fs::write(&project, serde_json::to_vec_pretty(&json!({"version":1,"name":record.command.name,"params":record.command.params,"clips":rendered_clips}))?).await?;
-        tokio::fs::write(&subtitles, srt).await?;
-        tokio::fs::rename(temp.path().join("output.mp4"), &output).await?;
-        self.update(id, |record| {
-            record.job.status = "completed".into(); record.job.progress = 100.0; record.job.clips = rendered_clips;
-            record.job.output_path = Some(output.to_string_lossy().into_owned()); record.job.project_path = Some(project.to_string_lossy().into_owned());
-            record.job.subtitle_path = Some(subtitles.to_string_lossy().into_owned()); record.job.error = None;
-            record.job.duration_seconds = Some(probe.duration_seconds);
-        })?;
-        Ok(())
+        self.finish_timeline(id, &record.command, rendered_clips, &ffmpeg, temp.path(), cancel).await
     }
     async fn ffmpeg(&self, binary: &Path, directory: &Path, args: Vec<String>, cancel: &AtomicBool) -> BackendResult<()> {
         check_cancel(cancel)?;
@@ -386,12 +404,15 @@ impl ClipRenderService {
         Ok(())
     }
 }
-fn active(status: &str) -> bool { matches!(status, "queued" | "preparing" | "planning" | "rendering") }
+fn active(status: &str) -> bool { matches!(status, "queued" | "preparing" | "analyzing" | "planning" | "generating" | "rendering" | "verifying") }
 fn check_cancel(cancel: &AtomicBool) -> BackendResult<()> { if cancel.load(Ordering::SeqCst) { Err(invalid("剪辑已取消")) } else { Ok(()) } }
 fn validate_clips(clips: &[ClipEdit], planner: bool) -> BackendResult<()> {
     if clips.is_empty() || clips.len() > 60 { return Err(invalid("请添加1至60段视频")); }
     let mut total = 0.0;
     for clip in clips {
+        if clip.transition.as_ref().is_some_and(|t| !matches!(t.kind.as_str(), "fade" | "black" | "white") || !t.seconds.is_finite() || !(0.04..=2.0).contains(&t.seconds)) {
+            return Err(invalid("转场无效：请选择淡入淡出、黑场或白场，时长为0.04至2秒"));
+        }
         if clip.target.media_type() != MediaType::Video || !clip.start.is_finite() || !clip.end.is_finite() || !clip.volume.is_finite()
             || clip.start < 0.0 || clip.end - clip.start < 0.04 || !(0.0..=2.0).contains(&clip.volume) || clip.caption.chars().count() > 2000 {
             return Err(invalid("视频裁切、音量或字幕无效：每段至少0.04秒，音量为0至2，字幕最多2000字"));
@@ -399,7 +420,8 @@ fn validate_clips(clips: &[ClipEdit], planner: bool) -> BackendResult<()> {
         if clip.source_identity.as_ref().is_none_or(|identity| identity.len() != 64 || !identity.bytes().all(|byte| byte.is_ascii_hexdigit())) { return Err(invalid("素材缺少内容签名，请重新打开剪辑编辑器读取原视频")); }
         total += clip.end - clip.start;
     }
-    if total > if planner { 18000.0 } else { 300.1 } { return Err(invalid("剪辑总时长过长，请减少或裁短素材")); }
+    let overlaps: f64 = clips.windows(2).map(|pair| timeline::overlap(&pair[0], &pair[1])).sum();
+    if total - overlaps > if planner { 18000.0 } else { 300.1 } { return Err(invalid("剪辑总时长过长，请减少或裁短素材")); }
     Ok(())
 }
 fn dimensions(params: &VideoClipParams) -> (u32, u32) {

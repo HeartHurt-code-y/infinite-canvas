@@ -303,7 +303,7 @@ export function pasteCanvasNodes(
       }
       case "videoClip":
         return { ...entry, data: { ...entry.data, ...position, config: {
-          ...entry.data.config, submission: null, renderDeliveries: [],
+          ...entry.data.config, submission: null, agentSubmission: null, renderDeliveries: [],
           timeline: (entry.data.config.timeline ?? []).map(clip => ({ ...clip, target: {
             ...clip.target, canvasNodeKey: clip.target.canvasNodeKey ? keysByOldKey.get(clip.target.canvasNodeKey) ?? null : null,
           } })),
