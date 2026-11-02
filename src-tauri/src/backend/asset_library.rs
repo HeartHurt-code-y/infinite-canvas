@@ -34,6 +34,9 @@ use super::{
 };
 
 const UPLOAD_GROUP_NAME: &str = "无限画布上传";
+/// 创建上传分组后回查列表的次数与间隔：上游分组列表可能短暂滞后于创建结果。
+const UPLOAD_GROUP_LOOKUP_ATTEMPTS: usize = 3;
+const UPLOAD_GROUP_LOOKUP_INTERVAL: Duration = Duration::from_millis(400);
 /// 火山引擎方舟素材组的类型：桌面端上传/管理的素材统一落在 AIGC（虚拟人像）组。
 /// Ark ListAssets / ListAssetGroups / CreateAssetGroup 均要求或使用该字段。
 const ARK_GROUP_TYPE: &str = "AIGC";
@@ -2750,32 +2753,47 @@ impl AssetLibrary {
             )
         };
         let _guard = gate.lock().await;
-        let mut group_id = self.find_upload_group(provider_connection_id).await?;
-        if group_id.is_none() {
-            let response = self
-                .port
-                .send(RemoteAssetRequest {
-                    provider_connection_id: provider_connection_id.to_string(),
-                    method: Method::POST,
-                    path: "/v1/assets/groups",
-                    body: Some(json!({ "name": UPLOAD_GROUP_NAME })),
-                })
-                .await?;
-            require_success("create upload asset group", &response)?;
-            group_id = self.find_upload_group(provider_connection_id).await?;
+        if let Some(group_id) = self.find_upload_group(provider_connection_id).await? {
+            return Ok(group_id);
         }
-        let group_id = group_id.ok_or_else(|| {
-            BackendError::protocol(
-                "upload asset group could not be resolved after creation",
-                json!({
-                    "providerConnectionId": provider_connection_id,
-                    "groupName": UPLOAD_GROUP_NAME
-                }),
-            )
-        })?;
-        Ok(group_id)
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/groups",
+                body: Some(json!({ "name": UPLOAD_GROUP_NAME })),
+            })
+            .await?;
+        require_success("create upload asset group", &response)?;
+        // 上游的创建响应只有 group_name（没有 id），真实 id 只能从列表里取；
+        // 列表可能短暂滞后于创建结果，因此回查带有限次重试。
+        for attempt in 0..UPLOAD_GROUP_LOOKUP_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(UPLOAD_GROUP_LOOKUP_INTERVAL).await;
+            }
+            if let Some(group_id) = self.find_upload_group(provider_connection_id).await? {
+                return Ok(group_id);
+            }
+        }
+        Err(BackendError::protocol(
+            "upload asset group could not be resolved after creation",
+            json!({
+                "providerConnectionId": provider_connection_id,
+                "groupName": UPLOAD_GROUP_NAME,
+                "rawResponse": response.body
+            }),
+        ))
     }
 
+    /// 查找「无限画布上传」分组。
+    ///
+    /// 解析规则与素材库列表/UI 完全一致（[`parse_asset_group`]）：上游既可能把显示名
+    /// 放在 `name`（魔芋 / SD2.0 / 海外平台），也可能只放在 `group_name`（MAIGateway），
+    /// 后者还可能带 `user-{uid}-token-{tid}-` 前缀。旧实现只认 `name` 且要求数值 id，
+    /// 在只给 `group_name` 的网关上永远匹配不上：「创建分组 → 回查列表」必然落空，
+    /// 于是每次素材上传都报 “upload asset group could not be resolved after creation”，
+    /// 还会在云端留下一个又一个同名垃圾分组。
     async fn find_upload_group(&self, provider_connection_id: &str) -> BackendResult<Option<i64>> {
         let response = self
             .port
@@ -2793,11 +2811,31 @@ impl AssetLibrary {
             .map(asset_array)
             .filter(|groups| !groups.is_empty())
             .unwrap_or_else(|| asset_array(&payload));
-        Ok(groups.into_iter().find_map(|entry| {
-            let id = entry.get("id").and_then(Value::as_i64)?;
-            let name = entry.get("name").and_then(Value::as_str)?;
-            (id > 0 && name == UPLOAD_GROUP_NAME).then_some(id)
-        }))
+        let mut unusable_id = false;
+        for entry in groups {
+            let Some(record) = parse_asset_group(entry) else {
+                continue;
+            };
+            if !is_upload_group(&record) {
+                continue;
+            }
+            match record.id.trim().parse::<i64>() {
+                Ok(id) if id > 0 => return Ok(Some(id)),
+                // 名字对上了但 id 不是正整数：上传契约要求整数分组 ID。此时不再新建
+                // 分组（那只会多留一个同名垃圾分组），直接把原因报出来。
+                _ => unusable_id = true,
+            }
+        }
+        if unusable_id {
+            return Err(BackendError::protocol(
+                "upload asset group id is not a positive integer",
+                json!({
+                    "providerConnectionId": provider_connection_id,
+                    "groupName": UPLOAD_GROUP_NAME
+                }),
+            ));
+        }
+        Ok(None)
     }
 
     async fn wait_for_import(
@@ -3313,6 +3351,16 @@ fn parse_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
             .and_then(Value::as_u64)
             .unwrap_or_default(),
     })
+}
+
+/// 判断一个素材分组是不是「无限画布上传」分组。
+///
+/// `name` 是显示名，`group_name` 可能是带 `user-{uid}-token-{tid}-` 前缀的内部名；
+/// 两者任一（去掉前缀后）等于上传分组名即命中。
+fn is_upload_group(record: &AssetGroupRecord) -> bool {
+    record.name == UPLOAD_GROUP_NAME
+        || record.group_name == UPLOAD_GROUP_NAME
+        || strip_token_group_prefix(record.group_name.trim()) == UPLOAD_GROUP_NAME
 }
 
 fn parse_real_person_group(raw: &Value) -> BackendResult<RealPersonGroup> {
