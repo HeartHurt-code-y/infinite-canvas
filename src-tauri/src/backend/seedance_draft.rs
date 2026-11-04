@@ -22,6 +22,7 @@ pub(crate) struct PreparedDraftPromotion {
 /// Canvas media, generation defaults and workflow approval never carry into this request.
 pub(crate) fn prepare_promotion(
     task: &TaskExecutionRecord,
+    observed_response: Option<&str>,
 ) -> BackendResult<PreparedDraftPromotion> {
     let remote_model_id = task.remote_model_id_snapshot.as_deref().unwrap_or_default();
     if task.operation != GenerationOperation::VideoGeneration
@@ -52,6 +53,28 @@ pub(crate) fn prepare_promotion(
         return Err(BackendError::validation(
             "来源任务不是可审核的草稿样片，或冻结身份不一致",
             json!({ "taskId": task.id }),
+        ));
+    }
+    // A gateway may accept draft:true but produce a normal video. The request alone
+    // never proves that the returned remote task can be reused as a draft.
+    let observed = observed_response.and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let mut envelope = observed.as_ref();
+    let mut mode = None;
+    for _ in 0..8 {
+        let Some(value) = envelope else { break };
+        if let Some(draft) = value.get("draft").and_then(Value::as_bool) {
+            mode = Some(draft);
+        }
+        envelope = value.get("data");
+    }
+    if mode != Some(true) {
+        return Err(BackendError::validation(
+            if mode == Some(false) {
+                "供应商返回的是普通视频（draft:false），没有生成可复用的样片，不能转正片。原视频已保留；请联系该供应商核对样片支持，或在清晰度中选择 1080P 直接生成。"
+            } else {
+                "供应商未确认样片身份，暂不能转正片。原视频已保留，请在任务详情中核对供应商返回。"
+            },
+            json!({ "taskId": task.id, "reason": "seedance_draft_not_confirmed", "providerDraft": mode }),
         ));
     }
     let remote_task_id = task

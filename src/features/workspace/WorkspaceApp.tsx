@@ -25,7 +25,7 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { canvasFeatureMediaType, type CanvasFeatureAction, type CanvasFeatureTarget, type CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasFeatureMediaEditor, type CanvasFeatureMediaSession } from "./CanvasFeatureMediaEditor";
 import type { VideoOpeningDraft } from "./CanvasVideoOpeningEditor";
-import { canPromoteSeedanceDraft } from "../../lib/seedanceDraft";
+import { canPromoteSeedanceDraft, seedanceDraftPromotionProblem } from "../../lib/seedanceDraft";
 import { CanvasAtlasToolDialog, type CanvasAtlasToolOptions, type CanvasAtlasToolSession } from "./CanvasAtlasToolDialog";
 import { invokeDesktop } from "../../lib/ipc";
 import * as v from "valibot";
@@ -8447,6 +8447,9 @@ export function WorkspaceApp({
 
   const promoteSeedanceDraftFromHistory = useCallback(
     async (draft: GenerationTaskDetail): Promise<string> => {
+      if (!canPromoteSeedanceDraft(draft)) {
+        throw new Error(seedanceDraftPromotionProblem(draft) ?? "这个任务不是可转正片的已完成样片。");
+      }
       const taskId = await promoteSeedanceDraft(draft.summary.id);
       const sourceNode =
         draft.summary.canvasId === canvasId
@@ -8485,7 +8488,6 @@ export function WorkspaceApp({
 
   const promoteSeedanceDraftFromCanvas = useCallback(async (taskId: string) => {
     const draft = await generationClient.get(taskId);
-    if (!canPromoteSeedanceDraft(draft)) throw new Error("这个任务不是可转正片的已完成样片。");
     return promoteSeedanceDraftFromHistory(draft);
   }, [promoteSeedanceDraftFromHistory]);
 

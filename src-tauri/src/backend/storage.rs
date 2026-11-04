@@ -1466,6 +1466,17 @@ impl Storage {
             })
     }
 
+    pub fn last_successful_observe_response(&self, task_id: &str) -> BackendResult<Option<String>> {
+        Ok(self.lock()?.query_row(
+            "SELECT raw_response FROM provider_calls
+             WHERE task_id = ?1 AND phase = 'observe'
+               AND http_status BETWEEN 200 AND 299 AND raw_response IS NOT NULL
+             ORDER BY response_received_at DESC, rowid DESC LIMIT 1",
+            params![task_id],
+            |row| row.get(0),
+        ).optional()?)
+    }
+
     pub fn save_canvas_document(
         &self,
         command: &SaveCanvasDocumentCommand,

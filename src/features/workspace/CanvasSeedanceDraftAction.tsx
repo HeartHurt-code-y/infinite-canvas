@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { generationClient, type GenerationTaskSummary } from "../../lib/backend";
-import { canPromoteSeedanceDraft, isSeedanceDraftModel } from "../../lib/seedanceDraft";
+import { canPromoteSeedanceDraft, isSeedanceDraftModel, isSeedanceDraftTask, seedanceDraftPromotionProblem } from "../../lib/seedanceDraft";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import "./CanvasSeedanceDraftAction.css";
 
@@ -13,6 +13,7 @@ export function CanvasSeedanceDraftAction({ taskId, tasks, onPromote, onOpenTask
   readonly onOpenTask: (taskId: string) => void;
 }) {
   const [eligible, setEligible] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [finalTaskId, setFinalTaskId] = useState<string | null>(null);
@@ -23,22 +24,31 @@ export function CanvasSeedanceDraftAction({ taskId, tasks, onPromote, onOpenTask
 
   useEffect(() => {
     let alive = true;
+    if (candidate) void generationClient.getProgress(taskId).then(async progress => {
+      if (!isSeedanceDraftTask(progress) && progress.summary.adapterIdSnapshot != null) return;
+      if (progress.summary.status !== "succeeded") return;
+      // Inspect the actual supplier response once for completed sample candidates, never poll detail.
+      const archived = await generationClient.get(taskId);
+      if (alive) {
+        setEligible(canPromoteSeedanceDraft(archived));
+        setProblem(seedanceDraftPromotionProblem(archived));
+      }
+    }).catch(() => { /* The existing task-history entry remains available. */ });
+    return () => { alive = false; };
+  }, [candidate, task?.status, taskId]);
+
+  useEffect(() => {
+    let alive = true;
     if (finalTaskId && (finalStatus === "failed" || finalStatus === "unknown")) {
       // Read once when the shared task list reports failure; do not add another polling loop.
       void generationClient.getProgress(finalTaskId).then(progress => {
         if (alive && progress.finalError != null) setError(progress.finalError);
       }).catch(() => {});
     }
-    if (candidate && !eligible) void generationClient.getProgress(taskId).then(async progress => {
-      // Older backends may omit the adapter snapshot; read detail once in that case.
-      const archived = progress.summary.adapterIdSnapshot == null
-        ? await generationClient.get(taskId) : progress;
-      if (alive) setEligible(canPromoteSeedanceDraft(archived));
-    }).catch(() => { /* The existing task-history entry remains available. */ });
     return () => { alive = false; };
-  }, [candidate, eligible, finalStatus, finalTaskId, taskId]);
+  }, [finalStatus, finalTaskId]);
 
-  if (!eligible) return null;
+  if (!eligible && !problem) return null;
 
   const promote = async () => {
     if (submitting.current || finalTaskId) return;
@@ -60,8 +70,9 @@ export function CanvasSeedanceDraftAction({ taskId, tasks, onPromote, onOpenTask
     onMouseDown={event => event.stopPropagation()}
     onClick={event => event.stopPropagation()}>
     <div className="canvas-seedance-draft__actions">
-      <span>样片</span>
+      <span>{problem ? "样片未生效" : "样片"}</span>
       {finalTaskId ? <button type="button" onClick={() => onOpenTask(finalTaskId)}>查看正片任务</button>
+        : problem ? <button type="button" onClick={() => onOpenTask(taskId)}>查看任务</button>
         : <button type="button" disabled={busy} onClick={() => void promote()}
           aria-label="样片已确认，生成 1080p 正片"
           data-tooltip="确认样片后创建独立付费任务，保留原样片。">
@@ -69,6 +80,6 @@ export function CanvasSeedanceDraftAction({ taskId, tasks, onPromote, onOpenTask
           {busy ? "提交正片中…" : "生成 1080P 正片"}
         </button>}
     </div>
-    {error != null ? <ErrorAlert error={error} variant="inline" /> : null}
+    {error != null || problem ? <ErrorAlert error={error ?? problem} variant="inline" /> : null}
   </div>;
 }

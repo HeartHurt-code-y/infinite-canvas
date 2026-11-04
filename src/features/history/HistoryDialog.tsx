@@ -45,6 +45,7 @@ import { frozenStartCommand, isRegenerableOperation } from "./regenerateGenerati
 import {
   canPromoteSeedanceDraft,
   isSeedanceDraftTask,
+  seedanceDraftPromotionProblem,
   seedanceDraftSourceTaskId,
 } from "../../lib/seedanceDraft";
 
@@ -939,6 +940,7 @@ export function HistoryDialog({
   const summary = detail?.summary ?? null;
   const sourceDraftTaskId = detail ? seedanceDraftSourceTaskId(detail) : null;
   const isDraft = detail ? isSeedanceDraftTask(detail) : false;
+  const draftPromotionProblem = detail ? seedanceDraftPromotionProblem(detail) : null;
   const frozenCommand = useMemo(() => (detail ? frozenStartCommand(detail) : null), [detail]);
   const isImageRegionEdit = frozenCommand?.modelDefinitionId.endsWith("::" + IMAGE_REGION_EDIT_BINDING) === true;
   /*
@@ -1351,7 +1353,7 @@ export function HistoryDialog({
                         className="history-regenerate__primary"
                         disabled={draftPromotionBusy || !canPromoteSeedanceDraft(detail)}
                         aria-describedby={
-                          draftPromotionError != null ? "history-draft-promotion-error" : undefined
+                          draftPromotionError != null || draftPromotionProblem ? "history-draft-promotion-error" : undefined
                         }
                         onClick={() => void submitDraftPromotion(detail)}
                       >
@@ -1361,11 +1363,11 @@ export function HistoryDialog({
                     {summary.status !== "succeeded" ? (
                       <p className="history-empty-note">样片成功后才能生成正片。</p>
                     ) : null}
-                    {draftPromotionError != null ? (
+                    {draftPromotionError != null || draftPromotionProblem ? (
                       <ErrorAlert
                         raw
                         id="history-draft-promotion-error"
-                        error={draftPromotionError}
+                        error={draftPromotionError ?? draftPromotionProblem}
                       />
                     ) : null}
                   </section>

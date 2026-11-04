@@ -602,7 +602,8 @@ impl GenerationTaskService {
             BackendError::Conflict("draft promotion registry is unavailable".into())
         })?;
         let source = self.storage.get_task_execution(source_task_id)?;
-        let prepared = super::seedance_draft::prepare_promotion(&source)?;
+        let observed_response = self.storage.last_successful_observe_response(source_task_id)?;
+        let prepared = super::seedance_draft::prepare_promotion(&source, observed_response.as_deref())?;
         if let Some(task_id) = self.storage.seedance_draft_final_task_id(source_task_id)? {
             return Ok(task_id);
         }

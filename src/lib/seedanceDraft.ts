@@ -52,11 +52,36 @@ export function isSeedanceDraftTask(detail: GenerationTaskDetail | GenerationTas
   });
 }
 
+/** A requested draft is only reusable when the supplier confirms its actual mode. */
+export function seedanceDraftPromotionProblem(detail: GenerationTaskDetail | GenerationTaskProgress): string | null {
+  if (!isSeedanceDraftTask(detail) || detail.summary.status !== "succeeded") return null;
+  let mode: boolean | null = null;
+  if ("calls" in detail) {
+    // Only the final successful observation is authoritative; submit requests can be echoed.
+    const call = [...detail.calls].reverse().find(call =>
+      call.phase === "observe" && call.httpStatus != null && call.httpStatus >= 200 && call.httpStatus < 300 && call.rawResponse != null);
+    try {
+      let payload: unknown = call?.rawResponse ? JSON.parse(call.rawResponse) : null;
+      for (let depth = 0; depth < 8; depth++) {
+        const envelope = record(payload);
+        if (!envelope) break;
+        if (typeof envelope["draft"] === "boolean") mode = envelope["draft"];
+        payload = envelope["data"];
+      }
+    } catch { /* Truncated or missing observations cannot confirm a reusable draft. */ }
+  }
+  if (mode === false) return "供应商返回的是普通视频（draft:false），没有生成可复用的样片，不能转正片。原视频已保留；请联系该供应商核对样片支持，或在清晰度中选择 1080P 直接生成。";
+  if (mode !== true) return "供应商未确认样片身份，暂不能转正片。原视频已保留，请在任务详情中核对供应商返回。";
+  if (!detail.summary.remoteTaskId?.trim()) return "草稿样片缺少有效的远程任务 ID。";
+  return null;
+}
+
 export function canPromoteSeedanceDraft(detail: GenerationTaskDetail | GenerationTaskProgress): boolean {
   return (
     isSeedanceDraftTask(detail) &&
     detail.summary.status === "succeeded" &&
-    Boolean(detail.summary.remoteTaskId?.trim())
+    Boolean(detail.summary.remoteTaskId?.trim()) &&
+    seedanceDraftPromotionProblem(detail) == null
   );
 }
 
