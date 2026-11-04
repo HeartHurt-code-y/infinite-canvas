@@ -102,14 +102,6 @@ jobs:
           path: |
             src-tauri/resources/ffmpeg
           key: ${{ steps.runtime-resources-cache.outputs.cache-primary-key }}
-      - name: Publish verified online release
-        if: inputs.publish
-        env:
-          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
-          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
       - name: Upload installation artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -120,6 +112,14 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+      - name: Publish verified online release
+        if: inputs.publish
+        env:
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
       - name: Report installation boundary
         run: |
           {

@@ -1,6 +1,7 @@
 // Keep the signed application untouched and put the first-install entry in the DMG itself.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { setTimeout as delay } from "node:timers/promises";
 import { chmod, copyFile, lstat, mkdtemp, readFile, rename, rm, symlink } from "node:fs/promises";
 import path from "node:path";
 import { assertComponentRoot, COMPONENT_REPO_ROOT } from "./runtime-resources.mjs";
@@ -49,7 +50,7 @@ export async function createMacInstallDmg({
     }
     await symlink("/Applications", path.join(contents, "Applications"));
     const stagedDmg = path.join(temporary, "installable.dmg");
-    await execute("/usr/bin/hdiutil", [
+    const createArguments = [
       "create",
       "-volname",
       appName.slice(0, -4),
@@ -60,7 +61,23 @@ export async function createMacInstallDmg({
       "-srcfolder",
       contents,
       stagedDmg,
-    ]);
+    ];
+    // DiskImages can briefly retain a device after Tauri creates its first DMG.
+    // Retry only the reported busy condition; keep other failures actionable.
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        await execute("/usr/bin/hdiutil", createArguments);
+        break;
+      } catch (error) {
+        const diagnostic = `${error?.stderr ?? ""}\n${error?.message ?? ""}`;
+        if (attempt === maxAttempts || !/resource busy/i.test(diagnostic)) throw error;
+        console.warn(`[macos-dmg] DiskImages is busy; retrying creation (${attempt + 1}/${maxAttempts}).`);
+        // This file is inside our private staging directory, never the original DMG.
+        await rm(stagedDmg, { force: true });
+        await delay(attempt * 2000);
+      }
+    }
     await execute("/usr/bin/hdiutil", ["verify", stagedDmg]);
     await rename(stagedDmg, filename);
   } finally {
