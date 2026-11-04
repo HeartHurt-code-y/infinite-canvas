@@ -17,6 +17,10 @@ on:
           - macos-15
           - macos-26
         default: macos-15
+      replace_existing:
+        description: Cancel the previous run for this architecture (stalled releases only)
+        type: boolean
+        default: false
       publish:
         description: Publish verified artifacts and the independent online update feed
         type: boolean
@@ -31,7 +35,7 @@ permissions:
 
 concurrency:
   group: macos-online-${{ inputs.architecture }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ inputs.replace_existing || false }}
 
 jobs:
   build:
