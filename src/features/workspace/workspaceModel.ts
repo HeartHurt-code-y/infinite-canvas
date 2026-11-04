@@ -1936,6 +1936,8 @@ export function parseGenerationCountInput(raw: string, max: number = MAX_GENERAT
 
 /** 图片节点的生成配置。 */
 export interface ImageNodeConfig {
+  readonly imageMarks?: readonly import("../../lib/imageMarks").ImageMark[];
+  readonly markModelSelection?: NodeModelSelection;
   readonly cameraControl?: import("../../lib/canvasCameraControl").CanvasCameraControl | undefined;
   readonly imagePreset?: import("../../lib/canvasImagePresets").CanvasImagePresetSelection | undefined;
   readonly imageMode?: import("../../lib/canvasImage").CanvasImageMode;

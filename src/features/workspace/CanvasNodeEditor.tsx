@@ -2,6 +2,7 @@ import { useCallback, useContext, useLayoutEffect, useRef, useState, type ReactN
 import { Icon } from "../../components/Icon";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { CanvasReferencePickingContext } from "./canvasReferencePicking";
+import { CanvasImageMarkingContext } from "./CanvasImageMarking";
 import { videoNodeEditorPlacement } from "./videoNodeEditorPlacement";
 import type { CanvasNodeRect } from "./workspaceModel";
 import "./VideoGenerationNode.css";
@@ -31,9 +32,11 @@ export function CanvasNodeEditorShell({
   const [expanded, setExpanded] = useState(false);
   const reference = useContext(CanvasReferencePickingContext);
   const pickingReference = reference?.session?.targetKey === nodeKey;
+  const marking = useContext(CanvasImageMarkingContext);
+  const pickingElement = marking?.targetKey === nodeKey;
   useLayoutEffect(() => {
-    if (pickingReference) setExpanded(false);
-  }, [pickingReference]);
+    if (pickingReference || pickingElement) setExpanded(false);
+  }, [pickingReference, pickingElement]);
   const rememberFocus = useCallback((element: EventTarget | null = document.activeElement) => {
     if (!(element instanceof HTMLElement) || !elementRef.current?.contains(element)) return;
     if (
@@ -213,6 +216,7 @@ export function CanvasNodeEditorShell({
 
   const toggleExpanded = () => {
     if (pickingReference) reference.setSession(null);
+    if (pickingElement) marking.stop();
     rememberFocus();
     setExpanded((value) => !value);
     requestAnimationFrame(restoreFocus);
@@ -259,7 +263,7 @@ export function CanvasNodeEditorShell({
           if (event.target instanceof Node && !event.currentTarget.contains(event.target)) return;
           if (event.nativeEvent.isComposing) return;
           if (event.key === "Escape") {
-            if (pickingReference) return;
+            if (pickingReference || pickingElement) return;
             // Tiptap 会默认消费 Escape；引用候选和设置弹层通过 stopPropagation
             // 优先收起自身，冒泡到这里的 Escape 仍须关闭当前编辑层。
             event.preventDefault();

@@ -114,6 +114,7 @@ export function CanvasGenNode({
   latestTask,
   tasks,
   onOpenTask,
+  onPromoteSeedanceDraft,
   connectedInputs,
   libraryResources,
   inheritedInputs,
@@ -163,6 +164,7 @@ export function CanvasGenNode({
   readonly latestTask?: GenerationTaskSummary | null | undefined;
   readonly tasks: readonly GenerationTaskSummary[];
   readonly onOpenTask: (taskId: string) => void;
+  readonly onPromoteSeedanceDraft: (taskId: string) => Promise<string>;
   readonly connectedInputs: readonly ConnectedAssetInput[];
   readonly libraryResources: readonly ConnectedLibraryResource[];
   readonly inheritedInputs: readonly InheritedAssetInput[];
@@ -252,6 +254,7 @@ export function CanvasGenNode({
         latestTask={latestTask}
         tasks={tasks}
         onOpenTask={onOpenTask}
+        onPromoteSeedanceDraft={onPromoteSeedanceDraft}
         inputs={effectiveInputs}
         output={previewOutput}
         onPreviewResult={onPreviewImage}

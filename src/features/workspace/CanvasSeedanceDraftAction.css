@@ -1,0 +1,5 @@
+.canvas-seedance-draft { padding-top: 8px; color: var(--nt-text-secondary); font-size: 12px; }
+.canvas-seedance-draft__actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.canvas-seedance-draft__actions > button { display: inline-flex; min-height: 28px; align-items: center; gap: 4px; padding: 4px 8px; color: var(--nt-text-default); background: var(--canvas-controls-bg); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: 8px; }
+.canvas-seedance-draft__actions > button:hover:not(:disabled) { background: var(--canvas-controls-hover); }
+.canvas-seedance-draft__actions > button:disabled { cursor: wait; opacity: .6; }

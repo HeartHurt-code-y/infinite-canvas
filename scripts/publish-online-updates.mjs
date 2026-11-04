@@ -363,6 +363,7 @@ export async function publishOnlineEdition({
   transportFactory = defaultTransportFactory,
   verifyRelease = verifyEditionRelease,
   dryRun = false,
+  packageOnly = false,
   onProgress = () => {},
 }) {
   const plan = await prepareOnlinePublication({
@@ -371,7 +372,11 @@ export async function publishOnlineEdition({
     platform,
     verifyRelease,
   });
-  const objects = plan.objects;
+  requireValue(!packageOnly || plan.platform.startsWith("darwin-"), "PKG-only publication requires macOS");
+  const objects = packageOnly
+    ? plan.objects.filter((entry) => entry.localPath?.endsWith(".pkg"))
+    : plan.objects;
+  requireValue(!packageOnly || objects.length === 1, "PKG-only publication requires exactly one verified installer");
   const report = {
     schemaVersion: 1,
     edition: plan.edition,
@@ -379,13 +384,14 @@ export async function publishOnlineEdition({
     platform: plan.platform,
     channel: plan.channel,
     dryRun,
+    packageOnly,
     objects: objects.map(({ objectKey, url, size, sha256 }) => ({
       objectKey,
       url,
       size,
       sha256,
     })),
-    feed: {
+    feed: packageOnly ? null : {
       objectKey: plan.feed.objectKey,
       url: plan.feed.url,
       size: plan.feed.size,
@@ -401,7 +407,7 @@ export async function publishOnlineEdition({
   const transport = await transportFactory({ root: plan.root, platform: plan.platform });
   for (const method of ["readObject", "headObject", "putObject", "verifyPublicObject"])
     requireValue(typeof transport?.[method] === "function", `Online transport lacks ${method}`);
-  const previous = await transport.readObject({
+  const previous = packageOnly ? null : await transport.readObject({
     objectKey: plan.feed.objectKey,
     maxBytes: JSON_BUDGET,
   });
@@ -457,6 +463,15 @@ export async function publishOnlineEdition({
       finalVerification.sourceFingerprint === plan.verification.sourceFingerprint,
     "Release changed during upload; online feed was not modified",
   );
+  if (packageOnly)
+    return {
+      ...report,
+      published: true,
+      feedChanged: false,
+      uploadedObjectCount: outcomes.filter((value) => value === "uploaded").length,
+      reusedObjectCount: outcomes.filter((value) => value === "reused").length,
+      publicObjectsVerified: true,
+    };
   // The original feed bytes stay fixed even if a local build runs concurrently.
   requireValue(
     plan.feedBody.equals(await regularBytes(plan.feed.localPath, plan.root)),
@@ -550,16 +565,18 @@ export async function publishOnlineEdition({
 export function parseOnlinePublishArgs(args) {
   const distributionAt = args.indexOf("--distribution-dir");
   const dryRun = args.includes("--dry-run");
+  const packageOnly = args.includes("--package-only");
   requireValue(
     distributionAt >= 0 &&
       args[distributionAt + 1] &&
       !args[distributionAt + 1].startsWith("--") &&
-      args.length === 2 + (dryRun ? 1 : 0) &&
+      args.length === 2 + (dryRun ? 1 : 0) + (packageOnly ? 1 : 0) &&
       args.filter((argument) => argument === "--distribution-dir").length === 1 &&
+      args.filter((argument) => argument === "--package-only").length <= 1 &&
       args.filter((argument) => argument === "--dry-run").length <= 1,
-    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run]",
+    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run] [--package-only]",
   );
-  return { distributionDirectory: args[distributionAt + 1], dryRun };
+  return { distributionDirectory: args[distributionAt + 1], dryRun, packageOnly };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

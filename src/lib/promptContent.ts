@@ -227,6 +227,10 @@ export interface PromptMarkReferenceInput {
   readonly label: string;
   readonly description: string;
   readonly color: string;
+  /** 没有明确输入光标时追加到末尾；元素标记的异步识别不把新引用插到文首。 */
+  readonly append?: boolean;
+  /** 交互插入的元素引用两侧留空格，避免与已有正文连在一起。 */
+  readonly padded?: boolean;
   /**
    * 该标记所在画面的缩略图（data URL），仅用于让 @ 候选看得见「这一处标的是什么」。
    * 取帧是异步的，因此可能缺省；缺省时候选退回标记色占位框。
@@ -1317,17 +1321,18 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       color: input.color,
     };
     if (this.editor != null) {
+      const content = promptMarkReferenceToTiptapNode(item, this.presentation());
       this.editor
         .chain()
-        .focus()
-        .insertContent(promptMarkReferenceToTiptapNode(item, this.presentation()))
+        .focus(input.append ? "end" : undefined)
+        .insertContent(input.padded ? [{ type: "text", text: " " }, content, { type: "text", text: " " }] : content)
         .run();
       this.syncFromEditor();
     } else {
       this.document = {
         schema: "prompt-content",
         version: 1,
-        items: [...this.document.items, item],
+        items: [...this.document.items, ...(input.padded ? [{ kind: "text" as const, text: " " }, item, { kind: "text" as const, text: " " }] : [item])],
       };
     }
     this.notify();

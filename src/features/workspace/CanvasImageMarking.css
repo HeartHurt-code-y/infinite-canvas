@@ -1,0 +1,28 @@
+.canvas-image-mark-bar__text { display: flex; flex-direction: column; gap: 4px; }
+.canvas-image-mark-bar__text strong { font-size: 14px; line-height: 14px; font-weight: 600; }
+.canvas-image-mark-bar__text small { font-size: 12px; line-height: 12px; font-weight: 400; color: rgb(255 255 255 / 80%); }
+.canvas-image-mark-model { padding-block: 6px; }
+.canvas-image-mark-model .canvas-select { min-width: 160px; max-width: 280px; }
+.canvas-image-marking .react-flow__handle { visibility: hidden; }
+.canvas-image-marking .react-flow__node :is(img, button) { cursor: crosshair; }
+.canvas-image-marking .canvas-node-toolbar--media { visibility: hidden; }
+.canvas-image-mark-overlay { position: fixed; z-index: calc(var(--z-modal) - 2); pointer-events: none; }
+.canvas-image-mark-overlay:is(:hover, :focus-within) { z-index: calc(var(--z-modal) - 1); }
+.canvas-image-mark-overlay__box { position: absolute; border: 2px solid rgb(255 255 255 / 80%); border-radius: 2px; }
+.canvas-image-mark-overlay__label { position: absolute; display: flex; align-items: center; gap: 4px; transform: translate(-50%, calc(-100% - 8px)); pointer-events: auto; }
+.canvas-image-mark-overlay__label > button, .canvas-image-mark-overlay__label > span { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 12px; border: 1px solid rgb(255 255 255 / 10%); border-radius: 999px; background: #2a2a2a; color: white; box-shadow: 0 8px 16px rgb(0 0 0 / 24%); font-size: 14px; line-height: 20px; white-space: nowrap; }
+.canvas-image-mark-overlay__label > button:hover { background: #333; }
+.canvas-image-mark-overlay__label > .canvas-image-mark-overlay__delete { width: 24px; height: 24px; padding: 0; opacity: 0; }
+.canvas-image-mark-overlay__label:is(:hover, :focus-within) > .canvas-image-mark-overlay__delete { opacity: 1; }
+.canvas-image-mark-overlay__label.is-loading { transform: translate(-50%, -50%); pointer-events: none; }
+.canvas-image-mark-overlay__label.is-loading > span { padding: 4px 8px; border-radius: 8px; background: var(--nt-bg-float); color: var(--nt-text-muted); font-size: 12px; }
+.canvas-image-mark-menu { position: fixed; left: 0; top: 0; z-index: calc(var(--z-modal) + 2); display: flex; flex-direction: column; gap: 2px; min-width: 120px; max-width: min(220px, calc(100vw - 16px)); max-height: 208px; overflow-y: auto; padding: 4px; border: .5px solid var(--canvas-controls-border); border-radius: 16px; background: var(--nt-bg-float); color: var(--nt-text-default); box-shadow: var(--shadow-ll-float); backdrop-filter: blur(32px); }
+.canvas-image-mark-menu button { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--nt-text-muted); text-align: left; font-size: 14px; line-height: 20px; }
+.canvas-image-mark-menu button[aria-checked="true"] { color: var(--nt-text-default); }
+.canvas-image-mark-menu button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.canvas-image-mark-menu button i { width: 8px; height: 8px; flex: none; border-radius: 50%; background: rgb(255 255 255 / 60%); }
+.canvas-image-mark-menu button:is(:hover, :focus-visible) { background: var(--canvas-controls-hover); }
+.canvas-image-mark-menu button:focus-visible, .canvas-image-mark-overlay button:focus-visible { outline: 2px solid var(--nt-text-default); outline-offset: 2px; }
+.mention-chip[data-mark-id^="image-mark-"] { cursor: pointer; }
+.mention-chip[data-mark-id^="image-mark-"]:focus-visible { outline: 2px solid var(--nt-text-default); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .canvas-image-mark-overlay .spin-icon { animation: none; } }

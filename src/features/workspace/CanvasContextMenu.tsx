@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, type KeyboardEvent } from "react";
+import { Fragment, useCallback, useEffect, useId, useRef, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useEscapeHandler } from "../../components/escapeArbiter";
 
@@ -14,6 +14,7 @@ export interface CanvasContextMenuItem {
   readonly hint?: string;
   readonly shortcut?: string;
   readonly disabled?: boolean;
+  readonly separatorBefore?: boolean;
   /** 删除一类的高风险动作，用错误色区分。 */
   readonly danger?: boolean;
 }
@@ -87,8 +88,13 @@ function CanvasContextMenuLayer({
       const elements = itemRefs.current.filter((item): item is HTMLButtonElement => item !== null && !item.disabled);
       if (elements.length === 0) return;
       const current = elements.findIndex((item) => item === document.activeElement);
+      if (event.key === "Tab") {
+        onClose();
+        return;
+      }
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
+        event.stopPropagation();
         const next =
           event.key === "ArrowDown"
             ? (current + 1) % elements.length
@@ -100,11 +106,13 @@ function CanvasContextMenuLayer({
       }
       if (event.key === "Home") {
         event.preventDefault();
+        event.stopPropagation();
         elements[0]?.focus();
         return;
       }
       if (event.key === "End") {
         event.preventDefault();
+        event.stopPropagation();
         elements[elements.length - 1]?.focus();
       }
     },
@@ -124,28 +132,36 @@ function CanvasContextMenuLayer({
         id={menuId}
         role="menu"
         aria-label="画布右键菜单"
-        className="canvas-context-menu"
+        className="canvas-context-menu canvas-context-menu--context"
         onKeyDown={handleKeyDown}
       >
         {items.map((item, index) => {
           const shortcut = item.shortcut?.replace(/mod\+([a-z])/u, (_, key: string) => `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+"}${key.toUpperCase()}`);
+          const hintId = `${menuId}-${item.id}-hint`;
           return (
-            <button
-              key={item.id}
-              type="button"
-              role="menuitem"
-              ref={(element) => {
-                itemRefs.current[index] = element;
-              }}
-              className={`canvas-context-menu__item${item.danger === true ? " is-danger" : ""}`}
-              aria-label={item.label}
-              disabled={item.disabled}
-              data-tooltip={item.hint}
-              onClick={() => handleSelect(item.id)}
-            >
-              <span className="canvas-context-menu__item-label">{item.label}</span>
-              {shortcut ? <span className="canvas-context-menu__shortcut" aria-hidden="true">{shortcut}</span> : null}
-            </button>
+            <Fragment key={item.id}>
+              {item.separatorBefore && index > 0 ? <div className="canvas-context-menu__separator" role="separator" /> : null}
+              <button
+                type="button"
+                role="menuitem"
+                tabIndex={-1}
+                ref={(element) => {
+                  itemRefs.current[index] = element;
+                }}
+                className={`canvas-context-menu__item${item.danger === true ? " is-danger" : ""}`}
+                aria-label={item.label}
+                aria-describedby={item.hint ? hintId : undefined}
+                disabled={item.disabled}
+                onClick={() => handleSelect(item.id)}
+              >
+                <span className="canvas-context-menu__item-label">
+                  {item.label}
+                  {item.hint ? <span className="canvas-context-menu__hint" aria-hidden="true" data-tooltip={item.hint}>?</span> : null}
+                </span>
+                {item.hint ? <span id={hintId} className="sr-only">{item.hint}</span> : null}
+                {shortcut ? <span className="canvas-context-menu__shortcut" aria-hidden="true">{shortcut}</span> : null}
+              </button>
+            </Fragment>
           );
         })}
       </div>

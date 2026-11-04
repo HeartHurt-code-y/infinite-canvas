@@ -60,8 +60,7 @@ import { normalizePromptReferenceText } from "../../lib/promptReferences";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
-import { WhiteModelControlSection } from "./WhiteModelControlSection";
-import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
+import type { GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
 import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
 import { CanvasVideoSettings } from "./CanvasVideoSettings";
@@ -1740,11 +1739,6 @@ export function VideoNodeSettings({
   providerCatalog,
   mediaInputs,
   onChange,
-  onGreenScreenGenerate,
-  onGreenScreenUseResult,
-  onImportGreenScreenVideo,
-  greenScreenResults,
-  greenScreenBusy,
   active = true,
   advancedHostId,
 }: {
@@ -1800,8 +1794,6 @@ export function VideoNodeSettings({
     seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])),
     selectedModel?.operationSchema,
   );
-  // These tools compile ordinary prompt/media requests; acceptance comes from the service.
-  const showSeedanceExtras = taskState.enabled;
   const showSeedanceDraft = supportsSeedanceDraft(
     selectedProvider?.provider.adapterId ?? "",
     selectedModel?.remoteModelId ?? "",
@@ -1885,94 +1877,6 @@ export function VideoNodeSettings({
       ) : null}
     </>
   );
-  const modelFeatureFields = (
-    <>
-      {showSeedanceExtras || config.greenScreen ? (
-        <GreenScreenSection
-          config={config.greenScreen}
-          inputs={greenScreenInputs}
-          modelId={selectedModel?.remoteModelId ?? ""}
-          results={greenScreenResults}
-          busy={greenScreenBusy}
-          onGenerate={onGreenScreenGenerate}
-          onUseResult={onGreenScreenUseResult}
-          onImportVideo={onImportGreenScreenVideo}
-          onChange={(next) =>
-            onChange({
-              ...config,
-              greenScreen: next,
-              ...(next.enabled && config.whiteModelControl?.enabled
-                ? { whiteModelControl: { ...config.whiteModelControl, enabled: false } }
-                : {}),
-            })
-          }
-        />
-      ) : null}
-
-      {showSeedanceExtras || config.whiteModelControl ? (
-        <WhiteModelControlSection
-          {...(config.whiteModelControl ? { config: config.whiteModelControl } : {})}
-          inputs={(mediaInputs ?? []).flatMap((input) =>
-            input.target
-              ? [{ key: input.key, name: input.name, kind: input.kind, target: input.target }]
-              : [],
-          )}
-          modelId={selectedModel?.remoteModelId ?? ""}
-          taskMode={taskState.mode}
-          onChange={(whiteModelControl) =>
-            onChange({
-              ...config,
-              whiteModelControl,
-              ...(whiteModelControl.enabled && config.greenScreen?.enabled
-                ? { greenScreen: { ...config.greenScreen, enabled: false } }
-                : {}),
-            })
-          }
-        />
-      ) : null}
-
-      {showSeedanceDraft ? (
-        <div className="canvas-gen-node__media-roles" aria-label="草稿样片与正片">
-          <label className="canvas-gen-node__field">
-            <span>先生成草稿样片</span>
-            <span className="canvas-gen-node__toggle-control">
-              <input
-                type="checkbox"
-                aria-label="先生成草稿样片"
-                checked={seedanceDraftEnabled}
-                onChange={(event) =>
-                  onChange({
-                    ...config,
-                    parameterValues: {
-                      ...taskState.parameterValues,
-                      draft: event.target.checked,
-                      ...(event.target.checked ? { resolution: "480p" } : {}),
-                    },
-                  })
-                }
-              />
-              <span aria-hidden="true">{seedanceDraftEnabled ? "开启" : "关闭"}</span>
-            </span>
-          </label>
-          <small>
-            {seedanceDraftEnabled
-              ? "先生成 480p 样片；在产物的「原任务」中预览并审核后，可人工发起 1080p 正片。正片会创建独立付费任务，保留样片。"
-              : "直接生成支持 480p / 720p。需要 1080p 时先生成草稿样片，审核后再生成正片。"}
-          </small>
-          <small>可直接使用供应商 API Key，无需额外配置令牌分组。</small>
-          {seedanceDraftEnabled &&
-          config.parameterValues["resolution"] !== "480p" &&
-          config.parameterValues["resolution"] != null ? (
-            <small>
-              此存档保留了 {String(config.parameterValues["resolution"])}{" "}
-              分辨率；建议关闭后重新开启草稿以选择 480p，当前请求由服务端判定。
-            </small>
-          ) : null}
-        </div>
-      ) : null}
-
-    </>
-  );
   return (
       <CanvasVideoSettings
         config={config}
@@ -1980,25 +1884,37 @@ export function VideoNodeSettings({
         active={active}
         advancedHostId={advancedHostId}
         providerCatalog={providerCatalog}
-        modelLabel={selectedModel?.displayName ?? "选择视频模型"}
+        modelLabel={showSeedanceDraft ? (seedanceDraftEnabled ? "SD2.5(样片)" : "SD2.5") : selectedModel?.displayName ?? "选择视频模型"}
         capabilities={taskState.parameterCapabilities}
         inputs={mediaInputs ?? []}
         referenceSettings={referenceFields}
-        modelFeatures={modelFeatureFields}
         model={<div className="canvas-video-model-list" aria-label="视频模型">
           {availableProviders.flatMap(entry => entry.models
             .filter(model => supportsGenerationNode(model, "video"))
-            .map(model => <button type="button" key={`${entry.provider.id}:${model.definitionId}`}
-              data-video-model-option
-              aria-pressed={config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId}
-              onClick={() => {
-                if (config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId) return;
-                onChange({ ...config, modelSelection: { providerId: entry.provider.id, modelDefinitionId: model.definitionId }, parameterValues: {}, seedanceTaskMode: "auto", videoMode: config.videoMode === "longVideo2video" ? "longVideo2video" : "auto", mediaRoles: {} });
-              }}>
-              <Icon name="video-camera" size="sm" aria-hidden="true" />
-              <span>{model.displayName}{availableProviders.length > 1 ? <small>{providerLabels.get(entry.provider.id) ?? entry.provider.displayName}</small> : null}</span>
-              {config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId ? <Icon name="check" size="sm" aria-hidden="true" /> : null}
-            </button>))}
+            .flatMap(model => {
+              const draftCapable = supportsSeedanceDraft(entry.provider.adapterId, model.remoteModelId);
+              const sameModel = config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId;
+              return (draftCapable ? [false, true] : [false]).map(draft => {
+                const selected = sameModel && (!draftCapable || seedanceDraftEnabled === draft);
+                const label = draftCapable ? `Seedance 2.5${draft ? "（样片模式）" : ""}` : model.displayName;
+                return <button type="button" key={`${entry.provider.id}:${model.definitionId}:${draft}`}
+                  data-video-model-option aria-pressed={selected}
+                  onClick={() => {
+                    if (selected) return;
+                    onChange({ ...config,
+                      modelSelection: { providerId: entry.provider.id, modelDefinitionId: model.definitionId },
+                      parameterValues: { ...(sameModel ? config.parameterValues : {}),
+                        ...(draftCapable ? { draft, ...(draft ? { resolution: "480p" } : {}) } : {}) },
+                      ...(!sameModel ? { seedanceTaskMode: "auto", videoMode: config.videoMode === "longVideo2video" ? "longVideo2video" : "auto", mediaRoles: {} } : {}),
+                    });
+                  }}>
+                  <Icon name="video-camera" size="sm" aria-hidden="true" />
+                  <span>{label}{draft ? <small>480P 低成本试片，满意后生成高清正片</small> : null}
+                    {availableProviders.length > 1 ? <small>{providerLabels.get(entry.provider.id) ?? entry.provider.displayName}</small> : null}</span>
+                  {selected ? <Icon name="check" size="sm" aria-hidden="true" /> : null}
+                </button>;
+              });
+            }))}
           {availableProviders.length === 0 ? <p role="status">请先在全局设置中配置视频模型。</p> : null}
         </div>}
       />

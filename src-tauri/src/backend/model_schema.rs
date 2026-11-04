@@ -694,8 +694,8 @@ pub(crate) fn seedance_reference_limits(model_id: &str) -> Option<SeedanceRefere
 }
 
 /// 同名模型在方舟上保留原生能力，只有 OpenAI 兼容网关采用本次草稿样片合同。
-/// 旧的通用国内档案同时声明 1080p、联网搜索等字段；该网关的生成阶段仅开放
-/// 480p/720p，1080p 正片由 draft_task 晋升请求让平台自动设置。
+/// 普通生成提供 480p/720p/1080p；样片另以 draft_task 复用生成正片。
+/// 客户端保留用户显式选择，实际能力由连接对应的服务端判断。
 fn apply_seedance_draft_video_dialect(
     schema: &mut Value,
     model_id: &str,
@@ -729,7 +729,7 @@ fn apply_seedance_draft_video_dialect(
                     },
                     "resolution": {
                         "type": "string", "label": "分辨率", "default": "720p",
-                        "enum": ["720p", "480p"]
+                        "enum": ["720p", "480p", "1080p"]
                     },
                     "duration": {
                         "type": "integer", "label": "时长", "default": 5, "enum": durations
@@ -3926,8 +3926,8 @@ pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) ->
             .and_then(Value::as_str)
             == Some(GatewayProfile::SeedanceDraft.profile_id())
     {
-        // 已按网关草稿合同迁移的档案不再走旧国内能力补齐，避免每次打开都先
-        // 加回 1080p/联网搜索、再由连接方言删除，造成无意义的重复写入。
+        // 该档案由连接方言统一维护（包含直出 1080p），不再走旧国内档案的
+        // 额外参数补齐，避免每次打开都产生无意义的重复写入。
         return false;
     }
     // RD 网关模型 ID 含 `seedance-2.5` 子串，但契约完全不同；

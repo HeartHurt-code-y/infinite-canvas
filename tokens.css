@@ -565,11 +565,12 @@
   --shadow-ll-menu: 0 8px 24px -4px rgb(0 0 0 / 0.32);
   /* LibTV 2026-11-03 右键菜单公开样式：196px / 16px / 32px。 */
   --canvas-context-menu-width: 196px;
+  --canvas-context-menu-border-width: 0.5px;
   --canvas-context-menu-radius: 16px;
   --canvas-context-menu-row-height: 32px;
   --canvas-context-menu-font-size: 13px;
   --canvas-context-menu-shortcut-size: 12px;
-  --canvas-context-menu-shadow: 0 8px 32px rgb(0 0 0 / 0.15);
+  --canvas-context-menu-shadow: 0 8px 32px rgb(0 0 0 / 0.15), 0 2px 8px rgb(0 0 0 / 0.1);
   --canvas-node-action-size: 24px;
   --canvas-node-action-radius: 6px;
   --canvas-node-action-bg: #00000066;

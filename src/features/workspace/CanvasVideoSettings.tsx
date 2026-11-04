@@ -1,5 +1,6 @@
 import { useLayoutEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { SlidersHorizontal } from "lucide-react";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import {
   canvasVideoModeOptions,
@@ -11,11 +12,9 @@ import {
   resolvedParameterValue,
   isFzyVideoSchema,
   isSeedance25VideoModel,
-  seedanceReferenceLimits,
   type ModelParameterCapability,
   type ModelParameterValue,
 } from "../../lib/modelCapabilities";
-import { providerSupportsAssetLibrary } from "../../lib/assetLibrarySupport";
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import {
   resolveLongVideoSettings,
@@ -208,7 +207,6 @@ export function CanvasVideoSettings({
   modelLabel,
   model,
   referenceSettings,
-  modelFeatures,
   capabilities,
   inputs,
   active,
@@ -220,7 +218,6 @@ export function CanvasVideoSettings({
   readonly modelLabel: string;
   readonly model: ReactNode;
   readonly referenceSettings: ReactNode;
-  readonly modelFeatures: ReactNode;
   readonly capabilities: readonly ModelParameterCapability[];
   readonly inputs: readonly { key: string; kind: string }[];
   readonly active: boolean;
@@ -232,7 +229,12 @@ export function CanvasVideoSettings({
     setHost(advancedHostId ? document.getElementById(advancedHostId) : null);
   }, [advancedHostId]);
   const setParameter = (key: string, value: ModelParameterValue) =>
-    onChange({ ...config, parameterValues: { ...config.parameterValues, [key]: value } });
+    onChange({ ...config, parameterValues: {
+      ...config.parameterValues,
+      [key]: value,
+      ...(key === "resolution" && String(value).toLowerCase() === "1080p" && config.parameterValues["draft"] === true
+        ? { draft: false } : {}),
+    } });
   const mode = config.videoMode ?? config.seedanceTaskMode ?? "auto";
   const modeInputs = [...inputs, ...(config.perTaskUrlMedia ?? [])];
   const selectedModel = providerCatalog.find(entry => entry.provider.id === config.modelSelection.providerId)
@@ -324,25 +326,12 @@ export function CanvasVideoSettings({
           </div>
         </div>
       ) : null}
+      {referenceSettings}
     </>
   );
-  const libraries = providerCatalog
-    .map((entry) => entry.provider)
-    .filter((provider) => provider.enabled && providerSupportsAssetLibrary(provider));
-  const verificationProviderId =
-    config.verificationProviderId ??
-    libraries.find((provider) => provider.id === config.modelSelection.providerId)?.id ??
-    libraries[0]?.id ??
-    "";
   const searchCapability = capabilities.find((capability) => capability.key === "web_search");
   const searchEnabled =
     config.parameterValues["web_search"] ?? searchCapability?.defaultValue ?? false;
-  // Seedance 全模态参考的素材上限（与后端同一份契约）：在面板里提前说清，
-  // 别让用户连了一段长音频、提交之后才被供应商的 400 打回。
-  const referenceLimits = (() => {
-    const remoteModelId = selectedModel?.remoteModelId;
-    return remoteModelId ? seedanceReferenceLimits(remoteModelId) : null;
-  })();
   const switches = (
     <section
       className="canvas-video-advanced"
@@ -391,35 +380,6 @@ export function CanvasVideoSettings({
         />
         <i aria-hidden="true" />
       </label>
-      {config.autoVerifyMaterials !== false ? (
-        <div className="canvas-video-verification-provider">
-          <span>校验素材库</span>
-          <CanvasSelect
-            ariaLabel="校验素材库"
-            value={verificationProviderId}
-            options={[
-              ...(verificationProviderId &&
-              !libraries.some((provider) => provider.id === verificationProviderId)
-                ? [{ value: verificationProviderId, label: "原素材库连接（不可用）" }]
-                : []),
-              ...(libraries.length
-                ? libraries.map((provider) => ({ value: provider.id, label: provider.displayName }))
-                : [{ value: "", label: "请先配置云端素材库连接" }]),
-            ]}
-            onChange={(verificationProviderId) => onChange({ ...config, verificationProviderId })}
-          />
-          <small>本地参考自动入库；审核通过后提交生成。已入库素材复用原身份。</small>
-        </div>
-      ) : null}
-      {referenceLimits ? (
-        <small className="canvas-video-reference-limits">
-          {referenceLimits.familyLabel} 参考素材上限：参考图 {referenceLimits.maxImages} 张、参考视频{" "}
-          {referenceLimits.maxVideos} 个（合计不超过 {referenceLimits.maxVideoTotalSeconds} 秒）、参考音频{" "}
-          {referenceLimits.maxAudios} 段（合计不超过 {referenceLimits.maxAudioTotalSeconds} 秒）。超出上限会在提交前被拦下。
-        </small>
-      ) : null}
-      {referenceSettings}
-      {modelFeatures}
     </section>
   );
   return (
@@ -458,10 +418,11 @@ export function CanvasVideoSettings({
         className="canvas-video-advanced-trigger"
         aria-label="高级设置"
         aria-expanded={config.advancedOpen === true}
-        title="高级设置"
+        data-tooltip="高级设置"
+        aria-controls={advancedHostId}
         onClick={() => onChange({ ...config, advancedOpen: !config.advancedOpen })}
       >
-        <LibTVMediaIcon name="icon-generate-settings1" size={16} />
+        <SlidersHorizontal size={16} aria-hidden="true" />
       </button>
       {host ? createPortal(switches, host) : switches}
     </>

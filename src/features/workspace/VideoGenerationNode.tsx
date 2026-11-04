@@ -3,6 +3,7 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { CanvasImageIcon } from "./CanvasImageIcons";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { CanvasVideoResultActions } from "./CanvasVideoResultActions";
+import { CanvasSeedanceDraftAction } from "./CanvasSeedanceDraftAction";
 import { CanvasVideoFrameCrop } from "./CanvasVideoFrameCrop";
 import type { CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasImageResultActions } from "./CanvasImageResultActions";
@@ -220,6 +221,7 @@ export function MediaGenerationPreview({
   tasks,
   onOpenTask,
   inputs,
+  onPromoteSeedanceDraft,
   output,
   startError,
   onSelect,
@@ -246,6 +248,7 @@ export function MediaGenerationPreview({
   readonly latestTask?: GenerationTaskSummary | null | undefined;
   readonly tasks: readonly GenerationTaskSummary[];
   readonly onOpenTask: (taskId: string) => void;
+  readonly onPromoteSeedanceDraft: (taskId: string) => Promise<string>;
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly output?: OutputNodeData | null | undefined;
   readonly promptContents?: PromptContentModule | undefined;
@@ -352,6 +355,7 @@ export function MediaGenerationPreview({
       aria-busy={starting || activeTask != null}
       data-image-crop-active={activeImageEdit && activeImageEdit.mode !== "rotate" ? "" : undefined}
       onMouseDown={(event) => {
+        if (event.button !== 0) return;
         if ((activeImageEdit && activeImageEdit.mode !== "rotate") ||
             (event.target as Element).closest("button, input, video[controls], details, summary, [data-canvas-image-tool]"))
           return;
@@ -519,6 +523,12 @@ export function MediaGenerationPreview({
           </span>
         )}
       </div>
+
+      {isVideo && output?.taskId && output.finalPath ? (
+        <CanvasSeedanceDraftAction key={output.taskId} taskId={output.taskId}
+          tasks={tasks}
+          onPromote={onPromoteSeedanceDraft} onOpenTask={onOpenTask} />
+      ) : null}
 
       {activeImageEdit?.mode === "outpaint" || activeImageEdit?.mode === "repaint" ? (
         <CanvasImageRegionEditor mode={activeImageEdit.mode} mediaHost={mediaHost} pixelSize={pixelSize}

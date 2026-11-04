@@ -1,4 +1,5 @@
 import { ImageLightbox } from "../../components/ImageLightbox";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import { Navigation, Workflow } from "lucide-react";
 import { applyImageNodeResult, imageNodePreview, imageResultFromOutput, restoreImageNodeGeneration } from "./imageNodeResults";
@@ -17,12 +18,14 @@ import type { ListFeatureAssets } from "./CanvasFeatureAssetPicker";
 import { CanvasReferenceLibraryContext } from "./canvasReferenceLibrary";
 import { loadCanvasGenerationTasks } from "./canvasGenerationTasks";
 import { CanvasReferencePickingContext, useCanvasReferencePicking } from "./canvasReferencePicking";
+import { CanvasImageMarkingBar, CanvasImageMarkingContext, useCanvasImageMarking } from "./CanvasImageMarking";
 import "./CanvasReferencePicking.css";
 import { CanvasTextImagePicker, CanvasTextReading, CanvasTextResource } from "./CanvasTextResource";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { canvasFeatureMediaType, type CanvasFeatureAction, type CanvasFeatureTarget, type CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasFeatureMediaEditor, type CanvasFeatureMediaSession } from "./CanvasFeatureMediaEditor";
 import type { VideoOpeningDraft } from "./CanvasVideoOpeningEditor";
+import { canPromoteSeedanceDraft } from "../../lib/seedanceDraft";
 import { CanvasAtlasToolDialog, type CanvasAtlasToolOptions, type CanvasAtlasToolSession } from "./CanvasAtlasToolDialog";
 import { invokeDesktop } from "../../lib/ipc";
 import * as v from "valibot";
@@ -161,6 +164,7 @@ import {
   type TosStagingConfig,
 } from "../../lib/backend";
 import { artifactFileName, resultDisplayName } from "./artifactNames";
+import { exportArtifactToDesktop } from "./desktopActions";
 import { canvasImageActionTarget, copyCanvasImage, downloadCanvasImage, duplicateCanvasImage } from "./canvasImageActions";
 import {
   registerArtifactNameSync,
@@ -486,25 +490,6 @@ import {
 } from "./videoClipModes";
 
 const CANVAS_FLOW_NODE_TYPES = { canvas: CanvasFlowNodeView };
-/*
- * 节点右键菜单条目。
- *
- * 前六项是原站 liblib 的节点级上下文项；后四项是左下控件组按原站收敛成六项后
- * 迁到这里的节点动作（粘贴 / 删除 / 交付）——原站把这些动作放在右键菜单与
- * 键盘快捷键里，没有独立的工具条按钮。
- */
-const CANVAS_NODE_CONTEXT_MENU_ITEMS = [
-  { id: "copyNode", label: "复制节点", hint: "仅复制当前节点" },
-  { id: "copyImage", label: "复制图片" },
-  { id: "copyText", label: "复制文本" },
-  { id: "duplicate", label: "创建副本", hint: "创建当前所有参数" },
-  { id: "paste", label: "粘贴已复制节点" },
-  { id: "group", label: "成组" },
-  { id: "copyExpanded", label: "复制整组" },
-  { id: "remove", label: "删除节点", danger: true },
-  { id: "exportArtifacts", label: "按名称批量交付选中产物" },
-  { id: "formatLayout", label: "整理画布" },
-];
 const EMPTY_CANVAS_FLOW_NODES: CanvasFlowNode[] = [];
 const VideoLocalEditDialog = lazy(() =>
   import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
@@ -1246,6 +1231,7 @@ type GenNodeCardSlotProps = {
   readonly latestTask: GenerationTaskSummary | null;
   readonly nodeTasks: readonly GenerationTaskSummary[];
   readonly onOpenGenerationTask: (taskId: string) => void;
+  readonly onPromoteSeedanceDraft: (taskId: string) => Promise<string>;
   readonly descriptorContext: Parameters<typeof getNodeDescriptor>[1];
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly promptContents: ReturnType<typeof createPromptContentModule>;
@@ -1659,6 +1645,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
   return (
     <>
       <CanvasGenNode
+        onPromoteSeedanceDraft={props.onPromoteSeedanceDraft}
         featureRequest={props.featureRequest}
         canvasId={props.canvasId}
         presentation={presentation}
@@ -2221,7 +2208,19 @@ export function WorkspaceApp({
    * 折叠 / 添加到素材库 / 解散）因此收在这里——原站的组操作同样走右键菜单。
    */
   const contextNodeEntry = useCanvasNodeEntry(nodeContextMenu?.nodeKey ?? "");
+  const contextPreview = useCanvasNodeDerived(
+    nodeContextMenu?.nodeKey ?? "",
+    latestGenerationPreviewFor,
+    generationPreviewToken,
+  );
+  const contextOutput = contextNodeEntry?.type === "output" ? contextNodeEntry.data : contextPreview;
   const contextImage = canvasImageActionTarget(contextNodeEntry);
+  const contextMediaType = contextNodeEntry?.type === "gen" || contextNodeEntry?.type === "asset"
+    ? contextNodeEntry.data.kind : contextOutput?.mediaType;
+  const contextHasMedia = contextMediaType === "image" || contextMediaType === "video" || contextMediaType === "audio";
+  const contextMediaPath = contextImage?.localPath ?? contextOutput?.finalPath;
+  const contextMediaName = contextImage?.name ?? contextOutput?.name
+    ?? (contextNodeEntry?.type === "gen" || contextNodeEntry?.type === "asset" ? contextNodeEntry.data.name : undefined) ?? "媒体";
   const [groupContextMenu, setGroupContextMenu] = useState<{
     readonly x: number;
     readonly y: number;
@@ -7854,10 +7853,17 @@ export function WorkspaceApp({
         })),
         ...urlConnections,
       ];
-      const hasMediaInput = connectedAssets.some(
-        (input) => input.kind === "image" || input.kind === "video",
-      );
       const storedPromptDocument = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
+      // A mark pins the actual image that was recognized, including the node's
+      // own previous result. Replacing the preview must not retarget that mark.
+      if (genNode.kind === "image" && !isImageUpscale) {
+        const referencedMarks = new Set(storedPromptDocument?.items.flatMap(item => item.kind === "mark_reference" ? [item.markId] : []));
+        for (const mark of genNode.config.imageMarks ?? []) {
+          if (!referencedMarks.has(mark.id) || connections.some(input => input.target.kind !== "url" && sameMediaReferenceTarget(input.target, mark.sourceTarget))) continue;
+          connections.push({ key: `image-mark-source:${mark.id}`, name: mark.sourceName, kind: "image", target: mark.sourceTarget, role: "" });
+        }
+      }
+      const hasMediaInput = connections.some(input => input.kind === "image" || input.kind === "video");
       const videoMode = genNode.kind === "video" ? genNode.config.videoMode ?? genNode.config.seedanceTaskMode : undefined;
       const promptDocument = storedPromptDocument && genNode.kind === "video"
         ? videoPromptForMode(storedPromptDocument, videoMode)
@@ -8476,6 +8482,12 @@ export function WorkspaceApp({
     },
     [canvasId, canvasNodesNow, addOutput, outputPlacementOptionsFor, refreshTasks],
   );
+
+  const promoteSeedanceDraftFromCanvas = useCallback(async (taskId: string) => {
+    const draft = await generationClient.get(taskId);
+    if (!canPromoteSeedanceDraft(draft)) throw new Error("这个任务不是可转正片的已完成样片。");
+    return promoteSeedanceDraftFromHistory(draft);
+  }, [promoteSeedanceDraftFromHistory]);
 
   // 各生成节点的活动任务与最近成功结果（按 sourceNodeId = 节点 key 关联）。
   const activeTaskByNode = useMemo(() => {
@@ -11234,6 +11246,9 @@ export function WorkspaceApp({
   const reference = useCanvasReferencePicking(canvasStore, canvasViewportRef,
     active && !storyboardEnabled ? editingNodeKey : null);
   const pickingReference = reference.session != null;
+  const marking = useCanvasImageMarking({ store: canvasStore, viewport: canvasViewportRef,
+    editorKey: active && !storyboardEnabled ? editingNodeKey : null, canvasId, providerCatalog, defaultModel: nodeModelSelections.prompt, promptContents });
+  const pickingCanvas = pickingReference || marking.targetKey != null;
   const referenceAssetOrder = useMemo(() => {
     const order = new Map<string, number>();
     if (pickingReference && assetDrawerTab === "assets") {
@@ -11671,6 +11686,7 @@ export function WorkspaceApp({
             handleEnhanceImage,
             handleEditImageRegion,
             openGenerationHistory,
+            promoteSeedanceDraftFromCanvas,
             updateVideoNodeConfig,
             openVideoLocalEdit,
             handleUseGreenScreenResult,
@@ -11698,6 +11714,7 @@ export function WorkspaceApp({
                 latestTask={latestTaskByNode.get(node.key) ?? null}
                 nodeTasks={tasksBySourceNode.get(node.key) ?? EMPTY_GENERATION_TASKS}
                 onOpenGenerationTask={openGenerationHistory}
+                onPromoteSeedanceDraft={promoteSeedanceDraftFromCanvas}
                 descriptorContext={nodeDescriptorContext}
                 providerCatalog={providerCatalog}
                 promptContents={promptContents}
@@ -11761,6 +11778,7 @@ export function WorkspaceApp({
       handleEnhanceImage,
       handleEditImageRegion,
       closeNodeEditor,
+      promoteSeedanceDraftFromCanvas,
       nodeDescriptorContext,
       selectedCanvasNodeKeys,
       startingNodeKeys,
@@ -12046,7 +12064,7 @@ export function WorkspaceApp({
     const findHandle = (target: EventTarget | null) => {
       const handle = target instanceof Element ? target.closest<HTMLElement>(".canvas-flow-handle.connectable") : null;
       return handle && canvasViewportRef.current?.contains(handle) &&
-        !canvasViewportRef.current.classList.contains("canvas-reference-picking") ? handle : null;
+        !canvasViewportRef.current.matches(".canvas-reference-picking, .canvas-image-marking") ? handle : null;
     };
     const toggleMenu = (handle: HTMLElement) => {
       const nodeKey = handle.dataset["nodeid"];
@@ -12553,14 +12571,19 @@ export function WorkspaceApp({
     ];
   }, [canvasAssetGroups, canvasGroupMetadata, groupContextMenu]);
 
-  const nodeContextMenuItems: readonly CanvasContextMenuItem[] = contextImage ? [
-    ...(contextImage.localPath && isDesktopRuntime() ? [{ id: "downloadImage", label: "下载图片" }] : []),
+  const nodeContextMenuItems: readonly CanvasContextMenuItem[] = [
+    ...(contextHasMedia ? [
+      { id: "createAsset", label: "保存到我的资产", disabled: !isDesktopRuntime() || (!contextMediaPath && contextNodeEntry?.type !== "asset") },
+      { id: "createSubject", label: "创建主体", disabled: true },
+      { id: "download", label: "下载", disabled: !contextMediaPath || !isDesktopRuntime(), separatorBefore: true },
+    ] : []),
     { id: "copyNode", label: "复制节点", hint: "仅复制当前节点", shortcut: "mod+c" },
-    ...(contextImage.src ? [{ id: "copyImage", label: "复制图片" }] : []),
-    { id: "duplicate", label: "创建副本", shortcut: "mod+d" },
+    ...(contextImage?.src ? [{ id: "copyImage", label: "复制图片" }] : []),
+    { id: "duplicate", label: "创建副本", hint: "复制当前节点及其参数", shortcut: "mod+d" },
     { id: "paste", label: "粘贴", shortcut: "mod+v", disabled: !canPasteCanvasNodes },
-    { id: "remove", label: "删除", shortcut: "Delete" },
-  ] : CANVAS_NODE_CONTEXT_MENU_ITEMS;
+    { id: "remove", label: "删除", shortcut: "Del" },
+    { id: "copyToClipboard", label: "复制到剪贴板", separatorBefore: true },
+  ];
 
   const groupSelectedCanvasNodes = useCallback(() => {
     if (!canGroupSelectedNodes) return;
@@ -12582,6 +12605,31 @@ export function WorkspaceApp({
       setNodeContextMenu(null);
       if (target == null) return;
       switch (action) {
+        case "createAsset":
+          if (contextNodeEntry?.type === "asset") {
+            handleSaveAssetNodeToLibrary(target.nodeKey, "local");
+          } else if (contextMediaPath) {
+            void localBase64AssetClient.importAsset({
+              localPath: contextMediaPath,
+              name: contextMediaName,
+              groupId: uploadTargetLocalGroupId(),
+            }).then(() => {
+              refreshLocalAssets("upload-finished");
+              toast.success("已保存到我的资产");
+            }).catch((error: unknown) => toast.error(`保存素材失败：${backendErrorMessage(error)}`));
+          }
+          return;
+        case "download":
+          if (contextMediaPath) void exportArtifactToDesktop(contextMediaPath,
+            artifactFileName(contextMediaName, contextMediaPath))
+            .then(saved => { if (saved) toast.success("已下载"); })
+            .catch((error: unknown) => toast.error(`下载失败：${backendErrorMessage(error)}`));
+          return;
+        case "copyToClipboard":
+          if (contextNodeEntry) void copyTextToClipboard(JSON.stringify(contextNodeEntry, null, 2))
+            .then(() => toast.success("已复制到剪贴板"))
+            .catch((error: unknown) => toast.error(`复制失败：${backendErrorMessage(error)}`));
+          return;
         case "copyImage":
           if (contextImage?.src) void copyCanvasImage(contextImage)
             .then(() => toast.success("图片已复制"))
@@ -12652,6 +12700,12 @@ export function WorkspaceApp({
       canPasteCanvasNodes,
       copyCanvasNodes,
       contextImage,
+      contextNodeEntry,
+      contextMediaPath,
+      contextMediaName,
+      handleSaveAssetNodeToLibrary,
+      uploadTargetLocalGroupId,
+      refreshLocalAssets,
       collectCanvasDocument,
       insertSubgraph,
       promptContents,
@@ -13130,7 +13184,7 @@ export function WorkspaceApp({
     const editor = element?.closest<HTMLElement>("[data-node-key]");
     const typing = isInsideFormField(event.target);
     if (typing && action !== "search" && (!editor || (action !== "generate" && action !== "duplicate"))) return;
-    if (pickingReference && !["zoomIn", "zoomOut", "fit", "undo", "redo"].includes(action)) {
+    if (pickingCanvas && !["zoomIn", "zoomOut", "fit", "undo", "redo"].includes(action)) {
       event.preventDefault();
       return;
     }
@@ -13728,7 +13782,7 @@ export function WorkspaceApp({
 
   return (
     <main className={`workspace-shell workspace-shell--immersive${storyboardEnabled
-      ? " workspace-shell--storyboard" : assetDrawerTab ? " workspace-shell--asset-drawer" : ""}${pickingReference ? " workspace-shell--reference-picking" : ""}`}>
+      ? " workspace-shell--storyboard" : assetDrawerTab ? " workspace-shell--asset-drawer" : ""}${pickingCanvas ? " workspace-shell--reference-picking" : ""}`}>
       {directorEntry?.type === "director" ? <Suspense fallback={<div role="status" className="sr-only">正在加载3D导演台…</div>}>
         <LazyDirectorEditor key={directorEntry.data.key} node={directorEntry.data}
           models={clipModelOptions("text_generation")} defaultModel={nodeModelSelections.prompt}
@@ -14159,6 +14213,11 @@ export function WorkspaceApp({
           tabIndex={-1}
         >
           <AppUpdateBanner />
+          {marking.targetKey ? <CanvasImageMarkingBar onReturn={() => {
+            locateQuickAddNode(marking.targetKey!);
+            marking.stop();
+          }} onExit={marking.stop} /> : null}
+          {marking.overlays}
           {reference.session ? (
             <div className="canvas-reference-pick-bar" aria-label="画布参考">
               <div className="canvas-reference-pick-bar__message" role="status">
@@ -14178,7 +14237,7 @@ export function WorkspaceApp({
             </div>
           ) : null}
           <div
-            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${handTool ? " is-hand-tool" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}${pickingReference ? " canvas-reference-picking" : ""}`}
+            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${handTool ? " is-hand-tool" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}${pickingReference ? " canvas-reference-picking" : ""}${marking.targetKey ? " canvas-image-marking" : ""}`}
             style={{ "--canvas-media-title-scale": 100 / Math.max(50, zoom) } as CSSProperties}
             ref={canvasViewportRef}
             tabIndex={0}
@@ -14186,7 +14245,7 @@ export function WorkspaceApp({
             onPointerMove={(event) => { lastCanvasPointer.current = { x: event.clientX, y: event.clientY }; }}
             onPointerCancel={() => { marqueeGesture.current = null; }}
             onDoubleClick={(event) => {
-              if (pickingReference) return;
+              if (pickingCanvas) return;
               if (
                 !(event.target instanceof Element) ||
                 !event.target.classList.contains("react-flow__pane")
@@ -14220,12 +14279,12 @@ export function WorkspaceApp({
               maxZoom={MAX_ZOOM / 100}
               snapToGrid={snapToGrid}
               snapGrid={[24, 24]}
-              panOnDrag={handTool || pickingReference ? [0, 1] : [1]}
-              nodesDraggable={!handTool && !pickingReference}
+              panOnDrag={handTool || pickingCanvas ? [0, 1] : [1]}
+              nodesDraggable={!handTool && !pickingCanvas}
               nodeDragThreshold={0}
-              nodesConnectable={!handTool && !pickingReference}
-              elementsSelectable={!handTool && !pickingReference}
-              selectionOnDrag={!handTool && !pickingReference}
+              nodesConnectable={!handTool && !pickingCanvas}
+              elementsSelectable={!handTool && !pickingCanvas}
+              selectionOnDrag={!handTool && !pickingCanvas}
               selectionMode={SelectionMode.Partial}
               onSelectionStart={() => { marqueeGesture.current = new Set(); }}
               onSelectionEnd={handleNodeSelectionEnd}
@@ -14254,7 +14313,7 @@ export function WorkspaceApp({
               onMoveEnd={handleFlowMoveEnd}
               onPaneClick={() => {
                 canvasViewportRef.current?.focus({ preventScroll: true });
-                if (pickingReference) return;
+                if (pickingCanvas) return;
                 selectNode(null);
                 selectEdge(null);
                 setMarqueeNodeKeys(new Set());
@@ -14262,7 +14321,7 @@ export function WorkspaceApp({
               }}
               onPaneContextMenu={(event) => {
                 event.preventDefault();
-                if (pickingReference) return;
+                if (pickingCanvas) return;
                 const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
                 if (!boardPosition) return;
                 setConnectionQuickAdd({
@@ -14273,18 +14332,19 @@ export function WorkspaceApp({
               }}
               onNodeContextMenu={(event, node) => {
                 event.preventDefault();
-                if (pickingReference) return;
+                if (pickingCanvas) return;
                 setNodeContextMenu({ x: event.clientX, y: event.clientY, nodeKey: node.id });
               }}
               onSelectionContextMenu={(event) => {
                 event.preventDefault();
+                if (pickingCanvas) return;
                 const nodeKey = selectedGroupableNodeKeys[0];
                 if (canGroupSelectedNodes && nodeKey) {
                   setNodeContextMenu({ x: event.clientX, y: event.clientY, nodeKey });
                 }
               }}
               onNodeClick={(event, node) => {
-                if (handTool) return;
+                if (handTool || pickingCanvas) return;
                 const groupId = assetGroupIdFromFlowId(node.id);
                 if (groupId != null) {
                   selectCanvasGroup(groupId);
@@ -14311,7 +14371,7 @@ export function WorkspaceApp({
                 selectEdge(null);
               }}
               onEdgeClick={(_, edge) => {
-                if (nodeMarquee || pickingReference) return;
+                if (nodeMarquee || pickingCanvas) return;
                 if (edge.selectable !== false) {
                   selectEdge(edge.id);
                   selectNode(null);
@@ -14351,6 +14411,7 @@ export function WorkspaceApp({
 
             <CanvasReferenceLibraryContext.Provider value={referenceLibrary}>
               <CanvasReferencePickingContext.Provider value={reference.context}>
+              <CanvasImageMarkingContext.Provider value={marking.context}>
               <div className="video-node-editor-layer">
                 {[...genFlowNodes, ...screenplayFlowNodes, ...videoClipFlowNodes].map((node) => (
                   <RetainedNodeEditor key={node.id} open={editingNodeKey === node.id}>
@@ -14361,6 +14422,7 @@ export function WorkspaceApp({
                   </RetainedNodeEditor>
                 ))}
               </div>
+              </CanvasImageMarkingContext.Provider>
               </CanvasReferencePickingContext.Provider>
             </CanvasReferenceLibraryContext.Provider>
 
@@ -14425,7 +14487,7 @@ export function WorkspaceApp({
             ) : null}
           </div>
 
-          {!pickingReference ? <CanvasBottomDock
+          {!pickingCanvas ? <CanvasBottomDock
             characterStudioOpen={characterStudio?.open === true}
             onOpenCharacterStudio={() => {
               closeConnectionQuickAdd();

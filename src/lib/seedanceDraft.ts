@@ -1,4 +1,4 @@
-import type { GenerationTaskDetail } from "./backend";
+import type { GenerationTaskDetail, GenerationTaskProgress } from "./backend";
 
 export const SEEDANCE_DRAFT_MODEL_ID = "doubao-seedance-2-5-260628";
 export const SEEDANCE_DRAFT_PROFILE_ID = "moyu_seedance_25_draft_v1";
@@ -20,10 +20,10 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 /** Use the task's archived dialect and request, never the current provider settings. */
-export function isSeedanceDraftTask(detail: GenerationTaskDetail): boolean {
+export function isSeedanceDraftTask(detail: GenerationTaskDetail | GenerationTaskProgress): boolean {
   if (detail.summary.operation !== "video_generation") return false;
   const logical = record(detail.logicalRequest);
-  const resolved = record(detail.resolvedRequest);
+  const resolved = "resolvedRequest" in detail ? record(detail.resolvedRequest) : null;
   const parameters = record(logical?.["parameters"]) ?? record(resolved?.["parameters"]);
   const logicalDraft = parameters?.["draft"] === true;
   /*
@@ -35,7 +35,8 @@ export function isSeedanceDraftTask(detail: GenerationTaskDetail): boolean {
    * 请求体里取，两条路任选其一都能认出草稿任务。
    */
   const snapshotAdapterId = detail.summary.adapterIdSnapshot;
-  return detail.calls.some((call) => {
+  if (logicalDraft && supportsSeedanceDraft(snapshotAdapterId ?? "", detail.summary.remoteModelIdSnapshot ?? "")) return true;
+  return "calls" in detail && detail.calls.some((call) => {
     const request = record(call.request);
     const requestAdapterId = request?.["adapterId"];
     const adapterId =
@@ -51,7 +52,7 @@ export function isSeedanceDraftTask(detail: GenerationTaskDetail): boolean {
   });
 }
 
-export function canPromoteSeedanceDraft(detail: GenerationTaskDetail): boolean {
+export function canPromoteSeedanceDraft(detail: GenerationTaskDetail | GenerationTaskProgress): boolean {
   return (
     isSeedanceDraftTask(detail) &&
     detail.summary.status === "succeeded" &&

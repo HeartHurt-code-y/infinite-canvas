@@ -109,7 +109,9 @@
 - 客户端负责按当前 API 文档完整编码用户参数与素材；文档新增字段时补齐上传和映射，不能以“未定义/不支持”为由拦截，也不能静默丢弃输入。界面枚举仅提供选项与默认值，保留用户显式参数。
 - 保留本地文件读取、素材/任务身份、凭据冻结和请求编码完整性保障；服务端拒绝时呈现其真实错误。付费提交回执不明确时核对原任务，不删字段重发或自动重复扣费。
 - **批量／可重试的付费提交必须带固定任务身份**（`StartGenerationCommand.clientTaskId`）：身份由前端在提交**之前**就写进画布文档，后端按「同一身份 + 同一份请求」只创建一次任务（`tasks.rs` 的 `existing_client_task` 比对 `logical_request.clientRequestHash`，不同则返回 `Conflict`）。这样重复点击、恢复、重提都只会拿回同一个任务，不会产生第二笔付费请求——前端因此可以放心做「继续或核对」：先查任务在不在，在就只认领，不在才用同一身份重提。请求内容变了（镜头或生成节点被编辑过）就不能复用身份，这时把该条标成「需处理」而不是重发。
+- **轮询与刷新只能走状态轻量接口**（`get_generation_task_progress`）：`get_generation_task` 是**诊断详情**，它会带回每次供应商调用的完整请求体与原始响应体——一次图片调用就是几 MB 整包 base64，一个视频任务有几十次调用，`resolved_request` 里同样可能埋着整包素材。生成期间每 1.5~6 秒拉一轮详情，等于让几十 MB 报文反复穿过 IPC 边界；生成相关的 Tauri 命令又跑在 UI 线程上，界面会整片卡住、生成键也解不开（新任务发不出去）。后端已把详情里的报文**在 SQL 层截断**（请求 8KB、响应 32KB，并回带原始字节数），详情接口只应在用户真的要看某次调用的报文时按需调用。状态接口带 `logicalRequest` 与结果 `source`，轮询路径靠它就够还原记录卡。**一次性回填**（如画布启动时恢复产物卡、用户点「从任务历史恢复」）确实需要完整产物字段时可以用详情接口，但**不得放进定时器**，也不得按任务数量成批拉。
 - **前端 TS 开了 `exactOptionalPropertyTypes`**：可选属性不能显式传 `undefined`，类型要写成 `prop?: T | undefined` 才接得住；`phase` 这类字面量联合字段要显式 `as const` 或 `as 字段类型`，否则会被推成 `string`。
+- **创作台的「文本生成」不经过统一媒体任务管线**：统一管线显式拒绝 `GenerationOperation::TextGeneration`（"text generation is not a canvas generation task"）——文本模型是同步返回、没有远程任务号，请求构造也在文本通道（`prompt_optimize.rs`）而不在 provider 层，形状与媒体任务不同。创作台文本生成走专用命令 `start_text_generation`：同步建任务 → `tauri::async_runtime::spawn` 后台执行 → **立刻返回任务 ID**，前端按 `get_generation_task_progress` 轮询，正文从 `generation_task_events` 的 `text_output` 事件取。**提交后必须立刻返回**：一次文本模型调用动辄十几秒，若照媒体任务那样「等结果出来才解锁」，创作台就发不出第二条，生成键会被按住几十秒——与「生成时锁按钮」是同一个坑。创作台的参考素材走 `reference_inputs`（target 支持 `asset` / `local_base64_asset` / `local_file`），不要用 `multimodal_inputs`（要 mimeType，创作台没有）。交付内容是**模型原样回答**（`general_text` 分支），不做提示词抽取。
 
 # 入口与生成页约定
 
@@ -173,6 +175,16 @@
 - 浮层一律 portal 到 `document.body` + `position: fixed`：创作台的参数工具条是 `overflow-x: auto` 的横向滚动容器，浮层留在工具条 DOM 里会被祖先裁掉，用户看到的是「点了没反应」。
 - 顶栏搜索按即梦的逻辑做：**input 常驻**（收起时宽 4px 被容器裁掉，只露放大镜），靠容器 `data-open` 切状态，**不是**「按钮 ↔ 输入框」整体替换。展开的触发是**点放大镜**（hover 不展开）。展开时整组向左生长，组右端与组内右侧按钮位置都不变。
 - 网格里的卡片若要显示长文本：`<button>` 的 UA 样式表带 `align-items: flex-start`，交叉轴不 stretch，文本宽度会退化成 max-content 画到邻列上。必须显式写 `align-items: stretch`，网格轨道写 `minmax(0, 1fr)`（不是 `1fr`），文本本身补 `min-width: 0` 才能让省略号生效。
+
+# Escape 仲裁约定
+
+- **Escape 只有一个决策点**：`src/components/escapeArbiter.ts` 是全应用**唯一**的 Escape 仲裁器（全仓只挂一个 window 级 keydown 监听，**冒泡阶段**）。浮层 / 弹窗 / 面板要响应 Escape，一律用 `useEscapeHandler({ canHandle, handle }, active)` 注册，**不要**再写 `window.addEventListener("keydown", …)`：平行监听器彼此看不见，「一次按键关两层」「按 Esc 没反应」就是这么来的（修复前全仓有二十多处各自处理 Escape，捕获阶段的那些会在 React 冒泡处理**之前**抢走按键，`useModalFocusTrap` 还 `stopImmediatePropagation()` 把同层别的监听一起掐掉）。
+- **捕获阶段抢不到、也抢不得**：捕获阶段还没有人处理过 Escape，`defaultPrevented` 恒为 false，捕获阶段监听必然抢在内层之前动手。冒泡阶段排在元素级 React 处理器之后，内层浮层（`CanvasSelect` / `CreateSelect` / `SearchableMultiSelect`）可以先用 `preventDefault()` 认领这个键。
+- **一次按键只有一个处理者**：仲裁器按「优先级大 → 后注册（更内层）」找第一个 `canHandle()` 为真的处理者，执行它就收工，其余不再动作。层级关系要写进 `canHandle`（浮层家族用 `hasOpenChildLayer`，「事件落在打开的下拉里」用 `isInsideOpenPopup`），不要再靠「谁先注册」赌。
+- **优先级**：浮层 / 弹窗默认 0；说明气泡 `ESCAPE_PRIORITY_TOOLTIP`（-100）；画布背景动作（Esc 退出：清选中 / 退出连线手势）`ESCAPE_PRIORITY_CANVAS`（-500）。气泡排在画布背景动作**之前**，是为了让「Escape 关闭当前显示着的那一条说明」「延迟中、还没显示的那条也要被压住」这两条既有约定真的生效；画布背景动作排在浮层**之后**，是为了浮层开着时 Esc 只关浮层。
+- **画布的 Esc 快捷键也走仲裁器**：原来 `useHotkeys("esc", …)` 在 document 冒泡阶段 `preventDefault()`，会把画布上所有浮层 / 抽屉的 Esc 全部吃掉（它们原本挂在捕获阶段才抢得过它）——画布上「抽屉 / 缩放菜单 / 摄像机面板按 Esc 关不掉」的根因就在这里。现在它是仲裁器里的一个处理者（画布背景动作），输入框 / 文本域里不触发（沿用 `react-hotkeys-hook` 默认的 `enableOnFormTags: false` 口径）。
+- **注册表挂在 `globalThis` 上**：模块被重新求值（HMR、依赖被打两份）会得到**新的**处理者数组与**新的** window 监听器，而旧监听器里残留的旧处理者会**先**抢到 Escape——它调用的是已卸载组件的 `setState`（等于什么都没做），却已经把按键吃掉并 `preventDefault()`，表现是「按 Esc 没反应」且没有任何异常。注册表挂全局对象、监听器只挂一次并转调 `registry.dispatch`（始终是最新一版实现）；`useEscapeHandler` 另外记「已卸载」，卸载后的处理者不再动手。
+- **已认领就不动作**：`defaultPrevented` 为真直接返回（已被元素级 React 处理器认领的键不再二次处理）；输入法组合期间（`isComposing` / `keyCode === 229`）一律不处理。
 
 # 报错提示约定
 

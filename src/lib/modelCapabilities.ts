@@ -1239,7 +1239,7 @@ function seedanceDraftVideoParameters(): Record<string, unknown> {
       default: "adaptive",
       enum: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"],
     },
-    resolution: { type: "string", label: "分辨率", default: "720p", enum: ["720p", "480p"] },
+    resolution: { type: "string", label: "分辨率", default: "720p", enum: ["720p", "480p", "1080p"] },
     duration: {
       type: "integer",
       label: "时长",

@@ -1,4 +1,4 @@
-import { useCallback, useLayoutEffect, useState, type RefObject } from "react";
+import { useCallback, useContext, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import { modelParameterCapabilities } from "../../lib/modelCapabilities";
@@ -9,6 +9,7 @@ import { CanvasImageStyleMarket } from "./CanvasImageStyleMarket";
 import { CanvasImageTranslation } from "./CanvasImageTranslation";
 import { CanvasImagePresetMenu } from "./CanvasImagePresetMenu";
 import { CanvasCameraControl } from "./CanvasCameraControl";
+import { CanvasImageMarkingContext } from "./CanvasImageMarking";
 import type { ConnectedAssetInput, GenNodeData, ImageNodeConfig, InheritedAssetInput } from "./workspaceModel";
 import "./CanvasImageEditor.css";
 
@@ -28,6 +29,8 @@ export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, p
   readonly onChange: (config: ImageNodeConfig) => void;
 }) {
   const [stylesOpen, setStylesOpen] = useState(false);
+  const marking = useContext(CanvasImageMarkingContext);
+  const markButton = useRef<HTMLButtonElement>(null);
   const upscale = node.config.imageMode === "upscale";
   const closeStyles = useCallback(() => setStylesOpen(false), []);
   const [translating, setTranslating] = useState(false);
@@ -43,11 +46,16 @@ export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, p
     return selectedModel ? modelParameterCapabilities(selectedModel.operationSchema,
       linkedStyle || node.config.styleReference != null || hasPromptImage || inputs.some(input => input.kind === "image" || input.kind === "video") ? "image_to_image" : "text_to_image", selectedModel.remoteModelId) : [];
   };
-  // LibTV exposes mark only with model schema.magic and its point-recognition service.
-  // The retired manual rectangle form is not that capability; historical prompt marks remain readable.
+  useLayoutEffect(() => {
+    if (!active || upscale || !marking) return;
+    marking.register({ targetKey: node.key, sessionRef, restoreFocus: () => markButton.current?.focus({ preventScroll: true }) });
+    return () => marking.register(null);
+  }, [active, upscale, node.key, sessionRef, marking?.register]);
   return <>
     <CanvasReferenceTools node={node} active={active} />
     {!upscale ? <>
+      <button ref={markButton} type="button" className="canvas-gen-node__tool-chip" aria-label="标记" aria-pressed={marking?.targetKey === node.key}
+        onClick={() => { if (marking?.targetKey === node.key) marking.stop(); else marking?.start(); }}><LibTVMediaIcon name="mark" size={12} /><span>标记</span></button>
       <button type="button" className="canvas-gen-node__tool-chip" aria-pressed={linkedStyle || node.config.styleReference != null}
         disabled={linkedStyle} data-tooltip={linkedStyle ? "通过画布上的风格素材卡更换风格" : undefined}
         onClick={() => setStylesOpen(true)}><LibTVMediaIcon name="style" size={12} /><span>风格</span></button>

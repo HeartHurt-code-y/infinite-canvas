@@ -262,6 +262,40 @@
 .canvas-context-menu__item:disabled,
 .canvas-node-actions__menu button:disabled { opacity: 0.3; cursor: default; }
 
+.canvas-context-menu--context {
+  border-width: var(--canvas-context-menu-border-width);
+}
+
+.canvas-context-menu--context .canvas-context-menu__item {
+  line-height: 1.55;
+}
+
+.canvas-context-menu__separator {
+  height: var(--canvas-context-menu-border-width);
+  margin: 0 var(--space-xs);
+  flex-shrink: 0;
+  background: var(--canvas-controls-border);
+}
+
+.canvas-context-menu__item-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.canvas-context-menu__hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border: var(--rule-thin) solid currentColor;
+  border-radius: 50%;
+  color: var(--nt-text-tertiary);
+  font-size: 9px;
+  line-height: 1;
+}
+
 /* ── 断点：分组列数 ─────────────────────────────────────────────────────── */
 
 @container (min-width: 31rem) {

@@ -466,6 +466,7 @@ const MarkReference = Node.create({
         class: `mention-chip mention-chip--mark${offFrame ? " is-off-frame" : ""}`,
         contenteditable: "false",
         "data-mark-id": markId,
+        ...(markId.startsWith("image-mark-") ? { role: "button", tabindex: "0", "aria-haspopup": "menu", "aria-label": `局部元素：${label}` } : {}),
         "data-mark-mention-id": String(node.attrs["mentionId"] ?? ""),
         "data-mark-color": color,
         "data-mark-description": description,

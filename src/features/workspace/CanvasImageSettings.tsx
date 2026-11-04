@@ -42,6 +42,9 @@ export function CanvasImageSettings({ config, active, advancedHostId, triggerHos
   const id = useId();
   const upscale = config.imageMode === "upscale";
   const upscaleProviders = providerCatalog.filter(entry => entry.provider.enabled && entry.provider.adapterId === "atlascloud_v1");
+  const markModels = providerCatalog.filter(entry => entry.provider.enabled).flatMap(entry => entry.models
+    .filter(model => model.operations.includes("text_generation"))
+    .map(model => ({ value: JSON.stringify([entry.provider.id, model.definitionId]), label: `${entry.provider.displayName} · ${model.displayName}` })));
   const [host, setHost] = useState<HTMLElement | null>(null);
   const [triggerHost, setTriggerHost] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setHost(document.getElementById(advancedHostId)); }, [advancedHostId]);
@@ -58,6 +61,15 @@ export function CanvasImageSettings({ config, active, advancedHostId, triggerHos
       <input id={`${id}-autolink`} type="checkbox" role="switch" checked={config.autoLink !== false} onChange={event => onChange({ ...config, autoLink: event.target.checked })} />
       <i aria-hidden="true" />
     </label>
+    <div className="canvas-video-parameter canvas-image-mark-model" data-tooltip="选择支持图片理解的文本模型。点击图片标记时调用，费用按供应商实际计费。">
+      <span>元素识别模型</span>
+      <CanvasSelect ariaLabel="元素识别模型" value={config.markModelSelection ? JSON.stringify([config.markModelSelection.providerId, config.markModelSelection.modelDefinitionId]) : ""}
+        options={[{ value: "", label: "工作区默认文本模型" }, ...markModels]} onChange={value => {
+          if (!value) { const next = { ...config }; delete next.markModelSelection; onChange(next); return; }
+          const [providerId, modelDefinitionId] = JSON.parse(value) as [string, string];
+          onChange({ ...config, markModelSelection: { providerId, modelDefinitionId } });
+        }} />
+    </div>
   </section>;
   const trigger = <button type="button" className="canvas-video-advanced-trigger" aria-label="高级设置" aria-expanded={config.advancedOpen === true} aria-controls={`${id}-advanced`} data-tooltip="高级设置" onClick={() => onChange({ ...config, advancedOpen: !config.advancedOpen })}><LibTVMediaIcon name="icon-generate-settings1" size={16} /></button>;
   return <>
