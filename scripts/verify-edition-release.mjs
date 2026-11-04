@@ -235,9 +235,11 @@ async function verifyMacEditionResources(
     expected.push(...files.map((entry) => ({ ...entry, path: `${destination}${entry.path}` })));
   }
   requireValue(
-    Object.keys(config.bundle.resources).length === 1 &&
-      expected.some(({ path: filename }) => filename.startsWith("ffmpeg/")),
-    "macOS online resource map must contain the bundled FFmpeg runtime",
+    config.bundle.resources["resources/ffmpeg/"] === "ffmpeg/" &&
+      config.bundle.resources["resources/fonts/liblib-extended/"] === "fonts/liblib-extended/" &&
+      expected.some(({ path: filename }) => filename.startsWith("ffmpeg/")) &&
+      expected.some(({ path: filename }) => filename.startsWith("fonts/liblib-extended/")),
+    "macOS online resource map must contain bundled FFmpeg and font resources",
   );
   const icons = tauriConfig.bundle?.icon?.filter((filename) => filename.endsWith(".icns")) ?? [];
   requireValue(
