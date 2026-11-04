@@ -413,7 +413,15 @@ impl GenerationTaskService {
                     }),
                 )
             })?;
+        let remote_model_id = if remote_model_id == super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING {
+            super::model_schema::ATLASCLOUD_REGION_EDIT_MODEL
+        } else {
+            remote_model_id
+        };
+        super::video_storyboard::validate(&command.parameters, remote_model_id, command.prompt.len())?;
+        let video_effects = super::video_effects::apply(&mut command)?;
         let mut logical_request = serde_json::to_value(&command)?;
+        if let Some(effects) = video_effects { logical_request["videoEffectsSnapshot"] = effects; }
         if let Some((_, request_hash)) = &client_identity {
             logical_request["clientRequestHash"] = json!(request_hash);
         }

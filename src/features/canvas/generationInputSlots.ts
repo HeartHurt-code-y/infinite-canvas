@@ -24,6 +24,7 @@ export function isGenerationMediaConsumer(
  */
 export function generationSourceOccupiesInputSlot(source: CanvasNodeEntry): boolean {
   return (
+    (source.type !== "asset" || !source.data.libraryResource) &&
     source.type !== "gen" &&
     source.type !== "screenplay" &&
     source.type !== "videoClip"

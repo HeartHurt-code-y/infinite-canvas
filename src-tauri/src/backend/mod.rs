@@ -14,6 +14,7 @@ pub(crate) mod gateway_profile;
 pub mod generation_materials;
 pub mod image_normalize;
 pub mod image_presets;
+pub mod image_style_market;
 pub mod local_base64_assets;
 pub mod local_results;
 pub mod long_video;
@@ -43,9 +44,15 @@ pub mod tos_sign;
 pub mod types;
 pub mod video_clip;
 pub mod video_clip_render;
+pub mod canvas_feature_generation;
 pub mod video_edit_source;
 pub mod video_local_edit;
+pub mod audio_node_edit;
+pub mod audio_split;
 pub mod video_preparation;
+pub mod video_storyboard;
+pub mod video_effects;
+pub mod video_director;
 pub mod volcengine_ark;
 mod xiaohongshu;
 
@@ -181,6 +188,7 @@ impl BackendState {
             local_results.clone(),
             staging.clone(),
             local_base64_assets.clone(),
+            composer.clone(),
         );
         let video_edit_sources = VideoEditSourceService::new(
             assets.clone(),

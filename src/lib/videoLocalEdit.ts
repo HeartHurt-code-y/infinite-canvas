@@ -28,6 +28,12 @@ export interface PreparedVideoEditSource {
   readonly release: () => Promise<void>;
 }
 
+export async function prepareCanvasMediaSource(target: MediaReferenceTarget) {
+  const command = target.mediaType === "video" ? "prepare_video_edit_source" : "prepare_canvas_media_source";
+  const prepared = await invokeDesktop(command, preparedSourceSchema, { target });
+  return { path: prepared.path, ...prepareSourcePreview(prepared) };
+}
+
 /** Read original media on the desktop, independently of preview URL expiry and browser CORS. */
 export async function prepareVideoEditSource(
   target: ExplicitMediaTarget | undefined,
@@ -49,6 +55,10 @@ export async function prepareVideoEditSource(
   const prepared = await invokeDesktop("prepare_video_edit_source", preparedSourceSchema, {
     target: resolvedTarget,
   });
+  return prepareSourcePreview(prepared);
+}
+
+function prepareSourcePreview(prepared: v.InferOutput<typeof preparedSourceSchema>): PreparedVideoEditSource {
   let released = false;
   return {
     src: toMediaSrc(prepared.path),
@@ -58,7 +68,7 @@ export async function prepareVideoEditSource(
       try {
         await invokeDesktopVoid("release_video_edit_source", { previewId: prepared.previewId });
       } catch {
-        frontendLog("warn", "视频编辑临时预览清理失败，将在后续启动时回收。");
+        frontendLog("warn", "素材编辑临时预览清理失败，将在后续启动时回收。");
       }
     },
   };

@@ -1,6 +1,6 @@
 import { memo, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { CanvasSelect } from "../../components/CanvasSelect";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import "./CanvasTextGenerator.css";
 
 /**
@@ -36,6 +36,7 @@ export interface CanvasTextGeneratorPanelProps {
   readonly onValueChange: (value: string) => void;
   readonly modelOptions: readonly CanvasTextGeneratorModelOption[];
   readonly canChooseModel: boolean;
+  readonly modelReady?: boolean;
   readonly modelValue: string;
   readonly onModelChange: (value: string) => void;
   readonly onTranslate: () => void;
@@ -66,6 +67,7 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
   onValueChange,
   modelOptions,
   canChooseModel,
+  modelReady = canChooseModel,
   modelValue,
   onModelChange,
   onTranslate,
@@ -85,7 +87,7 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
   const panelRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const trimmed = value.trim();
-  const canSubmit = (trimmed.length > 0 || allowEmpty) && !submitting && !disabled && canChooseModel;
+  const canSubmit = (trimmed.length > 0 || allowEmpty) && !submitting && !disabled && modelReady;
   const canTranslate = trimmed.length > 0 && !translating && !disabled;
 
   // 跟随画布缩放，同时把面板约束在画布可见范围；靠边时允许翻到节点上方。
@@ -96,6 +98,10 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
     const flowViewport = panel?.closest<HTMLElement>(".react-flow__viewport");
     const flowNode = panel?.closest<HTMLElement>(".react-flow__node");
     if (!panel || !surface || !viewport) return;
+    const scriptPanel = panel.classList.contains("canvas-text-generator--script");
+    const dock = scriptPanel
+      ? viewport.closest(".canvas-stage")?.querySelector(".canvas-bottom-dock-row") : null;
+    const header = scriptPanel ? surface.querySelector(".canvas-gen-node__header") : null;
     let frame = 0;
     const place = () => {
       frame = 0;
@@ -104,22 +110,29 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
       const scale = surface.offsetWidth > 0 ? anchor.width / surface.offsetWidth : 0;
       if (!scale || bounds.width <= 0 || bounds.height <= 0) return;
       const margin = 8;
+      const dockRect = dock?.getBoundingClientRect();
+      const bottom = dockRect && dockRect.height > 0 && dockRect.top > bounds.top
+        ? Math.min(bounds.bottom, dockRect.top) : bounds.bottom;
       const width = `${Math.min(660, Math.max(0, bounds.width - margin * 2) / scale)}px`;
-      const maxHeight = `${Math.max(0, bounds.height - margin * 2) / scale}px`;
       if (panel.style.width !== width) panel.style.width = width;
+      const gap = 16 * scale;
+      const topAnchor = header ? Math.min(anchor.top, header.getBoundingClientRect().top) : anchor.top;
+      const spaceBelow = bottom - margin - anchor.bottom;
+      const spaceAbove = topAnchor - bounds.top - margin;
+      const naturalHeight = (panel.scrollHeight + panel.offsetHeight - panel.clientHeight) * scale;
+      const above = spaceBelow < naturalHeight + gap && spaceAbove > spaceBelow;
+      const viewportHeight = Math.max(0, bottom - bounds.top - margin * 2);
+      const available = Math.min(viewportHeight, Math.max(112 * scale, (above ? spaceAbove : spaceBelow) - gap));
+      const maxHeight = `${(scriptPanel ? available : viewportHeight) / scale}px`;
       if (panel.style.maxHeight !== maxHeight) panel.style.maxHeight = maxHeight;
       panel.style.transform = "translateX(-50%)";
       const box = panel.getBoundingClientRect();
       const maxLeft = Math.max(bounds.left + margin, bounds.right - margin - box.width);
       const left = Math.min(Math.max(bounds.left + margin, box.left), maxLeft);
-      const spaceBelow = bounds.bottom - margin - anchor.bottom;
-      const spaceAbove = anchor.top - bounds.top - margin;
-      const desiredTop = spaceBelow < box.height + 16 * scale && spaceAbove > spaceBelow
-        ? anchor.top - 16 * scale - box.height
-        : anchor.bottom + 16 * scale;
+      const desiredTop = above ? topAnchor - gap - box.height : anchor.bottom + gap;
       const top = Math.min(
         Math.max(bounds.top + margin, desiredTop),
-        Math.max(bounds.top + margin, bounds.bottom - margin - box.height),
+        Math.max(bounds.top + margin, bottom - margin - box.height),
       );
       panel.style.transform = `translate(calc(-50% + ${(left - box.left) / scale}px), ${(top - box.top) / scale}px)`;
     };
@@ -130,6 +143,7 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
     resize?.observe(panel);
     resize?.observe(viewport);
+    if (dock) resize?.observe(dock);
     const movement = typeof MutationObserver === "undefined" ? null : new MutationObserver(schedule);
     if (flowViewport) movement?.observe(flowViewport, { attributes: true, attributeFilter: ["style"] });
     if (flowNode) movement?.observe(flowNode, { attributes: true, attributeFilter: ["style"] });
@@ -159,14 +173,6 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
             disabled={disabled}
             onChange={(event) => onValueChange(event.target.value)}
             onMouseDown={(event) => event.stopPropagation()}
-            onKeyDown={(event) => {
-              if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                if (canSubmit) {
-                  onSubmit();
-                }
-              }
-            }}
           />
         </div>
         <div className="canvas-text-generator__bar">
@@ -175,8 +181,14 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
             className="canvas-text-generator__model"
             value={modelValue}
             options={modelOptions}
+              triggerValue={className?.includes("canvas-text-generator--text") ? {
+                label: modelOptions.find(option => option.value === modelValue)?.label ?? "选择文本模型",
+                icon: <LibTVMediaIcon name="text-file" size={16} />,
+              } : undefined}
             onChange={onModelChange}
             disabled={disabled || !canChooseModel}
+            chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={12} />}
+            selectedIcon={<LibTVMediaIcon name="check" size={12} />}
             title="选择用于生成这段正文的文本模型"
           />
           <div className="canvas-text-generator__spacer" />
@@ -193,18 +205,19 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
                 onTranslate();
               }}
             >
-              <CanvasChromeIcon name="translate" size={16} />
+              <LibTVMediaIcon name="translate" size={16} />
             </button>
             <span
               className="canvas-text-generator__cost"
-              data-tooltip="本项目按供应商 API 实际计费，没有积分余额；消耗预估后端暂未接入"
+              data-tooltip="按当前供应商的实际用量计费"
             >
-              <CanvasChromeIcon name="lightning" size={14} className="canvas-text-generator__cost-icon" />
+              <LibTVMediaIcon name="icon-lightning-filled" size={14} className="canvas-text-generator__cost-icon" />
               <span className="canvas-text-generator__cost-value">—</span>
             </span>
             <button
               type="button"
               className="canvas-text-generator__submit"
+              data-canvas-generate=""
               data-tooltip={trimmed.length === 0 && !allowEmpty ? emptyHint : submitLabel}
               aria-label={submitLabel}
               disabled={!canSubmit}
@@ -214,7 +227,7 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
                 onSubmit();
               }}
             >
-              <CanvasChromeIcon name="arrow-up" size={12} />
+              <LibTVMediaIcon name="up-arrow" size={12} />
             </button>
           </div>
         </div>
@@ -232,7 +245,7 @@ export const CanvasTextGeneratorPanel = memo(function CanvasTextGeneratorPanel({
           onExpand?.();
         }}
       >
-        <CanvasChromeIcon name="expand" size={14} />
+        <LibTVMediaIcon name="icon-arrow-expand" size={14} />
       </button>
     </div>
   );

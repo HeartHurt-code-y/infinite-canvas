@@ -1,6 +1,8 @@
 //! Native smart editing. Every render has a durable identity; reading a job never submits work.
 mod agent;
 mod timeline;
+pub mod fonts;
+mod typography;
 pub use agent::{ClipAgentRequest, ClipAgentReceipt};
 pub use timeline::{ClipTransition, ClipTimelineSettings};
 use std::{collections::HashMap, io::Write as _, path::{Path, PathBuf}, process::Stdio,

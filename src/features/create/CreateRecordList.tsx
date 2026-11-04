@@ -44,8 +44,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 
 import { generationClient, renameGenerationResult } from "../../lib/backend";
+import { copyTextToClipboard } from "../../lib/clipboard";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { toast } from "../../lib/toast";
 import {
@@ -235,7 +237,7 @@ function RecordDetail({ record }: { readonly record: CreateRecord }) {
   const [rows, setRows] = useState<readonly RecordParameterRow[] | null>(null);
   const [failed, setFailed] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const { ref: popoverRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: popoverRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: triggerRef,
     minWidth: 280,
@@ -249,7 +251,7 @@ function RecordDetail({ record }: { readonly record: CreateRecord }) {
     setOpen(false);
   }, []);
 
-  useDismissOnOutside(open, popoverRef, triggerRef, close);
+  useDismissOnOutside(open, popoverRef, triggerRef, close, layerId);
 
   useEffect(() => {
     if (!open) return;
@@ -280,17 +282,17 @@ function RecordDetail({ record }: { readonly record: CreateRecord }) {
    * 焦点在这里还给触发按钮——写在事件回调里而不是 close() 里：
    * 渲染期读 ref.current 会被 react-hooks/refs 规则判为「可能在渲染期读 ref」。
    */
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close();
-      triggerRef.current?.focus();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [close, open]);
+  /* Esc 关闭详情浮层：交给全应用唯一的仲裁器（`escapeArbiter`）。 */
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => {
+        close();
+        triggerRef.current?.focus();
+      },
+    },
+    open,
+  );
 
   useEffect(() => {
     if (open) popoverRef.current?.focus();
@@ -350,7 +352,11 @@ function RecordDetail({ record }: { readonly record: CreateRecord }) {
                 )}
                 <div className="create-record-detail__row">
                   <dt>产物</dt>
-                  <dd>{`${record.results.length} 个`}</dd>
+                  <dd>
+                    {record.textOutput != null
+                      ? `文本正文 ${record.textOutput.length} 字`
+                      : `${record.results.length} 个`}
+                  </dd>
                 </div>
                 <div className="create-record-detail__row">
                   <dt>创建时间</dt>
@@ -406,7 +412,7 @@ function RecordMenu({
 }) {
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const { ref: menuRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: menuRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: triggerRef,
     minWidth: 176,
@@ -419,19 +425,19 @@ function RecordMenu({
     setOpen(false);
   }, []);
 
-  useDismissOnOutside(open, menuRef, triggerRef, close);
+  useDismissOnOutside(open, menuRef, triggerRef, close, layerId);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      close();
-      triggerRef.current?.focus();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [close, open]);
+  /* Esc 关闭操作菜单：交给全应用唯一的仲裁器（`escapeArbiter`）。 */
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => {
+        close();
+        triggerRef.current?.focus();
+      },
+    },
+    open,
+  );
 
   useEffect(() => {
     if (open) menuRef.current?.focus();
@@ -1314,6 +1320,40 @@ function RecordActions({
   );
 }
 
+/**
+ * 文本生成的产物：正文，不是媒体格子。
+ *
+ * 文本任务没有 `results`（媒体产物），交付物是模型回答本身。少了这一段，
+ * 记录卡只剩一个空格子——用户看到的是「生成了但什么都没有」。
+ */
+function RecordText({ record }: { readonly record: CreateRecord }) {
+  const [copied, setCopied] = useState(false);
+  const text = record.textOutput ?? "";
+  return (
+    <div className="create-record__text">
+      <p className="create-record__text-body">{text}</p>
+      <div className="create-record__actions">
+        <button
+          type="button"
+          className="create-record__action"
+          onClick={() => {
+            void copyTextToClipboard(text).then(
+              () => setCopied(true),
+              () => {
+                setCopied(false);
+                toast.error("复制失败", { description: "正文没有写进剪贴板，请手动选中复制。" });
+              },
+            );
+          }}
+        >
+          <Icon name="copy" size="xs" aria-hidden="true" />
+          {copied ? "已复制" : "复制正文"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PendingGrid({ record }: { readonly record: CreateRecord }) {
   const total = Math.max(record.expectedCount, record.results.length, 1);
   const finished = record.results.length;
@@ -1430,12 +1470,16 @@ function RecordCard({
   return (
     <article className="create-record">
       <RecordLabels record={record} title={title} renamed={renamed} onUsePrompt={onUsePrompt} />
-      <RecordMedia
-        record={record}
-        onPreview={(index, trigger) => onPreview(record, index, trigger)}
-        onUseAsReference={onUseAsReference}
-        onGenerateVideo={onGenerateVideo}
-      />
+      {record.textOutput != null && record.textOutput.trim() !== "" ? (
+        <RecordText record={record} />
+      ) : (
+        <RecordMedia
+          record={record}
+          onPreview={(index, trigger) => onPreview(record, index, trigger)}
+          onUseAsReference={onUseAsReference}
+          onGenerateVideo={onGenerateVideo}
+        />
+      )}
       <RecordActions
         record={record}
         onRegenerate={onRegenerate}

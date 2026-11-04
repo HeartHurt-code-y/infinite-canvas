@@ -26,6 +26,7 @@ import { createPortal } from "react-dom";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { toast } from "../../lib/toast";
 import type { AssetItem } from "../workspace/workspaceModel";
@@ -155,7 +156,7 @@ function AssetMenu({
   readonly onClose: () => void;
   readonly onUseAsReference?: ((asset: AssetItem) => void) | undefined;
 }) {
-  const { ref: menuRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: menuRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef,
     minWidth: 196,
@@ -163,18 +164,16 @@ function AssetMenu({
     preferAbove: true,
   });
 
-  useDismissOnOutside(open, menuRef, anchorRef, onClose);
+  useDismissOnOutside(open, menuRef, anchorRef, onClose, layerId);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
-    };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose, open]);
+  /* Esc 关闭菜单：交给全应用唯一的仲裁器（`escapeArbiter`）。 */
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => onClose(),
+    },
+    open,
+  );
 
   useEffect(() => {
     if (open) menuRef.current?.focus();

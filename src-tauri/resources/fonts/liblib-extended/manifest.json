@@ -1,0 +1,2337 @@
+{
+  "version": 1,
+  "source": "https://liblibai-web-static.liblib.cloud/liblibtv_online/static/_next/static/chunks/2c_61xqxzuqjo.js",
+  "sourceSha256": "9443b94528cf308b87fc9f12e337d4406ff99a38e17f9308c2f5099dcc865bd4",
+  "entries": [
+    {
+      "id": "liblib-lib-000",
+      "family": "Pretendard",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Pretendard",
+          "file": "originals/6d0af5258997aec7354a6e340fc2325ba321c410ca48b3af858c8c3d6e92a324.ttf",
+          "sha256": "6d0af5258997aec7354a6e340fc2325ba321c410ca48b3af858c8c3d6e92a324",
+          "bytes": 2725828
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-001",
+      "family": "NanumHuman TTF",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumHuman TTF Regular",
+          "file": "originals/ef009fbb959413ea13077dfcdd7bd3b8171038fbb1272594e25836c117067aeb.ttf",
+          "sha256": "ef009fbb959413ea13077dfcdd7bd3b8171038fbb1272594e25836c117067aeb",
+          "bytes": 1063576
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-002",
+      "family": "NanumBarunGothic",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumBarunGothic",
+          "file": "originals/9b872773134e2e4d8c0b17021266786576db06c843ede0d0b523b214a450756c.ttf",
+          "sha256": "9b872773134e2e4d8c0b17021266786576db06c843ede0d0b523b214a450756c",
+          "bytes": 4186060
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-003",
+      "family": "NanumBarunpen",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumBarunpen",
+          "file": "originals/f5bd6993e8376e7f0796837ba0e50e006eb1f568f5dbb571e18d66847ff4f9c0.ttf",
+          "sha256": "f5bd6993e8376e7f0796837ba0e50e006eb1f568f5dbb571e18d66847ff4f9c0",
+          "bytes": 11033840
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-004",
+      "family": "D2Coding",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "D2Coding",
+          "file": "originals/8b1b23e5de4dff652fb0b938528150d2f531edfda281d3944618b655711aba84.ttf",
+          "sha256": "8b1b23e5de4dff652fb0b938528150d2f531edfda281d3944618b655711aba84",
+          "bytes": 4185844
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-005",
+      "family": "NanumGothic Eco",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumGothic Eco",
+          "file": "originals/ab00307e954bbe0833cbaf6dacd143f9f053f84eac1d12060ced33d8250521e9.ttf",
+          "sha256": "ab00307e954bbe0833cbaf6dacd143f9f053f84eac1d12060ced33d8250521e9",
+          "bytes": 7783984
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-006",
+      "family": "NanumMyeongjo Eco",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumMyeongjo Eco",
+          "file": "originals/26544a2e23afdc2c6805400c044d507785977596487024f69081267d7e6b96da.ttf",
+          "sha256": "26544a2e23afdc2c6805400c044d507785977596487024f69081267d7e6b96da",
+          "bytes": 7024632
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-007",
+      "family": "NanumSquare",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumSquare",
+          "file": "originals/5a51deae5237435d9a0bc0cc6cc30619a914b29801f895698cfdacadcad06e94.ttf",
+          "sha256": "5a51deae5237435d9a0bc0cc6cc30619a914b29801f895698cfdacadcad06e94",
+          "bytes": 723640
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-008",
+      "family": "NanumSquare Neo",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumSquare Neo Regular",
+          "file": "originals/864de849b9d0af7efbd9e855044f5ab3bbf44cc88ddff6b9873ee830b9d3a61f.ttf",
+          "sha256": "864de849b9d0af7efbd9e855044f5ab3bbf44cc88ddff6b9873ee830b9d3a61f",
+          "bytes": 2189452
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-009",
+      "family": "NanumSquareRound",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumSquareRound Regular",
+          "file": "originals/52862fdf05b55ba886ca21998222d9598ef84c975e68046b9a8d8f1af09228a0.ttf",
+          "sha256": "52862fdf05b55ba886ca21998222d9598ef84c975e68046b9a8d8f1af09228a0",
+          "bytes": 1063276
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-010",
+      "family": "NanumBarunGothic YetHangul",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumBarunGothic YetHangul",
+          "file": "originals/558ad653b02a76e4b4d3107a5371e8e40e2b6916ef620b303013b8a7e2473970.ttf",
+          "sha256": "558ad653b02a76e4b4d3107a5371e8e40e2b6916ef620b303013b8a7e2473970",
+          "bytes": 6075584
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-011",
+      "family": "NanumMyeongjo YetHangul",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanumMyeongjo YetHangul",
+          "file": "originals/2da006402121ca2efb5ddbd213bd05adb2917733346705f13a09d260a739b569.ttf",
+          "sha256": "2da006402121ca2efb5ddbd213bd05adb2917733346705f13a09d260a739b569",
+          "bytes": 9475120
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-012",
+      "family": "Inter",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 100,
+          "family": "Inter",
+          "file": "instances/6b3ba05101b58ae655edc4245d34bd864c62e3faeca64e9fdcdb418f0322ccf4.ttf",
+          "sha256": "6b3ba05101b58ae655edc4245d34bd864c62e3faeca64e9fdcdb418f0322ccf4",
+          "bytes": 310516
+        },
+        {
+          "weight": 200,
+          "family": "Inter",
+          "file": "instances/7e3df65b68cd2ec9f87b202a01ffb321f30d64ab78c7f6aa9a7bda6ae50fd6c7.ttf",
+          "sha256": "7e3df65b68cd2ec9f87b202a01ffb321f30d64ab78c7f6aa9a7bda6ae50fd6c7",
+          "bytes": 310780
+        },
+        {
+          "weight": 300,
+          "family": "Inter",
+          "file": "instances/0e084b1e40dcf7bfa7820812799f47404a808ad261e95c8ccba897519c099a04.ttf",
+          "sha256": "0e084b1e40dcf7bfa7820812799f47404a808ad261e95c8ccba897519c099a04",
+          "bytes": 310412
+        },
+        {
+          "weight": 400,
+          "family": "Inter",
+          "file": "instances/5535401861a47a87b19f9c17fa2e2bcf46b0e5100b258d667888ee510ed38e20.ttf",
+          "sha256": "5535401861a47a87b19f9c17fa2e2bcf46b0e5100b258d667888ee510ed38e20",
+          "bytes": 309820
+        },
+        {
+          "weight": 500,
+          "family": "Inter",
+          "file": "instances/7cc64a30975d0eb6e741c5525fa77416962624bdf926d4dfccb674c4cfa66e85.ttf",
+          "sha256": "7cc64a30975d0eb6e741c5525fa77416962624bdf926d4dfccb674c4cfa66e85",
+          "bytes": 314708
+        },
+        {
+          "weight": 600,
+          "family": "Inter",
+          "file": "instances/52f173d48707e472aadd458d99db7e896aabd7b2fc9396988d7feaa7307691c7.ttf",
+          "sha256": "52f173d48707e472aadd458d99db7e896aabd7b2fc9396988d7feaa7307691c7",
+          "bytes": 315740
+        },
+        {
+          "weight": 700,
+          "family": "Inter",
+          "file": "instances/38347ab65dcc8608c893741b55766755431ba1cb55bf8e867706250e985c91b1.ttf",
+          "sha256": "38347ab65dcc8608c893741b55766755431ba1cb55bf8e867706250e985c91b1",
+          "bytes": 316128
+        },
+        {
+          "weight": 800,
+          "family": "Inter",
+          "file": "instances/9fe1831a47e4b12ec90cb472573ed59f6a41fb1acc3b91efc3ac73299f3ec865.ttf",
+          "sha256": "9fe1831a47e4b12ec90cb472573ed59f6a41fb1acc3b91efc3ac73299f3ec865",
+          "bytes": 316700
+        },
+        {
+          "weight": 900,
+          "family": "Inter",
+          "file": "instances/fadd35bda2493b850b51f695b2d50d6895bcbeeb3e1364ccadea4032d407364f.ttf",
+          "sha256": "fadd35bda2493b850b51f695b2d50d6895bcbeeb3e1364ccadea4032d407364f",
+          "bytes": 316368
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-013",
+      "family": "Anonymous Pro",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Anonymous Pro",
+          "file": "originals/46d8b9a5f4b38fc9d30f3cdd676d4c6f78a9bef949bb1a8304216cc731eb87f8.ttf",
+          "sha256": "46d8b9a5f4b38fc9d30f3cdd676d4c6f78a9bef949bb1a8304216cc731eb87f8",
+          "bytes": 158100
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-014",
+      "family": "Crimson Text",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Crimson Text",
+          "file": "originals/48e6c5d5ad1d01599d374ecb817e15890d1feb3b8a3a88e527d44c90389e1f06.ttf",
+          "sha256": "48e6c5d5ad1d01599d374ecb817e15890d1feb3b8a3a88e527d44c90389e1f06",
+          "bytes": 107200
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-015",
+      "family": "Albert Sans",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Albert Sans",
+          "file": "originals/e95d4cccbbf974818230c6b073e723aceb15da1e7baa3e5f74aa8f30e3400862.otf",
+          "sha256": "e95d4cccbbf974818230c6b073e723aceb15da1e7baa3e5f74aa8f30e3400862",
+          "bytes": 28688
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-016",
+      "family": "Roboto",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 100,
+          "family": "Roboto",
+          "file": "instances/4dc29db88d99e59c233624fe14765443b1a3a15daad754ccfb1b5cefa061f50f.ttf",
+          "sha256": "4dc29db88d99e59c233624fe14765443b1a3a15daad754ccfb1b5cefa061f50f",
+          "bytes": 144488
+        },
+        {
+          "weight": 200,
+          "family": "Roboto",
+          "file": "instances/72ca0295e31aed1d0591b706b213fe5f9fc98c30e725558f1ee09f481e1d304a.ttf",
+          "sha256": "72ca0295e31aed1d0591b706b213fe5f9fc98c30e725558f1ee09f481e1d304a",
+          "bytes": 144596
+        },
+        {
+          "weight": 300,
+          "family": "Roboto",
+          "file": "instances/970bc998eed0ed3027022e61d48d1ebed76d9786095e816fa4052a70dcbd9efc.ttf",
+          "sha256": "970bc998eed0ed3027022e61d48d1ebed76d9786095e816fa4052a70dcbd9efc",
+          "bytes": 144632
+        },
+        {
+          "weight": 400,
+          "family": "Roboto",
+          "file": "instances/6c2487dbe798247f0496f657fae19ac6e2024853681b4ffdce86fcf250f281e2.ttf",
+          "sha256": "6c2487dbe798247f0496f657fae19ac6e2024853681b4ffdce86fcf250f281e2",
+          "bytes": 144600
+        },
+        {
+          "weight": 500,
+          "family": "Roboto",
+          "file": "instances/1b2747d3f05d2932215ba9215fed7b156a799b9b3b8e97b7d8ed045baaa80952.ttf",
+          "sha256": "1b2747d3f05d2932215ba9215fed7b156a799b9b3b8e97b7d8ed045baaa80952",
+          "bytes": 144668
+        },
+        {
+          "weight": 600,
+          "family": "Roboto",
+          "file": "instances/38d085918a343c7601f21ec3eba13323616f9ca88f1f026d8b482238f41a1a75.ttf",
+          "sha256": "38d085918a343c7601f21ec3eba13323616f9ca88f1f026d8b482238f41a1a75",
+          "bytes": 145280
+        },
+        {
+          "weight": 700,
+          "family": "Roboto",
+          "file": "instances/76a07ab655e01c83cba0578b72ebda9c0c1ccb983ac9428ca8bbe8d4069df7ab.ttf",
+          "sha256": "76a07ab655e01c83cba0578b72ebda9c0c1ccb983ac9428ca8bbe8d4069df7ab",
+          "bytes": 145304
+        },
+        {
+          "weight": 800,
+          "family": "Roboto",
+          "file": "instances/cabd62a9b2f5c6fc93dc0055c1c68826ed940e3587d0e1d27a4b828d8d99edad.ttf",
+          "sha256": "cabd62a9b2f5c6fc93dc0055c1c68826ed940e3587d0e1d27a4b828d8d99edad",
+          "bytes": 145400
+        },
+        {
+          "weight": 900,
+          "family": "Roboto",
+          "file": "instances/6049000b00ae4c75b6c87114d8630b2088d39fabd7525dd08add7e848188a252.ttf",
+          "sha256": "6049000b00ae4c75b6c87114d8630b2088d39fabd7525dd08add7e848188a252",
+          "bytes": 145920
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-017",
+      "family": "Roboto Mono",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 100,
+          "family": "Roboto Mono",
+          "file": "instances/8fc5ce3adbfa009947a504cd40969f2a57202d82bc72b97088bc86a88003bf47.ttf",
+          "sha256": "8fc5ce3adbfa009947a504cd40969f2a57202d82bc72b97088bc86a88003bf47",
+          "bytes": 88920
+        },
+        {
+          "weight": 200,
+          "family": "Roboto Mono",
+          "file": "instances/5bae17c36abb1b32a332a6f5029d4a25d68c8d6eeda5743dab7d53e4c2426ff0.ttf",
+          "sha256": "5bae17c36abb1b32a332a6f5029d4a25d68c8d6eeda5743dab7d53e4c2426ff0",
+          "bytes": 88780
+        },
+        {
+          "weight": 300,
+          "family": "Roboto Mono",
+          "file": "instances/072aa470b27e4c4c47facf466dd00909d8c49170e89007b8206ff464b09f2c3d.ttf",
+          "sha256": "072aa470b27e4c4c47facf466dd00909d8c49170e89007b8206ff464b09f2c3d",
+          "bytes": 88632
+        },
+        {
+          "weight": 400,
+          "family": "Roboto Mono",
+          "file": "instances/c3dd3afe813cd0bee51cd5b0e104c649a2ba78a1d6509a5746908495100b0f89.ttf",
+          "sha256": "c3dd3afe813cd0bee51cd5b0e104c649a2ba78a1d6509a5746908495100b0f89",
+          "bytes": 87952
+        },
+        {
+          "weight": 500,
+          "family": "Roboto Mono",
+          "file": "instances/50ed324acdfaf021b3775119e1f32f209be48c2ea9c4a21c1be5fb617605bf28.ttf",
+          "sha256": "50ed324acdfaf021b3775119e1f32f209be48c2ea9c4a21c1be5fb617605bf28",
+          "bytes": 87844
+        },
+        {
+          "weight": 600,
+          "family": "Roboto Mono",
+          "file": "instances/026db5534a1210bd296fb14b6b3c03e32ce297dba49484ca32255fe3d3fd0392.ttf",
+          "sha256": "026db5534a1210bd296fb14b6b3c03e32ce297dba49484ca32255fe3d3fd0392",
+          "bytes": 88072
+        },
+        {
+          "weight": 700,
+          "family": "Roboto Mono",
+          "file": "instances/2808d09192df20758b96e77186da956a4eabea9d48da639be01af0aa3594c661.ttf",
+          "sha256": "2808d09192df20758b96e77186da956a4eabea9d48da639be01af0aa3594c661",
+          "bytes": 88080
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-018",
+      "family": "Source Serif Pro",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Source Serif Pro",
+          "file": "originals/4eb0d346de8ef092800db6b49a426afb8abd95c875d6a392e35f53ab8254ea62.ttf",
+          "sha256": "4eb0d346de8ef092800db6b49a426afb8abd95c875d6a392e35f53ab8254ea62",
+          "bytes": 231084
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-019",
+      "family": "Pacifico",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Pacifico",
+          "file": "originals/5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701.ttf",
+          "sha256": "5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701",
+          "bytes": 329380
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-020",
+      "family": "FuturistStencil",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "FuturistStencil",
+          "file": "originals/098bd52e7e7cbd8b283a2fb20de502aa8ae6c5eba9d595b093480b6b5fcc2286.ttf",
+          "sha256": "098bd52e7e7cbd8b283a2fb20de502aa8ae6c5eba9d595b093480b6b5fcc2286",
+          "bytes": 31956
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-021",
+      "family": "Krona One",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Krona One",
+          "file": "originals/273463916f96a4707e697e3013d955cde8154b4e6d635a55132e7a12f276534c.ttf",
+          "sha256": "273463916f96a4707e697e3013d955cde8154b4e6d635a55132e7a12f276534c",
+          "bytes": 35168
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-022",
+      "family": "Imagica",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Imagica",
+          "file": "originals/d1d508eb5a6bbe14adcf651b0c8e25e71a1ba08f0e0cb3e8d31ca0f868086c5a.ttf",
+          "sha256": "d1d508eb5a6bbe14adcf651b0c8e25e71a1ba08f0e0cb3e8d31ca0f868086c5a",
+          "bytes": 23248
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-023",
+      "family": "Oleo Script",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Oleo Script",
+          "file": "originals/1aa003ac938adf9bea644c406ce90eeb1913138aa1d7492242c0ca948c0f48ac.ttf",
+          "sha256": "1aa003ac938adf9bea644c406ce90eeb1913138aa1d7492242c0ca948c0f48ac",
+          "bytes": 34980
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-024",
+      "family": "Lemon",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Lemon",
+          "file": "originals/6a3973a9ea7c05e6041969d0a5e8f2b04db3b2ccd5e5bc98bc7ff52c0940ce2f.ttf",
+          "sha256": "6a3973a9ea7c05e6041969d0a5e8f2b04db3b2ccd5e5bc98bc7ff52c0940ce2f",
+          "bytes": 77180
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-025",
+      "family": "Dob",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Dob Bold",
+          "file": "originals/5acd2ffe8447bb22bf64f1f62dafb801ef307fbf0583f0a17308143e7e9025ba.ttf",
+          "sha256": "5acd2ffe8447bb22bf64f1f62dafb801ef307fbf0583f0a17308143e7e9025ba",
+          "bytes": 10580
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-026",
+      "family": "Shrikhand",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Shrikhand",
+          "file": "originals/00269b4efb014de272c9313e16b7e166617c6fdac819a2bb063ef1e371b5801b.ttf",
+          "sha256": "00269b4efb014de272c9313e16b7e166617c6fdac819a2bb063ef1e371b5801b",
+          "bytes": 213868
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-027",
+      "family": "D-DIN",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "D-DIN",
+          "file": "originals/705bece88e33c8f86d0ace0c7d93ee143b745cba7a99643753a4f91c3c22e204.ttf",
+          "sha256": "705bece88e33c8f86d0ace0c7d93ee143b745cba7a99643753a4f91c3c22e204",
+          "bytes": 49276
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-028",
+      "family": "D-DIN Condensed",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "D-DIN Condensed",
+          "file": "originals/724b48d534dbcde7a9f039bddc3a7344d4913de43726f3b7d7a56f0770a8ea6b.ttf",
+          "sha256": "724b48d534dbcde7a9f039bddc3a7344d4913de43726f3b7d7a56f0770a8ea6b",
+          "bytes": 50120
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-029",
+      "family": "D-DIN Exp",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "D-DIN Exp",
+          "file": "originals/ebb595323d0af86931cccc35ba232bee564ab034f62a8b41ef7c1617dd5111c1.ttf",
+          "sha256": "ebb595323d0af86931cccc35ba232bee564ab034f62a8b41ef7c1617dd5111c1",
+          "bytes": 43712
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-030",
+      "family": "Lack Line",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Lack Line",
+          "file": "originals/2f4005e9e8e58ec016940285b2f619b43cf49893ff164350e3d98e3325891e0f.otf",
+          "sha256": "2f4005e9e8e58ec016940285b2f619b43cf49893ff164350e3d98e3325891e0f",
+          "bytes": 119648
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-031",
+      "family": "Lack",
+      "group": "lib",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Lack",
+          "file": "originals/e2424fb9a37ba877236588e825daa6be08b2edae219e394cfae65d208cf4cba0.otf",
+          "sha256": "e2424fb9a37ba877236588e825daa6be08b2edae219e394cfae65d208cf4cba0",
+          "bytes": 103924
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-032",
+      "family": "HuoshanQinghe",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "HuoshanQinghe",
+          "file": "originals/920def3d17b4c8f3ceaa816d972649ab608d8f3b692c3a17865d15420ea9df22.ttf",
+          "sha256": "920def3d17b4c8f3ceaa816d972649ab608d8f3b692c3a17865d15420ea9df22",
+          "bytes": 1947324
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-033",
+      "family": "寒蝉德黑体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ChillDINGothic",
+          "file": "originals/98543b27703ad3325a4276d6c17327ce5eb436933ac7eb1f9388c9c06c9301a2.otf",
+          "sha256": "98543b27703ad3325a4276d6c17327ce5eb436933ac7eb1f9388c9c06c9301a2",
+          "bytes": 7345008
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-034",
+      "family": "IBM Plex Sans TC",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "IBM Plex Sans TC",
+          "file": "originals/654677156ffc9ba35503ff569a4d55bc7044501f055bd7752a404445ed31cee7.ttf",
+          "sha256": "654677156ffc9ba35503ff569a4d55bc7044501f055bd7752a404445ed31cee7",
+          "bytes": 5460860
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-035",
+      "family": "得意黑",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Smiley Sans Oblique",
+          "file": "originals/b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4.ttf",
+          "sha256": "b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4",
+          "bytes": 2629764
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-036",
+      "family": "南西初夏宋",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanxiChuxiasong",
+          "file": "originals/6531ef4e8401fdf80127380a429cad16ff05b6a08e2e95404b03d4954461de5c.ttf",
+          "sha256": "6531ef4e8401fdf80127380a429cad16ff05b6a08e2e95404b03d4954461de5c",
+          "bytes": 3272192
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-037",
+      "family": "字魂扁桃体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "zihunbiantaoti",
+          "file": "originals/24758548d8324539d96dd84f08636ce39804f7ff870d55b139c5a538d1f4cc70.ttf",
+          "sha256": "24758548d8324539d96dd84f08636ce39804f7ff870d55b139c5a538d1f4cc70",
+          "bytes": 2160508
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-038",
+      "family": "仓耳渔阳体W05",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "TsangerYuYangT W05",
+          "file": "originals/bd38cd54205042447f70b101815d3fd9c92fbceeac6ee84829929c3cd366387c.ttf",
+          "sha256": "bd38cd54205042447f70b101815d3fd9c92fbceeac6ee84829929c3cd366387c",
+          "bytes": 1552248
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-039",
+      "family": "字制区喜脉体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "FontQu Smile",
+          "file": "originals/3eba6e519a78c7456284511ae9e0be0030fba6614bf6ba008b48f30bde21eb83.ttf",
+          "sha256": "3eba6e519a78c7456284511ae9e0be0030fba6614bf6ba008b48f30bde21eb83",
+          "bytes": 2704724
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-040",
+      "family": "得拉黑体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Dela Gothic One",
+          "file": "originals/57986ebf82ac5b5383155483b541d7433121bf395c5621df59b48196a8a99c2e.ttf",
+          "sha256": "57986ebf82ac5b5383155483b541d7433121bf395c5621df59b48196a8a99c2e",
+          "bytes": 2487960
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-041",
+      "family": "普利世",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Plix",
+          "file": "originals/abf9677aaf75dc42c7ee49f7d78bf1f91b77aff9d06c3ce5a2e90c669a5430f3.otf",
+          "sha256": "abf9677aaf75dc42c7ee49f7d78bf1f91b77aff9d06c3ce5a2e90c669a5430f3",
+          "bytes": 7449452
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-042",
+      "family": "抖音美好体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "DouyinSans",
+          "file": "originals/fbecfacdfac33982774e301073a8d357a09c698cd3134bb6ddec0f5bfc268fa1.ttf",
+          "sha256": "fbecfacdfac33982774e301073a8d357a09c698cd3134bb6ddec0f5bfc268fa1",
+          "bytes": 1919404
+        }
+      ]
+    },
+    {
+      "id": "liblib-lib-043",
+      "family": "金字社得正体",
+      "group": "lib",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "JinzisheDezheng",
+          "file": "originals/a86361a90145ed0d90cc18a88872a0a684a2b2b2bcbc321e4aad96c8781688f4.otf",
+          "sha256": "a86361a90145ed0d90cc18a88872a0a684a2b2b2bcbc321e4aad96c8781688f4",
+          "bytes": 1849496
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-000",
+      "family": "3D Isometric",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "3D Isometric",
+          "file": "originals/f06432cbb93bb5a846d223261809602f917415dd55540bc9087a371b6896d139.ttf",
+          "sha256": "f06432cbb93bb5a846d223261809602f917415dd55540bc9087a371b6896d139",
+          "bytes": 85960
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-001",
+      "family": "Aileron",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "Aileron Black",
+          "file": "originals/b8f9d4c9e2b5ae455bf130f4a9f442e997d4d589d3d3d0b266e02b0cd8b9c0d4.ttf",
+          "sha256": "b8f9d4c9e2b5ae455bf130f4a9f442e997d4d589d3d3d0b266e02b0cd8b9c0d4",
+          "bytes": 109936
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-002",
+      "family": "Amiko",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Amiko",
+          "file": "originals/47234ea2ce44d33782a81ffae7df9037ff951a8dd6c8b9f3aebbc68ac2630453.ttf",
+          "sha256": "47234ea2ce44d33782a81ffae7df9037ff951a8dd6c8b9f3aebbc68ac2630453",
+          "bytes": 174112
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-003",
+      "family": "Amiko SemiBold",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 600,
+      "variants": [
+        {
+          "weight": 600,
+          "family": "Amiko SemiBold",
+          "file": "originals/77362fa4c2aea5bd5176b1a77996468d9c3953dac6cfe99bf4681cf01dc9985b.ttf",
+          "sha256": "77362fa4c2aea5bd5176b1a77996468d9c3953dac6cfe99bf4681cf01dc9985b",
+          "bytes": 171948
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-004",
+      "family": "Arapey",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "Arapey Black",
+          "file": "originals/60b6d53493d72bae4adedf7e9e6f07fdc6f2684e404fe9431b7661ba79e95de1.otf",
+          "sha256": "60b6d53493d72bae4adedf7e9e6f07fdc6f2684e404fe9431b7661ba79e95de1",
+          "bytes": 82740
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-005",
+      "family": "Arthead FREE",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Arthead FREE",
+          "file": "originals/c15010a326e1050f1dd644888517fe23402721096cf7cfcbc4e540dc6dadf123.otf",
+          "sha256": "c15010a326e1050f1dd644888517fe23402721096cf7cfcbc4e540dc6dadf123",
+          "bytes": 27388
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-006",
+      "family": "Attila",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Attila",
+          "file": "originals/141ec65663002d6c8a18dcc8a9de9e0b0d8a851790de7f73712af98331c2cc87.ttf",
+          "sha256": "141ec65663002d6c8a18dcc8a9de9e0b0d8a851790de7f73712af98331c2cc87",
+          "bytes": 17928
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-007",
+      "family": "Aznauri Round",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Aznauri Round",
+          "file": "originals/0f423716db7c19b86506a446187cc6c759d3fd5444d49966a67fc813383fd641.ttf",
+          "sha256": "0f423716db7c19b86506a446187cc6c759d3fd5444d49966a67fc813383fd641",
+          "bytes": 49452
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-008",
+      "family": "Aznauri Square",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Aznauri Square",
+          "file": "originals/de4ad932591c55ef99d24861aee4669b5aabdcd6624d2e6b95de641f1d0d18c3.ttf",
+          "sha256": "de4ad932591c55ef99d24861aee4669b5aabdcd6624d2e6b95de641f1d0d18c3",
+          "bytes": 50492
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-009",
+      "family": "Black Betty",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Black Betty",
+          "file": "originals/5c3c5e4188f42aa1b9a6b9dffe9a6e8a42b62811ae393f74114427ca870f866a.otf",
+          "sha256": "5c3c5e4188f42aa1b9a6b9dffe9a6e8a42b62811ae393f74114427ca870f866a",
+          "bytes": 42812
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-010",
+      "family": "Brassiere Line",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Brassiere Line",
+          "file": "originals/7c2ef92d527153a553495025e1aadbf0bbdb85fc107c3fbf48efe34807a2d71d.ttf",
+          "sha256": "7c2ef92d527153a553495025e1aadbf0bbdb85fc107c3fbf48efe34807a2d71d",
+          "bytes": 115632
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-011",
+      "family": "Bree Serif",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Bree Serif",
+          "file": "originals/244ac495d6c72e1f6a78490b0fddb6ae2af3cc0703c28163b331a5e578031a6f.ttf",
+          "sha256": "244ac495d6c72e1f6a78490b0fddb6ae2af3cc0703c28163b331a5e578031a6f",
+          "bytes": 42904
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-012",
+      "family": "Chain Reaction Itaric",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Chain Reaction Itaric",
+          "file": "originals/b4d79c2b198447601f59245eda180840224b4aed14ed9e66b168487fe19f6ae4.ttf",
+          "sha256": "b4d79c2b198447601f59245eda180840224b4aed14ed9e66b168487fe19f6ae4",
+          "bytes": 19972
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-013",
+      "family": "Chill Pixels",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Chill Pixels Mono",
+          "file": "originals/509dd3c5fe2cf3e7a546ab653e6102ee8d26f3fc46b26640fce82afa0fc9cac6.otf",
+          "sha256": "509dd3c5fe2cf3e7a546ab653e6102ee8d26f3fc46b26640fce82afa0fc9cac6",
+          "bytes": 74928
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-014",
+      "family": "Comfortaa",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Comfortaa",
+          "file": "originals/3d65c23576721e8d38a47c860e12040d749a1fea2beec69c6ac1ec4cb5d391a4.ttf",
+          "sha256": "3d65c23576721e8d38a47c860e12040d749a1fea2beec69c6ac1ec4cb5d391a4",
+          "bytes": 196260
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-015",
+      "family": "CornerV20",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CornerV20",
+          "file": "originals/7f4c30ab99f4dda3b5505ff1daa6c595c9eaab36c8f3909519c8401d02d8da8d.ttf",
+          "sha256": "7f4c30ab99f4dda3b5505ff1daa6c595c9eaab36c8f3909519c8401d02d8da8d",
+          "bytes": 44132
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-016",
+      "family": "Crimson Text SemiBold",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 600,
+      "variants": [
+        {
+          "weight": 600,
+          "family": "Crimson Text SemiBold",
+          "file": "originals/864a75a060c999c81b486f56b22e2fb9576c76918818315f59519cac3472c04d.ttf",
+          "sha256": "864a75a060c999c81b486f56b22e2fb9576c76918818315f59519cac3472c04d",
+          "bytes": 50000
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-017",
+      "family": "Empire",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Empire",
+          "file": "originals/80b00c5661ff5356d2d884d06e8fd703363d0a109cafa4ca5628828a146d9564.ttf",
+          "sha256": "80b00c5661ff5356d2d884d06e8fd703363d0a109cafa4ca5628828a146d9564",
+          "bytes": 32244
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-018",
+      "family": "Facon",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Facon",
+          "file": "originals/b97f81d83fd8e3fffdd7749211028323043292c78bb1dbf0444c5900fa23bddd.ttf",
+          "sha256": "b97f81d83fd8e3fffdd7749211028323043292c78bb1dbf0444c5900fa23bddd",
+          "bytes": 36460
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-019",
+      "family": "PP Handwriting",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "PP Handwriting",
+          "file": "originals/8a6d6fc2fb37d4440f49660cf17de5962491fc7b839dfd7db7c274a2da0e984c.ttf",
+          "sha256": "8a6d6fc2fb37d4440f49660cf17de5962491fc7b839dfd7db7c274a2da0e984c",
+          "bytes": 26568
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-020",
+      "family": "Silverblade Decorative",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Silverblade Decorative",
+          "file": "originals/9a0db86c726ad8d2f585478044e2724644526e9fd8a55279f76859dba4b34822.ttf",
+          "sha256": "9a0db86c726ad8d2f585478044e2724644526e9fd8a55279f76859dba4b34822",
+          "bytes": 197256
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-021",
+      "family": "Silverblade Fill",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Silverblade Fill",
+          "file": "originals/dce71e7d2ce87793076567306c6eefeeb01ae7e79efbfa4c2a19bbb4a80a5fb1.ttf",
+          "sha256": "dce71e7d2ce87793076567306c6eefeeb01ae7e79efbfa4c2a19bbb4a80a5fb1",
+          "bytes": 70708
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-022",
+      "family": "Silverblade Outline",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Silverblade Outline",
+          "file": "originals/b3f7800b9e4f6d766541fb5c5caf47716c3ba53c6dc9b3b919d9fd7fc0fb153d.ttf",
+          "sha256": "b3f7800b9e4f6d766541fb5c5caf47716c3ba53c6dc9b3b919d9fd7fc0fb153d",
+          "bytes": 143840
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-023",
+      "family": "Silverblade Thinline",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Silverblade Thinline",
+          "file": "originals/002f8dc2723e8ba9c11e55820096abd9f722918249edcb0f388de3af91aaa8a0.ttf",
+          "sha256": "002f8dc2723e8ba9c11e55820096abd9f722918249edcb0f388de3af91aaa8a0",
+          "bytes": 136772
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-024",
+      "family": "Silverblade",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Silverblade",
+          "file": "originals/4f0ea0af6df8af79eca8d9b646be1f07764ecb22e7cdd03556f29fa185bd4499.ttf",
+          "sha256": "4f0ea0af6df8af79eca8d9b646be1f07764ecb22e7cdd03556f29fa185bd4499",
+          "bytes": 82712
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-025",
+      "family": "Source Han Sans CN",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Source Han Sans CN",
+          "file": "originals/997dd673efde3a7cc7410da3ccde2a729f26dc9e1a81ad659a2d6666d36b7974.otf",
+          "sha256": "997dd673efde3a7cc7410da3ccde2a729f26dc9e1a81ad659a2d6666d36b7974",
+          "bytes": 8543504
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-026",
+      "family": "Source Han Serif CN",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "Source Han Serif CN",
+          "file": "originals/90118f6c20e798e12ea9e5b476ce920de94de2f505fc83fe641989d32da38a65.otf",
+          "sha256": "90118f6c20e798e12ea9e5b476ce920de94de2f505fc83fe641989d32da38a65",
+          "bytes": 11772444
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-027",
+      "family": "TRW UDMincho",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "TRW UDMincho",
+          "file": "originals/8586170e42a22ed4270c628d4be8770a62eca9f7313ffc3764f49a2f1668df87.ttf",
+          "sha256": "8586170e42a22ed4270c628d4be8770a62eca9f7313ffc3764f49a2f1668df87",
+          "bytes": 6675564
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-028",
+      "family": "Tokyo Zoo",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Tokyo Zoo",
+          "file": "originals/8b7b20032a9177c01d2975c0c0918a6eade141cc59b2ebb29781cbd3b89eb4d7.ttf",
+          "sha256": "8b7b20032a9177c01d2975c0c0918a6eade141cc59b2ebb29781cbd3b89eb4d7",
+          "bytes": 67640
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-029",
+      "family": "Box Clever",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Box Clever",
+          "file": "originals/49abfdc96580622a0688537df98672b539764bb506217063ff603dd8101de3bc.ttf",
+          "sha256": "49abfdc96580622a0688537df98672b539764bb506217063ff603dd8101de3bc",
+          "bytes": 12564
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-030",
+      "family": "Gooey",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Gooey",
+          "file": "originals/d3736fdf966d4b54b7c523845f0db2173b60fccef92e0d3840f20f7d0c53f728.ttf",
+          "sha256": "d3736fdf966d4b54b7c523845f0db2173b60fccef92e0d3840f20f7d0c53f728",
+          "bytes": 11040
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-031",
+      "family": "Alimama DongFangDaKai",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Alimama DongFangDaKai",
+          "file": "originals/43cf72cc77355fc17f8d148de871435f0beae1aacf3127076c498d3374c46598.ttf",
+          "sha256": "43cf72cc77355fc17f8d148de871435f0beae1aacf3127076c498d3374c46598",
+          "bytes": 5052644
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-032",
+      "family": "xianglifang",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "xianglifang",
+          "file": "originals/4a1e62beefd02cf877e24a32036924de30713119889c1fa61c2af76a6475b4bb.ttf",
+          "sha256": "4a1e62beefd02cf877e24a32036924de30713119889c1fa61c2af76a6475b4bb",
+          "bytes": 1114924
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-033",
+      "family": "CangerYuMo",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CangerYuMo W01",
+          "file": "originals/156830f5b7cf8ec2f8caa64b8ddd4d5c32c39bca4f406d1de1ac7158e258269e.ttf",
+          "sha256": "156830f5b7cf8ec2f8caa64b8ddd4d5c32c39bca4f406d1de1ac7158e258269e",
+          "bytes": 1792004
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-034",
+      "family": "CangerZhouKeZhengDaBangShu",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CangerZhouKeZhengDaBangShu",
+          "file": "originals/a73d6a207003975d1f5d65c878f601d316ba240f4938843e37851604f9f40832.ttf",
+          "sha256": "a73d6a207003975d1f5d65c878f601d316ba240f4938843e37851604f9f40832",
+          "bytes": 17157448
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-035",
+      "family": "CangerXiaoWanZi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CangerXiaoWanZi",
+          "file": "originals/dd35f614ccf78edc4cc12a7533fd5a2dc81dd71eacb48913089488d5ec55131c.ttf",
+          "sha256": "dd35f614ccf78edc4cc12a7533fd5a2dc81dd71eacb48913089488d5ec55131c",
+          "bytes": 1332148
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-036",
+      "family": "CangerFeiBai",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CangerFeiBai W01",
+          "file": "originals/a5a7af7d09c2a2bf701eb0f2572ee5f03408e1cb678fa03aebc6c81eeb01a635.ttf",
+          "sha256": "a5a7af7d09c2a2bf701eb0f2572ee5f03408e1cb678fa03aebc6c81eeb01a635",
+          "bytes": 1685220
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-037",
+      "family": "CJGDGMH",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "CJGDGMH",
+          "file": "instances/37da8e8bb476756578645be946f799890da1a70bd1c48d5db6eddf2d03ecad17.ttf",
+          "sha256": "37da8e8bb476756578645be946f799890da1a70bd1c48d5db6eddf2d03ecad17",
+          "bytes": 3847740
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-038",
+      "family": "WSQuanXing",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "WSQuanXing",
+          "file": "originals/82f12a7d53cff69a77ab12b089f830b20638ce698641018c6606615d43d613ed.ttf",
+          "sha256": "82f12a7d53cff69a77ab12b089f830b20638ce698641018c6606615d43d613ed",
+          "bytes": 1988092
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-039",
+      "family": "baotuxiaobaiti",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "baotuxiaobaiti",
+          "file": "originals/bc39dce2c413136b713019fc5661fccc29537e84fd66a75295f2743b93574972.ttf",
+          "sha256": "bc39dce2c413136b713019fc5661fccc29537e84fd66a75295f2743b93574972",
+          "bytes": 6227568
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-040",
+      "family": "QianTuMaKeShouXieTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "QianTuMaKeShouXieTi",
+          "file": "originals/1ad1499c02b5c713a8febb30f9fbf0c733e04f7375534090a64daa9c68b5c62d.ttf",
+          "sha256": "1ad1499c02b5c713a8febb30f9fbf0c733e04f7375534090a64daa9c68b5c62d",
+          "bytes": 25083988
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-041",
+      "family": "HGJXT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "HGJXT",
+          "file": "originals/77f6a19eae97cf60e3b278839618465a9e7ce4197c9847be5491540922e93b6d.ttf",
+          "sha256": "77f6a19eae97cf60e3b278839618465a9e7ce4197c9847be5491540922e93b6d",
+          "bytes": 2190472
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-042",
+      "family": "Liu Huan KaTong ShouShu",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Liu Huan KaTong ShouShu",
+          "file": "originals/9ae97ba6c63ea7feee925f2816ed0b9009d2d5e13611c47d51e748d4daf269aa.ttf",
+          "sha256": "9ae97ba6c63ea7feee925f2816ed0b9009d2d5e13611c47d51e748d4daf269aa",
+          "bytes": 6372052
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-043",
+      "family": "QianTuHouHeiTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "QianTuHouHeiTi",
+          "file": "originals/e0be21d02e19605d3a327e290224b24ccc02dee2c587bab8dce165d5cc7306ec.ttf",
+          "sha256": "e0be21d02e19605d3a327e290224b24ccc02dee2c587bab8dce165d5cc7306ec",
+          "bytes": 3016588
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-044",
+      "family": "FontQu Smile",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "FontQu Smile 常规",
+          "file": "originals/c58efc62318fd681c59ad88689200fb766905a63b91d72bd9b4a1016844cf85b.ttf",
+          "sha256": "c58efc62318fd681c59ad88689200fb766905a63b91d72bd9b4a1016844cf85b",
+          "bytes": 9487176
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-045",
+      "family": "大宝桃桃体",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "DaBaoTaoTaoTi",
+          "file": "originals/bd30c12df48316adb30fa38b998f235e7bf7193fdc436cc49efc7b69b102ce08.ttf",
+          "sha256": "bd30c12df48316adb30fa38b998f235e7bf7193fdc436cc49efc7b69b102ce08",
+          "bytes": 4205248
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-046",
+      "family": "ZTSJ-FaGunTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ZTSJ-FaGunTi",
+          "file": "originals/eb12653a9fe01d7af13bee87a00aa024fe053de686687ed58eb0c9d99a1d61d7.ttf",
+          "sha256": "eb12653a9fe01d7af13bee87a00aa024fe053de686687ed58eb0c9d99a1d61d7",
+          "bytes": 2886232
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-047",
+      "family": "ZiYouFangHuaTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ZiYouFangHuaTi",
+          "file": "originals/5c30403cf20e9551e8e76d8c31621d6978b9f6b9c7f0070cb420c42a5f4f45b9.ttf",
+          "sha256": "5c30403cf20e9551e8e76d8c31621d6978b9f6b9c7f0070cb420c42a5f4f45b9",
+          "bytes": 1742732
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-048",
+      "family": "ZhaiZaiJiaMaiKeBi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ZhaiZaiJiaMaiKeBi",
+          "file": "originals/5e57d4ba7c16ee4f3062cb281a11f267d01956a0f42273b1daf7a0aa6f5af4a2.ttf",
+          "sha256": "5e57d4ba7c16ee4f3062cb281a11f267d01956a0f42273b1daf7a0aa6f5af4a2",
+          "bytes": 17093684
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-049",
+      "family": "HCSZT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "寒蝉手拙体",
+          "file": "originals/f09ff3a12910b4c0d06b5d5eaedb942f8b8925a660211e50c93204126fff33d3.ttf",
+          "sha256": "f09ff3a12910b4c0d06b5d5eaedb942f8b8925a660211e50c93204126fff33d3",
+          "bytes": 12899104
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-050",
+      "family": "NanoPyongHanHei",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "NanoPyongHanHei",
+          "file": "originals/1f6bd27eed86b42a1c9cb73554705d5290ea5ba79186587ace5e7586991373e6.ttf",
+          "sha256": "1f6bd27eed86b42a1c9cb73554705d5290ea5ba79186587ace5e7586991373e6",
+          "bytes": 2614108
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-051",
+      "family": "Smiley Sans",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Smiley Sans Oblique",
+          "file": "originals/b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4.ttf",
+          "sha256": "b447d7e781f08bc95c4c9f23ba71ed2b8ebb639aa7184485c71c4ca5afcd25c4",
+          "bytes": 2629764
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-052",
+      "family": "ASTPYWK Light",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 300,
+      "variants": [
+        {
+          "weight": 300,
+          "family": "ASTPYWK Light",
+          "file": "originals/50981f508c0a0fcaf1216642ffed4256da8dc0d97581f8b4dd9a4cbd147fcec0.ttf",
+          "sha256": "50981f508c0a0fcaf1216642ffed4256da8dc0d97581f8b4dd9a4cbd147fcec0",
+          "bytes": 20369412
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-053",
+      "family": "ASTPYWK Medium",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "ASTPYWK Medium",
+          "file": "originals/e2b1468546570097e5b08c7fbc57780c87b0d0b7dcdbb59b5947314d3dc2f88b.ttf",
+          "sha256": "e2b1468546570097e5b08c7fbc57780c87b0d0b7dcdbb59b5947314d3dc2f88b",
+          "bytes": 16963324
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-054",
+      "family": "ASTPYWK Regular",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ASTPYWK Regular",
+          "file": "originals/3e0c44dd1f6081f8d57ebb29422288f38062ac97caf5842b7f2a93a8fdc2a880.ttf",
+          "sha256": "3e0c44dd1f6081f8d57ebb29422288f38062ac97caf5842b7f2a93a8fdc2a880",
+          "bytes": 16853232
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-055",
+      "family": "WenDaoChaoHei",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "WenDaoChaoHei",
+          "file": "originals/9bfe9a34027807f2e9eda6d9ad55929d92ba95e6f17cd8d32e14a1549993d868.ttf",
+          "sha256": "9bfe9a34027807f2e9eda6d9ad55929d92ba95e6f17cd8d32e14a1549993d868",
+          "bytes": 1874676
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-056",
+      "family": "XinYuGongZhangJiaSongA",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "XinYuGongZhangJiaSongA",
+          "file": "originals/64e2fe1aa83246ccd9aa6b1c33a88a65d181092c7678de45729063fe60214b27.ttf",
+          "sha256": "64e2fe1aa83246ccd9aa6b1c33a88a65d181092c7678de45729063fe60214b27",
+          "bytes": 19085760
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-057",
+      "family": "MDMDWuFengTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "MDMDWuFengTi",
+          "file": "originals/6a4ac0995b8be3e4d6aa378d26af2c285b8f1d9a7390fe4840febeb327978c36.ttf",
+          "sha256": "6a4ac0995b8be3e4d6aa378d26af2c285b8f1d9a7390fe4840febeb327978c36",
+          "bytes": 4416860
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-058",
+      "family": "LogoSC LongZhuTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "LogoSC LongZhuTi",
+          "file": "originals/977c43b9d16458517eb9503a847e7f58fdad803850bb1d63f6e14d5d09d11142.ttf",
+          "sha256": "977c43b9d16458517eb9503a847e7f58fdad803850bb1d63f6e14d5d09d11142",
+          "bytes": 3709528
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-059",
+      "family": "Mizuki-Gothic",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Mizuki-Gothic",
+          "file": "originals/a26b85a533ab9f9521dcd643e93de70d45e6cc226f71ea252e0c74d7a2cfd9b3.ttf",
+          "sha256": "a26b85a533ab9f9521dcd643e93de70d45e6cc226f71ea252e0c74d7a2cfd9b3",
+          "bytes": 4423536
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-060",
+      "family": "Huiwen-Fangsong",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "Huiwen-Fangsong",
+          "file": "originals/27e90154c0402f9447b1c2be4851a8735b9762e3b8eb4c0ef212e50718c07029.ttf",
+          "sha256": "27e90154c0402f9447b1c2be4851a8735b9762e3b8eb4c0ef212e50718c07029",
+          "bytes": 15875428
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-061",
+      "family": "HWMCT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "HWMCT",
+          "file": "originals/e0b4fba98fc4171147fdfd4ea0cc06125603d19ad417e9fcbf08d7f62f3b4f17.ttf",
+          "sha256": "e0b4fba98fc4171147fdfd4ea0cc06125603d19ad417e9fcbf08d7f62f3b4f17",
+          "bytes": 24427028
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-062",
+      "family": "HanziPinYin",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "HanziPinYin",
+          "file": "originals/6d3ae73116c16b8330042d4952d81a8985afb0d60f8e654a564cf626edf4c795.ttf",
+          "sha256": "6d3ae73116c16b8330042d4952d81a8985afb0d60f8e654a564cf626edf4c795",
+          "bytes": 10461000
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-063",
+      "family": "JiangChengLvDongHei",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "JiangChengLvDongHei",
+          "file": "originals/54f8dd5400fbc3cd540f08dd8831c173ea5e3f99218b96175511fd510aeddf68.ttf",
+          "sha256": "54f8dd5400fbc3cd540f08dd8831c173ea5e3f99218b96175511fd510aeddf68",
+          "bytes": 18581712
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-064",
+      "family": "JiangChengXieHei",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 100,
+      "variants": [
+        {
+          "weight": 100,
+          "family": "JiangChengXieHei 100W",
+          "file": "originals/27c4d97d7e8035c7cc4500274f5061cb5f7481c8928a5dd167526dbbe8afc986.ttf",
+          "sha256": "27c4d97d7e8035c7cc4500274f5061cb5f7481c8928a5dd167526dbbe8afc986",
+          "bytes": 19056656
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-065",
+      "family": "TangXianBinSong",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "TangXianBinSong",
+          "file": "originals/a20188a2ea5e8c36a5247e9cb43d4f3b3b4741bfcaa761a5bbe8b0f01bea7379.otf",
+          "sha256": "a20188a2ea5e8c36a5247e9cb43d4f3b3b4741bfcaa761a5bbe8b0f01bea7379",
+          "bytes": 5263036
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-066",
+      "family": "MuYaoSuiXinShouXie",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "MuYaoSuiXinShouXie",
+          "file": "originals/9898c2e28e0864f5faaae49b28d7d340421784cd8775c79ac8772d5af93d62dc.ttf",
+          "sha256": "9898c2e28e0864f5faaae49b28d7d340421784cd8775c79ac8772d5af93d62dc",
+          "bytes": 3579892
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-067",
+      "family": "RunZhiJiaKangXiZiDianQSMHT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "RunZhiJiaKangXiZiDianQSMHT",
+          "file": "originals/c0f69aebf4ac5dee5dca2ea60e4cd66883f9b23f77f70eaee7da0e179976157c.ttf",
+          "sha256": "c0f69aebf4ac5dee5dca2ea60e4cd66883f9b23f77f70eaee7da0e179976157c",
+          "bytes": 6091484
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-068",
+      "family": "RunZhiJiaKangXiZiDianMHT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "RunZhiJiaKangXiZiDianMHT",
+          "file": "originals/0d14c3cbc3211ab3282b1c239776f08afaeed9b665614a32c7ad09da9e623e11.ttf",
+          "sha256": "0d14c3cbc3211ab3282b1c239776f08afaeed9b665614a32c7ad09da9e623e11",
+          "bytes": 6119320
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-069",
+      "family": "Child Fun Sans Demo",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Child Fun Sans Demo",
+          "file": "originals/9b93cc87459f48eb87e2a0ea6d3f37e188bb9902dcfb43fd21d5ef3d1b553e88.ttf",
+          "sha256": "9b93cc87459f48eb87e2a0ea6d3f37e188bb9902dcfb43fd21d5ef3d1b553e88",
+          "bytes": 2423596
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-070",
+      "family": "SrcMing",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 700,
+      "variants": [
+        {
+          "weight": 700,
+          "family": "SrcMing",
+          "file": "originals/bcafc8bdc898e5da83d5e6ef70217a2644d96867f1f98c5c1942eae29e52042b.ttf",
+          "sha256": "bcafc8bdc898e5da83d5e6ef70217a2644d96867f1f98c5c1942eae29e52042b",
+          "bytes": 16442298
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-071",
+      "family": "Source-KeynoteartHans",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "Source-KeynoteartHans",
+          "file": "originals/514d8062e4e96b3fdba4042d9f7e339563ccdb55dd65a2e14fc29386290b060e.otf",
+          "sha256": "514d8062e4e96b3fdba4042d9f7e339563ccdb55dd65a2e14fc29386290b060e",
+          "bytes": 10043796
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-072",
+      "family": "Aidian FengYaHei",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "Aidian FengYaHei",
+          "file": "originals/49e2f611fb334e0e67020e43bc4088b5db85812e1e34df598381bd56bc196df0.ttf",
+          "sha256": "49e2f611fb334e0e67020e43bc4088b5db85812e1e34df598381bd56bc196df0",
+          "bytes": 4127128
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-073",
+      "family": "HouZunSongTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "HouZunSongTi",
+          "file": "originals/a8da090729ed88ce167b3c2ede46db71e2acea77ae0365d3ab55f27d289ebd4b.ttf",
+          "sha256": "a8da090729ed88ce167b3c2ede46db71e2acea77ae0365d3ab55f27d289ebd4b",
+          "bytes": 28008468
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-074",
+      "family": "bailubangbangshouxieti",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "bailubangbangshouxieti",
+          "file": "originals/f795aa685e21b114d69f16159dd67a2ed255c4b4ebce0193542b9bc746414b21.ttf",
+          "sha256": "f795aa685e21b114d69f16159dd67a2ed255c4b4ebce0193542b9bc746414b21",
+          "bytes": 5807028
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-075",
+      "family": "SCJSSHT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 800,
+      "variants": [
+        {
+          "weight": 800,
+          "family": "SCJSSHT",
+          "file": "instances/e5f6b63acf7433230050a6ba46927b62440229f661dd2ef65a2f39b6a3b8459d.ttf",
+          "sha256": "e5f6b63acf7433230050a6ba46927b62440229f661dd2ef65a2f39b6a3b8459d",
+          "bytes": 29412208
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-076",
+      "family": "ZhanKuQingKeHuangYouTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "ZhanKuQingKeHuangYouTi",
+          "file": "originals/6b43a14595c4963b996eb6259c14bd7c280eedde3db2a7f4dd19af9035004223.ttf",
+          "sha256": "6b43a14595c4963b996eb6259c14bd7c280eedde3db2a7f4dd19af9035004223",
+          "bytes": 9462116
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-077",
+      "family": "CLFN 16x CN",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "CLFN 16x CN",
+          "file": "originals/a420285266715329b79813a7ec7eaa65394f7ba5364526d9a6a8c7a3782067e4.ttf",
+          "sha256": "a420285266715329b79813a7ec7eaa65394f7ba5364526d9a6a8c7a3782067e4",
+          "bytes": 3077776
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-078",
+      "family": "CLFN 24x CN",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "CLFN 24x CN",
+          "file": "originals/36ca82bed49d7a9e60420fdede605aa649caa4d7beef85e64f83f88e9cfd969a.ttf",
+          "sha256": "36ca82bed49d7a9e60420fdede605aa649caa4d7beef85e64f83f88e9cfd969a",
+          "bytes": 4300224
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-079",
+      "family": "PangMenZhengDao-XiXian",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "PangMenZhengDao-XiXian",
+          "file": "originals/498b3f556e581c82512ad2afc3165d3fb797fd54304970b516fd1939f4930047.ttf",
+          "sha256": "498b3f556e581c82512ad2afc3165d3fb797fd54304970b516fd1939f4930047",
+          "bytes": 1802324
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-080",
+      "family": "JinzisheTongyuan",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "JinzisheTongyuan",
+          "file": "originals/7ba8f2247cb07087cfe42f0c083c2111cf72a9cd376f99d67c192e1e0397fe56.ttf",
+          "sha256": "7ba8f2247cb07087cfe42f0c083c2111cf72a9cd376f99d67c192e1e0397fe56",
+          "bytes": 24568460
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-081",
+      "family": "JNBBH",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "JNBBH Black",
+          "file": "originals/160e08a64176c96bf877664a1f1ade9a3d494491515a9f9a4baa355429a22670.ttf",
+          "sha256": "160e08a64176c96bf877664a1f1ade9a3d494491515a9f9a4baa355429a22670",
+          "bytes": 2334112
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-082",
+      "family": "JNYMT",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 900,
+      "variants": [
+        {
+          "weight": 900,
+          "family": "JNYMT",
+          "file": "originals/f17ca4d10a4c9861fbb9e286eb76a70880e9efe65082f0062f7623cb263e33fa.ttf",
+          "sha256": "f17ca4d10a4c9861fbb9e286eb76a70880e9efe65082f0062f7623cb263e33fa",
+          "bytes": 3187040
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-083",
+      "family": "DaigoMinteuA",
+      "group": "lovartExtend",
+      "chinese": false,
+      "defaultWeight": 500,
+      "variants": [
+        {
+          "weight": 500,
+          "family": "DaigoMinteuA",
+          "file": "originals/aa8c386a5cb242ea231456cab58c51d647ec301b5b64fa5ecc19a89c99918b4f.ttf",
+          "sha256": "aa8c386a5cb242ea231456cab58c51d647ec301b5b64fa5ecc19a89c99918b4f",
+          "bytes": 18493604
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-084",
+      "family": "Kingsoft_Cloud_Font",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "金山云技术体",
+          "file": "originals/6c56c087030b4aec09ae4d713e421e4fe4dcb710371854df0857adc0c9e855b7.ttf",
+          "sha256": "6c56c087030b4aec09ae4d713e421e4fe4dcb710371854df0857adc0c9e855b7",
+          "bytes": 3322488
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-085",
+      "family": "LMQYLSZRHT Regular",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "LMQYLSZRHT Regular",
+          "file": "originals/bf5a16c5cf6e6f652a8adfeab9dccb0282615459c517a17fe4e0855a882aca76.ttf",
+          "sha256": "bf5a16c5cf6e6f652a8adfeab9dccb0282615459c517a17fe4e0855a882aca76",
+          "bytes": 1387244
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-086",
+      "family": "XiaWuWenKai",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 300,
+      "variants": [
+        {
+          "weight": 300,
+          "family": "XiaWuWenKai Light",
+          "file": "originals/30a37e502d932f24e70b6d1194968b631912d1797a9500aad672202d6e27391a.ttf",
+          "sha256": "30a37e502d932f24e70b6d1194968b631912d1797a9500aad672202d6e27391a",
+          "bytes": 18604576
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-087",
+      "family": "FeiHuaSongTi",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "FeiHuaSongTi",
+          "file": "originals/09cafaee78f90a8cd847d781ce6de40a6d16f1aa4d6b0af911c2d1cc2cb0c4dd.ttf",
+          "sha256": "09cafaee78f90a8cd847d781ce6de40a6d16f1aa4d6b0af911c2d1cc2cb0c4dd",
+          "bytes": 13440204
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-088",
+      "family": "XiangcuiDazijitiW15",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "XiangcuiDazijitiW15",
+          "file": "originals/7871c818c3618c1a0a74ab298b92a6f8938131e62fda257b10532a02025bdeb9.ttf",
+          "sha256": "7871c818c3618c1a0a74ab298b92a6f8938131e62fda257b10532a02025bdeb9",
+          "bytes": 16503016
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-089",
+      "family": "XiangcuiDazijitiW35",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "XiangcuiDazijitiW35",
+          "file": "originals/9b5f2d9cd12ce9e7f6e2ea984bd2b7ac83676d69d549a0bd509e89c4ab7ca18c.ttf",
+          "sha256": "9b5f2d9cd12ce9e7f6e2ea984bd2b7ac83676d69d549a0bd509e89c4ab7ca18c",
+          "bytes": 16054740
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-090",
+      "family": "XiangcuiDazijitiW40",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "XiangcuiDazijitiW40",
+          "file": "originals/7170579959cf792d52793e91da103395bdf3e68220c40bb8788198b5b618a677.ttf",
+          "sha256": "7170579959cf792d52793e91da103395bdf3e68220c40bb8788198b5b618a677",
+          "bytes": 16231716
+        }
+      ]
+    },
+    {
+      "id": "liblib-extend-091",
+      "family": "dingliehakkafont",
+      "group": "lovartExtend",
+      "chinese": true,
+      "defaultWeight": 400,
+      "variants": [
+        {
+          "weight": 400,
+          "family": "dingliehakkafont",
+          "file": "originals/bcbcbe03817a617c44b2a180294f3a4cad94511eae7923e6c416ab0b0f8afbd4.ttf",
+          "sha256": "bcbcbe03817a617c44b2a180294f3a4cad94511eae7923e6c416ab0b0f8afbd4",
+          "bytes": 4980776
+        }
+      ]
+    }
+  ]
+}

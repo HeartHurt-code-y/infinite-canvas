@@ -4,6 +4,8 @@ import {
   occupyingGenerationInputKeys,
 } from "../canvas/generationInputSlots";
 import { stripMarkdown } from "../../lib/promptContent";
+import { imageNodePreview } from "./imageNodeResults";
+import type { ConnectedLibraryResource } from "./canvasLibraryResources";
 import {
   assetGenerationInput,
   outputGenerationInput,
@@ -40,6 +42,7 @@ export function connectedCanvasPromptText(sources: readonly ConnectedCanvasTextI
 }
 
 export interface ResolvedCanvasInputs {
+  readonly libraryResources: readonly ConnectedLibraryResource[];
   readonly media: readonly ConnectedCanvasMediaInput[];
   readonly texts: readonly ConnectedCanvasTextInput[];
   readonly pending: readonly {
@@ -73,6 +76,7 @@ export function canvasNodeIndex(entries: readonly CanvasNodeEntry[]): CanvasNode
     videoClip: new Map(
       entries.flatMap((e) => (e.type === "videoClip" ? [[e.data.key, e.data]] : [])),
     ),
+    director: new Map(entries.flatMap(e => e.type === "director" ? [[e.data.key, e.data]] : [])),
     result: new Map(entries.flatMap((e) => (e.type === "result" ? [[e.data.key, e.data]] : []))),
     output: new Map(entries.flatMap((e) => (e.type === "output" ? [[e.data.key, e.data]] : []))),
   };
@@ -84,6 +88,7 @@ export function canvasNodesByKeyFromDocument(document: CanvasDocument): CanvasNo
     gen: new Map(document.genNodes.map((n) => [n.key, n])),
     screenplay: new Map((document.screenplayNodes ?? []).map((n) => [n.key, n])),
     videoClip: new Map((document.videoClipNodes ?? []).map((n) => [n.key, n])),
+    director: new Map((document.directorNodes ?? []).map(n => [n.key, n])),
     result: new Map(document.resultNodes.map((n) => [n.key, n])),
     output: new Map((document.outputNodes ?? []).map((n) => [n.key, n])),
   };
@@ -290,6 +295,9 @@ function buildInputSnapshot(
       };
     } else if (entry.type === "output") {
       payload = outputPayload(entry.data);
+    } else if (entry.type === "gen" && entry.data.kind === "image" && entry.data.imageGeneration) {
+      const output = imageNodePreview(entry.data);
+      payload = output ? outputPayload(output) : payload;
     } else if (entry.type === "gen" && entry.data.kind === "prompt") {
       const text = entry.data.config.generatedPrompt.trim();
       payload = {
@@ -321,7 +329,8 @@ function buildInputSnapshot(
           : [],
       };
     }
-    if (entry.type !== "asset" && entry.type !== "output") {
+    if (entry.type !== "asset" && entry.type !== "output" &&
+        !(entry.type === "gen" && entry.data.kind === "image" && entry.data.imageGeneration)) {
       const latest =
         Array.from(outputsByProducer!.get(key)?.values() ?? [])
           .reverse()
@@ -340,13 +349,21 @@ function buildInputSnapshot(
     const media: ConnectedCanvasMediaInput[] = [];
     const texts: ConnectedCanvasTextInput[] = [];
     const pending: { sourceKey: string; edgeId: string; name: string }[] = [];
+    const libraryResources: ConnectedLibraryResource[] = [];
+    const directEdges = incoming!.get(targetKey) ?? [];
+    for (const edge of directEdges) {
+      const source = nodes.get(edge.fromKey);
+      if (source?.type === "asset" && source.data.libraryResource) {
+        libraryResources.push({ edgeId: edge.id, name: source.data.name, resource: source.data.libraryResource });
+      }
+    }
     // 直连素材在槽位表里的位置（0 起）与槽位表长度：清单据此渲染稳定的位置编号与空位行。
     let mediaPosition = new Map<string, number>();
     let mediaSlotCount = 0;
     const seenNodes = new Set([targetKey]);
     const seenMedia = new Set([targetKey]);
     const seenTexts = new Set([targetKey]);
-    const stack = (incoming!.get(targetKey) ?? [])
+    const stack = directEdges
       .map((edge) => ({ key: edge.fromKey, edgeId: edge.id }))
       .reverse();
     while (stack.length) {
@@ -354,6 +371,7 @@ function buildInputSnapshot(
       if (seenNodes.has(next.key)) continue;
       seenNodes.add(next.key);
       const entry = nodes.get(next.key);
+      if (entry?.type === "asset" && entry.data.libraryResource) continue;
       const parents = incoming!.get(next.key) ?? [];
       const payload = entry ? ownPayload(entry) : { media: [], texts: [] };
       for (const item of payload.media) {
@@ -466,7 +484,7 @@ function buildInputSnapshot(
         }
       }
     }
-    const result = { media, texts, pending, mediaSlotCount, mediaPosition };
+    const result = { media, texts, pending, mediaSlotCount, mediaPosition, libraryResources };
     resolved.set(targetKey, result);
     return result;
   };

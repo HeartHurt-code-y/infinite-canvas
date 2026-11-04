@@ -1,0 +1,1464 @@
+{
+  "schemaVersion": 1,
+  "source": "LibTV public model-version versionIntro",
+  "capturedAt": "2026-11-03T04:21:47.144Z",
+  "items": [
+    {
+      "uuid": "34d3d85fa99949b39a48c980f844ad31",
+      "versionId": 23043916,
+      "versionUuid": "d3a2aec98c1641d59f444ce0c2a4ae23",
+      "name": "产品扫光",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/17.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/17.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "[镜头一：00:00-00:02] 极高精细度微距特写，画面主角为图中的仿生镂空耳机。100%纯黑背景。一道锐利的银色轮廓光缓慢扫过，擦过米白色哑光仿生骨骼结构，并在复杂的孔洞内部投射出深邃的几何阴影。光线微妙地捕捉到深灰色泡沫耳垫的丰富触觉纹理。电影级明暗对照，持续慢动作。[镜头二：00:02-00:04] 镜头切至近景特写，聚焦于耳机的镀铬金属可伸缩头梁部分。流体光影效果，一道璀璨的线性霓虹高光沿着光滑的银色金属表面缓慢滑过，显现出细腻的拉丝金属光泽与高端质感。[镜头三：00:04-00:06] 切换至电影级产品全景亮相。对称构图，100%纯黑背景。米白色仿生骨骼耳机缓慢、优雅地从画面底部升起，从四分之三侧慢慢旋转到正面，最终定格在画面正中央。整个全景保持与镜头一完全相同的极暗调光影风格：拒绝大面积照亮，依然采用锐利的侧向擦光，仅勾勒出耳机的骨骼边缘，使复杂的镂空孔洞内部保持深邃的黑色阴影。耳机优雅悬浮，绝无笔直冲撞感与机械抖动。A24独立电影美学调色，带有一点复古颗粒感与高对比度渲染。8k分辨率，极致细节。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/17_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/34d3d85fa99949b39a48c980f844ad31?versionUuid=d3a2aec98c1641d59f444ce0c2a4ae23"
+    },
+    {
+      "uuid": "b5a4ecc4b88149ab894ad617c1d93fe9",
+      "versionId": 23030897,
+      "versionUuid": "1ab02829f6e744c88d95576f80c87c32",
+      "name": "微距推镜",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_4.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_4.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "一段带有远距离推进镜头的神秘电影感粉色化妆品瓶动态视频。摄影机一路穿透并深深探入一片密集、郁郁葱葱的隐秘花园深处，沿途充斥着极其繁茂的野生花草与浓密的绿植——整个场景完全由茂密花丛覆盖。 【0秒-2秒】：采用不可思议的极浅景深，带有最大值的高斯全模糊效果。整个画面完全出焦、数值极大极模糊，彻底消融在巨大、闪烁的植物焦外光晕与金色耀斑的梦幻质感中，整个画面被花丛覆盖看不到土壤。 【2秒-4秒】：摄影机流畅且持续地向深处推进，穿过层层叠叠、极其丰富的密集前景花草。画面发生渐进式拉焦，但沿途大量的植物在整个视频中始终保持强烈的虚焦和放大模糊状态，贴着镜头掠过。 【4秒-结束】：镜头深入并定格，焦点完全变清晰，牢牢锁定在隐藏在花丛与植物深处的磨砂粉色化妆品瓶身上，产品自然安置于花卉丛中。 灿烂、温暖的自然阳光穿透树叶缝隙，在画面中洒下巨大的柔和模糊光斑，营造出一种自然、温暖而神秘的空灵氛围。空气中飘散着肉眼清晰可见的细腻毛毛雨——它们在阳光下折射出耀眼的光芒，非常显眼，但依然保持着细密水雾的质感，绝无粗重的雨线落下。A24电影美学。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_4_image_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/b5a4ecc4b88149ab894ad617c1d93fe9?versionUuid=1ab02829f6e744c88d95576f80c87c32"
+    },
+    {
+      "uuid": "5d3da66e98e74107abf0ab9679790f27",
+      "versionId": 23030896,
+      "versionUuid": "21cd6725c9b540c0971047df318b9fa2",
+      "name": "水下慢镜头",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_3.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_3.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "画面环境与构图 (Scene & Composition)： 画面完全处于水下环境（Underwater environment throughout）：固定式静态水下摄影机（Fixed static underwater camera position），没有任何抖动或镜头移动。 主体动作逻辑 (Motion & Physics)： 主体为一瓶高级的椭圆形玻璃香水瓶。动作分为两个阶段：第一阶段，香水瓶从画面上方以正常重力加速度（Normal falling speed）切入水面并完全浸没；第二阶段，香水瓶在入水后即刻转变为平稳、缓慢的沉降状态（Slow-motion steady descent）。动作表现为在水下流体阻力作用下的自然悬浮与匀速下沉。 细节表现与光影 (Details & Lighting)： 高速摄影捕捉香水瓶突破水面瞬间形成的物理扰动，随后瓶身周围被细腻的慢动作水流波动与无数串缓缓垂直上升的晶莹气泡环绕（Slow-rising crystalline bubble streams）。画面融合淡蓝色背景与柔和的深水渐变打光，波光粼粼的焦散折射光线（Caustic light refractions）穿透水体，精准勾勒出玻璃瓶身通透的高级质感。 技术标准 (Technical Requirements)： 电影级商业布光（Cinematic professional lighting），极致超写实效果（Hyper-realistic），8k分辨率，高端香水品牌视觉广告风格。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_3_image_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/5d3da66e98e74107abf0ab9679790f27?versionUuid=21cd6725c9b540c0971047df318b9fa2"
+    },
+    {
+      "uuid": "90c315c72a4d442aa956b824045c3e5a",
+      "versionId": 23064309,
+      "versionUuid": "4007452d4db84a06872d9249d1d02d08",
+      "name": "赛博化妆师",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/46.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/46.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134143-s96kf"
+          ],
+          "systemPrompt": "高质量、电影质感的音乐视频片段。画面中心是一位神情自信、充满力量感的女性偶像，正面对镜头进行自然的唱歌或Rap表演，嘴唇动作与节奏同步，眼神始终坚定且自信地锁定镜头。她拥有一头深红色长发，身穿饰有复杂水晶吊坠的白色高定外套。她的头部周围环绕着多只机械臂，每只机械臂都手持各种专业的化妆刷，在她的面部进行精细、快速的化妆动作。化妆刷禁止在头发、耳朵上。\n\n动态与技术要求：\n摄像机从视频开始即执行平滑且缓慢的拉镜头（Pull-back/Zoom-out）动作，一开始是人物脸部的大特写。全程确保偶像始终保持在画面中心。灯光为冷色调且极度精准的专业摄影棚强光，要求完美匹配每一把化妆刷与艺人皮肤接触处的边缘光（Rim Light）效果，营造出细腻的投影和真实的高光反射。画面极度强调头发纹理、刷毛的质感、金属饰品的光泽以及背景亮片的反射细节。节奏感强烈，展现出一种极具掌控力的冷峻与高级时尚氛围。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/46_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "4c0a5ca7a032476eb9764a2dd0f75309"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/90c315c72a4d442aa956b824045c3e5a?versionUuid=4007452d4db84a06872d9249d1d02d08"
+    },
+    {
+      "uuid": "533a81c2788f46fc994f595dcbead1ab",
+      "versionId": 23043915,
+      "versionUuid": "a28e7729d6db4b59b4876ed9c1cc1910",
+      "name": "多角度定点",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/16.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/16.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "产品运镜脚本：多点特写与丝滑一镜到底核心运镜逻辑： 全貌开场 → 环绕联动 → 三处特写（保持距离） → 回归全貌1. 开场：沉稳全貌 (0-1.5秒)镜头动作： 从斜上方俯视切入，全貌展示，此时镜头匀速平移。产品动态： 手柄在画面中心缓慢旋转，橙红光影在哑光表面平滑流动。2. 中段：多点联动特写 (1.5-6.5秒)运镜原则： 每一个特写都保持 15-20cm 距离。关键点： 每次从一个点跳到下一个点时，静止使用硬切，而是利用镜头和产品变化带来的转角，让摄像机自然跟随“切入”下一个焦点。第一站（左侧摇杆）： 镜头向左平移并推入，手柄定格保持静止，让摇杆的橙色光圈在画面中画出一道优美的弧线。第二站（中央触控板）： 手柄开始旋转，镜头顺势平滑“滑行”至手柄中心，聚焦于触控板的细密纹理，聚焦锁定后手柄保持静止状态。第三站（侧边功能键）： 镜头向后微微拉升一段距离，转至手柄右侧，聚焦于动作按键和侧边线条的切割感，聚焦锁定后手柄保持静止状态。3. 结尾：丝滑回归 (6.5-8秒)镜头动作： 完成最后一处特写后，镜头迅速拉回（Pull-back）至初始的广角全景。产品动态： 手柄停止旋转，定格在最优展示姿态，画面亮度微调，品牌感收尾。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/16_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/533a81c2788f46fc994f595dcbead1ab?versionUuid=a28e7729d6db4b59b4876ed9c1cc1910"
+    },
+    {
+      "uuid": "fcc7bec4d7064f72a32105999c7357d0",
+      "versionId": 23053565,
+      "versionUuid": "a6fa373acfcf41c6b78ad942743f01d9",
+      "name": "悬浮缓入",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/38.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/38.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "画面中心是一瓶简约的粉色化妆品瓶，瓶身上有“Aib”标志。画面呈现出一种空灵、高端的商业广告质感。化妆品瓶从画面上方缓缓落下，最终悬浮在画面中心位置，并保持缓慢的自转。在瓶身周围，多个大小不一的晶莹剔透的水球在环绕瓶身运动。每个水球在公转的同时，自身也在进行自转，并伴随着轻微、真实的液体挤压变形和波动。光影柔和，采用粉色系通透灯光，背景干净，整体为 8K 高清超写实风格，体现出细腻的水滴质感和瓶身材质，高速摄像机视角，视觉重心突出。",
+          "referenceImages": [],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/fcc7bec4d7064f72a32105999c7357d0?versionUuid=a6fa373acfcf41c6b78ad942743f01d9"
+    },
+    {
+      "uuid": "3a686ea431bb473f835167be23ed248c",
+      "versionId": 23030907,
+      "versionUuid": "0d65795869e24bf399857931f396ff72",
+      "name": "红毯闪光灯",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_14.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_14.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133420-852mc"
+          ],
+          "systemPrompt": "[核心风格与画质]高视觉冲击力的 K-pop MV 风格。 极致的鲜红背景色调，带有压抑且华丽的戏剧张力。写实电影级画质，重点表现光影在极高频闪烁下的物理反射与皮肤通透感。[场景环境]极简鲜红背景空间。 初始状态仅有主角一人居中。1秒后，场景突变：大量摄影师、媒体人群的手臂、相机和手机从画面左右两侧迅速伸入（Intrusion），将主角紧紧包围。背景巨大的红墙在后续爆闪中产生强烈的明暗交替。[人物特征与表现]主角展现出游刃有余的巨星气场。0-1秒：人物神情冷峻，在静谧中直视镜头。1-6秒：面对突如其来的镜头森林，人物神情玩味且克制。动作轨迹：轻盈地向左侧头观察，随后自然地向右侧巡视，眼神在两侧闪烁的快门间游移，最后回到中心对视镜头。 双眼保持绝对自信，直面强光不闪躲。[核心动态：闪光狂热]爆发机制：从第1秒开始，全场瞬间进入高频爆闪模式（Flashing frenzy）。 2. 光影效果：大量闪光灯有节奏地交替闪烁，白光频繁将人物从暗处拉向极亮，形成强烈的视觉频闪（Strobe effect）。人群入画：1秒时刻，四周摄影师呈“侵略式”入画姿态，无数双手向中心延伸，相机和手机屏幕映射着刺眼的白光。[对比动态]周围环境是极致混乱、快节奏的快门爆闪与手臂晃动；而中心人物的转头动作则保持优雅与丝滑，形成动静结合的强烈张力。[镜头语言]固定机位。 镜头被周围杂乱的相机和手臂局部遮挡，形成“窥视感”视角，焦点始终死死锁住主角的面部。[声音与氛围]0-1秒静默，1秒时爆发密集的机械快门声（Shutter clicks），音效与闪光频率严格同步。[技术参数]时长 5 秒，高动作频率权重（High motion weight），开启“全局光照追踪”以处理高频闪光对红色背景的影响。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_14_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "6d9f854fccd143d4bf35dbf2c8376c37"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/3a686ea431bb473f835167be23ed248c?versionUuid=0d65795869e24bf399857931f396ff72"
+    },
+    {
+      "uuid": "4fec256fd7e749e1a54ce060a89651c7",
+      "versionId": 23053562,
+      "versionUuid": "632bf3c04b084eefb896a5f95b548cb4",
+      "name": "普拉达换装",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/35.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/35.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20261010143350-q4ksk",
+            "asset-20261010144254-98frj"
+          ],
+          "systemPrompt": "核心描述：电影级一镜到底（Long Take）遮挡换装秀。 镜头全程采用倒退式跟踪拍摄（Retreating Tracking Shot），始终正对着持续向前行走的模特，景别始终保持全身景别。模特为黑色狼尾湿发、淡紫色眼影的女性。通过前景物体的物理遮挡，实现从全黑皮革套装到乳白色礼服套装的丝滑视觉转换。动态细节与交互（生动动作强化）：第一阶段（组接一 - 全身镜头）： 模特身着全黑亚光皮革套装，金色饰品。她气场强大地迎着镜头走来，带着一丝随性：右手在行进中自然地向后轻拨了一下湿润的狼尾发丝，眼神带着一种冷峻的专注感看向镜头侧方。背景是深纵深的伦敦街道，圣保罗大教堂巍然耸立。第二阶段（组接二 - 核心遮挡转场）： 当模特持续行走时，一辆黑色豪华轿车（如劳斯莱斯或宾利）突然从画面的左侧向右侧（前景）横穿驶过。轿车巨大的车身侧面瞬间充斥整个屏幕，从顶部到底部完全遮挡住模特和背景，形成一个短暂的视觉盲区。第三阶段（组接三 - 全身镜头）： 在豪华轿车完全滑出画面的瞬间，模特如同魔法般完成换装。她依然保持着同样的行走步频和姿态，但此时已身着乳白色礼服套装，高跟鞋的步伐稳健有力，展现出一种“穿行于都市”的张力。这种“车过人变”的视觉效果需极其自然、无跳跃感。生动动作细节： 换装后的模特状态变得更加松弛华丽。她微微歪头，对着镜头露出了一个自信的眼神，松弛感使整个人物显得极其真实。视觉与镜头表现：相机运动： 模拟 ARRI Alexa 电影级动态范围。采用倒退式跟踪拍摄（Retreating Tracking Shot），镜头与模特保持绝对恒定的距离进行倒退。转场时，相机的焦平面始终锁定在模特的面部，确保换装前后模特在画面中的坐标点完全重合。环境锁定： 强调“背景恒定”逻辑。无论服装如何变换，背景中的圣保罗大教堂、云层的分布等禁止发生任何突跳。物理模拟： 豪华轿车经过时，车漆表面应反射出周围街道的光影，增加真实感。车身离开后，模特衣服的下摆应有随风摆动的惯性，表现出持续行进的动态。质感呈现：极致材质对比： 画面需展现极高保真的材质颗粒度。第一阶段强调全黑皮革的亚光质感与柔韧折痕，呈现出一种冷峻的工业高级感；转场后，瞬间切换为乳白色礼服的丝绸垂坠感与半透明褶皱薄纱，展现出轻盈、呼吸感十足的面料细节。面部微表情： 增加对模特面部肌肉动态的描述，如“自然的呼吸感”、“眼神的聚焦变换”以及“行走时肌肉的轻微震颤”，避免 AI 常见的“蜡像感”。物理惯性： 模特换装后，肩部的垂落长纱应根据她前行的步频，产生物理准确的摆动与滞后感。音效意向（辅助生成）：除脚步声与车流声外，加入模特转场后轻微的笑声呼吸感，以及丝绸长纱在风中细微的摩擦声，强化动作的生动感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/35_1.png",
+            "https://libtv-res.liblib.art/tool/cinematic/35_2.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "99d0a7ec766f4429980eb5a721d892b7",
+            "dce888bb9ac04979820ac12cb8d808ef"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/4fec256fd7e749e1a54ce060a89651c7?versionUuid=632bf3c04b084eefb896a5f95b548cb4"
+    },
+    {
+      "uuid": "495570fc2c6d4c5c8cf0bde5a9e8b906",
+      "versionId": 23075240,
+      "versionUuid": "feee540271e6467e9d8521b3d984e156",
+      "name": "穿梭机运镜",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/48.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/48.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "FPV连续飞行，一镜到底，紧紧跟随一架小直升机往前飞，快速混乱的动作穿过一栋欧美风格的house房子内部，夜晚的场景。Y2K风格的视频美学。小直升机穿梭飞过室内窗户。画面中出现一名黑发女人，她戴着黑色墨镜，穿着纯黑色无袖背心，脖子上挂着多层银色珠链。CRT电视里播放着这名戴墨镜女人的影像。同一名戴墨镜、穿纯黑色无袖背心的女人在复古海报前整理头发。跟随着直升机快速转场到一个室内车库里，依然是这名女人，手里拿着棒球棒。快速平移到一个凌乱的家庭健身房，还是这名戴着墨镜、穿着纯黑无袖背心的女人正在击打一个重拳袋。动态镜头，快速平移，运动模糊，强烈闪光灯，复古胶卷质感，高能量。人物面部皮肤无瑕疵，人物具有美观性。",
+          "referenceImages": [],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/495570fc2c6d4c5c8cf0bde5a9e8b906?versionUuid=feee540271e6467e9d8521b3d984e156"
+    },
+    {
+      "uuid": "f5a2ed2644f248b89f04e01d1466c875",
+      "versionId": 23053560,
+      "versionUuid": "4aa82694cd6242a7a9d1acafc6aa376b",
+      "name": "驯龙高手",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/33.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/33.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "电影级高速动作戏，一镜到底： 一名女性是驭龙骑士，正骑乘着一只躯体庞大至遮天蔽日的远古飞龙在万米高空的云层间穿梭。视觉比例对比：巨龙的体量至少是女性的五十倍以上，人影在龙背之上显得极其渺小，强调广袤空间下的巨物感。她身着贵族风格华丽战甲，深色压纹皮革与精细金属嵌件结合，肩部盾形装饰随骑行律动。摄影机运动约束：严禁鱼眼畸变；摒弃震颤手持感；采用平稳的缓慢推拉（Dolly In）与平滑的左右位移（Paraxial Movement），捕捉她御龙俯冲的姿态。巨龙双翼遮蔽大半云层，颈部肌肉紧绷，金属质感鳞片闪烁冷冽光泽。龙口积蓄红光，喷出毁灭性龙息，火焰划破苍穹，周围云团瞬间震碎形成巨大的漩涡。摄影机在翻转与俯冲中实现平稳、流畅的微调，通过空间位移感展现极速压迫感，而非单纯的镜头抖动。当镜头切换至女主近景时，捕捉她驾驭巨龙时坚定冷峻的神情，风压吹动发丝，战甲金属质感清晰可见。她做出精准的骑乘反馈——配合巨龙在高空进行平稳的侧身规避、翻滚与变向。强烈的气流与空气剥离效应环绕周围，形成半透明的压力波纹。追逐进入白热化，飞龙猛然抬头，龙息与敌方攻势在空中碰撞。镜头随即迅速拉开，以宏大的旋转视角捕捉广阔的空中战场——从人龙全景过渡至整个云层的破碎。画面呈现超写实的流体动力学（烟雾、云层颗粒）、超精细的体积光大气效果。技术规格：ARRI Alexa 35 摄影机，变形镜头（Anamorphic），浅景深，电影级调色，好莱坞史诗质感。音效设计：呼啸强风、巨龙咆哮、火焰爆裂，全程无配乐，仅有震撼的现场环境音。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/f5a2ed2644f248b89f04e01d1466c875?versionUuid=4aa82694cd6242a7a9d1acafc6aa376b"
+    },
+    {
+      "uuid": "673b518b25174a838f2583e32bfb68d6",
+      "versionId": 23053556,
+      "versionUuid": "af3425c04d30450c86ae87ff82f867d4",
+      "name": "机械姬",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/29.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/29.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "[镜头与运镜]电影级叙事：画面始于人物面部的极度特写。执行平滑、高精度的机械臂式同轴环绕运镜，缓慢围绕人物面部进行圆周运动，摄像机与受试者头部中心轴保持恒定距离。要求零抖动，动作流利稳定，呈现电影质感；视角从轻微侧面平滑过渡至直面镜头。[主体与初始状态]参考图中的角色形象。一位女性角色的极度面部特写，全身穿着胶质紧身战斗服，表面覆盖着完整的活塞、网格与电线带。画面初始，人物处于完全闭合状态，面部被完整的白色机械面具严密遮盖。背景空间中，灰烬、细碎粒子与烟雾自始至终处于持续的流动与飘散状态，环境充满动感。[动态崩解与触发]核心动态（关键爆发点）：一阵强风突袭画面。在此瞬间，人物闭眼、发丝被狂风吹乱、身体自然执行微向前倾的动作，上述动作与“面部”及“肩部”机械结构的瓦解动作完全同步。面部与肩部的机械外壳在风中瞬间破碎，幻化成大量的机械碎片、粒子与烟雾，向四周激荡散去。严禁限制：除面部与肩部区域外，颈部及身体其余部分的机械结构必须保持绝对完整，不可发生任何消散或崩解。[人物互动与高潮]随着碎片随风远去，面部完全露出。角色在强风的末尾顺势睁开双眸，视线与镜头精准锁定，透出坚定不移的目光。背景中烟雾、灰烬与肩部/面部崩解出的残骸持续翻滚，而颈部及身体上的机械结构则在狂风中纹丝不动，与周围混乱的消散过程形成强烈的静态稳定与动态破碎对比。[风格与美学]高端电影叙事风格。采用冷色调的白色科技光感，通过悬浮的半透明碎片与写实皮肤纹理进行光线折射。视觉焦点在于人类真容与破碎的“肩部/面部机械”在风中交织的瞬间，而躯干部分的完整机械质感则作为稳固的视觉锚点。要求8K超写实渲染，具备A24风格的大气光照，强调物理崩解瞬间的复杂细节。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/673b518b25174a838f2583e32bfb68d6?versionUuid=af3425c04d30450c86ae87ff82f867d4"
+    },
+    {
+      "uuid": "2eb4cb4ea8754fc9af8bd78a2edd91a7",
+      "versionId": 23030901,
+      "versionUuid": "4f0d62e149cf40fbaa07fa1daff05c43",
+      "name": "镜面分身",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_8.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_8.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133322-5p92n"
+          ],
+          "systemPrompt": "(场景空间)无限镜面迷宫 (Infinity Mirror Maze)，基于图1 的几何折射结构，冷蓝绿色调 (Pale Cyan)，霓虹冷光在镜面间无限次往复折射，营造出极深度的多层视觉回廊，空间感极强。(人物形象)完美复刻红发齐刘海女Idol。身穿繁复白色蕾丝维多利亚式礼服 (Tiered Lace Victorian Gown)，胸前及肩部带有精细的银色金属 filigree 和水钻装饰。妆容精致，神情自信且具有强烈的偶像表现力。(运镜逻辑 - 强化手持摇摄与空间眩晕感)起始运镜 (Opening): 采用手持摇摄 (Handheld Panning) 视角，从左侧快速且带有惯性地横向滑入。镜头全程保持明显的呼吸感与不规则抖动，模拟真实手机拍摄的晃动效果，直接切入女Idol自信演唱的特写。演唱动作 (Performance): 角色手持粉色 iPhone 拍摄自己，嘴唇配合歌词精准同步，自信对视镜头。动作带有表演性。强化手持摇镜 (Intensified Handheld Movement): 取消任何机械式升降运镜。镜头始终维持高频率、大幅度的手持摇晃与位移，镜头在水平与垂直轴向上进行不稳定的“扫掠”，配合四周无数个反射像的快速位移与拉伸，制造出一种极其强烈的、令人产生视觉眩晕感的沉浸式现场直播氛围。推拉互动 (Rhythmic Zoom): 镜头跟随演唱节奏，进行不规则的、手持式的快速推拉 (Snap-Zoom) 与晃动，增加直播时的实时互动感与不稳定性。(动作与细节)主角另一只手（佩戴银色长甲）在演唱高潮时做出极具张力的手势，与镜面中的反射像保持同步频率，捕捉裙摆在剧烈位移下的流动细节。(视觉特效)电影级4K，冷色调光影在镜面间反复折射，营造未来感与华丽感。强调镜面环境下的深度感，确保繁复的裙摆细节在剧烈的手持运动中依然清晰可见，画面充满动态的混乱美感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_8_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "f80d68c28dc44518a3edcff9616417f4"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/2eb4cb4ea8754fc9af8bd78a2edd91a7?versionUuid=4f0d62e149cf40fbaa07fa1daff05c43"
+    },
+    {
+      "uuid": "22288c145cde4e7daf27ac0501850c46",
+      "versionId": 23030898,
+      "versionUuid": "006dbc3031064e5dbcd9febafc18c02f",
+      "name": "试妆特写",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_5.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_5.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "【总控参数】 商业美妆广告级别，8k分辨率，极致写实，电影级运镜，纯净、无缝的柔和淡粉色棚拍背景。 【镜头一：下巴前拔盖 + 侧身快速推镜】 画面：近景特写（Medium Close-Up）。该亚洲模特身体呈微侧身姿态（Three-quarter angle to the camera），双手横向持握这款银色多棱立体金属口红，横置于自己下巴的正下方。随后，双手利落地向两侧水平发力将盖子拔开，左手稳固握住带有长条管身的口红主体（无盖），右手利落握住脱离的金属口红盖子，两手分开，逻辑明确。 运镜：伴随开盖动作，镜头极具节奏感地向内快速线性推进（Fast snap push-in），凌厉地对准双手持握的产品，瞬间拉近视觉距离，制造强烈的开场冲击力。 【镜头二：唇部大特写】 画面：极度大特写（Macro Shot）。画面切至该模特的饱满双唇。模特手持这款银色多棱口红，仅在下唇中央部位轻轻横向涂抹擦拭（Applying lipstick）一下，动作利落克制。仅呈现下唇局部与膏体接触后的那一抹深红宝石色痕迹，严禁任何全唇瞬间上色的视觉变化。膏体质感与唇部色泽保持高度统一，展现出绒雾哑光质感（Matte texture），保留双唇其余部位的原始自然质感。 运镜：宏观微距固定机位，微距景深控制，唇部边缘保持极其锐利的清晰度。 【镜头三：定格全景 + 展示性微动作】 画面：中特写（Medium Close-Up）。镜头瞬间拉远，展现模特完成妆容后的全脸。 模特动态：模特此时双唇（上唇与下唇）均已呈现均匀、饱满的深红宝石色哑光妆效，且与膏体颜色完全统一。模特微微扬起下巴，配合一个自信、高级的冷艳眼神交锋，微动作展示妆容。 运镜：温柔的缓慢推镜头（Gentle slow push-in），配合极其缓慢、细腻的左至右微幅平移（Slow paraxial movement），完全避免任何抖动，定格最终风格。",
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/22288c145cde4e7daf27ac0501850c46?versionUuid=006dbc3031064e5dbcd9febafc18c02f"
+    },
+    {
+      "uuid": "d8df24a6ab254bc1b7ced20c49309824",
+      "versionId": 23053555,
+      "versionUuid": "788d2ce5a68e4742900b4b0f68e83739",
+      "name": "3D解构",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/28.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/28.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "第一阶段（运镜与抽象构建）： 画面初始于彻底的虚空，此时画面内除了纯深黑色背景外，没有任何物体。随即，在镜头缓慢、平滑的环绕运动中，数以千计极细的、带有高级微弱发光质感（subtle emissive glow）的样条线（spline threads）开始无中生有地浮现。这些线条精确地汇聚于整个鞋履的轮廓区域内，包括鞋底在内的完整鞋型结构，呈程序化、优雅的动态舞蹈。线条通过有机的编织过程，精密地勾勒出整双鞋的初始框架。镜头保持全貌视野，强调线条的精密性与整体构建感，严禁大范围乱飞的杂乱线条。第二阶段（结构生长与细节）： 镜头维持电影感的视轴推入（paraxial push-in）运动，转向局部特写。鞋身结构持续生长——极细纤维不断致密编织，液态金属质感的支撑框架如同液体般精准覆盖在针织袜套之上。强调织物材质的纹理细节与金属框架生长过程中的光影流动。第三阶段（全貌展示）： 镜头拉远平滑过渡，展示运动鞋的全貌。鞋履悬浮在纯深黑色背景中，展现出完整的流线型设计。采用高对比度摄影棚灯光，锐利的轮廓光（rim lighting）勾勒出复杂的几何结构，突出金属支撑件丝绸般的高级反光与针织鞋面哑光质感的极致对比。技术参数： 照片级真实感，8k 分辨率，超高保真度，3D 渲染，平滑的帧插值，无任何抖动特效（no shaky effects），电影级叙事节奏。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/28_1.png",
+            "https://libtv-res.liblib.art/tool/cinematic/28_2.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/d8df24a6ab254bc1b7ced20c49309824?versionUuid=788d2ce5a68e4742900b4b0f68e83739"
+    },
+    {
+      "uuid": "35e7d6963fc44257a4c8ba5e25716c77",
+      "versionId": 23043920,
+      "versionUuid": "7d2f44994812429f84e3a65c9f76927a",
+      "name": "City Drive",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/21.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/21.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "核心描述：模拟 GoPro 以极低角度（极贴地）挂载深灰色未来超级跑车车身后部的固定视角。镜头直接聚焦于高速旋转的复杂后轮毂（黑色辐条设计，无黄色徽标）和其激起的巨大水花。场景与细节：挂载点与相对位置： 镜头固定在车身侧板或侧裙上，面向后轮和路面。后轮毂在画面中是固定的相对主体，但由于高速旋转而产生强烈的径向模糊。车身侧面（湿漉漉的深灰色金属漆）占据画面一角，显示出其上的霓虹灯反射。红色 LED 尾灯条（如参考图）在画面边缘清晰可见。运动动态：模拟 GoPro 的视角，画面本身没有平滑的位移（不是跟拍车子移动），而是相对于车身的固定位置。强烈的抖动和震动源于车身的实际运动。高速掠过的霓虹灯赛博朋克城市街景，在画面背景中呈现出极度的平移和拉伸模糊，形成霓虹灯流光。环境抖动： 画面必须有明显的、快速的、高频的抖动和震动，模拟车身在暴雨夜湿滑路面高速行驶时的物理反应。水动力与光影： 巨大的水花直接向镜头方向四溅，水珠在霓虹灯下闪烁，有时会瞬间遮挡镜头。场景是黑暗、紧张的赛博朋克暴雨夜，霓虹灯（青色、粉色、红色）在湿滑路面形成镜面反射。画质： 电影级高动态范围（HDR）， wet-look 质感，高分辨率，颗粒感，极佳的霓虹灯细节和反射处理。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/21_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/35e7d6963fc44257a4c8ba5e25716c77?versionUuid=7d2f44994812429f84e3a65c9f76927a"
+    },
+    {
+      "uuid": "d68061f72a644589970397900bd54cb9",
+      "versionId": 23030906,
+      "versionUuid": "8a479592efa840df9c98878465865461",
+      "name": "星云漩涡",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_13.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_13.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133409-xmp9c"
+          ],
+          "systemPrompt": "[核心风格与画质]史诗感 K-pop 视觉艺术。极致的暗黑极简主义（Dark Minimalism），高对比度、白轮廓光。背景完全没入黑暗，通过光影雕刻出人物轮廓。[打光与氛围]强光对比： 强烈的背光与侧逆光，人物边缘白光轮廓犀利，与背景彻底分离。高光溢出： 飞掠碎片和金属铠甲具有超高反射，产生剧烈的 Bloom 眩光，营造躁动不安的华丽感。[人物造型与特征]主体： 一位清冷的东亚女性偶像。造型细节： 长发在龙卷风压下呈现的飞舞状态，发丝被光刺透。穿着黑色镂空紧身裙，左臂铬合金铠甲与胸前液态金属结构折射高频光碎。武器： 双手紧握欧洲长剑，剑身垂直向上，在狂风中岿然不动，折射冷冽寒光。[动态细节与环境特效]（核心强化）狂风龙卷风 (Vortex Dynamics)： 场景中心形成强大的气流气旋，烟雾和碎片不再是杂乱无章，而是围绕人物进行高速螺旋运动，呈现出明显的龙卷风风眼视觉。极速物质散射： 碎片（碎纸、金属亮片）受强力气流驱动，以极高速度穿梭。前景遮挡与深度： 画面前景有大量反光碎片极度靠近镜头飞掠，形成巨大的视觉遮挡。运动模糊 (Motion Blur)： 所有的碎片（尤其是靠近镜头的碎片）带有显著的高速运动模糊拉丝，形成如彗星尾迹般的白光条纹，强化速度冲击力。[镜头语言]（景深与节奏强化）构图： 稳定的中央构图，人物处于风暴中心（Eye of the Storm）。运镜： 镜头缓慢向后拉远（Dolly Back），随着拉远，前景飞掠的模糊碎片不断撞击镜头视野，产生强烈的视觉侵略性。极端景深 (Shallow Depth of Field)： 前景碎片极度模糊，中景人物锐利清晰，远景碎片再次没入黑暗模糊，形成鲜明的三层空间纵深。时间奇观： 人物动作优雅迟缓，而身边的龙卷风碎片却以撕裂空气的速度狂暴旋转，极致的快慢对比。[配乐]K-pop 类型强节奏感配乐，叠加低频的风暴轰鸣声与金属切割声。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_13_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "f4749dc6ea0a4c0abdd451cbda8f9db1"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/d68061f72a644589970397900bd54cb9?versionUuid=8a479592efa840df9c98878465865461"
+    },
+    {
+      "uuid": "6f684240ac5f4e2c931f3351f7b4410d",
+      "versionId": 23077957,
+      "versionUuid": "b90e1dd2847b4adca35a312022981b53",
+      "name": "小蜜蜂运镜",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/49.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/49.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "FPV连续飞行，一镜到底，快速混乱的动作跟随一只小蜜蜂飞入一座宏伟的复古房子，夜晚的场景。电影复古舞厅美学。一只小蜜蜂在主大厅中迅速飞舞。优雅的情侣在舞厅中跳舞，快乐的孩子们在众人中奔跑。宾客们在华丽装饰的桌子上享受美食。一群人在一个温暖的角落里激烈地打牌。快速转场穿过一张大桌子下，揭示出一个酷酷的小男孩，他有着金色的头发，戴着深色太阳镜，穿着海军蓝T恤和灰色运动裤，自信地双臂交叉躲藏。快速环绕他的秘密藏身处，派对的混乱能量和舞动的脚步围绕着他。动态镜头，快速摇镜，运动模糊，温暖的电影灯光，丰富的复古胶卷质感，高能量。",
+          "referenceImages": [],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/6f684240ac5f4e2c931f3351f7b4410d?versionUuid=b90e1dd2847b4adca35a312022981b53"
+    },
+    {
+      "uuid": "b93156a679df45b788e21a708f52ec6b",
+      "versionId": 23053557,
+      "versionUuid": "313ae1ad9fc946009921b6c5cd33cbc5",
+      "name": "双人对打",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/30.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/30.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "镜头 1：废墟中的生死肉搏 (The Ruin Melee)极高动态打斗。 360度手持环绕运镜，镜头如飞掠般穿过藤蔓残垣。蓝色重型少女开启背部推进器，化作蓝色残影发动暴雨般的连续重拳，每一拳都伴随气爆声与四溅的火星；粉色少女身形如电，在生锈车骸间做极限Z字型闪避，脚尖点过车顶时金属凹陷塌落。百褶裙与发丝在拳风中狂乱舞动。周围水泥柱受拳风波击不断崩裂，枯叶与碎石被卷入气流形成旋涡，充满窒息的压迫感。镜头 2：能量撞击的寂静爆发 (Silent Impact)定格爆发特写。 蓝色机械拳头彻底贯穿防御，重击在粉色头盔侧面瞬间。时间停止（Bullet Time），清晰捕捉金属面罩受力瞬间扭曲凹陷、漆面炸裂飞溅的微观过程。蛛网状的蓝色高压电弧从撞击点呈放射状撕裂空气，震散周围薄雾。飞溅的金属碎片悬浮空中，冷蓝电流与暖色晖光在碎片切面上交相辉映，展现极致的物理破坏力。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/b93156a679df45b788e21a708f52ec6b?versionUuid=313ae1ad9fc946009921b6c5cd33cbc5"
+    },
+    {
+      "uuid": "524585349f184d0eaf0dd549d005e61d",
+      "versionId": 23043919,
+      "versionUuid": "05fc5f12b4ef40479da69e396ee5a4bd",
+      "name": "Showroom",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/20.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/20.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "[主体描述]： 一位气质清冷的年轻女性，身穿 60 年代复古未来主义风格时装。[服装材质]： 上衣为哑光棉质白底黑波点，纹理清晰；下身为丝缎质感的淡蓝色泡泡裙，呈现出极具张力的膨胀廓形，密集的垂直褶皱随光影c深浅变化。[饰品细节]： 佩戴带有微弱光泽的弹性尼龙手套，搭配半透明薄纱材质的及膝袜，白色皮革腰带具有明显的厚度感。[空间布局]： 室内为极简主义几何空间，大面积的纯白色立柱与墙面。[地面细节]： 地面铺设着莫兰迪淡蓝色高密度地毯，呈现出柔软、吸光的视觉质感。[纵深设计]： 画面后方设计有几何门洞，透出无限延伸的纯净地平线，冷色调的高调照明（High-key lighting），营造出无尘、超现实的纯净感。[镜头角度]：平视，镜头跟随人物运动。[运镜轨迹]： 镜头执行一个极度平稳的垂直下摇（Tilt Down）。[景别]：景别始终保持「中近景」不变。[动态节奏]： 起始于模特的上半身中近景，随着镜头匀速下行，逐步揭示下半身中近景：巨大的泡泡裙摆、腿部及脚部。[模特动作指令]：核心体态：模特双腿始终保持模特站姿。转动轨迹：肩膀以中轴线平滑小幅度旋转，依次呈现左肩对准镜头 ——右肩对准镜头。身体不要晃动。手部控制：双手不进行大幅度摆动或位移，随躯干自然转动。保持指尖彻底放松，呈自然垂落或轻抵身体状态，避免多余动作干扰服装线条。定格动作：旋转流程结束后，模特双臂顺势发力，完成单手叉腰定格，眼神锁定镜头。动态风格：动作衔接行云流水，通过躯干转动自然展示服装侧面与背部的剪裁，指尖的松弛感尽显高级时装感。[模特神态]：眼神锁定镜头。[物理反馈]： 裙摆在下移过程中展现出重力感和轻微的呼吸律动，模拟真实布料在静态站立时的自然垂坠与支撑感。[画质控制]： 8K 原始画质，时尚杂志大片级别。[光影策略]： 柔和的全局漫反射光线，消除生硬投影，画面明亮且对比度适中。[色彩科学]： 严格的低饱和度冷色系对比（淡蓝色、纯白色、极简黑），胶片级色彩分级。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/524585349f184d0eaf0dd549d005e61d?versionUuid=05fc5f12b4ef40479da69e396ee5a4bd"
+    },
+    {
+      "uuid": "9a4e4b8c501548868f7d8b8549c73620",
+      "versionId": 23053561,
+      "versionUuid": "e0c79dedc7f14d7aa73ce9210ee1df4a",
+      "name": "饰品特写",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/34.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/34.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            ""
+          ],
+          "systemPrompt": "[场景描述]高端电影感珠宝商业广告，极致特写镜头。模特妆容精致高级，佩戴着金属“流星锤”风格耳饰。光影采用高对比度电影氛围，柔和的轮廓光突显耳饰的锋利剪影。[动作序列逻辑]起始状态（中近景）： 画面呈现中近景特写，模特侧脸入镜，眼神直接锁定镜头，与镜头产生深邃且自信的互动感，目光跟随镜头移动，耳饰细节清晰可见。交互动作（转脸动作）： 模特进行优雅、平缓且受控的转头动作，头部从一侧脸部平滑转向另一侧，在转动过程中，模特始终保持与镜头的微妙眼神接触，直到侧脸完全展示，眼神交流依旧保持张力。动作严格遵循平滑的匀速运动逻辑，严禁任何画面抖动或抽帧。镜头运动： 镜头同步进行恒定速度的平滑推近（Dolly In）。动作线性流畅，没有任何突兀的变焦或跳变，镜头精准地向耳饰中心靠拢。最终状态（极致大特写）： 最终画面锁定在耳饰的极致微距特写（Macro Shot）。画面构图紧凑，聚焦于耳饰的尖刺细节与金属镜面反光。此时模特眼神虽淡出视野，但依然能感受到其营造的电影级叙事氛围，画面中心始终保持对耳饰材质极致表现的控制。[技术约束与一致性]结构一致性： 严格锁定图中“流星锤”耳饰的原始几何结构，整个序列中严禁出现任何变形、结构改变或形状错乱。技术规格： 8K高清画质，真实金属渲染效果，电影级明暗对比光效（Chiaroscuro），柔和虚化，微距摄影镜头感（等效100mm焦段）。负面约束： 严禁任何画面晃动、震动感、帧率不稳定或耳饰尖刺部分的模糊失真。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/34_2.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "f89c6b827fe44f34a06d96cd92f6f229"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/9a4e4b8c501548868f7d8b8549c73620?versionUuid=e0c79dedc7f14d7aa73ce9210ee1df4a"
+    },
+    {
+      "uuid": "07faf57627d64b84824451e12113a562",
+      "versionId": 23030899,
+      "versionUuid": "7895c64e5b6246ee8201d9d2b6bcfbf8",
+      "name": "瞳孔推镜",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_6.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_6.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133300-wll5h"
+          ],
+          "systemPrompt": "镜头运动（Camera Movement）：连续极致前推变焦（Zoom In），机位完美对齐左眼瞳孔中心，画面毫无抖动。视觉过程（Visual Progression）：起画： 基于参考图，齐刘海黑色短发、带有粉色睫毛的时尚少女，双眼呈独特的浅灰绿色，伴随着一次自然的眨眼。推进： 镜头快速微距刺入。粉色睫毛和面部迅速向四周退去，画面被浅灰绿色虹膜的细腻纤维微观纹理填满。结尾： 镜头迅速彻底坠入正中心的黑色瞳孔。瞳孔如黑洞般迅速放大吞噬全屏，最终定格为纯黑屏（Pure pitch-black screen）。视觉风格（Aesthetics）：电影级微距摄影，超写实虹膜纹理，无缝转场，大片柔和光影。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_6_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "d4ea475fe22e4f6586ea5db1499023d2"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/07faf57627d64b84824451e12113a562?versionUuid=7895c64e5b6246ee8201d9d2b6bcfbf8"
+    },
+    {
+      "uuid": "50138b4de38148398884c09a5220fe47",
+      "versionId": 23043917,
+      "versionUuid": "ddea02f6a9df495fb67e88000bec32b1",
+      "name": "机甲变身",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/18.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/18_2.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133433-8j547"
+          ],
+          "systemPrompt": "[核心风格与画质]顶级 K-pop 女团 MV 视觉风格，超现实电影感。 全片采用低饱和度、微偏青绿的冷影调，呈现浓郁的 35mm 胶片质感与细腻颗粒。极致追求人物皮肤的无暇感与丝滑的肤质纹理。镜头运动极尽丝滑，充满舞台设计的韵律美。[分镜头详细描述]镜头一：觉醒与神颜特写（中景转特写）镜头描述： 镜头像 MV 慢动作一样平滑推进，对准走廊中心的粉发欧美少女。她穿着黑色剪裁机能背心与透明肩甲。美式高校教室走廊环境，两旁是整齐的金属储物柜，磨石子地板映射出冷调灯光。空气中浮动着细腻的丁达尔效应（光束）。少女随着音乐节拍感抬头，双眼迸发粉色荧光，眼神冷酷且具偶像张力。镜头二：环绕式变身（360度环绕运镜）镜头描述：执行 360 度环绕运镜（Orbit Shot）。 少女张开双臂缓缓升至半空，镜头以她为圆心快速旋转。在这个过程中，白色纳米金属如流沙般从她的黑色机能靴向上蔓延。环绕镜头捕捉到机甲组件在空中咬合的每一个细节： 从黑色喇叭裤到腰部的机能剪裁，再到透明肩甲瞬间实体化为白色涂装金属。银白色电弧脉冲在冷青色的背景下极具视觉冲击力。镜头三：最终形态与舞台定格（中远景）镜头描述： 少女完全转化为白色流线型机甲战士，全封闭头盔充满科幻美感。她从半空轻盈落地，足尖触碰磨石子地板的一瞬产生巨大能量震波。镜头切换至正向低角度平移，定格在她充满力量感的战斗姿势。光影在银白色哑光金属表面流转，氛围在青春校园与硬核科幻间完美平衡，具有极强的视觉美感。[提示词优化]（生成时使用）：色彩关键词： Low saturation, Cineon film look, Teal and Orange (subtle), Neon pink energy.画质关键词： 8K resolution, K-pop idol aesthetic, Flawless skin, Volumetric lighting, Tyndall effect.运镜关键词： 360-degree orbital shot, Smooth camera movement, Dynamic slow-motion.",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/18_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "dbd1c46d753e41ccbc5e17c211c6f9df"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/50138b4de38148398884c09a5220fe47?versionUuid=ddea02f6a9df495fb67e88000bec32b1"
+    },
+    {
+      "uuid": "02008fc6414d404390818f03d5d0f494",
+      "versionId": 23064305,
+      "versionUuid": "8f4427fe34d642d8a70958fabc968622",
+      "name": "全景相机",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/42.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/42.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134127-n8fvp"
+          ],
+          "systemPrompt": "场景演变逻辑： 视频从人物近景（Close-up shot）开始，此时主角占据画面中心，背景是鱼眼视角下的局部建筑。随着视频播放，镜头进行平滑、迅速的拉远（Crash Dolly out），最终演变为极端的远景（Extreme Long Shot），即完整的 360 度超级鱼眼“小行星”视角。\n主角动作： 主角一边帅气地说唱，一边做出充满力量感的控制手势。\n建筑群落自主异动： > * 绝对静止部分： 主角、脚下的混凝土停机坪、以及边缘铁丝网围栏保持绝对静止（No jitter, no displacement）。即使镜头在拉远，这些核心主体在画面中的相对位置必须始终如一，作为视觉锚点。\n群落变化： 从视频的第一帧开始，无论镜头远近，圆球内部密集的城市群落就在自主进行机械式升降、错位和独立滑移，与主角的动作无关，保持高频且流畅的运动。\n镜头运动： 镜头轨迹为Crash Dolly out，从聚焦主角面部和上半身的近景，拉开到能够容纳整个“小行星”城市的宏大远景，视角全程锁定在鱼眼透视下。 保持极致的鱼眼小行星视角，摄像机配合节奏进行平滑、非常微妙的 paraxial（同轴）轻微前后推拉。绝无随机无目的的抖动。\n视觉风格： 顶级先锋 Y2K 音乐录影带美学，高饱和度，机械超现实主义。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/42_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "eb5ceeab139c4ae0bc41b1cdbddf2442"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/02008fc6414d404390818f03d5d0f494?versionUuid=8f4427fe34d642d8a70958fabc968622"
+    },
+    {
+      "uuid": "746637068f044a358d22c95530fafb29",
+      "versionId": 23043925,
+      "versionUuid": "0a155f4a92c04f4c803b673e3868fe1a",
+      "name": "升格爆炸",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/26.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/26.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134007-8p5k9"
+          ],
+          "systemPrompt": "[Scene Composition] 电影级写实镜头。一名神情冷峻、身穿黑色背心皮夹克的硬汉正对镜头走来。他走路姿态坚定有力，步伐较大。[The Event & Physics] 就在他身后一步之遥，一辆旧汽车在引爆瞬间炸裂。火焰和碎片在爆炸瞬间迅速向四周扩散。[Slow Motion Control] 爆炸发生后的瞬间，画面由常速瞬间切换到极慢动作（Ultra-slow motion, 1000fps视觉感）。 橙色火球如同粘稠的液体般极其缓慢地向四周扩张，火焰的每一丝褶皱和火星的轨迹都清晰可辨。[Character Detail] 尽管身后气浪翻滚，男子依然保持极慢速度向镜头逼近，他的发丝和皮夹克边缘在热浪冲击下产生肉眼可见的细微震颤。[Atmosphere] 强烈的空气热浪扭曲（Heat Haze），极高动态范围（HDR），背景的赤红火光与人物面部的冷色阴影形成史诗级明暗对比，8K分辨率，暴力美学巅峰。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/26_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "69832964ef9940328bec9448433aa34e"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/746637068f044a358d22c95530fafb29?versionUuid=0a155f4a92c04f4c803b673e3868fe1a"
+    },
+    {
+      "uuid": "94d2aa99aa204ac5841721223263ac65",
+      "versionId": 23043918,
+      "versionUuid": "2dc35d0bd7b649d881a7373525b73f52",
+      "name": "穿云而入",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/19.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/19.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "镜头类型（镜头运动控制）：一个连续的、纯粹的垂直向下平移镜头（Track Down / 画面向下平移）。不带任何前推（Dolly In）或变焦。画面保持完全平视，利用同向垂直位移实现无缝转场（Match Move）。场景一：云端天空 (00:00 - 00:01)画面内容：开场是一幅明亮、高清晰度的蓝天白云画面，画面上半部分是蓝天，下半部分是浓密的厚厚的云层。柔和的白云悬浮在空中，营造出一种广阔、空灵的高空虚拟视觉感。镜头运动：镜头开始做纯粹的、平稳的垂直向下移动。随着镜头快速的坠落，底部厚厚的云层向上退去，自然无边缘感顺畅地切入下一个镜头。没有任何向云层深处推进的纵深感。无缝转场 / 画面衔接：在云层完全移出画面的瞬间，利用相同的垂直向下运动惯性，利用厚厚的云层无缝衔接到场景二。场景二：空旷的好莱坞棕榈树街景与红色野马跑车夸张乱入 (00:01 - 结尾)空旷的环境设定：整条标志性的好莱坞棕榈树街道上完全空旷，没有任何其他汽车停放或行驶 (Completely empty street with no other cars)。跑车畸变出场与运动（底盘与阴影先行、跳跃感）：画面整体跟随上一个镜头的垂直惯性快速向街景下落。就在这股下落惯性减速、画面刚好快要静止下来的瞬间，那辆亮红色的1965款福特野马跑车（无Logo、无车牌）突然从镜头正后方（极其贴近镜头的超近距离）以极高的速度向前开入。强烈畸变与底盘先行：由于车辆紧贴着镜头边缘极速切入，画面产生强烈的超广角透视畸变（Massive camera distortion / Wide-angle perspective warping）。跑车带着一种“仿佛要跳过镜头、从观众头顶砸入画面”的腾空跳跃感 (A sense of jumping over the camera into the frame)。视觉先后顺序：在强烈的畸变下，最先霸占整个屏幕并强行闯入视线的，是跑车一瞬间笼罩地面的巨大变型阴影，以及它那因为跳跃姿态而暴露无遗的巨幅汽车底盘 (The massive vehicle undercarriage and exaggerated shadow enter the frame first)。随后车身才在畸变中迅速拉伸、恢复正常比例并落回地面。物理气流与环境互动（因跑车极速引发）：植物动态描述：随着红跑车伴随巨大的引擎轰鸣和跳跃感落地并极速向前冲去，两侧高大的美式棕榈树和树叶被车辆带起的强劲尾流冲击，产生由近及远、猛烈的瞬间晃动。地面环境（强烈的速度感）：马路两侧的绿色草丛和灌木丛由于跑车掠过的强风产生剧烈的抖动。轮胎与地面剧烈摩擦、卷起路面上隐约的尘土与几片落叶，在车尾形成狂乱飞扬的模糊动态残影，彰显极强的推背感与速度感。镜头运动：在经历向下顿挫并在跑车畸变驶入的刹那，画面彻底静止下来。镜头保持平视，目送这辆红色的复古跑车在完全空旷的街道中央留下一道极速的红色残影，向街道深处绝尘而去。整体风格：电影级画质，写实风格，高对比度阳光，画面色彩温暖。极具冲击力的镜头透视畸变，红跑车的巨大底盘与阴影带来强烈的视觉压迫，整体运动是垂直向下的平面平移结合地面载具夸张的动态力学。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/19_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/94d2aa99aa204ac5841721223263ac65?versionUuid=2dc35d0bd7b649d881a7373525b73f52"
+    },
+    {
+      "uuid": "b50dcab992b04293968496967b2fbee8",
+      "versionId": 23053564,
+      "versionUuid": "ccf0f3e0341b45a9b93e81acd9162dc2",
+      "name": "雪地赛车",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/37.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/37.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "电影级高速动作戏，逻辑化镜头调度：一辆极具未来感的超级跑车在极寒雪原上展开一场惊心动魄的疾驰。【侧向平视与环绕展示 - 夸张气动雪幕】镜头以车身侧面平视高度切入，与跑车保持等速并排疾驰。核心视觉焦点在于“极致夸张的雪幕喷涌”：跑车底盘高速气流产生剧烈的物理真空吸力，将地表厚重的积雪层大面积撕裂并向后呈扇形彻底掀起，形成如同浓稠流体般向后方、侧方疯狂喷涌的“超巨型雪浪”。雪浪高度需漫过车身顶部，遮蔽视野的视线边缘。在这一强力跟拍中，镜头以充满张力的弧线轨迹向车头前方平滑环绕（Orbital Move），穿梭于密集的雪暴颗粒之中，自然过渡至车辆顶部与车头正脸的特写，充分展示车顶流线型反射与车头几何结构。无数被卷起的冰晶与粉雪在镜头环绕时高频率撞击画面前景，营造出置身于极寒真空中心、雪幕遮天蔽日的超强临场感。【技术参数】运镜逻辑遵循“平视跟拍-弧形环绕”的叙事节奏。画面强调超写实的物理交互，车漆在冷色调环境下呈现深邃、坚硬的金属质感。雪花与冰屑的流体动力学效果需达到“爆发式”量级，空气中弥漫着高密度的雪尘，形成强烈的光影遮蔽效果，呈现出跑车在雪原上强行撕开一道空间的冷峻美感。使用 ARRI Alexa 35 摄影机，电影级冷调调色，大光圈营造出极致浅景深，精准锁定被雪幕半包围的跑车。音效设计同步节奏，强调引擎的野性嘶吼与底盘卷起积雪时如雷鸣般厚重、密集的轰鸣声。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/b50dcab992b04293968496967b2fbee8?versionUuid=ccf0f3e0341b45a9b93e81acd9162dc2"
+    },
+    {
+      "uuid": "56c93dc93f374c24a82a00ac0ebeaed8",
+      "versionId": 23043923,
+      "versionUuid": "cd9c5e102dd246bdbb9e77677357ceee",
+      "name": "控雨术",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/24.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/24.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "不允许切镜头，以下为一镜到底：[核心风格与画质 / Style & Quality]升格慢动作（120fps Slow-mo）超现实 K-pop 时尚 MV。深紫与魅惑暗红基调，极高对比度。重点表现阳光与射灯在波动水面、悬浮水珠上的色散折射（Chromatic Aberration），捕捉极速快门下的凝固高光。[场景环境 / Environment]液态幻境水域。主角置身于深紫色镜面天台水域。空气中密布大量悬浮水滴（Levitating Droplets）。在升格镜头下，水珠呈现缓慢飘浮、破碎与融合的物理动态，折射出耀眼的冷色霓虹光泽。[人物特征与造型 / Character & Outfit]主角为浅金长发女性 Idol，面容精致。身穿黑银撞色异形短裙，亮银色金属抹胸（Chrome Breastplate）。金属材质在旋转镜头下产生流动的镜面反射。[核心动作控制：升格律动 / Motion Control]肢体状态： 极度缓慢的律动。人物上身随节奏轻微扭动，手臂缓慢划过空气，产生“子弹时间”般的粘滞感。步伐表现： 自信猫步向镜头走来，脚尖点水瞬间，涟漪以极慢的速度向四周扩散，飞溅的水花在空中定格。[镜头语言：旋转推进与拉远 / Camera Language]动态轨迹： 采用手持摄影风格（Handheld Style）。镜头首先以顺时针大幅度旋转（Barrel Roll）并急速向人物脸部推进（Push-in），随后在节奏重音点迅速拉远（Pull-back/Zoom out），形成强烈的空间穿梭感。景深变幻： 随着镜头旋转推进，前景水珠由极度虚化（Bokeh）转为清晰，再随着拉远重新没入光斑中。[光影与氛围 / Lighting]强对比侧逆光。光线如流体般扫过人物轮廓，银色服装随着镜头旋转产生连续的闪烁高光（Shimmering Glints），营造极具攻击性的视觉美感。[技术参数 / Technicals]运动强度： 开启 High Motion Weight。关键词优化： Slow motion, Spinning zoom-in, Dramatic pull-back, Fluid physics, Cinematic handheld shakes.",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/56c93dc93f374c24a82a00ac0ebeaed8?versionUuid=cd9c5e102dd246bdbb9e77677357ceee"
+    },
+    {
+      "uuid": "a93d6b97b951484ca4a37bbd7573318b",
+      "versionId": 23053558,
+      "versionUuid": "746a0555cc6f46e3a3e29962ae7d064c",
+      "name": "升格KO",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/31.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/31.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "角色设定细节补充 (Refined Character Details)攻击者（粉色机甲）： 强调过热反馈。粉白装甲的关节缝隙因高负荷运作溢出微弱蒸汽，青蓝色感应器因愤怒变为高频闪烁。装甲上的刮痕沾染了新鲜的尘土。受击者（蓝色机甲）： 强调受损质感。蓝色头盔边缘因之前的激战已有裂纹，橙色模块忽明忽暗，虎牙咬紧唇角，表现出极强的顽强与痛苦。修改后的分镜提示词 (Action & Framing)镜头 1：骨骼轰鸣的重击 (Impact Extreme Close-up)【画面描述】： 画面并非简单的触碰，而是极具破坏性的重压。棕马尾少女的机械拳头（指节处带着高频震动特效）深深陷入蓝色少女的脸侧面部，蓝色头盔的半透明面罩在压力下产生蛛网状裂纹。受击瞬间，除了水滴（汗水或冷却液），还应伴随粉碎的金属喷漆微粒和破碎的传感器零件。【动态细节】： 蓝色少女的脸部肌肉剧烈震颤形变，瞳孔因冲击力放大。拳头周围产生圆环状的半透明激波气浪，将背景的废墟尘土瞬间排空。【提示词关键词】： Kinetic impact, brutal punch, facial distortion, mechanical debris, shockwave rings, shattering visor, extreme high-speed photography.镜头 2：残暴的惯性余波 (The Recoil Follow-through)【画面描述】： 采用广角低角度（Low Angle Wide）。蓝色少女（模特2）并非平地倒下，而是被这一拳的怪力直接击离地面。她呈现出一种痛苦的弓形，向后横飞，身体撞碎路面隆起的水泥块。【环境破坏】： 地面随着她的滑行被犁出一道深沟，大量碎石、钢筋断裂处和陈年灰尘向两侧疯狂飞溅。背景中倾斜的摩天大楼与她的飞行轨迹形成不稳定的构图。【动态细节】： 棕马尾少女在远景处保持出拳后的压低重心的马步姿势，地面在她脚下因反作用力崩裂。她的高马尾像鞭子一样抽向前方，烟雾从她机甲的排气孔中喷射。【提示词关键词】： Extreme knockback, body catapulted, cratering ground, dragging furrow, debris explosion, sense of weight and momentum, cinematic destruction.环境影调优化 (Atmosphere & Lighting)影调色系： 保持灰蓝冷调，但加入“视觉噪音”。空气中除了雾气，还要有飘浮的灰烬、微小的电路火花以及飞舞的废纸屑，增加画面的混乱感。光影质量： 散射光中加入丁达尔效应，光线穿过废墟缝隙形成冷冽的光柱，正好照亮受击瞬间飞溅的碎片。金属材质应有“高频磨损感”，阴影部分深沉且冷峻，突出末世的肃杀。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/a93d6b97b951484ca4a37bbd7573318b?versionUuid=746a0555cc6f46e3a3e29962ae7d064c"
+    },
+    {
+      "uuid": "db362e705e9e498ab7ff910b9591309a",
+      "versionId": 23043921,
+      "versionUuid": "bfaa3bb7c92845ef9e05b00684e87f45",
+      "name": "流光展翼",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/22.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/22.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133446-649lm"
+          ],
+          "systemPrompt": "## [核心风格与画质]史诗感 K-pop 视觉艺术。 极致的暗黑极简主义（Dark Minimalism），调色参考《ZEN》：高对比度、冷白轮廓光。通过物理级光线追踪，确保纯白哑光面料与镜面液态金属在全黑虚空中产生极具张力的视觉反差。## [场景与镜头]环境： 纯黑无边界虚空（Infinite Black Void），无地面参考，强调绝对的悬浮感。镜头： 广角大全景（EWS）起始。镜头执行极其平稳的轨道推焦（Dolly-in），视点锁定在画面的几何中心。## [人物造型（参考原图细节）]主体： 白金短发（Platinum Blonde）欧美 Idol，五官清冷。服饰： 纯白色高领剪裁连体衣，外搭结构感白色肩甲，下身配以带镂空设计的白色解构主义工装裤。妆造： 极简裸妆，强调皮肤冷白质感，与纯黑背景形成锐利切割。## [核心动作序列：无重力觉醒]初始状态 (0-2s)： 广角大全景镜头，人物背对镜头，呈无重力悬浮态。巨大的翅膀如同“金属蚕茧”般紧密收拢，层叠包裹住主体，随无形气流产生极轻微的物理律动。核心转折 (2-3s)：优雅转身： 人物在空中执行曲线变速的 180° 水平转身（先慢再快），由于角度的变化金属翅膀上不时折射出细腻的反射光芒。核心转折 (3-8s)：羽翼舒展： 在转身至面朝镜头的一瞬，身体舒展打开，同时镜面银液态骨架带动纯白羽翼向两侧暴力而优雅地张开。翅膀结构参考图中的多叉利刃形状，带有极强的侵略性，同时人物自信朝前走。物理细节： 受翅膀张开的瞬间反作用力影响，人物重心产生轻微的向上漂移（Vertical drift），同时许多羽毛从翅膀中绽放开来，在前景和背景中漫天飘散开来，呈现真实的悬浮物理反馈。## [材质与光影：镜面利刃]翅膀材质： 支撑结构为镜面铬合金（Mirror Chrome），具备流体形态，羽片由高密度银白生物羽毛组成。光影表现： 侧逆位冷白轮廓光（Rim Light）。光束精准捕捉金属骨架的冷冽闪光与工装裤织物的肌理，光影随人物转身在金属表面流转，产生“液态流光”视觉。## [技术参数]关键要素： 轴心稳定、高对比度、物理级反射、解构主义服装。[配乐]Kpop类型，强节奏感配乐。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/22_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "79ca447720a249efaca9b20ca19b717e"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/db362e705e9e498ab7ff910b9591309a?versionUuid=bfaa3bb7c92845ef9e05b00684e87f45"
+    },
+    {
+      "uuid": "68564bcf8d454f369852b6ab35c52e45",
+      "versionId": 23064307,
+      "versionUuid": "ac07bad333124f4dad96a1e390d110bc",
+      "name": "山路追击",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/44.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/44.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "山路拉力赛车追逐电影级动作序列（纯外部视角）：\n镜头全程采用一镜到底的动态无人机跟拍视角，摄像机位于两辆赛车后上方斜侧方，始终保持高速跟随与同步。运镜全程规避任何机位切换或生硬抖动，模拟专业电影级无人机（FPV）平滑而连贯的俯冲、悬停与变向能力。\n\n画面开场： 镜头从两车后上方切入，锁定前方发卡弯道。领头赛车为一辆黑白双色、极具时代感的复古跑车，外观极致简洁，严禁出现任何品牌Logo、标识或车牌号；后方紧随另一辆颜色迥异的赛车。两车以极高的同步性侧向漂移入弯，轮胎与粗糙路面剧烈摩擦，仅产生适度且清淡的薄烟，在高速气流作用下迅速消散，不遮挡赛道细节。画面前景处密集漂浮着大量被气旋卷起的樱花花瓣，近距离掠过镜头边缘，形成鲜明的空间层次与动态遮挡，花瓣在清澈的空气中飞舞，与赛车后方残留的细碎薄烟形成极具美感的虚实对比。\n\n动作衔接： 镜头随着赛车漂移的轨迹进行轻柔的侧向位移，捕捉车身极限侧倾。赛车出弯后，镜头紧跟其后平滑推进，无缝衔接至下一个连续的S型急弯。伴随赛车疾驰，公路两旁樱花树不断有花瓣被震落，形成密集的粉色花瓣雨，这些花瓣在阳光下呈现出半透明的质感。镜头在飞行路径上精确捕捉花瓣在气流中被高速甩开的物理动态，将整条盘山公路装点成一条飘落花瓣的流光大道。在通过下一个弯道时，镜头保持无人机特有的“回旋跟拍”逻辑，通过航线调整，将后方延伸的白色防护栏、山壁，以及其间飘落的无数樱花花瓣压缩在超长焦的景深中，极大强化速度的压迫感与唯美的视觉张力。\n\n物理细节与光影： 空气清透，高速扰动下形成轻微的热浪。无数花瓣在气旋中翻滚飘动，部分花瓣贴合在镜头边缘或随着车辆运动轨迹呈现高速模糊的优美线条。阳光明媚，光线穿透稀薄的烟雾与漫天飞舞的花瓣，形成曼妙的丁达尔效应，精确刻画车辆金属表面的冷峻高光与深邃暗部。公路侧方的防护栏、岩石纹理，以及高速流动的樱花瓣在动静对比中保持极致清晰，突显超写实纹理。\n\n技术规格：\nARRI Alexa 35 摄影机，搭配 35mm 至 85mm 变焦镜头（严禁畸变），浅景深，自然且具有电影感的冷峻调色。运镜逻辑：严禁手持抖动，全程保持物理模拟下的平滑惯性，推移与侧向位移具备“呼吸感”与节奏。音效设计：高转速引擎的持续轰鸣、轮胎与地面摩擦的干脆声响、高速气流撕裂声，以及花瓣拂过空气产生的细微沙沙声与金属共鸣交织，将极限竞技的氛围推向高潮。",
+          "referenceImages": [],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/68564bcf8d454f369852b6ab35c52e45?versionUuid=ac07bad333124f4dad96a1e390d110bc"
+    },
+    {
+      "uuid": "375ad5806da142d1b27693b3199de6b8",
+      "versionId": 23043922,
+      "versionUuid": "ce256845896f40839fc318acbc0e1503",
+      "name": "反派登场",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/23.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/23.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "电影级心理惊悚序列，一镜到底：\n一名背对镜头男子伫立在荒凉、布满碎石的战地平原上，身形显得极其渺小。摄像机以低机位、超广角镜头从地面向上仰拍，极度压缩主体与后方威胁的比例。\n在男子身前，浓重的灰黑色烟雾如飓风般翻滚，一台巨大的、金属质感饱满的机甲从浓烟中缓缓现身。其庞大的机械腿部和遮天蔽日的轮廓带给人强烈的压迫感。机甲传感器发出的冰冷强光穿透烟雾，锁定了男子。\n摄像机保持缓慢而稳定的后撤追踪，他身体本能地向后倾斜，脚步踉跄，双手不由自主地抬起试图建立防御。渺小的身躯与背景中巨大机甲带来的沉重呼吸感形成鲜明对比。随着烟雾中金属摩擦的咯吱声和碎石的滚落，紧张的静默逐渐被压抑的低频机械嗡嗡声所取代。\n画面要求：ARRI Alexa 35 质感，变形镜头带来的边缘畸变，极浅的景深让前景的人物极度清晰，背景的机甲带有沉重的工业颗粒感，体积感大气。\n音效设计： 极度的环境静谧中夹杂着沉重的呼吸声，随后转为低沉的、震颤地面的机械轰鸣，伴随着烟雾撕裂声和细微的碎石滚落，没有背景音乐，仅保留原始、压抑的电影级音效。",
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/375ad5806da142d1b27693b3199de6b8?versionUuid=ce256845896f40839fc318acbc0e1503"
+    },
+    {
+      "uuid": "b87680033800458f800ee98fb295129e",
+      "versionId": 23064303,
+      "versionUuid": "98062490e9d34127912f6a0be0c89a5e",
+      "name": "环球缩放",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/40.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/40.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "【起始画面：角色与环境】 电影级超写实长镜头。画面起始于巴黎标志性的鹅卵石街道中央，清晨柔和的阳光穿过法式建筑的缝隙。一位身材高挑、气质自信的白人女性模特站在路中央，身穿黄色短款夹克、头戴豹纹帽子、下半身穿着迷彩工装大肥裤。 【前半段：完整360度盘旋上升与自然互动】 【核心运镜：动态盘旋上升的360度环绕长镜头，轨迹必须转满完整的一整圈】 视频开始，镜头以人物为中心，呈螺旋盘旋上升的轨迹启动，必须转满完整的360度。在此过程中，模特展现出极其丝滑、流畅的肢体律动。她的眼神和动作与镜头进行自然的偶发性互动：随着镜头的绕行，她会自然地转头，眼神偶尔自信地扫过或短暂锁定镜头，随后又自然地移开或望向远方，呈现出抓拍般的街头高级感，而非死死盯着镜头。 【转折点：顶视定格与视觉触发】 当镜头流畅地在盘旋中转满360度、并刚好攀升至人物正头顶上方形成正顶视（Top-down view）俯瞰视角的瞬间，模特微微仰头。 【后半段：极速拉远升空】 镜头爆发启动。平滑而迅猛地垂直向高空极速拉远，带有明显的大广角动态镜头畸变效果，产生极强的速度感。街道、咖啡馆、法式建筑迅速缩小，巴黎标志性的屋顶网络在下方展开。 【中期过渡：大气层飞跃】 镜头持续急剧加速攀升，穿过具有真实物理体积感的稀薄云层与大气散射层。下方的宏大城市景观迅速收缩，显现出整个法国乃至欧洲大陆的清晰地理轮廓。 【结尾画面：宇宙终景】 镜头最终彻底冲出大气层，陷入深邃漆黑的宇宙。画面展现出悬浮在太空中的完整蓝色地球全景，完美复刻NASA卫星拍摄的超高分辨率质感：拥有逼真、富有层次的大气发光层、细腻交织的气旋云层、清晰可见的陆地纹理与深邃海洋。阳光从地球边缘切入，形成震撼的宇宙级镜头光晕。全片为丝滑无缝的宏大空间过渡，电影级超写实视效。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/b87680033800458f800ee98fb295129e?versionUuid=98062490e9d34127912f6a0be0c89a5e"
+    },
+    {
+      "uuid": "d11ba6246d124a90ae82b847ce05d123",
+      "versionId": 23030905,
+      "versionUuid": "102fe69de07e468a9b1246d4677469ae",
+      "name": "瞳孔异变",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_12.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_12.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133357-9m94r"
+          ],
+          "systemPrompt": "[核心主体]1位冷峻的年轻女性偶像，烟粉色（Dusty Pink）凌乱短发遮住单眼，灰蓝色冰冷瞳孔。面部骨相深邃，神情带有强烈的疏离感。[打光与色调]电影级冷调暗光，侧向光源勾勒面部轮廓，极简黑暗背景，强调金属件的冷光反射与皮肤质感。[服装妆造]妆容： 赛博烟熏妆，深色眼线，内眼角点缀冰冷高光。装置： 黑色高领装结合银色液态铬合金颈部机械组件，展现冷硬的工业美学。[镜头语言][正面近景]起始，执行极其缓慢平稳的[推焦 Zoom-in]至[双眼特写]。[分段动作]0-1秒： 人物低头垂眸，脸部笼罩在冷色阴影中，呈现死寂般的沉静。1-4秒（核心爆发）： * 人物保持头部绝对静止，双眼冷酷地抬起直视镜头。瞳孔剧变： 瞳孔中心猝然闪烁出强烈的超现实光芒，随后光芒保持常亮，瞳孔颜色由冷灰蓝平滑形变为极光青或炽白色。能量感： 伴随变色，瞳孔内浮现微小的数字矩阵或环形发光轨道，能量感向四周扩散，呈现一种即将进入“战斗模式”或“超载变身”的赛博仿生视觉冲击。[环境与画质]4K超清，电影级调色，极高细节的皮肤纹理与液态金属反射，追求极致的仿生人（Android）真实感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_12_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "fe351be601b44248a2e9cde6c8ab67bd"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/d11ba6246d124a90ae82b847ce05d123?versionUuid=102fe69de07e468a9b1246d4677469ae"
+    },
+    {
+      "uuid": "7aeaa109cfe54ad19aa485d0c91a5143",
+      "versionId": 23030900,
+      "versionUuid": "b96a3a656e204d58aa7c2213d44ad4a5",
+      "name": "面部环拍",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_7.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_7.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133311-thr7x"
+          ],
+          "systemPrompt": "(角色互动与运镜逻辑)眼神互动： 尽管墨镜是核心焦点，但模特表现出与镜头的互动感，透过镜片凝视镜头，实现冷峻而深邃的眼神交互。肢体动作：模特随着镜头的转动也有轻微、自然的扭头或转动身体的动作。镜头与构图： 采用中近景到特写构图（medium close-up to close-up）；缓慢、平滑的环绕式运镜（slow orbital camera movement）围绕墨镜旋转，摄像机轨迹保持平滑的弧形位移，全程采用缓慢、匀速的平移方式（严禁抖动），以墨镜的框体与镜面细节为绝对视觉中心。背景采用极浅的景深效果，将背景转化为虚化的光影氛围，突出墨镜的质感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_7_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "7fb18218d62b467385e25e9bc6f28867"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/7aeaa109cfe54ad19aa485d0c91a5143?versionUuid=b96a3a656e204d58aa7c2213d44ad4a5"
+    },
+    {
+      "uuid": "6c2f3aafbccf4155aa15e9eaf379550e",
+      "versionId": 23053559,
+      "versionUuid": "62a1ef0b691f4729885a9444257ec9c8",
+      "name": "深海巨兽",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/32.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/32.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "核心描述：电影级一镜到底高能动作场面。一名男子在海面上方以超音速飞行，保持低空巡航并带有极强的惯性冲力。镜头采用低角度变形宽银幕视角，进行紧凑、激进且流畅的跟踪拍摄，展现极速响应的加速度感。动态细节与交互：追逐戏份： 巨型深海怪兽破水而出，紧随其后追杀。怪物挥动巨大的利爪高速横扫，每一次落空都击碎海面，引发冲天水墙、剧烈浪花和扩张的冲击波涟漪。主体反应： 男子反应极快，通过微小的方向偏移、下潜和加速冲刺精准躲避攻击。其身体周围环绕着强烈的空气畸变和运动拖影，形成可见的压力隧道。视觉与镜头表现：相机运动： 模拟 ARRI Alexa 35 拍摄，变形镜头，浅景深。高频次的快速追踪，带有微小的甩镜头（Whip Pan）加速和动态微调，保持主体锐利清晰，环境则呈现强烈的运动模糊。画面质感： 超写实流体动力学，超细节水体物理特效，体积大气效果。好莱坞大片色彩分级，宏大的叙事感。音效意向（辅助生成）： 激烈的风切变声、海浪破碎声、低频海洋轰鸣，最后转为宁静的大气音效。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/6c2f3aafbccf4155aa15e9eaf379550e?versionUuid=62a1ef0b691f4729885a9444257ec9c8"
+    },
+    {
+      "uuid": "9c8655bd6eb24146b9465fe5dbcb5235",
+      "versionId": 23064308,
+      "versionUuid": "5912b91d41e74baaa1d025bb8720893a",
+      "name": "星尘降临",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/45.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/45.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134141-rhcjw"
+          ],
+          "systemPrompt": "一镜到底（One-Take）极速降临提示词：无雪花/无粒子修正版\n0-1s：幽蓝废墟穿越 (Ultra-Fast Gliding Traverse)\n相机采用极低机位，以超高速沿地面向前俯冲。场景是一个幽蓝色调的赛博都市废墟街道，两侧是冷蓝色和白色霓虹灯闪烁的高大建筑残骸。视角形成强烈的第一人称（POV）穿梭感。镜头正对前方天空中一个垂直砸向地面的白色不规则形光球，形成一种即将“迎面撞击”的压迫感。夜空被光球瞬时照亮，无数幽蓝色线性流光（Light Streaks）和空气扰动波纹伴随相机运动极速向后掠过，将速度感提升至极致，画面纯净无杂质。\n\n1-2s：能量爆发与侧面显现 (Luminous Burst & Profile Reveal)\n就在相机即将撞击落点的瞬间，光球触地炸裂，爆发出一团璀璨夺目的冷白色强光。冲击波伴随着纯净的强光束向四周瞬间散射，光影在场景中心形成半透明的能量涟漪。在耀眼的光线和层层推开的波光中心，一个身着华丽白裙的人物轮廓从光芒中剥离出来，她此时全身侧面朝向镜头，光影透过她半透明的袖摆产生强烈的丁达尔效应。\n\n2-5s：红发女神降临 (Red-haired Goddess Reveal)\n强光残影迅速散去，空气变得通透清澈。相机定格为中景。一位拥有鲜艳红发、齐刘海的绝美少女站立在画面中心。她紧接着完成一个利落、精准的动作：从侧面扭头带动身体，转身定住（不要旋转），变为完全正面朝镜头，眼神清冷坚定直视镜头。她身着镶嵌极细银色珠宝的精致白色蕾丝束身长裙。随后，她缓慢且优雅地在正面姿态下张开双臂。由于身后建筑空隙的强光背照，她宽大的半透明丝绸袖摆和红发在冷蓝色背景中受冲击波余威影响剧烈飘动，展现完美的布料物理动态，周围空气干净，无任何雪花干扰。整体画面是冷蓝色废墟、耀眼白光与火焰红发的强烈对比，充满神圣感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/45_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "31dc50aeb8ad441b8880698a9587be8d"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/9c8655bd6eb24146b9465fe5dbcb5235?versionUuid=5912b91d41e74baaa1d025bb8720893a"
+    },
+    {
+      "uuid": "c17de154c3904daabf0c0c5eca48cddc",
+      "versionId": 23030895,
+      "versionUuid": "e3a33b8bd0ad460fb65689197eb8bc6c",
+      "name": "逆转引力",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_2.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_2.jpg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "【0-1秒：绝对倒置与横向失重漂移】 初始画面与状态： 初始第一帧画面必须是完全、严格上下颠倒的地平线（180度垂直反转），地平线绝对水平、严禁任何歪斜。蓝天与白云位于画面正下方，密集的东京现代建筑群与橙白相间的东京铁塔倒悬在画面正上方。宇航员，始终保持在离镜头极远的地方，其画面占比在整个视频中严格维持在3%左右（远景点状）。宇航员从画面最上方边缘以极慢的速度滑入画面，随后稳稳地停留在画面正中央区域，初始姿态为无重力失重坐姿。 动态与运镜： 当宇航员停留在画面中央后，其与镜头的距离一直维持不变（画面占比死死固定在3%）。随着画面顺时针旋转，宇航员顺应失重状态，在画面中央由坐姿自然、缓慢地舒展为全身横躺、横向悬浮的姿态。其头部笔直朝向画面右侧，身体顺应着水平视线舒展。摄像机仅执行纯粹的电影感顺时针旋转（Roll），并伴随着轻柔的左右横向水平位移（Horizontal Paraxial Drift），使完全倒悬的、极其遥远的建筑群在旋转中产生极其细腻的、极小的横向视差。 【2-3秒：地平线归位定格与横躺向上漂离】 运镜与定格： 摄像机完成最后的顺时针旋转，全程保持与遥远建筑物的焦距和景深恒定。倒悬的地平线平稳摆动并最终完全恢复平正、进入完全静止锁定的定格状态——建筑群恢复到画面正常的中下方，天空回归到画面正上方。此时画面是一幅常规、稳定、绝对水平且平视的正常东京城市地平线全景。 主体动态： 在镜头旋转归位期间，宇航员始终保持在画面正中央，并完全维持着横躺、头朝画面右侧的最终定格状态。直到镜头完全不再旋转、画面彻底静止定格之后，处于画面中央、保持3%大小且依然维持头朝右横躺姿态的宇航员，才开始产生向上的移动。她以极慢、极具太空失重感的节奏，保持着横躺的优美身姿，缓慢地向画面上侧漂移，滑过最终的天空，直至完全消失在画面最顶端的边缘。 【艺术风格（全局控制）】 日系清冷电影感调色，低饱和度，低contrast，高级胶片质感。清晨柔和的光线照亮极远处的建筑侧面以及宇航员的轮廓。画面运镜克制、细腻，大楼线条和宇航员身形无融化、无AI畸变，极致画质。通过“镜头运动彻底结束、角色再保持横躺姿态向天际漂离”的视觉逻辑，创造出极强的空间疏离感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_2_image_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/c17de154c3904daabf0c0c5eca48cddc?versionUuid=e3a33b8bd0ad460fb65689197eb8bc6c"
+    },
+    {
+      "uuid": "8e3977794e3e44618051ca036a92c7cb",
+      "versionId": 23043924,
+      "versionUuid": "19ecf925b24f494c98161d9193f685d3",
+      "name": "AI 编舞",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/25.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/25.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260609151017-qrwlb"
+          ],
+          "systemPrompt": "[主体描述]韩国顶级 Solo 女歌手（站在画面中央），拥有极具辨识度的面孔与强大的舞台气场，目光锐利且充满自信。周围伴随多名专业舞者，全员统一穿着现代感十足的机能风白色套装（短款背心与工装裤），形成视觉上的协调感与对比感，突显主角的核心地位。[动作编排]展现极具爆发力的 Solo 舞台表演。要求：Solo 女歌手动作利落且充满掌控力，伴舞在后方进行精确的配合舞动。动作要求：身体控制（Body Isolations）、极具张力的定格造型、流畅的头发律动与身体曲线美。舞者与中心的 Solo 歌手形成视觉呼应，每一个动作都与快节奏电子舞曲的鼓点（Beat）实现毫秒级的精准卡点。[运镜与动作逻辑]电影级 8K 画质。环绕运镜 (Orbital Shot)：摄像机围绕 Solo 女歌手进行 360 度平滑扫视，捕捉其自信眼神与群体舞蹈律动。呼吸式推拉 (Beat-Sync Zoom)：严格卡点音乐重拍。鼓点骤响时，镜头快速推入 (Push-In) 至歌手面部特写，展示凌厉神态；乐段舒缓时，快速拉出 (Pull-Out) 至广角，展示整体阵型。队形俯拍 (Top-Down Transition)：关键帧触发。当伴舞队形发生几何变换的瞬间，镜头垂直切入 俯拍视角 (Bird's-eye View)，呈现完美的对称几何构图，随后丝滑切换回水平视角。[光影与氛围]极简主义高调（High-key）摄影风格。背景呈现纯净、通透的冷调灰白色雾气感。光线柔和且明亮，利用侧逆光勾勒人物的身体轮廓，使人物与背景产生高级的剥离感，画面干净、高级且充满现代感。[视觉风格]顶级音乐录影带（MV）质感，高帧率动态效果，色调冷静、高调、锐利，富有空间感的极简主义美学，强烈的电影级运动模糊。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/25_1_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "79d2900671c7429db7fb5cfd8c68644e"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/8e3977794e3e44618051ca036a92c7cb?versionUuid=19ecf925b24f494c98161d9193f685d3"
+    },
+    {
+      "uuid": "75caa0256e6745e78168e3ec88cc39a5",
+      "versionId": 23030904,
+      "versionUuid": "bed7e7dd22724ab0bb1f48be37933342",
+      "name": "Runway",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_11.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_11.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133346-2flmg"
+          ],
+          "systemPrompt": "[视频主题]一段极简超现实风格的时尚走秀短视频。[镜头与运镜描述]采用低角度后退追踪拍摄（Tracking Shot / Pull Back）手法。镜头位于模特正前方，随着模特稳步向前行走，目光正视前方，镜头保持低角度同步向后平滑移动，始终将模特锁定在画面中央，营造出一种不断延伸的纵深感。[人物与造型细节]画面中心是一位留着齐刘海、气质清冷的亚洲女模特在进行专业走秀。她穿着一件黑底白波点无袖高领上衣，下身是一条极其蓬松、具有充气感的浅蓝色“云朵泡泡裙”。模特戴着浅蓝色及肘长款手套，搭配同色系的及膝袜和平底鞋，整体造型呈现出复古未来主义风格。[环境与氛围]场景为一个梦幻的淡蓝色极简室内空间，地面铺着柔软的蓝色地毯。左侧是轻盈的白色落地纱帘，在光影下显得半透明且通透；右侧是极简的灰色墙体，背景正中央有一个开放式门洞，透出纯净的天空和地平线。[画质与光影]4K超高清画质，柔和的高调自然光从侧面洒入，光影衔接细腻。整体色调以天蓝色、奶油白和少许黑色点缀为主，氛围干净、清透且富有超现实感。[配乐]走秀节奏感配乐。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_11_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "408116965b784ac6bf845096d202660c"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/75caa0256e6745e78168e3ec88cc39a5?versionUuid=bed7e7dd22724ab0bb1f48be37933342"
+    },
+    {
+      "uuid": "96f32a2126a446c5a8c50086363c44ba",
+      "versionId": 23064302,
+      "versionUuid": "1a52b69a3cb448c48d2b269c13c0bc6b",
+      "name": "地球缩放",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/39.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/39.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "【起始画面：角色与环境】\n电影级超写实长镜头。画面起始于巴黎标志性的鹅卵石街道中央，阳光穿过法式建筑的缝隙，呈现出充满生机的清晨微光。一位年轻自信的时尚白人女性低头站在路中央，身穿一件亮黄色短款夹克、头戴豹纹棒球帽、下半身穿着迷彩工装大肥裤，背景中咖啡馆的雨棚随微风轻晃，远处有模糊的落叶和行人，环境带有自然的物理动态。\n【前两秒：模特摆姿势与互动】\n【核心指令：前0到2秒内镜头保持不动】模特在原地低头调整了一下帽子或外衣，身体带有自然的呼吸起伏与衣服褶皱的微小律动，展现出自信的时尚街拍pose。\n【动作衔接点：第2秒】在满2秒的瞬间，模特突然抬头，眼神精准、凌厉地直接看向镜头，与观众产生强烈的眼神聚焦和互动感。\n【镜头运动：极速升空】\n就在模特眼神锁定的刹那，镜头以此为信号爆发启动。镜头开始平滑后撤，然后迅猛地开始从顶视视角垂直升空，带有明显的大广角动态镜头畸变效果，产生极强的速度感与空间跨度。街道、咖啡馆、法式建筑迅速缩小，巴黎标志性的屋顶网络在下方交织展开。\n【中期过渡：大气层飞跃】\n镜头持续急剧加速攀升，穿过具有真实物理体积感的稀薄云层与大气散射层。下方的宏大城市景观迅速收缩，显现出整个法国乃至欧洲大陆的清晰地理轮廓。\n【结尾画面：宇宙终景】\n镜头最终彻底冲出大气层，陷入深邃漆黑的宇宙。画面展现出悬浮在太空中的完整蓝色地球全景，完美复刻NASA卫星拍摄的超高分辨率质感：拥有逼真、富有层次的蓝色大气发光层、细腻交织的气旋云层、清晰可见的陆地纹理与深邃海洋。阳光从地球边缘切入，形成震撼的宇宙级镜头光晕。全片为丝滑无缝的宏大空间过渡，电影级超写实视效。",
+          "referenceImages": [],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/96f32a2126a446c5a8c50086363c44ba?versionUuid=1a52b69a3cb448c48d2b269c13c0bc6b"
+    },
+    {
+      "uuid": "f7cef379de324a48bb72592b0a3b3209",
+      "versionId": 23008756,
+      "versionUuid": "95e90fa635b44056b7676d674bd0687e",
+      "name": "直升机揭幕",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/1.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/1.jpeg",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "黑色丝绸质感的遮罩完全覆盖汽车，通过缆绳连接天空中的白色直升机。直升机的机身长度与下方轿车的视觉比例保持真实物理常识。直升机从画面中间位置向右飞离并拉起黑色丝绸质感遮罩，遮罩随风掀开，逐渐露出完整汽车，直升机完全飞出画面外。电影感广告镜头，真实物理布料效果，丝滑运镜。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/1_1.png"
+          ],
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/f7cef379de324a48bb72592b0a3b3209?versionUuid=95e90fa635b44056b7676d674bd0687e"
+    },
+    {
+      "uuid": "bac0680bd0c147ada99d6f07ece6d142",
+      "versionId": 23030908,
+      "versionUuid": "7e8cb11eeff44c22afcfb45c56969a1e",
+      "name": "燃烧开场",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_15.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_15.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "视频开头为全黑屏。 随后画面正中心突然燃起细小火星，火焰呈{不规则环形}向四周剧烈燃烧，仿佛烧穿了一层黑色的纸张。转场细节： 燃烧边缘带有真实的焦黑卷曲质感，火光闪烁并伴随部分飞溅的细小火星。随着中心的燃烧洞口迅速扩大，丝滑转场露出底层的画面。主体描述： 画面底层显现出一名极具时尚感的东亚年轻女性，留着亮眼的橙色齐短发（波波头），身穿一件黑色重工纹理上衣和纱质长裙，蜷缩坐在银色轿车的车顶。她脚穿一双鲜红色的高跟凉鞋，神情冷峻，直视镜头。环境与光影： 场景设定在黄昏时分的荒野地带，背景是深蓝色的天空。火焰散发的暖橙色光芒真实地映射在模特的皮肤、红色凉鞋以及汽车的金属车顶上，形成强烈的冷暖色调对比。画质要求： 电影感叙事视角，极高画质，细节丰富，物理仿真火焰效果，高饱和度色彩对比，4K超清。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/bac0680bd0c147ada99d6f07ece6d142?versionUuid=7e8cb11eeff44c22afcfb45c56969a1e"
+    },
+    {
+      "uuid": "90ae4deab3424d72a54bb67a8febb9d0",
+      "versionId": 23030902,
+      "versionUuid": "55e0b25b8631496eb27555b2f64a677e",
+      "name": "巨星名场面",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_9.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_9.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133334-8q8l9"
+          ],
+          "systemPrompt": "[Core Subject / 主体细节]一个长相高级、留着大背头金色中长发的酷飒年轻男星，端坐在豪华轿车的后座。他身穿一件挺括的白色大衣、内搭白色衬衫、系着一条纯黑色的领带，内衬隐约露出红色。[Facial Expression & Movement / 表情与动作]他的表情始终保持高冷、松弛且酷酷的（cool and aloof）。虽然外部环境混乱，但他依旧保持着一种冷漠的宿命感，目光漫不经心地看着斜下方或车窗方向。[Environment & Setting / 环境与场景]豪华轿车内部，配有质感高级的暗红色皮革座椅。车窗外是一片漆黑的夜色，但此时已被混乱的人群包围。[Lighting & Visual Effects / 疯狂灯光与特效 - 重点]整个场景的核心是疯狂的闪光灯（frenzied paparazzi strobe lights）。数百个闪光灯如同密集的机关枪一般疯狂闪烁，刺眼、高频的白光彻底填满车窗玻璃。这种强烈的 stroboscopic 光影疯狂地穿透车窗，在车内交织成一张混乱的强光网。光影在主角的脸部、金发和白色大衣上形成剧烈、高亮且高频切换的反差光，营造出一种极致的混乱与压迫感，仿佛主角置身于暴风雨的中心。[Atmosphere & Camera Motion / 氛围与镜头]中景镜头（Medium shot）。车内静止的冷酷与车外失控的疯狂形成视觉冲击。极致的混乱、压迫感、名利场的喧嚣与主角内心的平静形成强烈对比。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_9_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "36f88bed3b03443eb80e6cd43ec50ccf"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/90ae4deab3424d72a54bb67a8febb9d0?versionUuid=55e0b25b8631496eb27555b2f64a677e"
+    },
+    {
+      "uuid": "34182fbcf55a494199a4de9ddda6e253",
+      "versionId": 23064306,
+      "versionUuid": "6bdd1c07d4134925893df9aeae0c2c48",
+      "name": "巨人俯瞰",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/43.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/43.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134139-npshj"
+          ],
+          "systemPrompt": "核心描述：\n镜头以 人物近景 开始，随后快速地 拉出（Zoom-out/Pull-back），转变为极低角度的仰视全景镜头。镜头中心始终锁定在坐在摩天大楼顶端边缘的年轻时尚男子（保持图中的服装、黄色毛皮靴和配饰细节）。随着镜头拉远，人物眼神始终保持与镜头的对视，流露出一种极度悠闲、自得且从容的自信感。\n\n动态细节与动作：\n主体动作 A（整理帽子 - 初始动作）： 视频起始于特写镜头，人物右手动作优雅且自然地抬起，轻轻调整头上的黄色卡车司机帽帽檐，随后放下。\n主体动作 B（晃脚 - 持续动作）： 在镜头拉出的全过程中，人物双腿从大楼边缘自然垂下，双脚（穿着显眼的黄色毛皮靴子）保持着节奏感，悠闲地前后摆动。镜头在拉出的过程中捕捉这种动态的连贯性。\n眼神互动： 人物的目光始终锐利、深邃且直视镜头，在整个镜头拉出的过程中始终与观众保持视觉交流，未曾偏离。\n\n环境与视点：\n运镜轨迹： 镜头从人物面部特写加速地拉向远方，展现出摩天大楼的整体结构，周围玻璃幕墙建筑产生强烈的仰视透视拉伸感。\n极端透视： 随着视野变宽，背景中广袤的城市天际线逐渐显露，人物身处云端般的“高高在上”之感愈发强烈。\n氛围： 阳光灿烂，天空湛蓝通透。画面光影真实，强调摩天大楼的材质感，整体呈现高质量的电影感视频效果。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/43_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "ce3007fd81a34fd1a7a9c53cc1cbe2d2"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/34182fbcf55a494199a4de9ddda6e253?versionUuid=6bdd1c07d4134925893df9aeae0c2c48"
+    },
+    {
+      "uuid": "5498fb617de74c6080e10c4c6063f17c",
+      "versionId": 23030903,
+      "versionUuid": "7d527345a6cd4e43bed48b9207b16738",
+      "name": "涡轮运镜",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/transition_10.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/shot_10.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607133345-r9ktj"
+          ],
+          "systemPrompt": "【核心主体】 一位潮流男说唱歌手，身穿白色棒球帽、橙色连帽衫和绿色几何图案羽绒背心。他正在充满能量地边往前走边表演说唱，双手不断做出极具表现力的嘻哈手势。【场景环境】 处于一个充满未来感的八角形科幻隧道走廊内部，两侧具有无限延伸的几何纵深感，墙面带有发光的霓虹灯线条。【光影色调】 高级电影感冷色调，深蓝色与青色的大气氛围光。隧道中心尽头有刺眼的强白色逆光，将人物勾勒出高对比度的剪影边缘。【相机运镜】 复合型动态镜头序列。起始画面为向左倾斜90度的荷兰式倾斜镜头（此时人物的头部水平朝向画面右侧）。随后，摄像机一边沿着中心轴线持续向后撤退（拉远镜头），一边流畅地进行顺时针翻滚旋转，直至画面随着时间推移完美恢复成正立视角。【画质风格】 顶级大师级MV质感，A24独立电影美学，超写实，高保真细节，丝滑流畅的动态。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/shot_10_image_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "df0c863d56b64919ab3e3eba240337a3"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/5498fb617de74c6080e10c4c6063f17c?versionUuid=7d527345a6cd4e43bed48b9207b16738"
+    },
+    {
+      "uuid": "08df93f7f40f4d54953a39ec6c307268",
+      "versionId": 23064304,
+      "versionUuid": "e32b890803af465893ac3aa634efb553",
+      "name": "俯冲地球",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/41.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/41.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [],
+          "systemPrompt": "一个充满动感与惊险的连续 FPV 穿越机长镜头，从一开始就以令人屏息的极快速度从高空鸟瞰视角出发，垂直向下猛烈坠落。镜头飞速掠过欧洲建筑，两侧伴随着强烈的运动模糊。接近地面时，镜头突然拉平，转为极低的贴地视角，并带有夸张的广角畸变（鱼眼效果）。随着镜头紧贴地面向前疾驰，巴黎的鹅卵石街道呈现出拉伸的透视感，周围的景物因极速而模糊成线条。最后，镜头丝滑、优雅地慢下来，平稳地停在一个稳定的中景画面中。镜头聚焦于一位身穿黄色短款外套、白色露脐上衣、宽松迷彩工装裤和豹纹发带的时尚年轻金发女性。在视频结尾时，她自然地微调身体重心，展露一丝微妙且自信的微笑，自然地摆出动作。电影级光影，逼真写实，8k分辨率，丝滑的速度渐变。",
+          "referenceImages": [],
+          "prefix": "",
+          "referenceSdUuid": [],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/08df93f7f40f4d54953a39ec6c307268?versionUuid=e32b890803af465893ac3aa634efb553"
+    },
+    {
+      "uuid": "4afdc57b30d644e2bf2feaa0a2b5484e",
+      "versionId": 23043926,
+      "versionUuid": "81010e36d2fc41f9b91874ccf1783f8a",
+      "name": "飞鸟解体",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/27.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/27.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "referenceImagesForSD": [
+            "asset-20260607134018-kn7kb"
+          ],
+          "systemPrompt": "[镜头感与氛围] > 画面采用手持摄影风格（Handheld shot），镜头带有自然的呼吸感微晃。起始为中景，对焦在一名蹲在昏暗更衣室储物柜前的非裔女性身上。光影呈高对比度的硬调工业风，环境充满尘埃微粒。 [核心动作与物理反馈] > 在女子开始幻化的瞬间，摄像师像是被惊吓到一样，镜头执行一个带有一丝迟滞和不规律震动的快速后退（Shaky Pull-back）。 [自然化的鸟群动态] > 女子并非整齐地消散，而是伴随着发丝的物理飘动，从局部开始瞬间崩解。白鸽群的爆出呈现非对称的散射状，白鸽的振翅动作杂乱且有力，带有强烈的物理写实感。 [视觉交互] > 鸽群并非单纯填满画面，而是成群结队地、带有随机路径地掠过镜头视角，产生真实的遮挡感和强烈的动态模糊。白鸽羽毛在硬光下反射出刺眼的白光，与背景深灰色的金属储物柜形成极高的视觉反差，动作流畅且具备高帧率的丝滑感。",
+          "referenceImages": [
+            "https://libtv-res.liblib.art/tool/cinematic/27_1.png"
+          ],
+          "prefix": "",
+          "referenceSdUuid": [
+            "0ed7f9fede184c3b89d8382ad66a7b2d"
+          ],
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/4afdc57b30d644e2bf2feaa0a2b5484e?versionUuid=81010e36d2fc41f9b91874ccf1783f8a"
+    },
+    {
+      "uuid": "e0d8ce3a93f742ebad8daa60a2ac7477",
+      "versionId": 23053563,
+      "versionUuid": "3c25cc2e20d34dfdaea350f152645d90",
+      "name": "飞跃地平线",
+      "coverUrl": "https://libtv-res.liblib.art/tool/cinematic/36.webp",
+      "previewUrl": "https://libtv-res.liblib.art/tool/cinematic/36.png",
+      "supportedBaseTypes": [
+        69,
+        66,
+        67
+      ],
+      "versionIntro": {
+        "promptConfig": {
+          "systemPrompt": "不允许切镜头，以下为一镜到底：\n电影级FPV无人机视角，一镜到底，全流程高帧率连续采样。\n镜头以超低空贴地姿态掠过长满苔藓的岩石地面，精准避开每一块细碎飞石。镜头保持向前推进的恒定惯性，随视野推移，远方地平线的草地轮廓逐渐被树冠遮蔽，随着无人机冲入林间，草地的颗粒感无缝演变为松树枝干的交错纹理，同时惊起一群隐匿在林间的鸟儿四散飞走（注：仅当树林上方天空负空间占比超过30%时触发鸟群）。\n运动不间断，机身穿出稀疏的林带边缘，前方视野骤然被漫天暴风雪填满；镜头保持原有的冲刺轨迹，画面中的绿意被雪花的白噪纹理侵蚀并取代，无人机维持丝滑的掠地姿态。镜头执行一次无视重力的急剧俯冲，掠过雪地边缘，从悬崖垂直下坠，利用雪雾消散的瞬间，将画面重心直接转入广阔明亮的海洋平面。\n一群海鸥横掠画面作为运动引导，引领无人机锁定海面跃起的海豚群。摄像机锁死海豚主体，以广角低角度平移保持相对静止，随海豚冲入浪尖的瞬间，利用水花四溅的遮挡（Masking）完成入水，镜头轨迹一气呵成。\n水下画面深度与海面视觉中心对齐，光线转为梦幻的蓝绿色深海调。一群海豚在清澈水域中穿行，体积光束（Volumetric Light）从破碎的波纹上方持续倾泻。\n\n技术约束：\n物理连续性： 强制开启全局轨迹锁定，禁止在场景交替点进行关键帧跳变。\n视觉流转： 使用“纹理演变（Texture Morphing）”替代“场景切换”，确保草地、树林、雪地、海洋之间的地表纹理在运动模糊中通过帧插值平滑渐变。\n相机语言： 采用ARRI Alexa 35模拟镜头，使用缓慢、平滑的电影级推移，伴随极低幅度的左右位移，严禁产生任何机械抖动或生硬的跳切。",
+          "prefix": "",
+          "suffix": ""
+        },
+        "templateInfo": [],
+        "effectPrompt": "",
+        "subType": "framing",
+        "type": "camera"
+      },
+      "sourceUrl": "https://www.liblib.art/modelinfo/e0d8ce3a93f742ebad8daa60a2ac7477?versionUuid=3c25cc2e20d34dfdaea350f152645d90"
+    }
+  ],
+  "unavailable": [
+    {
+      "uuid": "b5c79c1af2454a9f83419d36fc3d53b9",
+      "versionId": 23064310,
+      "name": "子弹时间",
+      "reason": "public model detail returned code 500"
+    }
+  ]
+}

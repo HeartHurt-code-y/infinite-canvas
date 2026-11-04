@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "instructionOrigin": "local-implementation-v1",
+  "version": 2,
+  "instructionOrigin": "local-implementation-v2",
   "groups": [
     {
       "id": "storyboard",
@@ -12,10 +12,14 @@
           "label": "调度故事板",
           "description": "生成带有运动轨迹等调度草图分镜",
           "placeholder": "描述一个 10-15 秒内能演完的小剧情片段。可补充角色、场景、道具、动作过程、走位、对白或参考图，系统会整理为 4-6 个中文调度分镜手绘版",
-          "icon": "storyboard",
+          "icon": "slash-storyboard",
           "newFeature": true,
           "inputRequirement": "prompt",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "将用户描述提炼为一个 10–15 秒内能完成的剧情片段，在一张图片中生成 4–6 个按时间顺序排列的中文调度分镜手绘草图。各格保持角色身份、服饰、道具、空间关系与美术风格一致；明确起始站位、动作过程、走位和镜头方向，用清晰箭头标示运动轨迹，并配简短中文镜号、景别、动作或对白说明。避免把时间顺序与机位变化混淆。内容过长时提炼关键动作，不凭空新增剧情。参考素材以用户的 @ 引用与文字说明确定对应关系。"
         },
         {
@@ -23,10 +27,14 @@
           "label": "故事板",
           "description": "生成完整剧情片段",
           "placeholder": "描述一个 10-15 秒内能演完的小剧情片段，系统会整理为 4-8 个连续分镜，内容过长时会自动提炼关键剧情。提供角色三视图、美术设定图及准确的需求描述，生成效果会更好。",
-          "icon": "storyboard",
+          "icon": "slash-storyboard",
           "newFeature": true,
           "inputRequirement": "prompt",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "把用户的小剧情整理为一个 10–15 秒内能演完的完整片段，在一张故事板图片中生成 4–8 个连续分镜，按从左到右、从上到下的顺序阅读。镜头应有明确的开始、发展与结果，景别、视线、运动轴线及人物动作自然衔接；角色身份、服饰、场景、美术与光照保持一致。按需配简短中文镜号和动作说明。长文本只提炼关键剧情，参考图用于保持人物和美术设定。"
         },
         {
@@ -34,10 +42,14 @@
           "label": "25宫格连贯分镜",
           "description": "生成连续分镜长图",
           "placeholder": "点击生成，直接基于当前图像进行25宫格剧情推演；支持文生/参考图生成。",
-          "icon": "grid3",
+          "icon": "slash-storyboard-25grid",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "在一张图片中排布清楚分隔的 5×5 网格，恰好 25 格，生成同一剧情的连贯分镜。依照用户描述和参考图片，从左到右、从上到下推进时间，每格有可辨识的动作或镜头变化；统一角色身份、服装、道具、空间布局、色调与画风，保证视线与动作连续。不把 25 格画成互不相关的海报，不重复同一静止画面，不额外增加网格。"
         },
         {
@@ -45,10 +57,14 @@
           "label": "剧情推演四宫格",
           "description": "生成四格剧情推演",
           "placeholder": "点击生成，直接基于当前图像进行4宫格剧情推演；支持文生/参考图生成。",
-          "icon": "grid2",
+          "icon": "slash-story-beat-4grid",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "根据用户描述或参考图片，在一张图片中生成 2×2、恰好四格的剧情推演，按左上、右上、左下、右下展开同一事件的起因、发展、转折和结果。四格统一人物、服饰、道具、场景与美术风格，动作因果清楚，景别变化服务叙事。用户已有剧情时以其要求为准；只有参考图时围绕图中可见行为做合理延展。"
         },
         {
@@ -56,10 +72,14 @@
           "label": "画面推演 - 3秒后",
           "description": "基于物理逻辑，生成3秒后的动作结果。",
           "placeholder": "",
-          "icon": "clock",
+          "icon": "slash-frame-prediction-plus3s",
           "newFeature": false,
           "inputRequirement": "image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "把参考图片作为当前时刻，根据人物动作趋势、物体速度、重力、接触关系和用户补充，推演约 3 秒后的单幅画面。保留人物身份、服装、环境结构、摄影风格和合理的镜头连续性；只改变在这段时间内有因果依据的动作与物体位置。不输出分镜拼图，不叠加原图，不凭空增加人物或无关事件。"
         },
         {
@@ -67,10 +87,14 @@
           "label": "画面推演 - 5秒前",
           "description": "基于物理逻辑，反推5秒前的动作起因。",
           "placeholder": "基于物理逻辑，反推5秒前的动作起因。",
-          "icon": "clock",
+          "icon": "slash-frame-prediction-minus5s",
           "newFeature": false,
           "inputRequirement": "image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "把参考图片作为当前时刻，根据人物姿态、物体运动与接触关系，反推约 5 秒前最合理的动作起因，输出一幅单独画面。保持人物身份、服装、环境结构、光线与摄影风格一致，前因能自然演变到参考图中的结果。遵循用户补充，不加入缺乏依据的新人物或事件，不输出前后对比拼图。"
         }
       ]
@@ -83,32 +107,146 @@
         {
           "scene": "portrait_texture_adjustment",
           "label": "人像质感调节",
-          "description": "调整人像肤质与细节，保留人物身份",
-          "placeholder": "上传人像参考图，可补充肤质、光影与细节要求。",
-          "icon": "portrait",
+          "description": "降低 AI 感，调整人物与场景的融合、光影和质感",
+          "placeholder": "描述想要的人像，或上传参考图后补充质感与光影要求。",
+          "icon": "portrait-adjust",
           "newFeature": true,
-          "inputRequirement": "image",
+          "inputRequirement": "prompt_or_image",
           "defaults": {},
-          "instruction": "对参考图片中的人像进行肤质和细节调整。保持人物身份、五官比例、年龄特征、表情、发型、衣着、姿态、构图与背景一致；保留自然皮肤结构和真实光影。只按用户要求与以下肤质选项改变质感，不改变人物身份，不生成对比图或额外人物。",
+          "instruction": "根据文字描述生成人像，或对参考图片中的人像进行自然质感调整。有参考图时保留人物身份、五官比例、年龄特征、服装与动作关系；按以下选项处理人物与场景的融合、光影、皮肤、纹理和锐度。优先满足用户明确要求，避免替换人物、增加额外人物、过度磨皮或生成前后对比图。",
           "options": [
             {
-              "key": "texture",
-              "label": "肤质",
-              "default": "natural",
+              "key": "subject_scene_fusion",
+              "label": "人景融合",
+              "default": "自然融合",
               "values": [
-                { "value": "natural", "label": "自然肤质", "instruction": "保留真实毛孔、细小肌理与自然肤色，避免过度磨皮。" },
-                { "value": "detailed", "label": "增强细节", "instruction": "增强清晰而自然的皮肤、发丝与眼部细节，避免锐化光晕和虚构纹理。" },
-                { "value": "soft", "label": "柔和质感", "instruction": "适度柔化皮肤瑕疵和粗糙感，同时保留可见肌理，避免蜡像或塑料皮肤。" }
+                {
+                  "value": "轻度对齐",
+                  "label": "轻度对齐",
+                  "instruction": "轻度对齐人物与背景的色温、曝光和接触阴影，保留原有画面关系。"
+                },
+                {
+                  "value": "自然融合",
+                  "label": "自然融合",
+                  "instruction": "自然协调人物与环境的色调、光照和接触阴影，让人物融入场景。"
+                },
+                {
+                  "value": "深度融合",
+                  "label": "深度融合",
+                  "instruction": "加强人物与背景的整体光色、景深和空间关系融合，消除明显的合成边缘，保留人物身份。"
+                }
               ]
             },
             {
-              "key": "lighting",
-              "label": "光影",
-              "default": "preserve",
+              "key": "lighting_fusion",
+              "label": "光影融合",
+              "default": "自然匹配",
               "values": [
-                { "value": "preserve", "label": "保留原光影", "instruction": "保留参考图的光线方向、明暗关系和整体色彩。" },
-                { "value": "soft", "label": "柔和光影", "instruction": "使用柔和、自然的漫射人像光，保持立体感与真实肤色。" },
-                { "value": "cinematic", "label": "电影光影", "instruction": "使用克制的电影人像布光和色调，保留高光层次与暗部细节。" }
+                {
+                  "value": "柔和补光",
+                  "label": "柔和补光",
+                  "instruction": "用柔和补光改善人像曝光，控制高光，保留面部立体感。",
+                  "legacy": {
+                    "key": "lighting",
+                    "value": "soft"
+                  }
+                },
+                {
+                  "value": "自然匹配",
+                  "label": "自然匹配",
+                  "instruction": "自然匹配人物与场景的光线方向、明暗关系和色温。",
+                  "legacy": {
+                    "key": "lighting",
+                    "value": "preserve"
+                  }
+                },
+                {
+                  "value": "氛围强化",
+                  "label": "氛围强化",
+                  "instruction": "强化符合场景的氛围光和明暗层次，避免肤色失真和过曝。",
+                  "legacy": {
+                    "key": "lighting",
+                    "value": "cinematic"
+                  }
+                }
+              ]
+            },
+            {
+              "key": "skin_texture",
+              "label": "皮肤",
+              "default": "自然肤质",
+              "values": [
+                {
+                  "value": "清透修饰",
+                  "label": "清透修饰",
+                  "instruction": "轻度修饰皮肤瑕疵，保持清透肤色与自然结构，避免塑料感。",
+                  "legacy": {
+                    "key": "texture",
+                    "value": "soft"
+                  }
+                },
+                {
+                  "value": "自然肤质",
+                  "label": "自然肤质",
+                  "instruction": "保留自然毛孔、细小肌理和真实肤色，避免过度磨皮。",
+                  "legacy": {
+                    "key": "texture",
+                    "value": "natural"
+                  }
+                },
+                {
+                  "value": "真实肌理",
+                  "label": "真实肌理",
+                  "instruction": "增强真实的皮肤细节与微小肌理，避免凭空增加瑕疵或改变年龄。",
+                  "legacy": {
+                    "key": "texture",
+                    "value": "detailed"
+                  }
+                }
+              ]
+            },
+            {
+              "key": "surface_texture",
+              "label": "纹理",
+              "default": "自然纹理",
+              "values": [
+                {
+                  "value": "柔和纹理",
+                  "label": "柔和纹理",
+                  "instruction": "柔化画面表面的生硬纹理，保留材质差异，避免涂抹感。"
+                },
+                {
+                  "value": "自然纹理",
+                  "label": "自然纹理",
+                  "instruction": "保留皮肤、头发、衣物与环境的自然材质纹理。"
+                },
+                {
+                  "value": "颗粒质感",
+                  "label": "颗粒质感",
+                  "instruction": "添加克制且均匀的细腻颗粒质感，避免明显噪点和色块。"
+                }
+              ]
+            },
+            {
+              "key": "sharpness",
+              "label": "锐度",
+              "default": "标准清晰",
+              "values": [
+                {
+                  "value": "柔焦",
+                  "label": "柔焦",
+                  "instruction": "使用轻微柔焦，让边缘柔和，仍保留眼睛与关键细节。"
+                },
+                {
+                  "value": "标准清晰",
+                  "label": "标准清晰",
+                  "instruction": "保持自然的标准清晰度，避免过度锐化或模糊。"
+                },
+                {
+                  "value": "高清锐化",
+                  "label": "高清锐化",
+                  "instruction": "增强细节清晰度和边缘表现，避免锐化光晕与虚构纹理。"
+                }
               ]
             }
           ]
@@ -118,10 +256,14 @@
           "label": "电影级光影校正",
           "description": "调整画面光影质感",
           "placeholder": "点击生成，直接对当前图像进行电影机光影矫正、景别视角；支持通过文本/参考图生成。",
-          "icon": "light",
+          "icon": "slash-cinematic-lighting-correction",
           "newFeature": false,
           "inputRequirement": "image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "对参考图片做电影级光影与色彩校正，保持主体身份、动作、构图、镜头、环境和物体位置。校正不自然的曝光、白平衡与色偏，使主光、补光、轮廓光及阴影方向协调，恢复高光层次和暗部细节，呈现有动机的电影光影与统一色调。用户指定光线或氛围时优先遵循，避免改变物体造型或增加无关元素。"
         }
       ]
@@ -136,10 +278,14 @@
           "label": "720全景",
           "description": "生成全景场景图",
           "placeholder": "点击生成，直接将场景图像转为720全景图；支持文生/参考图生成。",
-          "icon": "angle",
+          "icon": "slash-panoramic-720",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "2K", "quality": "medium", "ratio": "2:1" },
+          "defaults": {
+            "resolution": "2K",
+            "quality": "medium",
+            "ratio": "2:1"
+          },
           "instruction": "根据用户描述和参考图，生成可用于 720 全景浏览的完整 360°×180° 等距柱状投影（equirectangular）场景图，目标画幅为 2:1。保持同一观察点和一致的空间透视，水平覆盖完整一周并包含天顶、地面，左右边缘无缝衔接，避免接缝、重复主体、弯折地平线和视角拼贴。参考图用于保持场景、人物及美术设定；实际像素尺寸由所选模型参数决定。"
         },
         {
@@ -147,10 +293,14 @@
           "label": "多机位九宫格",
           "description": "生成多视角机位图",
           "placeholder": "点击生成，直接基于当前图生成约9个不同的角度、景别视角；支持模型图像分辨率。",
-          "icon": "grid3",
+          "icon": "grid-3x3",
           "newFeature": false,
           "inputRequirement": "image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "以参考图中的同一主体、场景和同一时刻为基础，在一张图片中生成 3×3、恰好九格的多机位视图。组合正面、侧面、背面、俯视、仰视和不同景别等有区别且空间合理的机位。保持人物身份、服饰、道具、环境布局、动作状态、光线与画风一致，只改变摄像机位置、朝向或景别。不要把九格推进为九个不同剧情时刻。"
         }
       ]
@@ -165,21 +315,52 @@
           "label": "角色三视图",
           "description": "一键生成角色三视图（正面/侧面/背面）。",
           "placeholder": "点击生成，直接基于当前图像生成带正面肖像特写的白底三视图；支持通过文本/参考图生成。",
-          "icon": "portrait",
+          "icon": "slash-character-design",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
-          "instruction": "根据参考图或文字角色设定，在同一张干净白底设定图上横向排列角色全身正面、侧面、背面三视图，并补充正面肖像特写。三个全身视图统一人物身份、身高比例、发型、服装、材质和配饰，站姿中性，比例对齐，身体与服装细节不相互矛盾。保持参考图的美术风格，不裁切头脚，不加入无关道具和装饰文字。"
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "21:9"
+          },
+          "instruction": "根据参考图或文字角色设定，在同一张干净白底设定图上横向排列角色全身正面、侧面、背面三视图，并补充正面肖像特写。三个全身视图统一人物身份、身高比例、发型、服装、材质和配饰，站姿中性，比例对齐，身体与服装细节不相互矛盾。保持参考图的美术风格，不裁切头脚，不加入无关道具和装饰文字。",
+          "optionsPreviewUrl": "https://libtv-res.liblib.art/upload-images/9702388b5296438c859f26580b00d146/6d9a859ffc03518ec1cda2f9ccc6bf364d66bfca.mp4",
+          "options": [
+            {
+              "key": "enableFaceErase",
+              "label": "人脸抹除",
+              "control": "switch",
+              "help": "仅抹除新生成图中全身像可见的人脸，保留独立的正面肖像特写；参考图和已有结果不变。",
+              "default": "0",
+              "values": [
+                {
+                  "value": "0",
+                  "label": "关闭",
+                  "instruction": ""
+                },
+                {
+                  "value": "1",
+                  "label": "开启",
+                  "presetLabel": "角色三视图(新)",
+                  "instruction": "开启角色三视图的人脸抹除：仅对全身正面和全身侧面视图中可见的面部去除可识别的五官，用自然肤色平滑填充，保留头部轮廓、头发和耳朵；全身背面视图保持正常后脑与发型。独立的正面肖像特写必须完整保留清晰五官、表情和人物身份，绝不能抹除或遮挡该肖像。其它身体、服装、配饰、姿态、比例和白底排版保持一致。不要对整张图片做模糊处理，不使用马赛克、黑块或文字遮挡，不额外生成未抹脸的全身视图。"
+                }
+              ]
+            }
+          ]
         },
         {
           "scene": "character_face_turnaround_3view",
           "label": "角色脸部三视图",
           "description": "基于一张参考图生成脸部细节三视图",
           "placeholder": "点击生成，直接基于当前图像生成带正面肖像特写的白底三视图；支持通过文本/参考图生成。",
-          "icon": "face",
+          "icon": "slash-character-face-turnaround",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "2K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "2K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "根据参考图或文字描述，在同一张白底图片中横向排列同一角色脸部的正面、四分之三侧面和纯侧面特写。保持五官身份、年龄、肤色、脸部结构、发型、配饰与表情一致，头部大小和视线高度对齐，展示清楚的面部细节与轮廓。只改变观察角度，不改变人物身份或美术风格。"
         },
         {
@@ -187,10 +368,14 @@
           "label": "角色设定图",
           "description": "角色主视觉与设定拆解",
           "placeholder": "点击生成，直接基于当前图像生成完整的角色设定图；支持通过文本/参考图生成。",
-          "icon": "member",
+          "icon": "perspnal-n",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "生成一张完整的角色设定图，以全身主视觉为中心，合理排布辅助角度、面部表情、服装结构、配饰和材质细节。所有视图属于同一角色，统一五官、身体比例、发型、衣着与美术风格，保留参考图的可识别特征。布局清晰、背景简洁，用户指定的角色特征优先，不将角色拆解成彼此不一致的人物。"
         },
         {
@@ -198,10 +383,14 @@
           "label": "场景设定图",
           "description": "场景主视觉与空间、材质设定拆解",
           "placeholder": "描述场景，或基于参考图生成完整的场景设定图。",
-          "icon": "assets",
+          "icon": "slash-list",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "生成一张完整场景设定图，展示场景主视觉、关键空间关系、辅助视角以及建筑、陈设、材质和光照细节。各视图应属于同一空间，尺寸、入口、道路、建筑与家具布局一致。遵循文字和参考图的时代、地域、风格、气候与氛围，排布清晰，避免把场景设定误画成人物设定或不相关地点拼贴。"
         },
         {
@@ -209,10 +398,14 @@
           "label": "产品设定图",
           "description": "产品主视觉与结构、材质细节拆解",
           "placeholder": "描述产品，或基于参考图生成完整的产品设定图。",
-          "icon": "product",
+          "icon": "slash-product-turnaround",
           "newFeature": false,
           "inputRequirement": "prompt_or_image",
-          "defaults": { "resolution": "4K", "quality": "high", "ratio": "16:9" },
+          "defaults": {
+            "resolution": "4K",
+            "quality": "high",
+            "ratio": "16:9"
+          },
           "instruction": "生成一张完整产品设定图，以产品主视觉为中心，排布正面、侧面、背面等必要角度和结构、材质、连接件、功能细节的放大视图。所有视图必须是同一产品，比例、结构、颜色、材质和品牌标识一致，保留参考图中已有的可识别外形与文字。背景简洁、布局清晰，不凭空添加品牌、功能或不可能的结构。"
         }
       ]

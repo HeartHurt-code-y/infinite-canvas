@@ -33,6 +33,7 @@
 }
 
 .canvas-audio-node__card {
+  position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
@@ -98,10 +99,206 @@
   fill: currentColor;
 }
 
-/* 已有产物：原生音频播放器（项目里没有音频波形组件，用浏览器自带的）。 */
-.canvas-audio-node__player {
-  width: 100%;
+.react-flow__node .canvas-flow-node .canvas-gen-node.canvas-gen-node--audio.has-audio-result {
+  height: auto;
+  min-height: 144px;
 }
+.has-audio-result .canvas-audio-node__card { padding: 0; }
+.canvas-audio-result { width: 100%; }
+.canvas-audio-waveform { padding: 12px 12px 4px; }
+.canvas-audio-waveform__track {
+  position: relative;
+  height: 80px;
+  margin: 0 1px;
+  border-radius: 12px;
+  background: var(--nt-bg-overlay, var(--panel-background));
+  isolation: isolate;
+}
+.canvas-audio-waveform__bars {
+  position: absolute;
+  inset: 0 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  pointer-events: none;
+}
+.canvas-audio-waveform__bars span {
+  width: 3px;
+  border-radius: 2px;
+  background: var(--nt-icon-tertiary, #525252);
+}
+.canvas-audio-waveform__bars [data-played] { background: var(--nt-icon-default); }
+.canvas-audio-waveform__seek {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: ew-resize;
+}
+.canvas-audio-waveform__track:has(.canvas-audio-waveform__seek:focus-visible) {
+  outline: 2px solid var(--nt-icon-brand);
+  outline-offset: 2px;
+}
+.canvas-audio-waveform__playhead,
+.canvas-audio-waveform__cut {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 2px;
+}
+.canvas-audio-waveform__playhead { pointer-events: none; background: var(--nt-red-600, #f54848); }
+.canvas-audio-waveform__playhead-grip {
+  position: absolute;
+  inset: 0 -4px;
+  cursor: col-resize;
+  touch-action: none;
+  pointer-events: auto;
+}
+.canvas-audio-waveform__outside {
+  position: absolute;
+  inset-block: 4px;
+  background: rgb(0 0 0 / 46%);
+  pointer-events: none;
+}
+.canvas-audio-waveform__outside.is-start { left: 0; }
+.canvas-audio-waveform__outside.is-end { right: 0; }
+.canvas-audio-waveform__cut {
+  width: 10px;
+  border: 0;
+  background: linear-gradient(var(--nt-icon-brand), var(--nt-icon-brand)) center / 2px 100% no-repeat;
+  cursor: pointer;
+}
+.canvas-audio-waveform__selection {
+  position: absolute;
+  inset-block: 4px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--nt-icon-brand);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--nt-icon-brand) 12%, transparent);
+  cursor: grab;
+  touch-action: none;
+}
+.canvas-audio-waveform__selection:active { cursor: grabbing; }
+.canvas-audio-waveform__selection-length {
+  padding: 3px 6px;
+  border-radius: 6px;
+  background: rgb(0 0 0 / 65%);
+  color: white;
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.canvas-audio-waveform__handle {
+  position: absolute;
+  z-index: 3;
+  inset-block: 0;
+  width: 12px;
+  border: 0;
+  background: linear-gradient(var(--nt-icon-brand), var(--nt-icon-brand)) center / 2px 24px no-repeat;
+  cursor: col-resize;
+  touch-action: none;
+}
+.canvas-audio-waveform__handle.is-start { left: -6px; }
+.canvas-audio-waveform__handle.is-end { right: -6px; }
+.canvas-audio-waveform__spinner { position: absolute; inset: 0; margin: auto; pointer-events: none; }
+.canvas-audio-waveform__transport {
+  display: grid;
+  grid-template-columns: 1fr 28px 1fr;
+  align-items: center;
+  height: 44px;
+  padding: 0 8px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--nt-text-secondary);
+}
+.canvas-audio-waveform__transport > :last-child { justify-self: end; }
+.canvas-audio-waveform__transport button {
+  display: grid;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  color: var(--nt-icon-default);
+  background: transparent;
+}
+.canvas-audio-waveform__transport button:hover:not(:disabled) { background: var(--canvas-controls-hover); }
+.canvas-audio-result-edit__actions {
+  position: absolute;
+  z-index: 3;
+  right: 8px;
+  bottom: calc(100% + 30px);
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  border: 0.5px solid var(--canvas-controls-border);
+  border-radius: 12px;
+  background: var(--panel-background);
+  opacity: 0;
+  pointer-events: none;
+}
+.canvas-audio-node:is(:hover, .is-selected) .canvas-audio-result-edit__actions,
+.canvas-audio-result-edit__actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+.canvas-audio-result-edit__actions button,
+.canvas-audio-result-edit__panel button:not([role="combobox"]) {
+  display: inline-grid;
+  min-width: 32px;
+  min-height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: var(--panel-background);
+  color: var(--nt-text-default);
+}
+.canvas-audio-result-edit__actions button:hover:not(:disabled),
+.canvas-audio-result-edit__panel button:hover:not(:disabled),
+.canvas-audio-result-edit__panel button[aria-pressed="true"] { background: var(--canvas-controls-hover); }
+.canvas-audio-result-edit__actions button:disabled,
+.canvas-audio-result-edit__panel button:disabled { opacity: .5; }
+.canvas-audio-result-edit__panel {
+  position: absolute;
+  z-index: 8;
+  top: calc(100% + 16px);
+  left: 50%;
+  display: grid;
+  width: 400px;
+  gap: 6px;
+  padding: 8px;
+  transform: translateX(-50%);
+  border: 0.5px solid var(--canvas-controls-border);
+  border-radius: 12px;
+  background: var(--panel-background);
+  box-shadow: var(--canvas-shadow-dropdown);
+  pointer-events: auto;
+}
+.canvas-audio-result-edit__panel label {
+  display: grid;
+  grid-template-columns: 3em 1fr 6em;
+  gap: 8px;
+  align-items: center;
+}
+.canvas-audio-result-edit__panel input { width: 100%; accent-color: var(--nt-icon-brand); }
+.canvas-audio-result-edit__panel textarea {
+  resize: vertical;
+  padding: 8px;
+  border: 0.5px solid var(--canvas-controls-border);
+  border-radius: 8px;
+  background: var(--nt-bg-overlay, var(--panel-background));
+  color: var(--nt-text-default);
+}
+.canvas-audio-result-edit__panel p { margin: 0; font-size: 13px; }
+.canvas-audio-result-edit__range { font-variant-numeric: tabular-nums; }
+.canvas-audio-result-edit__speeds,
+.canvas-audio-result-edit__confirm { display: flex; gap: 4px; }
+.canvas-audio-result-edit__confirm { justify-content: end; }
 
 /* ── 编辑层 ─────────────────────────────────────────────────────────── */
 

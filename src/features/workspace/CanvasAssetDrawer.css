@@ -1,274 +1,381 @@
-/*
- * 资产管理抽屉（liblib.tv 画布左侧抽屉的逆向对齐版）。
- *
- * 规格来源：docs/integrations/liblib-canvas-re.md 第 3.4 节与实测令牌表
- * （2026-10-22，登录态，DPR=1.5）。原站是 Mantine Drawer + 自研调宽把手：
- *   抽屉 320 全高、把手 12 全高、浮层圆角 12、三层投影。
- *
- * 颜色/尺寸一律走 tokens.css 的 LibTV 令牌组，组件里不写颜色字面值。
- */
+.workspace-shell.workspace-shell--immersive.workspace-shell--asset-drawer {
+  grid-template:
+    "asset-drawer header" var(--size-header)
+    "asset-drawer canvas" minmax(0, 1fr) / auto minmax(0, 1fr);
+}
 
-/*
- * 根节点只承载两件事：把抽屉与把手放进同一个 fixed 坐标系，以及持有当前宽度。
- * display: contents 让它不产生盒子，因此不会在工作区布局里留下空位，
- * 但自定义属性照常向下继承 —— 把手据此贴在抽屉右缘。
- */
-.canvas-asset-drawer-root {
-  display: contents;
-  --canvas-asset-drawer-width: var(--size-ll-drawer);
+.workspace-shell--asset-drawer .workspace-header .brand-mark,
+.workspace-shell--asset-drawer .workspace-header .brand-name,
+.workspace-shell--asset-drawer .canvas-chrome-items__button[aria-controls="canvas-asset-drawer"] {
+  display: none;
 }
 
 .canvas-asset-drawer {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  z-index: var(--z-drawer);
+  grid-area: asset-drawer;
+  position: relative;
+  z-index: var(--z-sticky);
   display: flex;
   flex-direction: column;
-  width: var(--canvas-asset-drawer-width);
-  max-width: 100vw;
-  background: var(--canvas-controls-bg);
-  color: var(--canvas-controls-text);
-  border-right: var(--rule-thin) solid var(--canvas-controls-border);
-  box-shadow: var(--shadow-ll-float);
+  min-height: 0;
+  max-width: calc(100vw - 20rem);
+  box-sizing: border-box;
+  color: #f5f5f5;
+  background: #171717;
+  border-inline-end: 1px solid #393939;
+  font-size: 13px;
+}
+
+.canvas-asset-drawer [hidden],
+.canvas-asset-drawer[hidden] {
+  display: none;
 }
 
 .canvas-asset-drawer__header {
+  display: grid;
+  min-height: 84px;
+  align-content: center;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.canvas-asset-drawer__workspace-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 30px;
+}
+
+.canvas-asset-drawer__project {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvas-asset-drawer__project > span {
+  flex: 0 0 auto;
+  padding-inline-end: 8px;
+  border-inline-end: 1px solid #3c3c3c;
+}
+
+.canvas-asset-drawer__tabs,
+.canvas-asset-drawer__tools,
+.canvas-asset-drawer__footer {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-sm);
-  padding: var(--space-sm) var(--space-md);
-  border-bottom: var(--rule-thin) solid var(--canvas-controls-border);
 }
 
-.canvas-asset-drawer__title {
-  margin: 0;
-  font-size: var(--text-sm);
-  font-weight: 600;
-  line-height: 1.4;
-  color: var(--canvas-controls-text);
+.canvas-asset-drawer__tabs {
+  gap: 4px;
+  min-height: 50px;
+  padding-inline: 8px;
+  border-block: 1px solid #303030;
 }
 
-.canvas-asset-drawer__close {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: var(--size-control-small);
-  height: var(--size-control-small);
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-control);
+.canvas-asset-drawer__tabs button,
+.canvas-asset-drawer__tools button,
+.canvas-asset-drawer__footer button,
+.canvas-asset-drawer__group-heading > button,
+.canvas-asset-drawer__row {
+  color: inherit;
   background: transparent;
-  color: var(--nt-text-secondary);
+  border: 0;
   cursor: pointer;
 }
 
-.canvas-asset-drawer__error {
-  flex: 0 0 auto;
-  padding: var(--space-sm) var(--space-md) 0;
+.canvas-asset-drawer__tabs button {
+  border-radius: 10px;
+  padding: 6px 12px;
+  font-weight: 500;
 }
 
-.canvas-asset-drawer__body {
+.canvas-asset-drawer__tabs button[aria-selected="true"] {
+  background: #3b3b3b;
+}
+
+.canvas-asset-drawer__canvas,
+.canvas-asset-drawer__assets {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
-  padding: var(--space-sm);
-  overflow-y: auto;
-  overscroll-behavior: contain;
+  min-width: 0;
+}
+
+.canvas-asset-drawer__tools {
+  min-height: 46px;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 10px;
+}
+
+.canvas-asset-drawer__tools > button:not(.canvas-select),
+.canvas-asset-drawer__search > button,
+.canvas-asset-drawer__footer > button,
+.canvas-asset-drawer__group-heading > button:first-child {
+  display: grid;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border-radius: 6px;
+  color: #c8c8c8;
+}
+
+.canvas-asset-drawer :is(.canvas-asset-drawer__header, .canvas-asset-drawer__tabs, .canvas-asset-drawer__canvas, .canvas-asset-drawer__footer) button:hover:not(:disabled),
+.canvas-asset-drawer :is(.canvas-asset-drawer__header, .canvas-asset-drawer__canvas) .canvas-select[aria-expanded="true"] {
+  background-color: #303030;
+}
+
+.canvas-asset-drawer :is(.canvas-asset-drawer__header, .canvas-asset-drawer__canvas) .canvas-select {
+  width: auto;
+  min-height: 28px;
+  min-width: 0;
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background-color: transparent;
+  font: inherit;
+}
+
+.canvas-asset-drawer__project > .canvas-select {
+  max-width: 120px;
+  padding-inline: 2px 4px;
+}
+
+.canvas-asset-drawer__tools > .canvas-asset-drawer__view {
+  margin-inline-start: auto;
+}
+
+.canvas-asset-drawer__tools > .canvas-asset-drawer__filter,
+.canvas-asset-drawer__tools > .canvas-asset-drawer__view {
+  padding-inline: 6px;
+}
+
+.canvas-asset-drawer__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 0 100%;
+  padding-inline: 6px;
+  border-radius: 6px;
+  background: #252525;
+  color: #bcbcbc;
+}
+
+.canvas-asset-drawer__search input {
+  flex: 1 1 auto;
+  width: 0;
+  height: 30px;
+  padding: 0;
+  color: #f5f5f5;
+  background: transparent;
+  border: 0;
+  font: inherit;
+}
+
+.canvas-asset-drawer__search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.canvas-asset-drawer__scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 8px;
+}
+
+.canvas-asset-drawer__empty {
+  margin: 12px;
+  color: #949494;
 }
 
 .canvas-asset-drawer__tree,
-.canvas-asset-drawer__assets {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
+.canvas-asset-drawer__members {
+  display: grid;
+  gap: 4px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
 }
 
-.canvas-asset-drawer__canvas {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
-  border-radius: var(--radius-control);
-  cursor: pointer;
-}
-
-.canvas-asset-drawer__row,
-.canvas-asset-drawer__asset {
+.canvas-asset-drawer__group-heading {
   display: flex;
   align-items: center;
-  gap: var(--space-xs);
-  width: 100%;
-  min-height: var(--size-ll-control);
-  padding: 0 var(--space-sm);
-  border: 0;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--canvas-controls-text);
-  font-size: var(--text-sm);
-  text-align: left;
-  cursor: pointer;
+  gap: 0;
 }
 
-.canvas-asset-drawer__row-name {
+.canvas-asset-drawer__group-heading > button:first-child {
+  flex: 0 0 24px;
+  min-width: 24px;
+}
+
+.canvas-asset-drawer__members {
+  margin-inline-start: 46px;
+}
+
+.canvas-asset-drawer__node {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.canvas-asset-drawer__node[data-selected="true"] {
+  background: #323232;
+}
+
+.canvas-asset-drawer__row {
+  display: flex;
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  border-radius: 8px;
+  text-align: start;
+}
+
+.canvas-asset-drawer__name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* 展开的画布把箭头转向下方，示意「这一层已经摊开」。 */
-.canvas-asset-drawer__canvas.is-expanded .canvas-asset-drawer__row > svg {
-  transform: rotate(90deg);
+.canvas-asset-drawer__folder {
+  color: #bcbcbc;
+  filter: drop-shadow(0 -2px 0 #818181);
 }
 
-.canvas-asset-drawer__group {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
-  padding-left: var(--space-sm);
-  border-left: var(--rule-thin) solid var(--nt-border-neutral-l1);
-}
-
-.canvas-asset-drawer__tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2xs);
-}
-
-.canvas-asset-drawer__tab {
-  min-height: var(--size-ll-control);
-  padding: 0 var(--space-sm);
-  border: 0;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--nt-text-secondary);
-  font-size: var(--text-xs);
-  cursor: pointer;
-}
-
-.canvas-asset-drawer__tab[aria-selected="true"] {
-  background: var(--canvas-controls-active);
-  color: var(--canvas-controls-text);
-}
-
-.canvas-asset-drawer__panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2xs);
-}
-
-.canvas-asset-drawer__asset {
-  gap: var(--space-xs);
-}
-
-.canvas-asset-drawer__thumb {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: var(--size-control-small);
-  height: var(--size-control-small);
+.canvas-asset-drawer__thumbnail {
+  position: relative;
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
   overflow: hidden;
-  border-radius: var(--radius-control);
-  background: var(--nt-bg-overlay);
-  color: var(--nt-text-secondary);
+  place-items: center;
+  border-radius: 8px;
+  background: #505050;
+  color: #adadad;
 }
 
-.canvas-asset-drawer__thumb img {
+.canvas-asset-drawer__thumbnail img {
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.canvas-asset-drawer__empty {
-  margin: 0;
-  padding: var(--space-sm);
-  /* 空态文案是正文级：tertiary 在面板底上只有 3.55:1，达不到正文要求的 4.5:1。 */
-  color: var(--nt-text-secondary);
-  font-size: var(--text-xs);
-}
-
-.canvas-asset-drawer__footer {
-  flex: 0 0 auto;
-  padding: var(--space-sm) var(--space-md);
-  border-top: var(--rule-thin) solid var(--canvas-controls-border);
-  color: var(--nt-text-secondary);
-  font-size: var(--text-xs);
-}
-
-/*
- * 调宽把手：原站自研件，类名沿用 `workspace-panel-drawer-resize-handle`
- * （见逆向规格 1.4 节），供其他工作区抽屉复用同一套拖拽与键盘行为。
- * 命中区固定 12px 全高，视觉上只在 hover/聚焦时给一条 1px 提示线。
- */
-.workspace-panel-drawer-resize-handle {
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: var(--canvas-asset-drawer-width);
-  z-index: var(--z-drawer);
-  width: var(--size-ll-drawer-handle);
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: col-resize;
-  touch-action: none;
-  user-select: none;
-}
-
-.workspace-panel-drawer-resize-handle::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: var(--rule-thin);
-  transform: translateX(-50%);
-  background: var(--canvas-controls-border);
+.canvas-asset-drawer__rating {
   opacity: 0;
-  transition: opacity 120ms ease;
 }
 
-@media (hover: hover) {
-  .workspace-panel-drawer-resize-handle:hover::after {
-    opacity: 1;
-  }
-}
-
-.workspace-panel-drawer-resize-handle:focus-visible::after {
+.canvas-asset-drawer__node:hover .canvas-asset-drawer__rating,
+.canvas-asset-drawer__node:focus-within .canvas-asset-drawer__rating {
   opacity: 1;
 }
 
-.canvas-asset-drawer :focus-visible,
-.workspace-panel-drawer-resize-handle:focus-visible {
-  outline: var(--rule-active) solid var(--color-focus);
-  outline-offset: calc(-1 * var(--rule-active));
+.canvas-asset-drawer__star {
+  color: #ffc65a;
 }
 
-@media (hover: hover) {
-  .canvas-asset-drawer__row:hover,
-  .canvas-asset-drawer__asset:hover:not([aria-disabled="true"]),
-  .canvas-asset-drawer__tab:hover {
-    background: var(--canvas-controls-hover);
+.canvas-asset-drawer__tree[data-view="grid"],
+.canvas-asset-drawer__tree[data-view="grid"] .canvas-asset-drawer__members {
+  grid-template-columns: repeat(auto-fill, minmax(105px, 1fr));
+}
+
+.canvas-asset-drawer__tree[data-view="grid"] > .canvas-asset-drawer__group {
+  grid-column: 1 / -1;
+}
+
+.canvas-asset-drawer__tree[data-view="grid"] .canvas-asset-drawer__node {
+  position: relative;
+}
+
+.canvas-asset-drawer__tree[data-view="grid"] .canvas-asset-drawer__node > .canvas-asset-drawer__row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.canvas-asset-drawer__tree[data-view="grid"] .canvas-asset-drawer__thumbnail {
+  flex: 0 0 auto;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+}
+
+.canvas-asset-drawer__tree[data-view="grid"] .canvas-asset-drawer__rating {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background-color: #252525;
+}
+
+.canvas-asset-drawer__assets {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.canvas-asset-drawer .asset-panel {
+  flex: 1 0 auto;
+}
+
+.canvas-asset-drawer .asset-panel .asset-grid {
+  flex: 1 0 auto;
+  overflow: visible;
+}
+
+.canvas-asset-drawer__assets .panel-title-row__identity {
+  display: none;
+}
+
+.canvas-asset-drawer__assets .panel-title-row__actions {
+  margin-inline-start: auto;
+}
+
+.canvas-asset-drawer__footer {
+  min-height: 50px;
+  justify-content: space-between;
+  padding-inline: 12px;
+  border-top: 1px solid #303030;
+  color: #999;
+  font-size: 12px;
+}
+
+.canvas-asset-drawer__resize {
+  position: absolute;
+  z-index: 2;
+  inset: 0 -5px 0 auto;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.canvas-asset-drawer__resize:focus-visible {
+  outline: 1px solid var(--color-focus);
+  outline-offset: -4px;
+}
+
+@media (max-width: 44rem) {
+  .workspace-shell.workspace-shell--immersive.workspace-shell--asset-drawer {
+    grid-template:
+      "header" var(--size-header)
+      "canvas" minmax(0, 1fr) / minmax(0, 1fr);
   }
 
-  .canvas-asset-drawer__close:hover {
-    background: var(--canvas-controls-hover);
-    color: var(--canvas-controls-text);
+  .canvas-asset-drawer {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: var(--z-modal);
+    max-width: calc(100% - 48px);
+    box-shadow: var(--shadow-raised);
   }
-}
 
-.canvas-asset-drawer__asset[aria-disabled="true"] {
-  cursor: default;
-  color: var(--nt-text-tertiary);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .workspace-panel-drawer-resize-handle::after {
-    transition: none;
+  .canvas-asset-drawer__resize {
+    display: none;
   }
 }

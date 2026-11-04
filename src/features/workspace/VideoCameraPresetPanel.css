@@ -1,0 +1,60 @@
+.video-camera-library { width: min(640px, calc(100vw - 32px)); max-height: calc(100vh - 64px); display: flex; flex-direction: column; overflow: hidden; color: var(--nt-text-default); background: var(--canvas-controls-bg); border: .5px solid var(--canvas-controls-border); border-radius: 12px; box-shadow: var(--canvas-shadow-dropdown); backdrop-filter: blur(16px); }
+.video-camera-library header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; gap: 12px; }
+.video-camera-library header strong { font-size: 14px; }
+.video-camera-library button { border: 0; border-radius: 6px; color: inherit; background: transparent; cursor: pointer; padding: 7px 10px; }
+.video-camera-library button:hover, .video-camera-library button[aria-selected="true"], .video-camera-library__search button[aria-pressed="true"] { background: var(--canvas-controls-hover); }
+.video-camera-library button:focus-visible, .video-camera-library input:focus-visible, .video-camera-library textarea:focus-visible { outline: 2px solid var(--color-brand-400, #09caf5); outline-offset: 2px; }
+.video-camera-library__search { display: flex; align-items: center; gap: 8px; padding: 0 12px 12px; }
+.video-camera-library input, .video-camera-library textarea { box-sizing: border-box; width: 100%; min-width: 0; border: 1px solid var(--canvas-controls-border); border-radius: 8px; padding: 8px 10px; background: transparent; color: var(--nt-text-default); font: inherit; }
+.video-camera-library__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-content: start; gap: 8px 4px; overflow-y: auto; padding: 0 16px 16px; min-height: 0; }
+.video-camera-library__grid article { position: relative; min-width: 0; }
+.video-camera-library .video-camera-library__use { display: block; width: 100%; min-width: 0; padding: 0; overflow: hidden; text-align: center; border-radius: 3px; }
+.video-camera-library__use img, .video-camera-library__use video, .video-camera-library__custom { width: 100%; aspect-ratio: 1; display: block; object-fit: cover; border-radius: 3px; background: var(--canvas-controls-hover); }
+.video-camera-library__custom { display: grid; place-items: center; color: var(--nt-text-muted); }
+.video-camera-library__use > span:last-child:not(.video-camera-library__custom) { display: block; padding: 4px; font-size: 12px; line-height: 17px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.video-camera-library .video-camera-library__favorite { position: absolute; top: 4px; right: 4px; display: grid; place-items: center; width: 24px; height: 24px; color: white; background: #0009; padding: 0; border-radius: 8px; opacity: 0; }
+.video-camera-library__favorite[aria-pressed="true"] { color: #ffd25c; }
+.video-camera-library__manage { position: absolute; right: 4px; bottom: 29px; display: flex; gap: 4px; opacity: 0; }
+.video-camera-library__manage button { display: grid; place-items: center; width: 20px; height: 20px; padding: 0; color: white; background: #0009; border-radius: 4px; }
+.video-camera-library article:is(:hover, :focus-within) :is(.video-camera-library__favorite, .video-camera-library__manage) { opacity: 1; }
+.video-camera-library button:disabled { cursor: default; opacity: .4; }
+.video-camera-library--presets { width: min(800px, calc(100vw - 32px)); height: min(604px, calc(100vh - 64px)); }
+.video-camera-library--presets > header { flex-shrink: 0; border-bottom: .5px solid var(--canvas-controls-border); padding: 12px; gap: 8px; }
+.video-camera-library--presets [role="tablist"] { display: flex; flex-shrink: 0; gap: 4px; }
+.video-camera-library--presets [role="tab"] { font-size: 13px; white-space: nowrap; }
+.video-camera-library--presets > .video-camera-library__grid { flex: 1; padding-top: 12px; }
+.video-camera-library__search--inline { width: 336px; min-width: 0; margin-left: auto; padding: 0 8px; border: 1px solid var(--canvas-controls-border); border-radius: 8px; }
+.video-camera-library__search--inline input { border: 0; padding: 6px 0; font-size: 12px; }
+.video-camera-library__search--inline > button { display: flex; padding: 0; }
+.video-camera-library .video-camera-library__new { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; aspect-ratio: 1; border: 1px solid var(--canvas-controls-border); border-radius: 3px; font-size: 12px; }
+.video-camera-library__empty { grid-column: 1 / -1; text-align: center; color: var(--nt-text-muted); }
+.video-camera-editor { width: min(525px, calc(100vw - 32px)); }
+.video-camera-editor header { border-bottom: .5px solid var(--canvas-controls-border); }
+.video-camera-editor form { overflow-y: auto; }
+.video-camera-editor__body { display: flex; gap: 12px; padding: 12px; }
+.video-camera-editor__preview-field { display: flex; flex-direction: column; gap: 8px; width: 204px; flex-shrink: 0; color: var(--nt-text-muted); font-size: 14px; }
+.video-camera-editor__preview-area { position: relative; }
+.video-camera-editor .video-camera-editor__preview { display: block; width: 204px; height: 204px; position: relative; padding: 0; border-radius: 4px; overflow: hidden; }
+.video-camera-editor__preview > :is(img, video) { display: block; width: 100%; height: 100%; object-fit: cover; }
+.video-camera-editor__replace { position: absolute; top: 4px; right: 4px; display: flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 8px; color: white; background: #000a; font-size: 13px; backdrop-filter: blur(12px); }
+.video-camera-editor__uploading { position: absolute; inset: 0; display: grid; place-items: center; color: white; background: #0008; backdrop-filter: blur(8px); font-size: 12px; }
+.video-camera-editor__preview-menu { position: absolute; top: 8px; left: 8px; display: flex; flex-direction: column; min-width: 112px; padding: 4px; color: var(--nt-text-default); border: 1px solid var(--canvas-controls-border); border-radius: 8px; background: var(--canvas-controls-bg); box-shadow: var(--canvas-shadow-dropdown); }
+.video-camera-editor__preview-menu button { text-align: left; font-size: 12px; }
+.video-camera-editor__fields { width: 285px; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.video-camera-editor__fields label { display: flex; flex-direction: column; gap: 8px; color: var(--nt-text-muted); font-size: 14px; }
+.video-camera-editor__input { position: relative; }
+.video-camera-editor__input input { height: 32px; padding: 6px 48px 6px 8px; font-size: 13px; }
+.video-camera-editor__input textarea { height: 120px; padding: 8px 8px 24px; resize: none; font-size: 13px; }
+.video-camera-editor__input small { position: absolute; right: 10px; bottom: 8px; font-size: 12px; color: var(--nt-text-muted); pointer-events: none; }
+.video-camera-editor__input small[data-invalid="true"] { color: #e85d5d; }
+.video-camera-editor__input [aria-invalid="true"] { border-color: #cb272d; }
+.video-camera-editor footer, .video-camera-delete footer { display: flex; justify-content: flex-end; gap: 8px; padding: 0 12px 12px; }
+.video-camera-editor .video-camera-editor__save { min-height: 32px; color: var(--canvas-controls-bg); background: var(--nt-text-default); padding: 0 12px; font-size: 13px; }
+.video-camera-delete { width: min(360px, calc(100vw - 32px)); }
+.video-camera-delete p { margin: 4px 16px 20px; font-size: 14px; }
+.video-camera-library__pagination { display: flex; justify-content: center; align-items: center; padding: 8px; gap: 12px; font-size: 12px; }
+.video-camera-library--assets { min-height: 360px; }
+.video-camera-library--assets .video-camera-library__grid { flex: 1; }
+@media (hover: none) { .video-camera-library :is(.video-camera-library__favorite, .video-camera-library__manage) { opacity: 1; } }
+@media (max-width: 640px) { .video-camera-library--presets > header { flex-wrap: wrap; } .video-camera-library__search--inline { order: 1; flex: 1 0 100%; box-sizing: border-box; } }
+@media (max-width: 520px) { .video-camera-library__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .video-camera-editor__body { flex-wrap: wrap; } .video-camera-editor__fields { width: 100%; } }

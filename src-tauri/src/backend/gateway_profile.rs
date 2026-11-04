@@ -123,10 +123,11 @@ impl GatewayProfile {
             GatewayProfile::FzyVideo => false,
             // Atlas Cloud 视频家族：模型名命中**只是候选**，是否真走 Atlas 协议
             // 由 `available_on` 按连接方言裁决（同名模型在兼容网关上仍是魔芋协议）。
-            // 平台上的视频家族目前有 Vidu Q4 与 Kling 4.0 两个，各自一份契约。
+            // 生成与高清使用同一套 Atlas 提交、轮询和产物下载协议。
             GatewayProfile::AtlasCloudVideo => {
                 is_atlascloud_vidu_video_model(model_id)
                     || is_atlascloud_kling_video_model(model_id)
+                    || model_id.eq_ignore_ascii_case(super::canvas_feature_generation::VIDEO_UPSCALER)
             }
         }
     }

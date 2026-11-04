@@ -616,6 +616,83 @@ pub(crate) fn is_seedance_draft_video_model(model_id: &str) -> bool {
     )
 }
 
+/// Seedance 系列「全模态参考」的素材上限。
+///
+/// 来源：火山方舟《创建视频生成任务 API · 模型能力 / 传入单个音频要求》与
+/// 《视频生成教程 · 使用限制》：
+///
+/// - Seedance 2.5：参考图片 0–30 张、参考视频 0–10 个（单个 2–30 秒、
+///   所有参考视频合计 ≤ 30 秒）、参考音频 0–10 段（单个 2–30 秒、
+///   所有参考音频合计 ≤ 30 秒）；
+/// - Seedance 2.0 系列：参考图片 0–9 张、参考视频 0–3 个（单个 2–15 秒、
+///   合计 ≤ 15 秒）、参考音频 0–3 段（单个 2–15 秒、合计 ≤ 15 秒）。
+///
+/// 供应商只在**提交之后**校验这些上限，越限一律 400 InvalidParameter
+/// （典型文案："the parameter audio total duration (seconds) specified in the
+/// request is not valid: ... must be less than or equal to 30.2 for model
+/// doubao-seedance-2-5 in r2v"）。应用侧按同一份契约先校验，失败发生在本地、
+/// 不产生远程请求，错误直接说清是哪段素材、实际多长、上限多少。
+#[derive(Clone, Copy)]
+pub(crate) struct SeedanceReferenceLimits {
+    pub max_images: usize,
+    pub max_videos: usize,
+    pub max_audios: usize,
+    /// 单个参考视频 / 参考音频的时长下限（秒）。
+    pub min_media_seconds: f64,
+    /// 单个参考视频 / 参考音频的时长上限（秒）。
+    pub max_single_seconds: f64,
+    /// 所有参考视频合计时长上限（秒）。
+    pub max_video_total_seconds: f64,
+    /// 所有参考音频合计时长上限（秒）。
+    pub max_audio_total_seconds: f64,
+}
+
+/// 该模型是否走「全模态参考」契约（`content` 数组里的参考图 / 参考视频 /
+/// 参考音频），并返回它的素材上限。
+///
+/// 不套用本表的三类模型：
+/// - RD 网关（`rd-seedance-2.5-*`）：顶层字段契约，参考素材走
+///   `reference_videos` / `reference_audios`，上限与方舟原生不同；
+/// - 按次系列（`sp2.5-*`）：自有契约与档位表；
+/// - 海外 Dreamina（即梦）Seedance：方舟文档未登记其参考素材上限，套用国内
+///   限制会把本来能提交成功的请求挡在本地。
+///
+/// 注意**草稿样片不在排除名单里**：`doubao-seedance-2-5-260628` 在魔芋等
+/// 网关上既是普通 Seedance 2.5 的模型 ID，也被草稿样片档案复用，而「样片
+/// 模式」提交仍然携带参考素材、同样受方舟的时长上限约束。真正不携带参考
+/// 素材的是 `draft_task` 晋升请求，那条路径不经过本表的校验点。
+pub(crate) fn seedance_reference_limits(model_id: &str) -> Option<SeedanceReferenceLimits> {
+    if is_rd_video_model(model_id) || is_sp25_per_use_video_model(model_id) {
+        return None;
+    }
+    if is_dreamina_seedance_video_model(model_id) {
+        return None;
+    }
+    if is_seedance_25_video_model(model_id) {
+        return Some(SeedanceReferenceLimits {
+            max_images: 30,
+            max_videos: 10,
+            max_audios: 10,
+            min_media_seconds: 2.0,
+            max_single_seconds: 30.0,
+            max_video_total_seconds: 30.0,
+            max_audio_total_seconds: 30.0,
+        });
+    }
+    if is_seedance_20_video_model(model_id) {
+        return Some(SeedanceReferenceLimits {
+            max_images: 9,
+            max_videos: 3,
+            max_audios: 3,
+            min_media_seconds: 2.0,
+            max_single_seconds: 15.0,
+            max_video_total_seconds: 15.0,
+            max_audio_total_seconds: 15.0,
+        });
+    }
+    None
+}
+
 /// 同名模型在方舟上保留原生能力，只有 OpenAI 兼容网关采用本次草稿样片合同。
 /// 旧的通用国内档案同时声明 1080p、联网搜索等字段；该网关的生成阶段仅开放
 /// 480p/720p，1080p 正片由 draft_task 晋升请求让平台自动设置。
@@ -1854,6 +1931,32 @@ fn apply_grsai_image_dialect(schema: &mut Value, identity: &str) -> bool {
 ///
 /// 契约文档见 `docs/integrations/atlascloud-image-api.md`。
 pub const ATLASCLOUD_IMAGE_PROFILE: &str = "atlascloud_image_v1";
+pub const ATLASCLOUD_UPSCALER_MODEL: &str = "atlascloud/image-upscaler";
+pub const ATLASCLOUD_REGION_EDIT_BINDING: &str = "atlascloud/masked-image-edit";
+pub const ATLASCLOUD_REGION_EDIT_MODEL: &str = "black-forest-labs/flux-dev";
+
+pub fn atlascloud_region_edit_schema() -> Value {
+    json!({
+        "profileVersion": 1, "requestProfileId": ATLASCLOUD_IMAGE_PROFILE, "resultType": "image",
+        "request": { "encoding": "json", "path": ATLASCLOUD_GENERATE_PATH, "observePath": ATLASCLOUD_PREDICTION_OBSERVE_PATH,
+            "mediaEncoding": "atlascloud_masked_image", "mediaField": "image", "parameterContainer": "root" },
+        "parameters": {
+            "num_images": { "type": "integer", "label": "生成数量", "min": 1, "max": 4, "default": 1, "order": 1 }
+        }
+    })
+}
+
+pub fn atlascloud_upscaler_schema() -> Value {
+    json!({
+        "profileVersion": 1, "requestProfileId": ATLASCLOUD_IMAGE_PROFILE, "resultType": "image",
+        "request": { "encoding": "json", "path": "/api/v1/model/generateImage", "observePath": "/api/v1/model/prediction/{task_id}",
+            "mediaEncoding": "atlascloud_upscale_image", "mediaField": "image", "parameterContainer": "root" },
+        "parameters": {
+            "outscale": { "type": "number", "label": "放大倍数", "enum": [2,4], "default": 2, "order": 1 },
+            "output_format": { "type": "string", "label": "输出格式", "enum": ["png","jpeg","webp"], "default": "png", "order": 2 }
+        }
+    })
+}
 const ATLASCLOUD_GENERATE_PATH: &str = "/api/v1/model/generateImage";
 const ATLASCLOUD_PREDICTION_OBSERVE_PATH: &str = "/api/v1/model/prediction/{task_id}";
 /// 平台目录里 Grok Imagine Image 2.0 家族的模型 id 前缀：文生图与参考图编辑
@@ -2269,6 +2372,10 @@ pub fn atlascloud_image_operation_schema_for(
     model_id: &str,
     operation: GenerationOperation,
 ) -> Option<Value> {
+    if model_id == ATLASCLOUD_UPSCALER_MODEL { return Some(atlascloud_upscaler_schema()); }
+    if model_id == ATLASCLOUD_REGION_EDIT_BINDING && operation == GenerationOperation::ImageToImage {
+        return Some(atlascloud_region_edit_schema());
+    }
     if is_atlascloud_midjourney_image_model(model_id) {
         // Midjourney 家族只有一个图生图成员。**文生图也返回同一份档案**：这样
         // 组包层能给出「该模型必须带 1 张参考图」的明确提示，而不是退回通用形态，
@@ -2311,6 +2418,17 @@ pub fn atlascloud_image_operation_schema_for(
 /// 编辑成员的文生图槽位会被移除：留着它等于给用户留一个必然被上游拒绝的
 /// 付费入口（该模型没有文生图形态）。
 fn apply_atlascloud_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if identity == ATLASCLOUD_UPSCALER_MODEL {
+        let replacement = atlascloud_upscaler_schema();
+        let mut changed = false;
+        if let Some(map) = schema.as_object_mut() {
+            changed |= map.remove("text_to_image").is_some();
+            if let Some(slot) = map.get_mut("image_to_image") {
+                if *slot != replacement { *slot = replacement; changed = true; }
+            }
+        }
+        return changed;
+    }
     if is_atlascloud_midjourney_image_model(identity) {
         return apply_atlascloud_midjourney_image_dialect(schema, identity);
     }

@@ -79,28 +79,27 @@
  * 画布预览卡片沿用原站的 350px 方形主体，独立编辑区只复用内部动作。
  */
 .canvas-text-try--compact {
-  min-height: 350px;
-  justify-content: center;
-  padding-block: var(--space-xs);
-  background: var(--color-surface-2);
-  border: var(--rule-thin) solid var(--color-rule-2);
-  border-radius: var(--radius-panel);
-}
-
-.canvas-content-preview.is-selected .canvas-text-try--compact {
-  border-color: var(--color-rule-strong);
+  box-sizing: border-box;
+  height: 100%;
+  justify-content: flex-start;
+  padding: 28px 24px 24px;
 }
 
 .canvas-text-try--compact .canvas-text-try__icon {
-  margin-bottom: var(--space-xs);
+  flex: none;
+  margin-bottom: 17px;
+}
+
+.canvas-text-try--compact .canvas-text-try__actions {
+  width: 100%;
 }
 
 .canvas-text-try--compact .canvas-text-try__label {
-  margin-bottom: var(--space-3xs);
+  margin-bottom: 8px;
 }
 
 .canvas-text-try--compact .canvas-text-try__list {
-  gap: 2px;
+  gap: 4px;
 }
 
 .canvas-text-try--compact .canvas-text-try__item {
@@ -113,8 +112,128 @@
   min-height: 252px;
 }
 
-.react-flow__node .canvas-flow-node .canvas-gen-node.canvas-content-preview[data-node-kind="prompt"] {
+.react-flow__node .canvas-flow-node .canvas-gen-node.canvas-content-preview:is([data-node-kind="prompt"], [data-script-card]) {
+  position: relative;
   width: 350px;
+  height: 350px;
+  min-height: 350px;
+  padding: 0;
+}
+
+.canvas-content-preview:is([data-node-kind="prompt"], [data-script-card]) .canvas-content-preview__surface {
+  height: 100%;
+  box-sizing: border-box;
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: 12px;
+  background: var(--color-surface-2);
+}
+
+.canvas-content-preview.is-selected:is([data-node-kind="prompt"], [data-script-card]) .canvas-content-preview__surface {
+  border-color: var(--color-text-3);
+}
+
+.canvas-content-preview:is([data-node-kind="prompt"], [data-script-card]) .canvas-content-preview__surface > .canvas-gen-node__header {
+  position: absolute;
+  inset: auto 0 calc(100% + 5px);
+  min-height: 18px;
+  padding: 0;
+}
+
+.canvas-content-preview:is([data-node-kind="prompt"], [data-script-card]) .canvas-gen-node__type-icon {
+  width: 14px;
+  height: 14px;
+  background: transparent;
+  color: inherit;
+}
+
+.canvas-text-card__body {
+  display: flex;
+  box-sizing: border-box;
+  height: 100%;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding: 16px;
+}
+
+.canvas-text-card__status, .canvas-text-card__placeholder {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--color-muted);
+}
+
+.canvas-text-card__placeholder {
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.canvas-text-card__edit {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  opacity: 0;
+}
+
+.canvas-content-preview:is(:hover, :focus-within) .canvas-text-card__edit { opacity: 1; }
+.canvas-content-preview:has(.canvas-text-try) .canvas-text-card__edit:not(:focus-visible) { opacity: 0; }
+.canvas-text-reading { overflow-wrap: anywhere; user-select: text; }
+.canvas-text-resource { flex: 1; min-height: 0; user-select: text; cursor: text; }
+.canvas-text-resource .prompt-mention__field { padding: 0; background: transparent; border: 0; }
+.react-flow__node .canvas-flow-node .canvas-text-resource .prompt-mention__input {
+  min-height: 280px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+}
+.canvas-content-preview[data-node-kind="prompt"]:has(.canvas-text-resource:focus-within) .canvas-content-preview__surface {
+  border-color: var(--color-text-3);
+}
+
+.canvas-text-image-picker {
+  box-sizing: border-box;
+  width: min(880px, calc(100vw - 40px));
+  height: min(620px, 82dvh);
+  padding: 0;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: 16px;
+}
+.canvas-text-image-picker[open] { display: flex; }
+.canvas-text-image-picker::backdrop { background: rgb(0 0 0 / 58%); }
+.canvas-text-image-picker > .canvas-feature-picker { flex: 1; min-width: 0; }
+
+.canvas-text-generator.canvas-text-generator--text {
+  border-radius: 20px;
+  background: var(--color-surface-1);
+}
+.canvas-text-generator--text .canvas-text-generator__body { padding: 8px; }
+.canvas-text-generator--text .canvas-text-generator__prompt {
+  padding: 12px 26px 8px 8px;
+  min-height: 96px;
+  max-height: 100px;
+  background: transparent;
+}
+.canvas-text-generator--text .canvas-text-generator__input::placeholder {
+  color: var(--color-muted);
+  opacity: .65;
+}
+.react-flow__node .canvas-flow-node .canvas-text-generator--text .canvas-text-generator__input {
+  background: transparent;
+}
+.canvas-text-generator--text .canvas-text-generator__bar { background: transparent; }
+.canvas-text-generator--text .canvas-text-generator__model {
+  border-color: transparent;
+  background: transparent;
+}
+.canvas-text-generator--text .canvas-text-generator__expand { background: transparent; }
+.canvas-text-generator--text .canvas-text-generator__submit {
+  border-radius: 12px;
+  color: var(--color-surface-1);
+  background: var(--color-text);
 }
 
 /* ── 悬浮生成器面板 ─────────────────────────────────────────────── */

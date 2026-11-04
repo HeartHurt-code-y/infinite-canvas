@@ -449,6 +449,14 @@ const generationTaskSummarySchema = v.looseObject({
   providerConnectionId: v.string(),
   providerDisplayNameSnapshot: v.string(),
   modelDefinitionId: v.string(),
+  /*
+   * 新增字段一律 optional。
+   *
+   * 开发环境下前端由 Vite 实时下发，后端二进制可能还是旧的：字段缺失会让
+   * `looseObject` 的必填键校验失败 → `invokeDesktop` 抛 BackendContractError
+   * → 整页记录列表/历史面板都打不开。新增字段写成 optional，新旧后端都能用。
+   */
+  adapterIdSnapshot: v.optional(v.string()),
   remoteModelIdSnapshot: nullableStringSchema,
   remoteTaskId: nullableStringSchema,
   progress: nullableNumberSchema,
@@ -509,12 +517,14 @@ const providerCallRecordSchema = v.looseObject({
   attemptId: v.string(),
   phase: v.string(),
   request: v.unknown(),
+  requestBytes: v.optional(v.number()),
   sentAt: nullableNumberSchema,
   responseReceivedAt: nullableNumberSchema,
   durationMs: nullableNumberSchema,
   httpStatus: nullableNumberSchema,
   responseHeaders: v.unknown(),
   rawResponse: nullableStringSchema,
+  responseBytes: v.optional(nullableNumberSchema),
   runtimeError: v.unknown(),
 });
 
@@ -537,6 +547,7 @@ export const generationTaskDetailSchema = v.looseObject({
 
 export const generationTaskProgressSchema = v.looseObject({
   summary: generationTaskSummarySchema,
+  logicalRequest: v.unknown(),
   results: v.array(
     v.looseObject({
       taskId: v.string(),
@@ -544,9 +555,11 @@ export const generationTaskProgressSchema = v.looseObject({
       mediaType: generationResultMediaTypeSchema,
       saveStatus: generationResultRecordSchema.entries.saveStatus,
       finalPath: nullableStringSchema,
+      source: v.unknown(),
       error: v.unknown(),
     }),
   ),
+  textOutput: v.optional(v.nullable(textGenerationOutputRecordSchema)),
   finalError: v.unknown(),
 }) satisfies v.GenericSchema<GenerationTaskProgress>;
 

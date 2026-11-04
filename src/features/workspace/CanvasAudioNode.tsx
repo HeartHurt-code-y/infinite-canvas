@@ -12,13 +12,18 @@ import { createPortal } from "react-dom";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { placeFloatingLayer } from "../../components/floatingLayer";
-import { toMediaSrc, type GenerationTaskSummary, type ProviderCatalogEntry } from "../../lib/backend";
+import { backendErrorMessage, toMediaSrc, type GenerationTaskSummary, type ProviderCatalogEntry } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import type { PromptContentEditorSession, PromptContentModule } from "../../lib/promptContent";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
-import { CanvasNodeCardIcon } from "./CanvasNodeCardIcons";
+import { toast } from "../../lib/toast";
+import { artifactFileName, validateArtifactName } from "./artifactNames";
+import { exportArtifactToDesktop } from "./desktopActions";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { CanvasNodeEditorShell } from "./CanvasNodeEditor";
+import { CanvasAudioResultEdit } from "./CanvasAudioResultEdit";
+import type { CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasReferenceTools } from "./CanvasReferenceTools";
+import { MediaNodeTaskStatus, generationTaskNeedsAttention, nodeStatusTasks } from "./VideoGenerationNode";
 import { PromptMentionInput } from "./PromptNodeViews";
 import { CanvasNodeTitle } from "./VideoGenerationNode";
 import {
@@ -59,12 +64,15 @@ import "./CanvasAudioNode.css";
  */
 
 export interface CanvasAudioNodeProps {
+  readonly featureRequest?: CanvasInlineFeatureRequest | undefined;
   readonly node: Extract<GenNodeData, { kind: "audio" }>;
   readonly selected: boolean;
   readonly starting: boolean;
   readonly startError: string | null;
   readonly activeTask: GenerationTaskSummary | null;
   readonly latestTask?: GenerationTaskSummary | null | undefined;
+  readonly tasks: readonly GenerationTaskSummary[];
+  readonly onOpenTask: (taskId: string) => void;
   readonly connectedInputs: readonly ConnectedAssetInput[];
   readonly mentionCandidates: readonly MentionCandidate[];
   readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
@@ -273,6 +281,8 @@ export function CanvasAudioNode({
   startError,
   activeTask,
   latestTask,
+  tasks,
+  onOpenTask,
   connectedInputs,
   mentionCandidates,
   aliveCanvasNodeKeys,
@@ -290,8 +300,11 @@ export function CanvasAudioNode({
   onCloseEditor,
   promptContents,
   previewOutput,
+  featureRequest,
 }: CanvasAudioNodeProps) {
   const config = node.config;
+  const statusTasks = nodeStatusTasks(tasks, latestTask);
+  const showTaskStatus = starting || activeTask != null || statusTasks.some(generationTaskNeedsAttention);
   const models = useMemo(() => audioModelOptions(providerCatalog), [providerCatalog]);
   const promptLabelId = useId();
   const promptHintId = useId();
@@ -300,6 +313,9 @@ export function CanvasAudioNode({
   const { popoverRef, placement } = useAnchoredPopover(formatOpen, formatAnchorRef, 260);
   /* 字数计数要放在所有条件返回之前：它是 hook，不能只在编辑层里调用。 */
   const characterCount = usePromptCharacterCount(promptContents, node.key);
+  const [duration, setDuration] = useState<{ src: string; seconds: number } | null>(null);
+  const playerRef = useRef<HTMLAudioElement>(null);
+  const [exporting, setExporting] = useState(false);
 
   const modelValue = `${config.modelSelection.providerId}::${config.modelSelection.modelDefinitionId}`;
 
@@ -344,12 +360,29 @@ export function CanvasAudioNode({
     : (previewOutput?.previewSrc ?? null);
   const audioSrc = outputSrc ? (toMediaProxyUrl(outputSrc) ?? outputSrc) : null;
   const titleText = node.name ?? "音频节点";
+  const sourceDuration = audioSrc && duration?.src === audioSrc ? duration.seconds : null;
+  const durationSeconds = sourceDuration == null ? null : Math.floor(sourceDuration);
+  const download = async () => {
+    if (!previewOutput?.finalPath || exporting) return;
+    const path = previewOutput.finalPath;
+    const name = previewOutput.name?.trim() || "音频";
+    setExporting(true);
+    try {
+      if (await exportArtifactToDesktop(path, artifactFileName(validateArtifactName(name) ? "音频" : name, path))) {
+        toast.success("音频已保存");
+      }
+    } catch (failure) {
+      toast.error("下载失败：" + backendErrorMessage(failure));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   if (presentation === "card") {
     return (
       <div
         id={`node-preview-${node.key}`}
-        className={`canvas-gen-node canvas-gen-node--audio canvas-node-preview canvas-audio-node${selected ? " is-selected" : ""}`}
+        className={`canvas-gen-node canvas-gen-node--audio canvas-node-preview canvas-audio-node${selected ? " is-selected" : ""}${audioSrc ? " has-audio-result" : ""}`}
         data-connection-target={node.key}
         aria-busy={starting || activeTask != null}
         onMouseDown={(event) => {
@@ -365,15 +398,23 @@ export function CanvasAudioNode({
               onRename={onRename ? (value) => onRename(node.key, value) : undefined}
             />
           </span>
+          {durationSeconds != null ? <span className="canvas-node-toolbar__size">
+            {Math.floor(durationSeconds / 60)}:{String(durationSeconds % 60).padStart(2, "0")}
+          </span> : null}
         </div>
         <div className="canvas-audio-node__card">
           {audioSrc ? (
-            <audio
-              className="canvas-audio-node__player"
-              controls
-              src={audioSrc}
-              aria-label={`${titleText}的生成结果`}
-            />
+            <>
+              <audio key={audioSrc} ref={playerRef} hidden preload="metadata" src={audioSrc}
+                onLoadedMetadata={event => {
+                  const seconds = event.currentTarget.duration;
+                  if (Number.isFinite(seconds) && seconds > 0) setDuration({ src: audioSrc, seconds });
+                }} />
+              <CanvasAudioResultEdit key={audioSrc} nodeKey={node.key} output={previewOutput ?? null}
+                duration={sourceDuration} playerRef={playerRef} providerCatalog={providerCatalog}
+                exporting={exporting} onDownload={() => { void download(); }} onOpen={onCloseEditor}
+                featureRequest={featureRequest} />
+            </>
           ) : (
             <div className="canvas-audio-node__empty">
               <AudioNoteIcon />
@@ -385,8 +426,8 @@ export function CanvasAudioNode({
                   disabled={!onAudioToVideo}
                   title={
                     onAudioToVideo
-                      ? "在右侧建一个视频节点并连入这段音频，不会自动发起付费生成"
-                      : "音频生视频需要先建一个视频节点"
+                      ? "选择音频，连入右侧新建的视频节点"
+                      : "音频生视频暂不可用"
                   }
                   onClick={(event) => {
                     event.stopPropagation();
@@ -408,6 +449,9 @@ export function CanvasAudioNode({
             hint="打开编辑区查看请求设置；提交回执不明确时请在历史中核对原任务。"
           />
         ) : null}
+        {showTaskStatus ? <MediaNodeTaskStatus kind="audio" task={activeTask ?? latestTask ?? null} starting={starting}
+          tasks={statusTasks}
+          onOpenTask={onOpenTask} /> : null}
       </div>
     );
   }
@@ -416,6 +460,9 @@ export function CanvasAudioNode({
     config.modelSelection.providerId && config.modelSelection.modelDefinitionId,
   );
   const counter = `${characterCount}/${AUDIO_NODE_PROMPT_MAX_LENGTH}`;
+  const submitHint = !selectionReady ? "请先选择可用的供应商和语音模型"
+    : characterCount === 0 ? "请输入要生成的音频文本"
+      : characterCount > AUDIO_NODE_PROMPT_MAX_LENGTH ? "音频文本最多 2000 字" : null;
   const languageLabel =
     AUDIO_NODE_LANGUAGES.find((item) => item.value === config.language)?.label ?? "中文";
   const sampleRateLabel =
@@ -484,6 +531,8 @@ export function CanvasAudioNode({
           className="canvas-audio-node__model"
           value={modelValue}
           options={modelOptions}
+          chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={14} />}
+          selectedIcon={<LibTVMediaIcon name="check" size={12} />}
           onChange={(value) => {
             const separator = value.indexOf("::");
             if (separator <= 0) return;
@@ -524,7 +573,7 @@ export function CanvasAudioNode({
           <span className="canvas-audio-node__format-text">
             {languageLabel} · {sampleRateLabel} · {formatLabel}
           </span>
-          <CanvasChromeIcon name="chevron-down" size={14} />
+          <LibTVMediaIcon name="icon-chevron-down-small" size={14} />
         </button>
         <span className="canvas-audio-node__footer-spacer" />
         <button
@@ -540,7 +589,7 @@ export function CanvasAudioNode({
             onTranslatePrompt?.(node.key);
           }}
         >
-          <CanvasChromeIcon name="translate" size={16} />
+          <LibTVMediaIcon name="translate" size={16} />
         </button>
         <button
           type="button"
@@ -555,7 +604,7 @@ export function CanvasAudioNode({
             update({ advancedOpen: !config.advancedOpen });
           }}
         >
-          <CanvasChromeIcon name="adjust" size={16} />
+          <LibTVMediaIcon name="icon-generate-settings1" size={16} />
         </button>
         <span className="canvas-audio-node__counter">{counter}</span>
         {/*
@@ -563,18 +612,17 @@ export function CanvasAudioNode({
           所以这里显示「—」而不是编造一个单价。
         */}
         <span className="canvas-audio-node__cost" title="按供应商实际计费">
-          <CanvasChromeIcon name="lightning" size={12} />
+          <LibTVMediaIcon name="icon-lightning-filled" size={12} />
           <span>—</span>
         </span>
         <button
           type="button"
           className="canvas-gen-node__start"
+          data-canvas-generate=""
           aria-label="开始音频生成"
           aria-describedby={startError ? `audio-start-error-${node.key}` : undefined}
-          title={
-            selectionReady ? "点击开始音频生成" : "请先选择可用的供应商和语音模型"
-          }
-          disabled={starting || !selectionReady || activeTask != null}
+          data-tooltip={submitHint ?? "开始音频生成"}
+          disabled={starting || Boolean(submitHint) || activeTask != null}
           data-state={starting ? "loading" : undefined}
           onMouseDown={(event) => event.stopPropagation()}
           onClick={(event) => {
@@ -584,9 +632,9 @@ export function CanvasAudioNode({
           }}
         >
           {starting ? (
-            <CanvasNodeCardIcon name="spinner" className="spin-icon" size={14} />
+            <LibTVMediaIcon name="icon-loading" className="spin-icon" size={14} />
           ) : (
-            <CanvasChromeIcon name="arrow-up" size={14} />
+            <LibTVMediaIcon name="up-arrow" size={14} />
           )}
         </button>
       </div>
@@ -628,11 +676,10 @@ export function CanvasAudioNode({
         </div>
       </div>
 
-      {starting || activeTask != null ? (
-        <div className="canvas-audio-node__status" role="status" aria-live="polite">
-          <CanvasNodeCardIcon name="spinner" className="spin-icon" size={12} />
-          <span>{starting ? "提交中…" : "正在生成音频"}</span>
-        </div>
+      {showTaskStatus ? (
+        <MediaNodeTaskStatus kind="audio" task={activeTask ?? latestTask ?? null} starting={starting}
+          tasks={statusTasks}
+          onOpenTask={onOpenTask} />
       ) : null}
       {latestTask != null && latestTask.status === "failed" && !startError ? (
         <span className="sr-only">上一次音频生成失败</span>

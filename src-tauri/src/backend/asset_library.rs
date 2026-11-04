@@ -123,6 +123,16 @@ trait AssetPort: Send + Sync {
     /// 解析素材库连接使用的接口方言（依据供应商连接的 adapter_id）。
     fn dialect(&self, provider_connection_id: &str) -> BackendResult<AssetDialect>;
 
+    /// 该连接在**素材库作用域**下实际生效的凭据引用。
+    ///
+    /// 素材库优先使用供应商专用的素材库令牌（`asset-library-token:{连接}`），未配置
+    /// 时回退到兼容旧版的全局引用，最后才是供应商主密钥。素材就是用这把密钥上传的，
+    /// 上游按密钥隔离素材库，因此「这份素材属于哪把密钥」只能从这里问出来。
+    fn asset_library_credential_ref(&self, provider_connection_id: &str) -> BackendResult<String>;
+
+    /// 两个凭据引用背后是不是同一把密钥（上游素材库的隔离边界）。
+    fn credentials_match(&self, left: &str, right: &str) -> bool;
+
     /// 素材库网关判定：给定 provider_connection_id 对应的 base_url 是否为海外平台。
     /// 海外平台（如 konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传。
     fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool>;
@@ -207,6 +217,17 @@ impl AssetPort for ProviderAssetAdapter {
             ARK_ADAPTER_ID => AssetDialect::VolcengineArk,
             _ => AssetDialect::Moyu,
         })
+    }
+
+    fn asset_library_credential_ref(&self, provider_connection_id: &str) -> BackendResult<String> {
+        Ok(self
+            .providers
+            .resolve_asset_library(provider_connection_id)?
+            .api_key_ref)
+    }
+
+    fn credentials_match(&self, left: &str, right: &str) -> bool {
+        self.providers.credentials_match(left, right)
     }
 
     fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool> {
@@ -344,6 +365,10 @@ pub enum AssetDelivery {
     Bytes,
     RemoteReadable {
         destination_provider_connection_id: String,
+        /// 生成请求实际使用的凭据引用（模型绑定了令牌组时是分组凭据，否则是供应商
+        /// 主密钥）。上游素材库按密钥隔离，交给生成端的 `asset://` 引用必须能被这把
+        /// 密钥解析，否则上游会回「The specified asset ... is not found」。
+        destination_credential_ref: String,
     },
 }
 
@@ -2718,10 +2743,22 @@ impl AssetLibrary {
             }
             AssetDelivery::RemoteReadable {
                 destination_provider_connection_id,
+                destination_credential_ref,
             } => {
                 let same_provider_scope =
                     identity.provider_connection_id == destination_provider_connection_id;
-                let reference = if same_provider_scope {
+                // 上游素材库的隔离边界不是「连接」，而是「密钥」：Bearer 令牌网关按
+                // API Key 隔离素材库（同一主机上素材库令牌能取到的素材，生成主密钥
+                // 取不到，会回 `NotFound.asset_id: The specified asset ... is not
+                // found.`）。所以只有当生成请求用的就是上传这份素材的那把密钥时，
+                // 才能把 `asset://<id>` 交给生成端；否则改用上游自己给出的公网可读
+                // 地址（`preview_url`），由上游去拉取。
+                let destination_can_read_asset = same_provider_scope
+                    && self.asset_id_readable_by_destination(
+                        &identity.provider_connection_id,
+                        &destination_credential_ref,
+                    )?;
+                let reference = if destination_can_read_asset {
                     asset.asset_url.clone().or(asset.preview_url.clone())
                 } else {
                     asset.preview_url.clone()
@@ -2739,6 +2776,29 @@ impl AssetLibrary {
                     file_extension: fallback_extension,
                     access: ResolvedAssetAccess::RemoteReference(reference),
                 })
+            }
+        }
+    }
+
+    /// 生成端能不能解析这份素材的 `asset://` 引用。
+    ///
+    /// - 火山方舟：素材 API 走 AK/SK、推理 API 走 API Key，密钥形态不同但同属一个
+    ///   账号，素材按**账号**隔离 → 同一连接下 `asset://` 引用始终可解析。
+    /// - 魔芋方言（Bearer 令牌网关）：素材按**密钥**隔离 → 只有生成请求用的密钥与
+    ///   上传素材的密钥相同（专用素材库令牌 / 令牌组都会让两者不同）时才可解析。
+    fn asset_id_readable_by_destination(
+        &self,
+        owner_provider_connection_id: &str,
+        destination_credential_ref: &str,
+    ) -> BackendResult<bool> {
+        match self.port.dialect(owner_provider_connection_id)? {
+            AssetDialect::VolcengineArk => Ok(true),
+            AssetDialect::Moyu => {
+                let owner_credential_ref =
+                    self.port.asset_library_credential_ref(owner_provider_connection_id)?;
+                Ok(self
+                    .port
+                    .credentials_match(&owner_credential_ref, destination_credential_ref))
             }
         }
     }

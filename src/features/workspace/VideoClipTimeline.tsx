@@ -5,6 +5,8 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import { type MediaReferenceTarget } from "../../lib/backend";
 import { ClipTimelinePlayer } from "./ClipTimelinePlayer";
+import { ClipTextControls } from "./ClipTextControls";
+import { estimateClipWords, clipTypographyIssue, DEFAULT_TEXT_ANIMATION } from "../../lib/clipTypography";
 import { clipOverlap, clipTimelineLayout } from "./clipTimelineLayout";
 import { toMediaSrc } from "../../lib/backend";
 import { videoPreparationClient } from "../../lib/videoPreparation";
@@ -74,7 +76,7 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
   const identitiesRef = useRef(new Map<string, string>());
   const [selected, setSelected] = useState(0);
   const [selectedOverlay, setSelectedOverlay] = useState<string | null>(null);
-  const [seek, setSeek] = useState({ index: 0, nonce: 0 });
+  const [seek, setSeek] = useState<{ index: number; nonce: number; time?: number }>({ index: 0, nonce: 0 });
   const [timelineTime, setTimelineTime] = useState(0);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
@@ -83,6 +85,14 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
   const [outputPreview, setOutputPreview] = useState<{ path: string; name: string } | null>(null);
   const [zoom, setZoom] = useState(1);
   const sendingRef = useRef(false);
+  const nativePickerRef = useRef(false);
+  useEffect(() => {
+    const guard = (event: KeyboardEvent) => {
+      if (nativePickerRef.current && event.key === "Escape" && !event.isComposing && event.keyCode !== 229) { event.preventDefault(); event.stopImmediatePropagation(); }
+    };
+    document.addEventListener("keydown", guard, true);
+    return () => document.removeEventListener("keydown", guard, true);
+  }, []);
   const autoStartedRef = useRef(false);
   const newestRef = useRef(jobs[0]?.id);
   const initialRef = useRef({ inputs, saved: autoStart ? undefined : saved, agent: Boolean(onRunAgent) || jobs.some(job => job.agent != null) });
@@ -143,7 +153,7 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
   function valid(next: readonly ClipEdit[], options: ClipTimelineSettings) {
     return next.every(clip => Number.isFinite(clip.start) && Number.isFinite(clip.end) && clip.start >= 0 && clip.end - clip.start >= 0.04
       && (!clip.transition || Number.isFinite(clip.transition.seconds) && clip.transition.seconds >= 0.04 && clip.transition.seconds <= 2))
-      && options.overlays.every(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end - item.start >= 0.04 && item.end <= 300.1);
+      && options.overlays.every(item => Number.isFinite(item.start) && Number.isFinite(item.end) && item.start >= 0 && item.end - item.start >= 0.04 && item.end <= 300.1 && !clipTypographyIssue(item));
   }
   function chooseClip(index: number) {
     setSelected(index); setSelectedOverlay(null); setOutputPreview(null); setSeek(current => ({ index, nonce: current.nonce + 1 }));
@@ -156,7 +166,18 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
   }
   function patch(value: Partial<ClipEdit>) { change(clips.map((clip, index) => index === selected ? { ...clip, ...value } : clip)); }
   function changeSettings(value: Partial<ClipTimelineSettings>) { change(clips, selected, { ...settings, ...value }); }
-  function patchOverlay(value: Partial<ClipOverlay>) { changeSettings({ overlays: settings.overlays.map(item => item.id === selectedOverlay ? { ...item, ...value } : item) }); }
+  function patchOverlay(value: Partial<ClipOverlay>) {
+    changeSettings({ overlays: settings.overlays.map(item => {
+      if (item.id !== selectedOverlay) return item;
+      const next = { ...item, ...value };
+      if (next.highlight && value.text != null && value.text !== item.text) next.highlight = { ...next.highlight, words: estimateClipWords(next.text, Math.max(0.04, next.end - next.start)) };
+      else if (next.highlight && (value.start != null || value.end != null) && Number.isFinite(next.end - next.start) && next.end > next.start) {
+        const factor = (next.end - next.start) / (item.end - item.start);
+        next.highlight = { ...next.highlight, words: next.highlight.words.map(word => ({ ...word, start: word.start * factor, end: word.end * factor })) };
+      }
+      return next;
+    }) });
+  }
   function history(direction: "undo" | "redo") {
     if (blocked) return;
     const source = direction === "undo" ? undoRef : redoRef;
@@ -199,6 +220,8 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
   }
   async function render(intelligent: boolean) {
     if (sendingRef.current || blocked || !clips.length) return;
+    const typographyIssue = settings.overlays.map(clipTypographyIssue).find(Boolean);
+    if (typographyIssue) { setError(new Error(typographyIssue)); return; }
     if (!valid(clips, settings) || clips.some(clip => clip.end > (durations.get(JSON.stringify(clip.target)) ?? Infinity) + 0.01)) { setError(new Error("裁切或文字轨时间无效，请检查开始和结束时间。")); return; }
     if (!intelligent && total > 300.1) { setError(new Error("手动剪辑总时长不能超过300秒，请裁短素材。")); return; }
     sendingRef.current = true; setSending(true); setError(null);
@@ -219,7 +242,9 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
     if (running || sendingRef.current) return;
     sendingRef.current = true; setSending(true); setError(null);
     try {
+      nativePickerRef.current = !path;
       const project = path ? await readClipProject(path) : await importClipProject();
+      nativePickerRef.current = false;
       if (!project) return;
       const values = new Map(durations);
       for (const clip of project.clips) {
@@ -233,7 +258,7 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
       setSeek(current => ({ index: 0, nonce: current.nonce + 1 })); onSave(project.clips, project.settings); onImportParams(project.params);
       dialogRef.current?.querySelector(".clip-timeline__body")?.scrollTo({ top: 0, behavior: "smooth" });
     } catch (failure) { setError(failure); }
-    finally { sendingRef.current = false; setSending(false); }
+    finally { nativePickerRef.current = false; sendingRef.current = false; setSending(false); }
   }
   async function addConnectedVideo(input: VideoClipInput) {
     if (blocked || sendingRef.current || !input.target || clips.length >= 60) return;
@@ -281,17 +306,25 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
         <CanvasSelect ariaLabel={kind === "text" ? "规划模型" : kind === "video" ? "画面模型" : "语音模型"} disabled={running || sending} value={JSON.stringify([models[kind].providerId, models[kind].modelDefinitionId])}
           options={[{ value: "", label: "请选择模型" }, ...modelOptions[kind].map(option => ({ value: JSON.stringify([option.providerId, option.modelDefinitionId]), label: option.label }))]}
           onChange={value => { const choice = modelOptions[kind].find(option => JSON.stringify([option.providerId, option.modelDefinitionId]) === value); if (choice) onModelChange(kind, choice); }} /></label>)}</div><p>按本节点保存；已有任务使用受理时的模型。</p></details>
+      <div className="clip-timeline__editor">
       {outputPreview ? <section className="clip-timeline__render-preview" aria-label="成片预览"><strong>{outputPreview.name}</strong><video src={toMediaSrc(outputPreview.path)} controls preload="metadata" onError={() => setError(new Error("成片无法播放，请检查本地文件。"))} /><button type="button" onClick={() => setOutputPreview(null)}>返回轨道预览</button></section>
         : clips.length ? <ClipTimelinePlayer clips={clips} settings={settings} params={params} seek={seek} onPosition={onPosition} onError={setError} />
         : <section className="clip-timeline__preview" role="status">{loading ? "正在读取原视频…" : job?.status === "completed" ? "成片已完成，可在下方预览或载入任一产物编辑" : running ? "Agent 正在处理，成片会自动保存到画布" : "连接素材，或在下方发起 Agent 创作"}</section>}
       <section className="clip-timeline__inspector" aria-label="轨道设置">
         {overlay ? <fieldset disabled={blocked}><legend>{overlay.kind === "text" ? "独立文字轨" : "独立字幕轨"}</legend>
           <label>内容<textarea aria-label="轨道文字内容" rows={3} maxLength={2000} value={overlay.text} onChange={event => patchOverlay({ text: event.target.value })} /></label>
+          <ClipTextControls key={overlay.id} overlay={overlay} onChange={patchOverlay} onPickingChange={value => { nativePickerRef.current = value; }} onSeek={time => setSeek(current => ({ index: selected, time, nonce: current.nonce + 1 }))} />
           <div className="clip-timeline__field-pair"><label>出现（秒）<input aria-label="文字出现时间" type="number" min={0} max={300} step={0.01} value={Number.isFinite(overlay.start) ? overlay.start : ""} onChange={event => patchOverlay({ start: event.target.valueAsNumber })} /></label><label>结束（秒）<input aria-label="文字结束时间" type="number" min={0} max={300} step={0.01} value={Number.isFinite(overlay.end) ? overlay.end : ""} onChange={event => patchOverlay({ end: event.target.valueAsNumber })} /></label></div>
           <div className="clip-timeline__field-pair"><label>水平位置 %<input aria-label="文字水平位置" type="range" min={0} max={100} value={overlay.x} onChange={event => patchOverlay({ x: event.target.valueAsNumber })} /></label><label>垂直位置 %<input aria-label="文字垂直位置" type="range" min={0} max={100} value={overlay.y} onChange={event => patchOverlay({ y: event.target.valueAsNumber })} /></label></div>
           <label>字号（画面高度 %）<input aria-label="文字字号" type="range" min={1} max={20} step={0.5} value={overlay.size} onChange={event => patchOverlay({ size: event.target.valueAsNumber })} /></label>
           <label>文字颜色<input type="color" value={overlay.color} onChange={event => patchOverlay({ color: event.target.value })} /></label>
-          <label className="clip-timeline__check"><input type="checkbox" checked={overlay.bold} onChange={event => patchOverlay({ bold: event.target.checked })} />粗体</label><label className="clip-timeline__check"><input type="checkbox" checked={overlay.background} onChange={event => patchOverlay({ background: event.target.checked })} />半透明背景</label>
+          {!overlay.font ? <label className="clip-timeline__check"><input type="checkbox" checked={overlay.bold} onChange={event => patchOverlay({ bold: event.target.checked, weight: event.target.checked ? 700 : 400 })} />粗体</label> : null}<label className="clip-timeline__check"><input type="checkbox" checked={overlay.background} onChange={event => patchOverlay({ background: event.target.checked })} />半透明背景</label>
+          <button type="button" onClick={() => changeSettings({ overlays: settings.overlays.map(item => item.kind !== overlay.kind || item.id === overlay.id ? item : {
+            ...item, font: overlay.font ?? null, weight: overlay.weight ?? (overlay.bold ? 700 : 400), bold: overlay.bold,
+            color: overlay.color, background: overlay.background,
+            animation: overlay.animation ?? DEFAULT_TEXT_ANIMATION,
+            highlight: overlay.highlight ? { ...overlay.highlight, words: item.highlight?.words.map(word => word.text).join("") === item.text && item.highlight.words.length ? item.highlight.words : estimateClipWords(item.text, item.end - item.start) } : { enabled: false, textColor: "#fff36aff", backgroundColor: "#7148e680", words: [] },
+          }) })}>应用样式到所有{overlay.kind === "subtitle" ? "字幕" : "文字"}</button>
           {overlay.kind === "subtitle" && settings.subtitles === "soft" ? <p>当前导出可关闭字幕。位置与颜色需选择「烧录字幕」后写入画面。</p> : null}
           <button type="button" onClick={() => { changeSettings({ overlays: settings.overlays.filter(item => item.id !== overlay.id) }); setSelectedOverlay(null); }}>删除这条文字</button><button type="button" onClick={() => setSelectedOverlay(null)}>返回片段设置</button>
         </fieldset> : selectedClip ? <fieldset disabled={blocked}><legend>{selectedClip.name}</legend>
@@ -305,6 +338,7 @@ export function VideoClipTimeline({ name, inputs, saved, savedSettings, params, 
           <div className="clip-timeline__actions"><button type="button" disabled={playhead <= selectedClip.start + 0.04 || playhead >= selectedClip.end - 0.04} onClick={() => { const next = [...clips]; next.splice(selected, 1, { ...selectedClip, end: playhead, transition: null }, { ...selectedClip, start: playhead }); change(next); }}>在播放头分割</button><button type="button" disabled={clips.length < 2} onClick={() => change(clips.filter((_, index) => index !== selected))}>删除片段</button></div>
         </fieldset> : null}
       </section>
+      </div>
       {inputs.some(input => input.nodeType === "video" && input.target) ? <details className="clip-timeline__connected"><summary>加入已连接视频</summary><div>{inputs.filter(input => input.nodeType === "video" && input.target).map(input => <button key={input.key} type="button" disabled={blocked || clips.length >= 60} onClick={() => { void addConnectedVideo(input); }}>加入轨道：{input.name}</button>)}</div><p>明确加入所选素材；不会重置已有剪辑。每次加入可用撤销恢复。</p></details> : null}
       <section className="clip-timeline__sequence" aria-label="视频轨道">
         <div className="clip-timeline__sequence-title"><strong>视频轨道</strong><output>{clips.length} 段 · {Number.isFinite(total) ? formatTime(total) : "时间待修正"}</output><label>时间轴缩放<input aria-label="时间轴缩放" type="range" min={1} max={5} step={0.5} value={zoom} onChange={event => setZoom(event.target.valueAsNumber)} /></label></div>

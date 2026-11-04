@@ -1,14 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ErrorAlert } from "../../components/ErrorAlert";
-import { CanvasNodeCardIcon } from "./CanvasNodeCardIcons";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
-import { toMediaSrc, type GenerationTaskSummary } from "../../lib/backend";
+import { CanvasImageIcon } from "./CanvasImageIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
+import { CanvasVideoResultActions } from "./CanvasVideoResultActions";
+import { CanvasVideoFrameCrop } from "./CanvasVideoFrameCrop";
+import type { CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
+import { CanvasImageResultActions } from "./CanvasImageResultActions";
+import { CanvasImageInlineEditor, type CanvasImageTransform } from "./CanvasImageInlineEditor";
+import { CanvasImageRegionEditor, type StartImageRegionEdit } from "./CanvasImageRegionEditor";
+import { isDesktopRuntime, toMediaSrc, type GenerationTaskSummary } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import type { PromptContentModule } from "../../lib/promptContent";
 import { validateArtifactName } from "./artifactNames";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { useNodeInView } from "./mediaPreview";
 import { useLocalVideoPoster } from "./localVideoPoster";
+import { imageGenerationSlots } from "./imageNodeResults";
 import {
   TASK_STATUS_LABELS,
   isRunningTaskStatus,
@@ -112,51 +119,95 @@ export function CanvasNodeTitle({
   );
 }
 
+export function CanvasMediaNodeTitle({ kind, title, pixelSize, onRename, processing = false }: {
+  readonly kind: "image" | "video";
+  readonly title: string;
+  readonly pixelSize?: { readonly width: number; readonly height: number } | null;
+  readonly onRename?: ((name: string) => void) | undefined;
+  readonly processing?: boolean;
+}) {
+  const dimensions = pixelSize ? `${pixelSize.width} × ${pixelSize.height}` : null;
+  return <div className="canvas-node-toolbar canvas-node-toolbar--media">
+    <span className="canvas-node-toolbar__type">
+      <LibTVMediaIcon name={kind === "video" ? "icon-play-filled-small" : "icon-image-filled"}
+        className="canvas-node-toolbar__icon" size={14} />
+      <CanvasNodeTitle title={title} onRename={onRename} />
+    </span>
+    {processing ? <span className="canvas-node-toolbar__size">云端处理中</span> :
+      dimensions ? <span className="canvas-node-toolbar__size">{dimensions}</span> : null}
+  </div>;
+}
+
 export function MediaNodeTaskStatus({
   task,
   starting,
+  tasks,
+  onOpenTask,
   hasResult = false,
   kind = "video",
 }: {
-  readonly kind?: "image" | "video";
+  readonly kind?: "image" | "video" | "audio";
   readonly task: GenerationTaskSummary | null;
   readonly starting: boolean;
   readonly hasResult?: boolean;
+  readonly tasks?: readonly GenerationTaskSummary[] | undefined;
+  readonly onOpenTask?: ((taskId: string) => void) | undefined;
 }) {
-  const busy = starting || (task != null && isRunningTaskStatus(task.status));
+  const items = tasks?.length ? tasks : task ? [task] : [];
+  const running = items.filter(item => isRunningTaskStatus(item.status) && item.queryHealth !== "degraded");
+  const failed = items.filter(generationTaskNeedsAttention);
+  const succeeded = items.filter(item => item.status === "succeeded").length;
+  const cancelled = items.filter(item => item.status === "cancelled").length;
+  const busy = starting || running.length > 0;
+  const displayTask = task ?? running[0] ?? failed[0] ?? items[0];
   const progress =
-    task?.progress == null ? null : Math.min(100, Math.max(0, Math.round(task.progress)));
+    displayTask?.progress == null || items.length > 1 ? null : Math.min(100, Math.max(0, Math.round(displayTask.progress)));
+  const label = items.length > 1
+    ? [running.length ? `${running.length} 个进行中` : "", succeeded ? `${succeeded} 个已完成` : "", failed.length ? `${failed.length} 个需处理` : "", cancelled ? `${cancelled} 个已取消` : ""].filter(Boolean).join(" · ")
+    : starting ? "提交中…" : displayTask ? generationTaskStateText(displayTask) : hasResult ? "已生成" : "待生成";
   return (
     <div className="video-node-status" role="status" aria-live="polite">
-      <CanvasNodeCardIcon
-        name={busy ? "spinner" : task?.status === "failed" ? "warning" : "done"}
-        className={busy ? "spin-icon" : ""}
-        size={12}
-      />
+      <LibTVMediaIcon name={busy ? "icon-loading" : failed.length ? "warning-circle-filled" : "check"}
+        className={busy ? "spin-icon" : ""} size={12} />
       <span>
-        {starting
-          ? "提交中…"
-          : task
-            ? (TASK_STATUS_LABELS[task.status] ?? "正在生成")
-            : hasResult
-              ? "已生成"
-              : "待生成"}
+        {label}
       </span>
       {progress != null ? <strong>{progress}%</strong> : null}
-      {task && busy ? (
+      {displayTask && busy ? (
         <span
           className="video-node-status__progress"
           role="progressbar"
-          aria-label={kind === "image" ? "图片节点生成进度" : "视频节点生成进度"}
+          aria-label={`${kind === "image" ? "图片" : kind === "audio" ? "音频" : "视频"}节点生成进度`}
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={progress ?? undefined}
         >
-          <i style={{ width: `${progress ?? 18}%` }} />
+          <i className={progress == null ? "is-indeterminate" : undefined} style={progress == null ? undefined : { width: `${progress}%` }} />
         </span>
       ) : null}
+      {displayTask && onOpenTask ? <button type="button" className="video-node-status__details nodrag nopan" aria-label="查看生成任务"
+        onMouseDown={event => event.stopPropagation()}
+        onClick={event => { event.stopPropagation(); onOpenTask(failed[0]?.id ?? displayTask.id); }}>查看任务</button> : null}
     </div>
   );
+}
+
+export function generationTaskStateText(task: GenerationTaskSummary | null): string {
+  if (!task) return "正在读取任务…";
+  if (task.queryHealth === "degraded") return "查询已停止";
+  return TASK_STATUS_LABELS[task.status] ?? "正在生成";
+}
+
+export function generationTaskNeedsAttention(task: GenerationTaskSummary): boolean {
+  return task.status === "failed" || task.status === "interrupted" || task.status === "unknown" || task.queryHealth === "degraded";
+}
+
+export function nodeStatusTasks(
+  tasks: readonly GenerationTaskSummary[],
+  latestTask: GenerationTaskSummary | null | undefined,
+): readonly GenerationTaskSummary[] {
+  return tasks.filter(task => isRunningTaskStatus(task.status) ||
+    (task.id === latestTask?.id && generationTaskNeedsAttention(task)));
 }
 
 export function MediaGenerationPreview({
@@ -166,6 +217,8 @@ export function MediaGenerationPreview({
   starting,
   activeTask,
   latestTask,
+  tasks,
+  onOpenTask,
   inputs,
   output,
   startError,
@@ -176,13 +229,23 @@ export function MediaGenerationPreview({
   onRename,
   onVideoPreset,
   onImagePreset,
+  onSelectImageResult,
+  onPreviewResult,
+  onEnhanceImage,
+  onEditImageRegion,
+  providerCatalog,
+  onCloseEditor,
+  featureRequest,
 }: {
+  readonly featureRequest?: CanvasInlineFeatureRequest | undefined;
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly selected: boolean;
   readonly editing: boolean;
   readonly starting: boolean;
   readonly activeTask: GenerationTaskSummary | null;
   readonly latestTask?: GenerationTaskSummary | null | undefined;
+  readonly tasks: readonly GenerationTaskSummary[];
+  readonly onOpenTask: (taskId: string) => void;
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly output?: OutputNodeData | null | undefined;
   readonly promptContents?: PromptContentModule | undefined;
@@ -200,7 +263,13 @@ export function MediaGenerationPreview({
   readonly onRemove: (key: string) => void;
   readonly onRename?: ((key: string, name: string) => void) | undefined;
   readonly onVideoPreset?: ((preset: "long" | "frames" | "first") => void) | undefined;
-  readonly onImagePreset?: ((preset: "image_to_image" | "upscale") => void) | undefined;
+  readonly onImagePreset?: ((mode: "image_to_image" | "upscale") => void) | undefined;
+  readonly onSelectImageResult?: ((key: string, resultKey: string) => void) | undefined;
+  readonly onPreviewResult: (key: string) => void;
+  readonly onEnhanceImage: (key: string, preview: OutputNodeData) => void;
+  readonly onEditImageRegion: StartImageRegionEdit;
+  readonly providerCatalog: readonly import("../../lib/backend").ProviderCatalogEntry[];
+  readonly onCloseEditor?: (() => void) | undefined;
 }) {
   const elementRef = useRef<HTMLDivElement>(null);
   /**
@@ -212,6 +281,36 @@ export function MediaGenerationPreview({
   const { containerRef: mediaRef, inView } = useNodeInView<HTMLDivElement>({
     heavy: Boolean(output?.finalPath ?? output?.previewSrc),
   });
+  const [imagesExpanded, setImagesExpanded] = useState(false);
+  const [imageEdit, setImageEdit] = useState<{ mode: CanvasImageTransform; source: OutputNodeData } | null>(null);
+  const [mediaHost, setMediaHost] = useState<HTMLDivElement | null>(null);
+  const setMediaRef = useCallback((element: HTMLDivElement | null) => {
+    mediaRef(element);
+    setMediaHost(element);
+  }, [mediaRef]);
+  const activeImageEdit = imageEdit && imageEdit.source.key === output?.key &&
+    imageEdit.source.taskId === output.taskId && imageEdit.source.resultKey === output.resultKey &&
+    imageEdit.source.finalPath === output.finalPath ? imageEdit : null;
+  useEffect(() => {
+    if (imageEdit && !activeImageEdit) setImageEdit(null);
+  }, [activeImageEdit, imageEdit]);
+  const openImageEdit = useCallback((mode: CanvasImageTransform, source: OutputNodeData) => {
+    onCloseEditor?.();
+    setImagesExpanded(false);
+    setImageEdit({ mode, source });
+  }, [onCloseEditor]);
+  useEffect(() => {
+    if (featureRequest?.action.kind !== "image") return;
+    featureRequest.onHandled();
+    if (output?.finalPath === featureRequest.sourcePath) openImageEdit(featureRequest.action.mode, output);
+  }, [featureRequest, openImageEdit, output]);
+  const imageResults = node.kind === "image" ? (node.imageGeneration?.results ?? []).filter(result => result.finalPath || result.previewSrc) : [];
+  const imageSlots = node.kind === "image" ? imageGenerationSlots(node, tasks) : [];
+  const showGallery = imagesExpanded && imageSlots.length > 1;
+  const orderedSlots = [...imageSlots].sort((a, b) => Number(b.result?.resultKey === output?.resultKey) - Number(a.result?.resultKey === output?.resultKey));
+  const currentTasks = node.kind === "image" && node.imageGeneration
+    ? tasks.filter(task => node.imageGeneration?.taskIds.includes(task.id))
+    : nodeStatusTasks(tasks, latestTask);
   const isVideo = node.kind === "video";
   const kindLabel = isVideo ? "视频生成" : "图片生成";
   /** 原站标题条上的类型名：图片节点 / 视频节点。 */
@@ -227,6 +326,7 @@ export function MediaGenerationPreview({
   const outputSrc = output?.finalPath ? toMediaSrc(output.finalPath) : output?.previewSrc;
   const mediaSrc = outputSrc ? (toMediaProxyUrl(outputSrc) ?? outputSrc) : null;
   const name = nodeName;
+  const playerRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     const element = elementRef.current;
@@ -250,8 +350,10 @@ export function MediaGenerationPreview({
       data-connection-target={node.key}
       data-video-node-key={isVideo ? node.key : undefined}
       aria-busy={starting || activeTask != null}
+      data-image-crop-active={activeImageEdit && activeImageEdit.mode !== "rotate" ? "" : undefined}
       onMouseDown={(event) => {
-        if ((event.target as Element).closest("button, input, video[controls], details, summary"))
+        if ((activeImageEdit && activeImageEdit.mode !== "rotate") ||
+            (event.target as Element).closest("button, input, video[controls], details, summary, [data-canvas-image-tool]"))
           return;
         onSelect(node.key);
         onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
@@ -263,50 +365,42 @@ export function MediaGenerationPreview({
         时不在 ReactFlowProvider 里，NodeToolbar 会直接抛错。普通绝对定位头
         视觉等价，且任何上下文都安全。
       */}
-      <div className="canvas-node-toolbar">
-        <span className="canvas-node-toolbar__type">
-          <CanvasNodeCardIcon
-            name={isVideo ? "video" : "image"}
-            className="canvas-node-toolbar__icon"
-            size={14}
-          />
-          <CanvasNodeTitle
-            title={titleText}
-            onRename={onRename ? (value) => onRename(node.key, value) : undefined}
-          />
-          {isVideo ? null : (
-            <CanvasNodeCardIcon name="shield" className="canvas-node-toolbar__shield" size={14} />
-          )}
-        </span>
-        {pixelSize ? (
-          <span
-            className="canvas-node-toolbar__size"
-            title={`${pixelSize.width} × ${pixelSize.height}`}
-          >
-            {pixelSize.width} × {pixelSize.height}
-          </span>
-        ) : null}
-      </div>
+      <CanvasMediaNodeTitle kind={node.kind} title={titleText} pixelSize={pixelSize}
+        onRename={onRename ? value => onRename(node.key, value) : undefined} />
 
       <div
-        ref={mediaRef}
-        className={`canvas-node-preview__media ${isVideo ? "video-generation-preview__media" : "image-generation-preview__media"}`}
+        ref={setMediaRef}
+        className={`canvas-node-preview__media ${isVideo ? "video-generation-preview__media" : "image-generation-preview__media"}${showGallery ? " canvas-node-preview__media--gallery" : ""}`}
         style={
-          pixelSize
+          showGallery ? { height: "auto" } : pixelSize
             ? { aspectRatio: `${pixelSize.width} / ${pixelSize.height}`, height: "auto" }
             : undefined
         }
         aria-label={`${name}的媒体预览`}
       >
+        {mediaSrc && output?.origin === "generation" ? <span className="canvas-media-ai-badge">AI 生成</span> : null}
         {/*
-          媒体右上角的唯一动作按钮。原站同一位置放的是「替换素材」
-          （24×24、bg-black/40、backdrop-blur、圆角 6px、图标 14px），
-          本项目把同一个位置给「编辑」，编辑区在选中节点后展开在节点下方。
+          点击节点即可编辑；仅在键盘聚焦时显示编辑入口，供键盘操作与焦点恢复使用。
         */}
-        {onEdit || onSelect ? (
+        {node.kind === "image" && !activeImageEdit ? (
+          <CanvasImageResultActions node={node} output={output} onPreview={onPreviewResult} onEnhance={onEnhanceImage}
+            onTransform={openImageEdit} />
+        ) : null}
+        {isVideo ? <CanvasVideoFrameCrop nodeKey={node.key} /> : null}
+        {isVideo && output?.finalPath && mediaSrc ? (
+          <CanvasVideoResultActions key={output.finalPath} nodeKey={node.key} output={output} src={mediaSrc} playerRef={playerRef}
+            onPreview={onPreviewResult} featureRequest={featureRequest} />
+        ) : null}
+        {!activeImageEdit && imageSlots.length > 1 ? <button type="button" className="canvas-image-count nodrag nopan"
+          aria-label={showGallery ? "收起图片" : `展开 ${imageSlots.length} 张图片及生成进度`}
+          aria-expanded={showGallery} aria-controls={showGallery ? `image-results-${node.key}` : undefined}
+          onClick={event => { event.stopPropagation(); setImagesExpanded(!showGallery); }}>
+          <LibTVMediaIcon name="imageset" size={14} />{showGallery ? "收起" : `${imageResults.length}/${imageSlots.length}`}
+        </button> : null}
+        {!activeImageEdit && (onEdit || onSelect) ? (
           <button
             type="button"
-            className="canvas-node-preview__edit"
+            className="canvas-node-preview__edit canvas-node-preview__edit--keyboard"
             data-open-video-editor={isVideo ? node.key : undefined}
             data-open-node-editor={node.key}
             aria-label={`编辑${kindLabel}：${name}`}
@@ -318,15 +412,49 @@ export function MediaGenerationPreview({
               (onEdit ?? onSelect)(node.key);
             }}
           >
-            <CanvasNodeCardIcon name="edit" size={14} />
+            <LibTVMediaIcon name="pencil" size={14} />
           </button>
         ) : null}
-        {mediaSrc && isVideo ? (
+        {showGallery ? (
+          <div id={`image-results-${node.key}`} className="canvas-image-results nodrag nopan">
+            {orderedSlots.map(slot => {
+              const result = slot.result;
+              const src = result?.finalPath ? toMediaSrc(result.finalPath) : result?.previewSrc;
+              const primary = result?.resultKey === output?.resultKey;
+              const label = `图片 ${imageSlots.findIndex(item => item.key === slot.key) + 1}`;
+              const slotStatus = slot.task?.status === "succeeded" ? "正在保存结果…" : generationTaskStateText(slot.task);
+              if (!src || !result) return <button key={slot.key} type="button"
+                className="canvas-image-results__tile canvas-image-results__pending"
+                aria-label={`${label} · ${slotStatus}`}
+                data-failed={slot.task ? generationTaskNeedsAttention(slot.task) || undefined : undefined}
+                onClick={event => { event.stopPropagation(); if (slot.task) onOpenTask(slot.task.id); }}>
+                <LibTVMediaIcon name={slot.task && generationTaskNeedsAttention(slot.task) ? "warning-circle-filled" : "icon-loading"} size={20}
+                  className={slot.task && isRunningTaskStatus(slot.task.status) && slot.task.queryHealth !== "degraded" ? "spin-icon" : ""} />
+                <span>{slotStatus}</span>
+                {slot.task?.progress != null && isRunningTaskStatus(slot.task.status) ? <small>{Math.min(100, Math.max(0, Math.round(slot.task.progress)))}%</small> : null}
+              </button>;
+              return <button key={slot.key} type="button" className="canvas-image-results__tile"
+                aria-pressed={primary} aria-label={`${primary ? "当前主图" : "设为主图"}：${label}`} onClick={event => {
+                  event.stopPropagation();
+                  if (!primary) onSelectImageResult?.(node.key, result.resultKey);
+                }}>
+                <img src={inView ? (toMediaProxyUrl(src) ?? src) : undefined} alt={label} draggable={false} decoding="async"
+                  onLoad={primary ? event => {
+                    const image = event.currentTarget;
+                    if (image.naturalWidth > 0 && image.naturalHeight > 0)
+                      setPixelSize({ width: image.naturalWidth, height: image.naturalHeight });
+                  } : undefined} />
+                {!primary ? <span className="canvas-image-results__choose">设为主图</span> : null}
+              </button>;
+            })}
+          </div>
+        ) : mediaSrc && isVideo ? (
           <video
+            ref={playerRef}
             key={output?.key}
             src={inView ? mediaSrc : undefined}
             poster={poster.src ?? undefined}
-            controls
+            controls={!output?.finalPath || !isDesktopRuntime()}
             playsInline
             preload="metadata"
             aria-label={`${name}的生成结果`}
@@ -358,24 +486,26 @@ export function MediaGenerationPreview({
           )
         ) : isVideo && !starting && !activeTask ? (
           <div className="canvas-video-empty">
-            <CanvasNodeCardIcon name="video" size={52} />
+            <LibTVMediaIcon name="icon-play-filled-large" size={78} />
             <span>尝试：</span>
-            <button type="button" onClick={() => onVideoPreset?.("long")} title="规划镜头、分段生成并合成成片">∞ <span>5分钟超长视频</span></button>
-            <button type="button" onClick={() => onVideoPreset?.("frames")}><CanvasChromeIcon name="assets" size={16} /><span>首尾帧生成视频</span></button>
-            <button type="button" onClick={() => onVideoPreset?.("first")}><CanvasChromeIcon name="universal" size={16} /><span>首帧生成视频</span></button>
+            <button type="button" onClick={() => onVideoPreset?.("long")} data-tooltip="规划镜头、分段生成并合成成片"><LibTVMediaIcon name="mode-long-video2video" size={16} /><span>5分钟超长视频</span></button>
+            <button type="button" onClick={() => onVideoPreset?.("frames")}><LibTVMediaIcon name="layers-f" size={14} /><span>首尾帧生成视频</span></button>
+            <button type="button" onClick={() => onVideoPreset?.("first")}><LibTVMediaIcon name="sparkle-f" size={14} /><span>首帧生成视频</span></button>
           </div>
         ) : !isVideo && !starting && !activeTask ? (
           <div className="canvas-image-empty">
-            <CanvasNodeCardIcon name="image" size={52} />
+            <CanvasImageIcon name="empty" size={90} />
             <span>尝试：</span>
-            <button type="button" onClick={() => onImagePreset?.("image_to_image")}><CanvasChromeIcon name="image" size={16} /><span>图生图</span></button>
-            <button type="button" onClick={() => onImagePreset?.("upscale")}><CanvasChromeIcon name="upscale" size={16} /><span>图片高清</span></button>
+            <div className="canvas-image-empty__actions">
+              <button type="button" onClick={() => onImagePreset?.("image_to_image")}><CanvasImageIcon name="upload" size={14} /><span>图生图</span></button>
+              <button type="button" onClick={() => onImagePreset?.("upscale")}><LibTVMediaIcon name="hd" size={16} /><span>图片高清</span></button>
+            </div>
           </div>
         ) : (
           <span
             className={`canvas-node-preview__empty ${isVideo ? "video-generation-preview__empty" : "image-generation-preview__empty"}`}
           >
-            <CanvasNodeCardIcon name={isVideo ? "video" : "image"} size={28} />
+            <LibTVMediaIcon name={isVideo ? "icon-play-filled-large" : "icon-image-filled"} size={28} />
             <span>
               {starting || activeTask
                 ? isVideo
@@ -390,14 +520,25 @@ export function MediaGenerationPreview({
         )}
       </div>
 
+      {activeImageEdit?.mode === "outpaint" || activeImageEdit?.mode === "repaint" ? (
+        <CanvasImageRegionEditor mode={activeImageEdit.mode} mediaHost={mediaHost} pixelSize={pixelSize}
+          nodeKey={node.key} source={activeImageEdit.source} providers={providerCatalog} onStart={onEditImageRegion}
+          onClose={() => setImageEdit(null)} />
+      ) : activeImageEdit ? (
+        <CanvasImageInlineEditor mode={activeImageEdit.mode} nodeKey={node.key} output={activeImageEdit.source}
+          mediaHost={mediaHost} onClose={() => setImageEdit(null)} />
+      ) : null}
+
       {/*
         生成状态：原站的节点卡上没有常驻状态条（状态在编辑层里），所以这里只在
         有任务在跑时叠一块浮层，静止状态的卡片就是「媒体 + 标题条」。
       */}
-      {starting || activeTask != null ? (
+      {starting || activeTask != null || currentTasks.some(generationTaskNeedsAttention) ? (
         <MediaNodeTaskStatus
           kind={node.kind}
           task={activeTask ?? latestTask ?? null}
+          tasks={currentTasks}
+          onOpenTask={onOpenTask}
           starting={starting}
           hasResult={Boolean(mediaSrc)}
         />
@@ -408,6 +549,11 @@ export function MediaGenerationPreview({
           error={startError}
           hint="打开编辑区查看请求设置；提交回执不明确时请在历史中核对原任务。"
         />
+      ) : null}
+      {node.kind === "image" && (!node.imageGeneration || node.imageGeneration.taskIds.includes(latestTask?.id ?? "")) && !startError && !starting && !activeTask && latestTask &&
+        (latestTask.status === "failed" || latestTask.status === "interrupted" || latestTask.queryHealth === "degraded") ? (
+        <ErrorAlert error={latestTask.queryHealth === "degraded" ? "图片任务已停止自动查询" : "本次图片生成未完成"}
+          hint="在生成历史中查看错误、继续查询或取消任务。" />
       ) : null}
       {/*
         节点卡片本体不再放装饰端口、卡片头与「编辑」按钮：原站的连线端口是

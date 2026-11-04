@@ -16,7 +16,7 @@ use super::{
     tasks::GenerationTaskService,
     types::{
         ExplicitMediaInput, GenerationOperation, GenerationTaskStatus, MediaReferenceTarget,
-        MediaType, PromptSegment,
+        MediaType, PromptSegment, SaveStatus,
     },
 };
 use model::*;
@@ -332,10 +332,21 @@ impl LongVideoService {
                 continue;
             }
             let result = progress.results.iter().find(|result| {
-                result.media_type == MediaType::Video && result.final_path.is_some()
+                result.media_type == MediaType::Video
+                    && result.save_status == SaveStatus::Succeeded
+                    && result.final_path.is_some()
             });
+            // 远端成功与本地落盘是两个阶段。下载仍在排队/写入时必须占住原槽位，
+            // 不能把 succeeded + 无路径当成异常终态，提前停止整条编排。
+            let saving = progress.summary.status == GenerationTaskStatus::Succeeded
+                && progress.results.iter().any(|result| {
+                    result.media_type == MediaType::Video
+                        && matches!(result.save_status, SaveStatus::Pending | SaveStatus::Writing)
+                });
             let status = if result.is_some() {
                 "succeeded".into()
+            } else if saving {
+                "saving".into()
             } else {
                 progress.summary.status.as_str().into()
             };

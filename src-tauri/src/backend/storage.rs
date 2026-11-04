@@ -37,6 +37,9 @@ mod generation_lifecycle;
 #[path = "storage/history_query.rs"]
 mod history_query;
 
+#[path = "storage/image_upscale.rs"]
+mod image_upscale;
+
 /// 已完成（`active` / `cleaned`）的产物入库上传参与重启恢复的时间窗口。
 ///
 /// 绿色小点是要点亮「刚刚上传成功」的产物卡片，重启时重新翻出很久以前的成功上传没有意义；
@@ -959,8 +962,8 @@ impl Storage {
         transaction.execute(
             "UPDATE provider_model_bindings
              SET enabled = 0, updated_at = ?2
-             WHERE provider_connection_id = ?1",
-            params![command.provider_connection_id, timestamp],
+             WHERE provider_connection_id = ?1 AND (remote_model_id IS NULL OR remote_model_id <> ?3)",
+            params![command.provider_connection_id, timestamp, super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING],
         )?;
 
         for selection in &command.selections {
@@ -1030,7 +1033,9 @@ impl Storage {
         transaction.commit()?;
         drop(connection);
 
-        self.list_bindings(Some(&command.provider_connection_id))
+        let mut bindings = self.list_bindings(Some(&command.provider_connection_id))?;
+        bindings.retain(|binding| binding.remote_model_id.as_deref() != Some(super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING));
+        Ok(bindings)
     }
 
     /// 供应商连接下的令牌分组（同一供应商内按令牌区分模型的凭据作用域）。
@@ -1617,10 +1622,19 @@ impl Storage {
         )?;
         let calls = collect_rows(
             &connection,
-            "SELECT id, task_id, attempt_id, phase, request_json, sent_at,
-                    response_received_at, duration_ms, http_status, response_headers_json,
-                    raw_response, runtime_error_json
-             FROM provider_calls WHERE task_id = ?1 ORDER BY rowid",
+            /*
+             * 上游报文整包过 IPC 是「生成时界面锁死」的根因：一次图片调用能带
+             * 4MB 整包 base64，一个视频任务有几十次调用、每次响应又是整包素材。
+             * 这里在 SQL 层就截断，正文不再离开后端；原始字节数另行带回，
+             * 界面据此说明「已省略多少」。
+             */
+            &format!(
+                "SELECT id, task_id, attempt_id, phase,
+                        length(request_json), substr(request_json, 1, {REQUEST_PREVIEW_LIMIT}), sent_at,
+                        response_received_at, duration_ms, http_status, response_headers_json,
+                        substr(raw_response, 1, {RESPONSE_PREVIEW_LIMIT}), length(raw_response), runtime_error_json
+                 FROM provider_calls WHERE task_id = ?1 ORDER BY rowid"
+            ),
             task_id,
             call_from_row,
         )?;
@@ -1653,7 +1667,13 @@ impl Storage {
         Ok(GenerationTaskDetail {
             summary,
             logical_request: parse_json_column(logical)?,
-            resolved_request: resolved.map(parse_json_column).transpose()?,
+            resolved_request: resolved
+                .map(parse_json_column)
+                .transpose()?
+                .map(|mut value| {
+                    redact_large_strings(&mut value);
+                    value
+                }),
             attempts,
             calls,
             events,
@@ -1673,21 +1693,38 @@ impl Storage {
             )
             .optional()?
             .ok_or_else(|| BackendError::NotFound(format!("generation task {task_id}")))?;
-        let final_error: Option<String> = connection.query_row(
-            "SELECT final_error_json FROM generation_tasks WHERE id = ?1",
+        let (logical, final_error): (String, Option<String>) = connection.query_row(
+            "SELECT logical_request_json, final_error_json FROM generation_tasks WHERE id = ?1",
             params![task_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let results = collect_rows(
             &connection,
-            "SELECT task_id, result_index, media_type, save_status, final_path, error_json
+            "SELECT task_id, result_index, media_type, save_status, final_path, source_json, error_json
              FROM generation_results WHERE task_id = ?1 ORDER BY result_index",
             task_id,
             progress_result_from_row,
         )?;
+        // 文本生成的交付物是正文事件，没有媒体产物行。只取最近一条，够渲染即可。
+        let text_output: Option<String> = connection
+            .query_row(
+                "SELECT payload_json FROM generation_task_events
+                 WHERE task_id = ?1 AND event_type = 'text_output' ORDER BY id DESC LIMIT 1",
+                params![task_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let text_output = text_output
+            .map(|payload| {
+                let value = parse_json_column(payload)?;
+                serde_json::from_value::<TextGenerationOutputRecord>(value).map_err(json_sql_error)
+            })
+            .transpose()?;
         Ok(GenerationTaskProgress {
             summary,
+            logical_request: parse_json_column(logical)?,
             results,
+            text_output,
             final_error: final_error.map(parse_json_column).transpose()?,
         })
     }
@@ -2860,7 +2897,8 @@ fn task_summary_sql(where_clause: &str) -> String {
                 provider_connection_id, provider_display_name_snapshot, model_definition_id,
                 remote_model_id_snapshot, remote_task_id, progress, tokens_json,
                 created_at, updated_at, completed_at,
-                json_extract(logical_request_json, '$.outputName') FROM generation_tasks {where_clause}"
+                json_extract(logical_request_json, '$.outputName'), adapter_id_snapshot
+         FROM generation_tasks {where_clause}"
     )
 }
 
@@ -2884,6 +2922,7 @@ fn task_summary_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationTaskSummar
         provider_connection_id: row.get(6)?,
         provider_display_name_snapshot: row.get(7)?,
         model_definition_id: row.get(8)?,
+        adapter_id_snapshot: row.get(17)?,
         remote_model_id_snapshot: row.get(9)?,
         remote_task_id: row.get(10)?,
         progress: row.get(11)?,
@@ -2910,23 +2949,83 @@ fn attempt_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationAttemptRecord> 
 }
 
 fn call_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderCallRecord> {
-    let request: String = row.get(4)?;
-    let response_headers: Option<String> = row.get(9)?;
-    let runtime_error: Option<String> = row.get(11)?;
+    let request_bytes: i64 = row.get(4)?;
+    let request_text: String = row.get(5)?;
+    let response_headers: Option<String> = row.get(10)?;
+    let response_bytes: Option<i64> = row.get(12)?;
+    let runtime_error: Option<String> = row.get(13)?;
+    /*
+     * 完整的小报文照旧给 JSON；被截断的大报文已经不是合法 JSON，
+     * 这时只交片段与字节数，界面据此说明「请求体已省略」。
+     */
+    let request = match serde_json::from_str::<Value>(&request_text) {
+        Ok(mut value) => {
+            redact_large_strings(&mut value);
+            value
+        }
+        Err(_) => json!({
+            "truncated": true,
+            "bytes": request_bytes,
+            "preview": request_text,
+        }),
+    };
+    let raw_response = row.get::<_, Option<String>>(11)?.map(|text| match response_bytes {
+        Some(bytes) if bytes > RESPONSE_PREVIEW_LIMIT => {
+            format!("{text}\n…（响应体已截断，原始 {bytes} 字节）")
+        }
+        _ => text,
+    });
     Ok(ProviderCallRecord {
         id: row.get(0)?,
         task_id: row.get(1)?,
         attempt_id: row.get(2)?,
         phase: row.get(3)?,
-        request: parse_json_column(request)?,
-        sent_at: row.get(5)?,
-        response_received_at: row.get(6)?,
-        duration_ms: row.get(7)?,
-        http_status: row.get(8)?,
+        request,
+        request_bytes,
+        sent_at: row.get(6)?,
+        response_received_at: row.get(7)?,
+        duration_ms: row.get(8)?,
+        http_status: row.get(9)?,
         response_headers: response_headers.map(parse_json_column).transpose()?,
-        raw_response: row.get(10)?,
+        raw_response,
+        response_bytes,
         runtime_error: runtime_error.map(parse_json_column).transpose()?,
     })
+}
+
+/// 单个字符串超过这个长度就当作整包素材：只留头尾片段，中间标注省略字节数。
+const REDACT_STRING_LIMIT: usize = 4096;
+
+/// 请求体预览上限（字节）。超过这个长度只留片段，原始字节数另行带回。
+const REQUEST_PREVIEW_LIMIT: i64 = 8 * 1024;
+
+/// 响应体预览上限（字节）。失败诊断需要原文，但整包 base64 不该穿过 IPC 边界。
+const RESPONSE_PREVIEW_LIMIT: i64 = 32 * 1024;
+
+/// 递归替换超长字符串（整包 base64 素材），避免正文穿过 IPC 边界。
+fn redact_large_strings(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            if text.len() > REDACT_STRING_LIMIT {
+                let head: String = text.chars().take(512).collect();
+                let tail: String = text
+                    .chars()
+                    .rev()
+                    .take(512)
+                    .collect::<Vec<char>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let omitted = text.len();
+                *text = format!("{head}…（已省略 {omitted} 字节）…{tail}");
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_large_strings),
+        Value::Object(map) => map
+            .iter_mut()
+            .for_each(|(_, item)| redact_large_strings(item)),
+        _ => {}
+    }
 }
 
 fn event_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationTaskEvent> {
@@ -2966,13 +3065,18 @@ fn result_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationResultRecord> {
 fn progress_result_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationProgressResult> {
     let media_type: String = row.get(2)?;
     let save_status: String = row.get(3)?;
-    let error: Option<String> = row.get(5)?;
+    let source: Option<String> = row.get(5)?;
+    let error: Option<String> = row.get(6)?;
     Ok(GenerationProgressResult {
         task_id: row.get(0)?,
         result_index: row.get(1)?,
         media_type: parse_media_type(media_type)?,
         save_status: parse_save_status(save_status)?,
         final_path: row.get(4)?,
+        source: source
+            .map(parse_json_column)
+            .transpose()?
+            .unwrap_or(Value::Null),
         error: error.map(parse_json_column).transpose()?,
     })
 }

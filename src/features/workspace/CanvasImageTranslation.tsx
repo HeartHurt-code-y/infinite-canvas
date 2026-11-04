@@ -1,3 +1,4 @@
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { useId, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,7 +9,7 @@ import { useModalFocusTrap } from "../../components/useModalFocusTrap";
 import { generationClient, type ProviderCatalogEntry, type StartGenerationCommand } from "../../lib/backend";
 import { canvasImageClient, type CanvasImageTranslationTask } from "../../lib/canvasImage";
 import type { PromptContentDocumentV1, PromptContentEditorSession } from "../../lib/promptContent";
-import { isRunningTaskStatus, type GenNodeData, type ImageNodeConfig } from "./workspaceModel";
+import { isRunningTaskStatus, type ImageNodeConfig, type VideoNodeConfig } from "./workspaceModel";
 
 function fingerprint(document: PromptContentDocumentV1): string {
   const text = JSON.stringify(document);
@@ -35,12 +36,12 @@ function translatedDocument(source: PromptContentDocumentV1, raw: string): Promp
   return { ...source, items: source.items.map((item, index) => item.kind === "text" && texts.has(index) ? { ...item, text: texts.get(index) ?? item.text } : item) };
 }
 
-export function CanvasImageTranslation({ canvasId, node, sessionRef, providerCatalog, onChange, onClose }: {
+export function CanvasImageTranslation<T extends ImageNodeConfig | VideoNodeConfig>({ canvasId, node, sessionRef, providerCatalog, onChange, onClose }: {
   readonly canvasId: string;
-  readonly node: Extract<GenNodeData, { kind: "image" }>;
+  readonly node: { readonly key: string; readonly kind: "image" | "video"; readonly config: T };
   readonly sessionRef: RefObject<PromptContentEditorSession | null>;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly onChange: (config: ImageNodeConfig) => void;
+  readonly onChange: (config: T) => void;
   readonly onClose: () => void;
 }) {
   const trap = useModalFocusTrap({ active: true, onEscape: onClose });
@@ -101,7 +102,7 @@ export function CanvasImageTranslation({ canvasId, node, sessionRef, providerCat
     const items = document.items.flatMap((item, index) => item.kind === "text" && item.text.trim() ? [{ index, text: item.text }] : []);
     if (!items.length) { setError("请先输入需要翻译的提示词文字。"); return; }
     const generation: StartGenerationCommand = {
-      canvasId, sourceNodeId: `${node.key}:prompt-translation`, outputName: "图片提示词翻译",
+      canvasId, sourceNodeId: `${node.key}:prompt-translation`, outputName: node.kind === "video" ? "视频提示词翻译" : "图片提示词翻译",
       operation: "text_generation", providerConnectionId: selected.providerId, modelDefinitionId: selected.modelId,
       prompt: [{ kind: "text", text: JSON.stringify({ language, items }) }], explicitMedia: [], parameters: {}, generationCount: 1,
     };
@@ -110,17 +111,16 @@ export function CanvasImageTranslation({ canvasId, node, sessionRef, providerCat
     void submit(pending);
   };
   return createPortal(<div className="canvas-video-modal-scrim"><div ref={trap.ref} {...trap.containerProps} className="canvas-video-modal" role="dialog" aria-modal="true" aria-label="翻译提示词" tabIndex={-1}>
-    <header><strong>翻译提示词</strong><button type="button" onClick={onClose}>关闭</button></header>
+    <header><strong>翻译提示词</strong><button type="button" aria-label="关闭翻译提示词" onClick={onClose}><LibTVMediaIcon name="close" size={16} /></button></header>
     <p>仅翻译文字，保留 @ 素材身份、标记、附件和段落结构。翻译结果预览后再应用。</p>
     {foreignTask ? <><ErrorAlert error="这份翻译属于原画布或原节点。" tone="warning" hint="副本保留当前提示词；可以为当前节点新建翻译。" /><button type="button" onClick={() => onChange({ ...node.config, translationTask: null })}>为当前节点新建翻译</button></> : !job ? <>
-      <label>文本模型<CanvasSelect ariaLabel="翻译使用的文本模型" value={selectedModelValue} options={models.length ? [...(selectedModelValue && !models.some(item => item.value === selectedModelValue) ? [{ value: selectedModelValue, label: "原文本模型（不可用）" }] : []), ...models] : [{ value: "", label: "请先配置文本模型" }]} onChange={setModel} /></label>
-      <label>目标语言<CanvasSelect ariaLabel="目标语言" value={language} options={[{ value: "English", label: "英语" }, { value: "Chinese", label: "中文" }]} onChange={value => setLanguage(value === "Chinese" ? "Chinese" : "English")} /></label>
-      <small>将调用所选文本模型，按供应商计费；不会提交图片生成。</small>
+      <label>文本模型<CanvasSelect chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={12} />} selectedIcon={<LibTVMediaIcon name="check" size={12} />} ariaLabel="翻译使用的文本模型" value={selectedModelValue} options={models.length ? [...(selectedModelValue && !models.some(item => item.value === selectedModelValue) ? [{ value: selectedModelValue, label: "原文本模型（不可用）" }] : []), ...models] : [{ value: "", label: "请先配置文本模型" }]} onChange={setModel} /></label>
+      <label>目标语言<CanvasSelect chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={12} />} selectedIcon={<LibTVMediaIcon name="check" size={12} />} ariaLabel="目标语言" value={language} options={[{ value: "English", label: "英语" }, { value: "Chinese", label: "中文" }]} onChange={value => setLanguage(value === "Chinese" ? "Chinese" : "English")} /></label>
+      <small>将调用所选文本模型，按供应商计费。</small>
       <button type="button" disabled={busy || !models.some(item => item.value === selectedModelValue)} onClick={start}>开始翻译</button>
     </> : <>
       <p role="status">{status === "succeeded" ? "翻译已完成" : status === "failed" ? "翻译失败" : status === "cancelled" ? "翻译已取消" : status === "unknown" ? "请求结果不明确，请核对原任务" : "正在读取或执行原翻译任务…"}</p>
-      <small>任务：{job.taskId}</small>
-      <button type="button" disabled={query.isFetching || busy} onClick={() => { void query.refetch(); }}>重新读取原任务</button>
+      {query.error || status === "unknown" ? <button type="button" disabled={query.isFetching || busy} onClick={() => { void query.refetch(); }}>刷新翻译状态</button> : null}
       {query.error ? <><ErrorAlert error={query.error} hint="读取失败不会再次提交；可以用同一任务身份核对并继续。" /><button type="button" disabled={busy} onClick={() => { void submit(job); }}>核对并继续原翻译</button></> : null}
       {query.data?.finalError ? <ErrorAlert error={query.data.finalError} hint="请检查原任务与文本模型配置。需要重新翻译时显式新建任务。" /> : null}
       {preview?.error && !changed ? <ErrorAlert error={preview.error} hint="原提示词未改动，请在任务历史中查看完整返回。" /> : null}

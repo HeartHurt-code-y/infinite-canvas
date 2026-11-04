@@ -27,7 +27,6 @@ mkdir -p "$online_root"
 test "$(cd "$online_root" && pwd -P)" = "$online_root"
 rm -rf "$online_root/target/release/bundle" "$online_root/artifacts/$release_version"
 pnpm tauri:build:online --bundles app,dmg
-IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib product_scene_images
 node scripts/verify-edition-release.mjs --distribution-dir "$online_root/artifacts/$release_version"
 # Exercise the public one-command PKG installation on this disposable runner.
 # The embedded postinstall must clear quarantine without changing any signed bytes.

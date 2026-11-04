@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { memo, useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { useDismissOnOutside, useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
@@ -49,29 +50,37 @@ export const CanvasTabs = memo(function CanvasTabs({
   const switcherTriggerRef = useRef<HTMLButtonElement | null>(null);
   const switcherId = useId();
 
-  const { ref: switcherPanelRef } = useFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: switcherPanelRef, layerId } = useFloatingLayerAnchor<HTMLDivElement>({
     open: switcherOpen,
     anchorRef: switcherTriggerRef,
     preferAbove: false,
     minWidth: 200,
     maxHeight: 320,
   });
-  useDismissOnOutside(switcherOpen, switcherPanelRef, switcherTriggerRef, () =>
-    setSwitcherOpen(false),
+  useDismissOnOutside(
+    switcherOpen,
+    switcherPanelRef,
+    switcherTriggerRef,
+    () => setSwitcherOpen(false),
+    layerId,
   );
 
-  useEffect(() => {
-    if (!switcherOpen) return;
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setSwitcherOpen(false);
-      switcherTriggerRef.current?.focus({ preventScroll: true });
-    };
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [switcherOpen]);
+  /*
+   * Esc 关闭画布切换面板：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 之前这段自己挂在 window 的**捕获阶段**，会抢在 React 冒泡处理之前把
+   * Escape 吃掉——面板里的下拉（`CanvasSelect`）想先关自己都来不及。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => switcherOpen,
+      handle: () => {
+        setSwitcherOpen(false);
+        switcherTriggerRef.current?.focus({ preventScroll: true });
+      },
+    },
+    switcherOpen,
+  );
 
   const closeSwitcher = useCallback((refocus = true) => {
     setSwitcherOpen(false);

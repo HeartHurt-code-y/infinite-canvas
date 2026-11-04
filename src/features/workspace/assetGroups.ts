@@ -1,3 +1,4 @@
+import { DIRECTOR_NODE_SIZE } from "./directorScene";
 import {
   assetNodeDimensions,
   nearestAvailableNodePosition,
@@ -5,6 +6,7 @@ import {
   genNodeDimensions,
   SCREENPLAY_NODE_WIDTH,
   SCREENPLAY_NODE_HEIGHT,
+  SCRIPT_GENERATOR_NODE_SIZE,
   VIDEO_CLIP_NODE_WIDTH,
   VIDEO_CLIP_NODE_HEIGHT,
   PROMPT_NODE_WIDTH,
@@ -34,12 +36,9 @@ interface GroupableNode {
 /** 画布上素材组节点的 id 前缀。组本身不是持久化节点，只是成员外框和统一输出端口。 */
 export const ASSET_GROUP_FLOW_PREFIX = "asset-group:";
 
-const GROUP_PAD = 16;
-const GROUP_HEADER = 32;
-/** 普通节点的标题伸出卡片上沿，组工具条必须在标题之外。 */
-const GROUP_NODE_LABEL_GAP = 40;
-/** 右侧留白，让组的输出端口落在素材卡片外面。 */
-const GROUP_GUTTER = 28;
+const GROUP_PAD = 20;
+/** 成员标题在媒体卡片上方，留在分组边框内。 */
+const GROUP_NODE_LABEL_GAP = 36;
 
 export const ASSET_PLACE_GAP = 36;
 
@@ -86,7 +85,7 @@ export function isUploadableOutput(node: CanvasGroupMember): node is OutputNodeD
 export function isMediaGroupMember(
   node: CanvasGroupMember,
 ): node is AssetNodeData | OutputNodeData {
-  return "assetId" in node || "resultKey" in node;
+  return ("assetId" in node && !node.libraryResource) || "resultKey" in node;
 }
 
 export function canvasGroupMemberName(node: CanvasGroupMember): string {
@@ -247,17 +246,20 @@ function memberSize(node: CanvasGroupMember): { readonly width: number; readonly
     case "prompt":
       return genNodeDimensions(node.kind);
     case "screenplay":
-      return { width: SCREENPLAY_NODE_WIDTH, height: SCREENPLAY_NODE_HEIGHT };
+      return node.config.scriptGenerator
+        ? { width: SCRIPT_GENERATOR_NODE_SIZE, height: SCRIPT_GENERATOR_NODE_SIZE }
+        : { width: SCREENPLAY_NODE_WIDTH, height: SCREENPLAY_NODE_HEIGHT };
     case "video_clip":
       return { width: VIDEO_CLIP_NODE_WIDTH, height: VIDEO_CLIP_NODE_HEIGHT };
+    case "director":
+      return { width: DIRECTOR_NODE_SIZE, height: DIRECTOR_NODE_SIZE };
     default:
       return { width: PROMPT_NODE_WIDTH, height: PROMPT_NODE_HEIGHT };
   }
 }
 
-/** 包住全部成员，并在上方留标题栏、右侧留输出端口。 */
+/** 包住全部成员，四周留白并包含成员标题。 */
 export function assetGroupBounds(members: readonly CanvasGroupMember[]): CanvasNodeRect {
-  const header = GROUP_HEADER + (members.every(isMediaGroupMember) ? 0 : GROUP_NODE_LABEL_GAP);
   if (members.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -272,9 +274,9 @@ export function assetGroupBounds(members: readonly CanvasGroupMember[]): CanvasN
   }
   return {
     x: minX - GROUP_PAD,
-    y: minY - GROUP_PAD - header,
-    width: maxX - minX + GROUP_PAD * 2 + GROUP_GUTTER,
-    height: maxY - minY + GROUP_PAD * 2 + header,
+    y: minY - GROUP_PAD - GROUP_NODE_LABEL_GAP,
+    width: maxX - minX + GROUP_PAD * 2,
+    height: maxY - minY + GROUP_PAD * 2 + GROUP_NODE_LABEL_GAP,
   };
 }
 

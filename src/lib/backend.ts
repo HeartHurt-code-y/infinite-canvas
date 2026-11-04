@@ -1450,6 +1450,7 @@ export function inferMediaKindFromName(fileName: string): MediaLibraryKind | nul
 
 export async function pickLocalMediaFiles(
   accept?: readonly MediaLibraryKind[],
+  options?: { readonly multiple?: boolean; readonly title?: string },
 ): Promise<readonly string[]> {
   if (!isDesktopRuntime()) return [];
   const { open } = await import("@tauri-apps/plugin-dialog");
@@ -1459,8 +1460,8 @@ export async function pickLocalMediaFiles(
     .map(([extension]) => extension);
   if (extensions.length === 0) return [];
   const selection = await open({
-    multiple: true,
-    title: "选择要上传的素材文件",
+    multiple: options?.multiple ?? true,
+    title: options?.title ?? "选择要上传的素材文件",
     filters: [
       {
         name:
@@ -1610,6 +1611,9 @@ export interface GenerationTaskSummary {
   readonly providerConnectionId: string;
   readonly providerDisplayNameSnapshot: string;
   readonly modelDefinitionId: string;
+  /** 供应商适配器快照：任务详情里的请求体会被截断，适配器身份由这里给。 */
+  /** 供应商适配器快照。旧后端没有这个字段（前端字段一律 optional）。 */
+  readonly adapterIdSnapshot?: string | undefined;
   readonly remoteModelIdSnapshot: string | null;
   readonly remoteTaskId: string | null;
   readonly progress: number | null;
@@ -1682,13 +1686,21 @@ export interface ProviderCallRecord {
   readonly taskId: string;
   readonly attemptId: string;
   readonly phase: string;
+  /** 请求体。小报文是完整 JSON；大报文只带截断预览。 */
   readonly request: unknown;
+  /** 请求体原始字节数。大于预览长度即说明正文已被省略。 */
+  /** 请求体原始字节数。旧后端没有这个字段（前端字段一律 optional）。 */
+  readonly requestBytes?: number | undefined;
   readonly sentAt: number | null;
   readonly responseReceivedAt: number | null;
   readonly durationMs: number | null;
   readonly httpStatus: number | null;
   readonly responseHeaders: unknown;
+  /** 响应体（超长时已截断）。 */
   readonly rawResponse: string | null;
+  /** 响应体原始字节数。大于返回长度即说明正文已被截断。 */
+  /** 响应体原始字节数。旧后端没有这个字段（前端字段一律 optional）。 */
+  readonly responseBytes?: number | null | undefined;
   readonly runtimeError: unknown;
 }
 
@@ -1704,13 +1716,25 @@ export interface GenerationTaskDetail {
   readonly finalError: unknown;
 }
 
-/** Status-only polling data; excludes provider response bodies and result sources. */
+/**
+ * Status-only polling data: it carries no provider request/response bodies and no
+ * resolved media payloads, so a status check never moves whole base64 assets over
+ * the WebView IPC boundary.
+ */
 export interface GenerationTaskProgress {
   readonly summary: GenerationTaskSummary;
-  readonly results: readonly Pick<
+  /** 逻辑请求快照：提示词、参数与素材引用。 */
+  readonly logicalRequest: unknown;
+  readonly results: readonly (Pick<
     GenerationResultRecord,
     "taskId" | "resultIndex" | "mediaType" | "saveStatus" | "finalPath" | "error"
-  >[];
+  > & { readonly source: unknown })[];
+  /**
+   * 文本任务的回答正文。文本生成没有媒体产物，正文就是交付物。
+   *
+   * optional：旧后端还没有这个字段。
+   */
+  readonly textOutput?: TextGenerationOutputRecord | null | undefined;
   readonly finalError: unknown;
 }
 
@@ -1788,6 +1812,32 @@ export const generationClient: GenerationTaskClient = {
     invokeDesktop("get_generation_task_progress", generationTaskProgressSchema, { taskId }),
   queryVideoTaskNow: (taskId) => invokeDesktopVoid("query_video_task_now", { taskId }),
   cancel: (taskId) => invokeDesktop("cancel_generation_task", generationTaskDetailSchema, { taskId }),
+};
+
+/**
+ * 创作台文本生成的提交参数。
+ *
+ * 与 `StartGenerationCommand` 是两件事：媒体生成走统一任务管线，文本生成走
+ * 文本模型通道（`start_text_generation`）——提交后**立刻**返回任务 ID，模型在
+ * 后台跑，前端按任务轮询。走管线的话一次几十秒的模型调用会按住提交按钮。
+ */
+export interface StartTextGenerationCommand {
+  readonly canvasId: string;
+  readonly sourceNodeId: string;
+  readonly providerConnectionId: string;
+  readonly modelDefinitionId: string;
+  readonly userPrompt: string;
+  readonly contextHistory?: readonly PromptOptimizationContextEntry[];
+  readonly multimodalInputs?: readonly PromptMultimodalInput[];
+  readonly referenceInputs?: readonly PromptReferenceInput[];
+}
+
+export interface TextGenerationClient {
+  start(this: void, command: StartTextGenerationCommand): Promise<string>;
+}
+
+export const textGenerationClient: TextGenerationClient = {
+  start: (command) => invokeDesktop("start_text_generation", stringSchema, { command }),
 };
 
 /** Create a separate final task from a reviewed draft using its frozen credential scope. */
@@ -2011,12 +2061,13 @@ export interface PromptReferenceInput {
 }
 
 export interface OptimizeVideoPromptCommand {
+  readonly directorStyleKey?: string;
   /** 用于把文本模型调用归档到当前画布与来源节点；旧调用方可省略。 */
   readonly canvasId?: string;
   readonly sourceNodeId?: string;
   readonly providerConnectionId: string;
   readonly modelDefinitionId: string;
-  readonly mode: TextSkillMode;
+  readonly mode: TextSkillMode | "video_prompt";
   /** 悬浮文本生成器走通用文本合同，不加载视频提示词技能。 */
   readonly generalText?: boolean;
   /** 脚本生成器使用后端内置的结构化分镜合同。 */

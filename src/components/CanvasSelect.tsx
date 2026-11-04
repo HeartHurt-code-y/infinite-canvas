@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { placeFloatingLayer } from "./floatingLayer";
@@ -17,6 +18,16 @@ const VIEWPORT_SELECTOR = ".react-flow__viewport";
 export interface CanvasSelectOption {
   readonly value: string;
   readonly label: string;
+  readonly icon?: ReactNode;
+  readonly disabled?: boolean;
+}
+
+function nextEnabledOption(options: readonly CanvasSelectOption[], current: number, step: number): number {
+  for (let offset = 1; offset <= options.length; offset += 1) {
+    const index = (current + step * offset + options.length) % options.length;
+    if (!options[index]?.disabled) return index;
+  }
+  return Math.max(0, current);
 }
 
 /**
@@ -43,10 +54,16 @@ export function CanvasSelect({
   className,
   title,
   ariaDescribedBy,
+  chevronIcon,
+  selectedIcon,
+  preferAbove = false,
+  triggerValue,
 }: {
   readonly ariaLabel: string;
   readonly value: string;
   readonly options: readonly CanvasSelectOption[];
+  readonly preferAbove?: boolean;
+  readonly triggerValue?: Pick<CanvasSelectOption, "label" | "icon"> | undefined;
   readonly onChange: (value: string) => void;
   readonly disabled?: boolean | undefined;
   readonly required?: boolean | undefined;
@@ -56,6 +73,8 @@ export function CanvasSelect({
   readonly title?: string | undefined;
   /** 指向错误说明的 id：让读屏与视觉提示都能拿到「下一步怎么办」。 */
   readonly ariaDescribedBy?: string | undefined;
+  readonly chevronIcon?: ReactNode;
+  readonly selectedIcon?: ReactNode;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -72,7 +91,7 @@ export function CanvasSelect({
     0,
     options.findIndex((option) => option.value === value),
   );
-  const selected = options[selectedIndex];
+  const selected = triggerValue ?? options[selectedIndex];
   const optionId = useCallback((index: number) => `${listId}-option-${index}`, [listId]);
 
   const close = useCallback((refocus = true) => {
@@ -83,7 +102,7 @@ export function CanvasSelect({
   const commit = useCallback(
     (index: number) => {
       const option = options[index];
-      if (option == null) return;
+      if (option == null || option.disabled) return;
       if (option.value !== value) onChange(option.value);
       close();
     },
@@ -119,7 +138,7 @@ export function CanvasSelect({
          * 画布节点的菜单**自动**选方向：下方够就朝下（贴着节点卡片），
          * 不够才朝上。创作台的浮坞贴底，才需要强制向上。
          */
-        preferAbove: false,
+        preferAbove,
         measuredHeight,
       });
       menu.style.top = `${box.top}px`;
@@ -158,7 +177,7 @@ export function CanvasSelect({
       window.removeEventListener("mousedown", handleMousedown, true);
       observer?.disconnect();
     };
-  }, [open, measuredHeight]);
+  }, [open, measuredHeight, preferAbove]);
 
   useEffect(() => {
     if (!open) return;
@@ -174,9 +193,9 @@ export function CanvasSelect({
 
   /** 打开那一刻的选中项决定高亮起点；此后 options/value 变化不重置浏览位置。 */
   const openMenu = useCallback(() => {
-    setActive(selectedIndex);
+    setActive(options[selectedIndex]?.disabled ? nextEnabledOption(options, -1, 1) : selectedIndex);
     setOpen(true);
-  }, [selectedIndex]);
+  }, [options, selectedIndex]);
 
   const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (disabled) return;
@@ -195,24 +214,22 @@ export function CanvasSelect({
   const handleListKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActive((current) => (options.length ? (current + 1) % options.length : 0));
+      setActive((current) => nextEnabledOption(options, current, 1));
       return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
-      setActive((current) =>
-        options.length ? (current - 1 + options.length) % options.length : 0,
-      );
+      setActive((current) => nextEnabledOption(options, current, -1));
       return;
     }
     if (event.key === "Home") {
       event.preventDefault();
-      setActive(0);
+      setActive(nextEnabledOption(options, -1, 1));
       return;
     }
     if (event.key === "End") {
       event.preventDefault();
-      setActive(Math.max(0, options.length - 1));
+      setActive(nextEnabledOption(options, 0, -1));
       return;
     }
     if (event.key === "Enter") {
@@ -252,8 +269,9 @@ export function CanvasSelect({
         }}
         onKeyDown={handleTriggerKeyDown}
       >
+        {selected?.icon}
         <span className="canvas-select__value">{selected?.label ?? ""}</span>
-        <Icon name="caret-down" aria-hidden="true" size="xs" />
+        {chevronIcon ?? <Icon name="caret-down" aria-hidden="true" size="xs" />}
       </button>
       {open
         ? createPortal(
@@ -276,15 +294,17 @@ export function CanvasSelect({
                     role="option"
                     id={optionId(index)}
                     aria-selected={option.value === value}
+                    aria-disabled={option.disabled || undefined}
                     // 选项值原样挂在 DOM 上：测试按值选项，不必把值翻译成展示文案。
                     data-value={option.value}
                     className={`canvas-select__option${index === active ? " is-active" : ""}${option.value === value ? " is-selected" : ""}`}
-                    onMouseEnter={() => setActive(index)}
+                    onMouseEnter={() => { if (!option.disabled) setActive(index); }}
                     onClick={() => commit(index)}
                   >
+                    {option.icon}
                     <span className="canvas-select__option-label">{option.label}</span>
                     {option.value === value ? (
-                      <Icon name="check" aria-hidden="true" size="xs" />
+                      selectedIcon ?? <Icon name="check" aria-hidden="true" size="xs" />
                     ) : null}
                   </div>
                 ))

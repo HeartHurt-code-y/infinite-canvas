@@ -1,6 +1,6 @@
 import { useStoreApi } from "@xyflow/react";
-import { useLayoutEffect, useRef, useState, type CSSProperties } from "react";
-import { canvasGroupMemberName, isMediaGroupMember, type CanvasGroupMember } from "./assetGroups";
+import { useLayoutEffect, useRef, useState, type MouseEvent } from "react";
+import type { CanvasGroupMember } from "./assetGroups";
 import type { CanvasGroup } from "../canvas/canvasGroups";
 
 /**
@@ -31,19 +31,7 @@ export function CanvasMarqueeSelectionReader({
   return null;
 }
 
-/**
- * 分组（对齐原站 liblib 画布）。
- *
- * 原站实测（2026-10-22，用户提供的复杂画布截图 + 像素取样）：
- *   - 组 = 一块**半透明彩色大框**：框内是该颜色的低透明度填充，叠一层 45° 斜纹，
- *     边框是同色；同一个组的所有成员共用一个颜色（黑 / 青 / 棕橙 / 紫 / 绛红 / 绿）。
- *   - 框的左上角压着一枚**同色实底的小标签**（组名，白字，约 11px，圆角 4）。
- *   - 框上**没有工具条**：原站的分组只有「框 + 标签」两件东西。
- *
- * 所以本项目原来的工具条（拖手柄 / 折叠 / 改名 / 顺序清单 / 复制 / 上传 / 解散）
- * 整体删除：标签就是拖动整组的手柄，改名改成**双击标签就地编辑**（与原站的
- * 节点标题一致），其余动作走**右键菜单**（原站的组操作同样在右键菜单里）。
- */
+/** 卡片上方的组名可以拖动整组、双击改名，也可以打开组菜单。 */
 export function AssetGroupFrame({
   group,
   members,
@@ -63,36 +51,34 @@ export function AssetGroupFrame({
 }) {
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState(group.name);
-  const renameButtonRef = useRef<HTMLInputElement>(null);
+  const titleRef = useRef<HTMLButtonElement>(null);
   const renameActiveRef = useRef(false);
-  const mediaOnly = members.every(isMediaGroupMember);
-  const orderLabel = members
-    .map((member, index) => `${index + 1}. ${canvasGroupMemberName(member)}`)
-    .join("  ");
-  const finishRename = (save: boolean) => {
+  const finishRename = (save: boolean, restoreFocus = false) => {
     if (!renameActiveRef.current) return;
     renameActiveRef.current = false;
     if (save && draftName.trim()) onRename(draftName.trim());
     setRenaming(false);
-    renameButtonRef.current?.focus();
+    if (restoreFocus) window.requestAnimationFrame(() => titleRef.current?.focus());
   };
-  const style = {
-    "--canvas-group-color": `var(--canvas-group-ink-${groupColorIndex(group.id)})`,
-  } as CSSProperties;
+  const openGroupMenu = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onContextMenu?.({ x: event.clientX, y: event.clientY });
+  };
   return (
     <div
       className="canvas-asset-group"
-      style={style}
+      onContextMenu={group.collapsed ? openGroupMenu : undefined}
       data-selected={selected ? "true" : undefined}
       data-collapsed={group.collapsed ? "true" : undefined}
       role="group"
       aria-label={`${group.name}，${members.length} 个节点${group.collapsed ? "，已折叠" : ""}`}
     >
       <button
+        ref={titleRef}
         type="button"
-        className="canvas-asset-group__chip nodrag nopan"
+        className="canvas-asset-group__chip"
         aria-label={`选择整组 ${group.name}`}
-        title={mediaOnly ? `${group.name} · ${orderLabel}` : `${group.name} · ${orderLabel}`}
         onClick={onSelect}
         onDoubleClick={(event) => {
           event.stopPropagation();
@@ -100,11 +86,7 @@ export function AssetGroupFrame({
           setDraftName(group.name);
           setRenaming(true);
         }}
-        onContextMenu={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          onContextMenu?.({ x: event.clientX, y: event.clientY });
-        }}
+        onContextMenu={openGroupMenu}
       >
         {group.name}
       </button>
@@ -113,11 +95,10 @@ export function AssetGroupFrame({
           className="canvas-asset-group__rename nodrag nopan"
           onSubmit={(event) => {
             event.preventDefault();
-            finishRename(true);
+            finishRename(true, true);
           }}
         >
           <input
-            ref={renameButtonRef}
             aria-label="分组名称"
             autoFocus
             value={draftName}
@@ -126,9 +107,10 @@ export function AssetGroupFrame({
             onBlur={() => finishRename(true)}
             onKeyDown={(event) => {
               event.stopPropagation();
+              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
               if (event.key === "Escape") {
                 event.preventDefault();
-                finishRename(false);
+                finishRename(false, true);
               }
             }}
           />
@@ -136,13 +118,4 @@ export function AssetGroupFrame({
       ) : null}
     </div>
   );
-}
-
-/** 同一个组永远拿到同一个颜色：按组 id 的字符和取模。 */
-function groupColorIndex(groupId: string): number {
-  let sum = 0;
-  for (let index = 0; index < groupId.length; index += 1) {
-    sum = (sum + groupId.charCodeAt(index)) % 997;
-  }
-  return (sum % 6) + 1;
 }

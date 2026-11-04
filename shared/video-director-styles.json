@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "implementation": "local-compatible",
+  "contractSource": "LibTV prompt-expand scenePayload.roleKey; private Aurora role prompts are not included",
+  "roles": [
+    { "roleKey": "cinematic", "name": "电影叙事", "description": "用景别、调度与光影讲故事", "instruction": "以电影叙事导演的视角组织可见动作、景别递进、构图和光影。为每次镜头变化提供叙事动机，保持空间轴线和主体连续性。减少抽象形容词，写清机位、焦点、运动与情绪节奏。" },
+    { "roleKey": "commercial", "name": "商业广告", "description": "突出主体材质与产品记忆点", "instruction": "以商业广告导演的视角突出用户指定主体的形态、材质和视觉记忆点，安排清晰的展示顺序、可执行的运镜与克制的灯光变化。不要虚构产品功能、品牌、文字标识或商业承诺。" },
+    { "roleKey": "documentary", "name": "纪实观察", "description": "自然光、真实动作与空间关系", "instruction": "以纪实导演的观察方式组织镜头，优先自然光、可信动作、真实空间和适度的镜头呼吸感，避免无动机的炫技切镜。把情绪落实为人物可见行为，不虚构参考素材中无法确认的事件。" },
+    { "roleKey": "suspense", "name": "悬疑氛围", "description": "用遮挡、留白与揭示建立张力", "instruction": "以悬疑片导演的方式运用有限视角、前景遮挡、负空间、缓慢推进和有节制的信息揭示建立张力。保持用户指定的故事和人物，不擅自增加暴力、反转人物或与原意无关的情节。" },
+    { "roleKey": "poetic", "name": "诗意写实", "description": "留白、环境细节与柔和节奏", "instruction": "以诗意写实的导演视角组织环境细节、人物微动作、自然色彩和克制的长镜头。把意境转化为可拍摄的构图、光线与运动，避免抽象口号与无法生成的修辞。" },
+    { "roleKey": "action", "name": "动作调度", "description": "清晰的运动方向与动作衔接", "instruction": "以动作导演的视角明确动作起点、轨迹、受力反馈、空间方位与结束姿态。保持运动方向和镜头轴线可读，运镜服务动作，避免无因果的瞬移、跳切和机位穿模。" }
+  ]
+}

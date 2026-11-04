@@ -2,21 +2,28 @@ import * as v from "valibot";
 import rawCatalog from "../../shared/canvas-image-presets.json";
 import type { ModelParameterCapability, ModelParameterValue } from "./modelCapabilities";
 
-const optionValueSchema = v.object({ value: v.string(), label: v.string(), instruction: v.string() });
+const optionValueSchema = v.object({
+  value: v.string(), label: v.string(), instruction: v.string(),
+  presetLabel: v.optional(v.string()),
+  legacy: v.optional(v.object({ key: v.string(), value: v.string() })),
+});
 const optionSchema = v.object({
   key: v.string(), label: v.string(), default: v.string(), values: v.array(optionValueSchema),
+  control: v.optional(v.picklist(["choices", "switch"]), "choices"),
+  help: v.optional(v.string()),
 });
 const presetSchema = v.object({
   scene: v.string(),
   label: v.string(),
   description: v.string(),
   placeholder: v.string(),
-  icon: v.picklist(["storyboard", "grid3", "grid2", "clock", "portrait", "light", "angle", "face", "member", "assets", "product"]),
+  icon: v.picklist(["slash-storyboard","slash-storyboard-25grid","slash-story-beat-4grid","slash-frame-prediction-plus3s","slash-frame-prediction-minus5s","portrait-adjust","slash-cinematic-lighting-correction","slash-panoramic-720","grid-3x3","slash-character-design","slash-character-face-turnaround","perspnal-n","slash-list","slash-product-turnaround"]),
   newFeature: v.boolean(),
   inputRequirement: v.picklist(["prompt", "image", "prompt_or_image"]),
   defaults: v.record(v.string(), v.string()),
   instruction: v.string(),
   options: v.optional(v.array(optionSchema), []),
+  optionsPreviewUrl: v.optional(v.pipe(v.string(), v.url())),
 });
 const catalog = v.parse(v.object({
   version: v.number(),
@@ -44,10 +51,20 @@ export function canvasImagePreset(scene: string | undefined): BuiltinCanvasImage
 }
 
 export function imagePresetOptionValues(preset: BuiltinCanvasImagePreset, saved?: Readonly<Record<string, string>>): Record<string, string> {
-  return Object.fromEntries(preset.options.map(option => [
-    option.key,
-    option.values.some(value => value.value === saved?.[option.key]) ? saved?.[option.key] ?? option.default : option.default,
-  ]));
+  return Object.fromEntries(preset.options.map(option => {
+    const selected = option.values.find(value => value.value === saved?.[option.key]);
+    const legacy = option.values.find(value => value.legacy && saved?.[value.legacy.key] === value.legacy.value);
+    return [option.key, selected?.value ?? legacy?.value ?? option.default];
+  }));
+}
+
+export function canvasImagePresetLabel(preset: BuiltinCanvasImagePreset, saved?: Readonly<Record<string, string>>): string {
+  const values = imagePresetOptionValues(preset, saved);
+  for (const option of preset.options) {
+    const label = option.values.find(value => value.value === values[option.key])?.presetLabel;
+    if (label) return label;
+  }
+  return preset.label;
 }
 
 const PARAMETER_KEYS: Readonly<Record<string, readonly string[]>> = {

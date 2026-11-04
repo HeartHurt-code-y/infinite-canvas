@@ -86,8 +86,12 @@ async function assertPreparedRuntimeResources(root, mapped) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+  // A resource family can ship a subdirectory and keep compile-time files alongside it.
+  const mappedFamilies = new Set(
+    mapped.map((source) => `${source.split("/").slice(0, 2).join("/")}/`),
+  );
   requireValue(
-    sameArray([...mapped].sort(), prepared),
+    sameArray([...mappedFamilies].sort(), prepared),
     "Edition resource map does not match the prepared runtime resources",
   );
 }

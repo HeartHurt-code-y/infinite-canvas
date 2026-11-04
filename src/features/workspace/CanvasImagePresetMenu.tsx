@@ -1,24 +1,25 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
-import { CanvasSelect } from "../../components/CanvasSelect";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
 import {
   CANVAS_IMAGE_PRESET_GROUPS,
+  CANVAS_IMAGE_PRESET_VERSION,
   canvasImagePreset,
+  canvasImagePresetLabel,
   imagePresetOptionValues,
   selectCanvasImagePreset,
 } from "../../lib/canvasImagePresets";
 import type { ModelParameterCapability } from "../../lib/modelCapabilities";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import type { ImageNodeConfig } from "./workspaceModel";
 
 /** 让 body portal 与编辑层各自的关闭手势互不抢占。 */
-function usePresetDismiss(open: boolean, anchor: RefObject<HTMLElement | null>, layer: RefObject<HTMLElement | null>, close: () => void, allowSelect = false) {
+function usePresetDismiss(open: boolean, anchor: RefObject<HTMLElement | null>, layer: RefObject<HTMLElement | null>, close: () => void) {
   useEffect(() => {
     if (!open) return;
     const outside = (target: EventTarget | null) => target instanceof Node
-      && !anchor.current?.contains(target) && !layer.current?.contains(target)
-      && !(allowSelect && target instanceof Element && target.closest(".canvas-select__menu"));
+      && !anchor.current?.contains(target) && !layer.current?.contains(target);
     const pointer = (event: PointerEvent) => { if (outside(event.target)) close(); };
     const focus = (event: FocusEvent) => { if (outside(event.target)) close(); };
     document.addEventListener("pointerdown", pointer, true);
@@ -27,7 +28,11 @@ function usePresetDismiss(open: boolean, anchor: RefObject<HTMLElement | null>, 
       document.removeEventListener("pointerdown", pointer, true);
       document.removeEventListener("focusin", focus);
     };
-  }, [open, anchor, layer, close, allowSelect]);
+  }, [open, anchor, layer, close]);
+  useEscapeHandler({
+    canHandle: () => open,
+    handle: () => { close(); anchor.current?.focus({ preventScroll: true }); },
+  }, open);
 }
 
 export function CanvasImagePresetMenu({ config, active, getCapabilities, triggerRef, onChange }: {
@@ -53,9 +58,6 @@ export function CanvasImagePresetMenu({ config, active, getCapabilities, trigger
 
   const keydown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === "Escape") {
-      event.preventDefault(); event.stopPropagation(); close(); triggerRef.current?.focus({ preventScroll: true }); return;
-    }
     if (event.key === "Tab") {
       close(); triggerRef.current?.focus({ preventScroll: true }); event.stopPropagation(); return;
     }
@@ -85,9 +87,9 @@ export function CanvasImagePresetMenu({ config, active, getCapabilities, trigger
 
   return <>
     <button ref={triggerRef} type="button" aria-label="图片预设" aria-haspopup="menu" aria-expanded={visible} aria-controls={visible ? id : undefined}
-      data-tooltip={current ? `图片预设：${current.label}` : "图片预设"} data-selected={Boolean(config.imagePreset) || undefined}
+      data-tooltip={current ? `图片预设：${canvasImagePresetLabel(current, config.imagePreset?.options)}` : "图片预设"} data-selected={Boolean(config.imagePreset) || undefined}
       onClick={() => setOpen(value => !value)}>
-      <CanvasChromeIcon name="grid2plus" size={16} /><i className="canvas-image-preset-new-dot" aria-hidden="true" />
+      <LibTVMediaIcon name="preset-n" size={16} /><i className="canvas-image-preset-new-dot" aria-hidden="true" />
     </button>
     {visible ? createPortal(<div ref={layer.ref} id={id} className="canvas-image-preset-menu nodrag nopan" role="menu" aria-label="图片预设"
       onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onKeyDown={keydown}>
@@ -101,8 +103,8 @@ export function CanvasImagePresetMenu({ config, active, getCapabilities, trigger
               onChange({ ...config, imagePreset: selected.selection, parameterValues: selected.parameterValues, imageMode: "auto", panoramaEnabled: false });
               close(); triggerRef.current?.focus({ preventScroll: true });
             }}>
-            <span className="canvas-image-preset-menu__icon"><CanvasChromeIcon name={preset.icon} size={20} />{preset.newFeature ? <i className="canvas-image-preset-new-dot" aria-hidden="true" /> : null}</span>
-            <span>{preset.label}</span>
+            <span className="canvas-image-preset-menu__icon"><LibTVMediaIcon name={preset.icon} size={20} />{preset.newFeature ? <i className="canvas-image-preset-new-dot" aria-hidden="true" /> : null}</span>
+            <span>{canvasImagePresetLabel(preset, config.imagePreset?.scene === preset.scene ? config.imagePreset.options : undefined)}</span>
             {preset.newFeature ? <span className="sr-only">新功能</span> : null}
           </button>)}
         </section>)}
@@ -123,34 +125,74 @@ export function CanvasImagePresetBadge({ config, active, onChange, onReopen, onC
   const preset = canvasImagePreset(config.imagePreset?.scene);
   const trigger = useRef<HTMLButtonElement>(null);
   const [open, setOpen] = useState(false);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const switchPanel = Boolean(preset?.options.length && preset.options.every(option => option.control === "switch"));
   const visible = open && active && Boolean(preset?.options.length);
   const close = useCallback(() => setOpen(false), []);
-  const layer = useFloatingLayerAnchor<HTMLDivElement>({ open: visible, anchorRef: trigger, minWidth: 285, maxHeight: 360, preferAbove: true, gap: 8 });
-  usePresetDismiss(visible, trigger, layer.ref, close, true);
+  const layer = useFloatingLayerAnchor<HTMLDivElement>({ open: visible, anchorRef: trigger, minWidth: switchPanel ? 220 : 282, maxHeight: 560, preferAbove: switchPanel, gap: 4, followAnchor: true });
+  usePresetDismiss(visible, trigger, layer.ref, close);
   useEffect(() => { if (!active || !preset?.options.length) setOpen(false); }, [active, preset]);
-  useLayoutEffect(() => { if (visible) layer.ref.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true }); }, [visible, layer.ref]);
+  useEffect(() => { setOpen(false); setPreviewFailed(false); }, [preset?.scene]);
+  useLayoutEffect(() => {
+    if (visible) layer.ref.current?.querySelector<HTMLButtonElement>('[role="switch"], [role="radio"][aria-checked="true"]')?.focus({ preventScroll: true });
+  }, [visible, layer.ref]);
   if (!config.imagePreset) return null;
   const values = preset ? imagePresetOptionValues(preset, config.imagePreset.options) : {};
+  const label = preset ? canvasImagePresetLabel(preset, config.imagePreset.options) : "预设已失效";
+  const changeOption = (key: string, value: string) => {
+    if (!config.imagePreset) return;
+    onChange({ ...config, imagePreset: {
+      ...config.imagePreset, version: CANVAS_IMAGE_PRESET_VERSION, options: { ...values, [key]: value },
+    } });
+  };
   return <div className="canvas-image-preset-badge">
-    <span className="canvas-image-preset-badge__icon"><CanvasChromeIcon name={preset?.icon ?? "grid2plus"} size={14} /></span>
-    <span>{preset?.label ?? "预设已失效"}</span>
-    <button ref={trigger} type="button" aria-label={preset?.options.length ? `调整${preset.label}` : "重新选择图片预设"}
-      data-tooltip={preset?.options.length ? `调整${preset.label}` : "重新选择图片预设"} aria-haspopup={preset?.options.length ? "dialog" : "menu"}
-      aria-expanded={preset?.options.length ? visible : undefined} aria-controls={visible ? id : undefined}
-      onClick={() => preset?.options.length ? setOpen(value => !value) : onReopen()}><CanvasChromeIcon name="adjust" size={14} /></button>
-    <button type="button" aria-label="清除图片预设" data-tooltip="清除图片预设" onClick={() => { close(); onClear(); }}><CanvasChromeIcon name="close" size={12} /></button>
-    {visible && preset ? createPortal(<div ref={layer.ref} id={id} className="canvas-image-preset-options nodrag nopan" role="dialog" aria-label={preset.label}
+    <button type="button" className="canvas-image-preset-badge__remove" aria-label="清除图片预设" data-tooltip="清除图片预设" onClick={() => { close(); onClear(); }}>
+      <span className="canvas-image-preset-badge__icon" aria-hidden="true"><LibTVMediaIcon name={preset?.icon ?? "preset-n"} size={12} /></span>
+      <span className="canvas-image-preset-badge__close" aria-hidden="true"><LibTVMediaIcon name="close" size={10} /></span>
+    </button>
+    <button type="button" className="canvas-image-preset-badge__label" aria-label={`重新选择图片预设：${label}`} aria-haspopup="menu"
+      onClick={() => { close(); onReopen(); }}>{label}</button>
+    {preset?.options.length ? <button ref={trigger} type="button" className="canvas-image-preset-badge__options" aria-label={`调整${preset.label}`}
+      data-tooltip={`调整${preset.label}`} aria-haspopup="dialog" aria-expanded={visible} aria-controls={visible ? id : undefined}
+      onClick={() => setOpen(value => !value)}><LibTVMediaIcon name="icon-generate-settings1" size={14} /></button> : null}
+    {visible && preset ? createPortal(<div ref={layer.ref} id={id} className={`canvas-image-preset-options nodrag nopan${switchPanel ? " canvas-image-preset-options--switches" : ""}`} role="dialog" aria-label={preset.label}
       onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}
       onKeyDown={event => {
-        if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); trigger.current?.focus({ preventScroll: true }); }
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
       }}>
-      <strong>{preset.label}</strong>
-      {preset.options.map(option => <label key={option.key}><span>{option.label}</span><CanvasSelect ariaLabel={option.label} value={values[option.key] ?? option.default}
-        options={option.values.map(value => ({ value: value.value, label: value.label }))} onChange={value => {
-          if (config.imagePreset) onChange({ ...config, imagePreset: { ...config.imagePreset, options: { ...values, [option.key]: value } } });
-        }} /></label>)}
-      <button type="button" onClick={() => { close(); onReopen(); }}>更换预设</button>
+      {switchPanel ? <strong className="canvas-image-preset-options__heading">{preset.label}</strong> : null}
+      {switchPanel && preset.optionsPreviewUrl && !previewFailed ? <video className="canvas-image-preset-options__preview" src={preset.optionsPreviewUrl}
+        autoPlay loop muted playsInline preload="metadata" crossOrigin="anonymous" aria-label={`${preset.label}效果示意`} onError={() => setPreviewFailed(true)} /> : null}
+      {preset.options.map(option => option.control === "switch" ? <div key={option.key} className="canvas-image-preset-options__switch-row">
+        <span className="canvas-image-preset-options__switch-label"><span id={`${id}-${option.key}`}>{option.label}</span>
+          {option.help ? <button type="button" className="canvas-image-preset-options__help" aria-label={`${option.label}说明`} data-tooltip={option.help}>
+            <LibTVMediaIcon name="help" size={14} />
+          </button> : null}
+        </span>
+        <button type="button" role="switch" className="canvas-image-preset-options__switch" aria-labelledby={`${id}-${option.key}`}
+          aria-checked={values[option.key] === "1"} data-tooltip={option.help}
+          onClick={() => changeOption(option.key, values[option.key] === "1" ? "0" : "1")}><i aria-hidden="true" /></button>
+      </div> : <div key={option.key} className="canvas-image-preset-options__group" role="radiogroup" aria-labelledby={`${id}-${option.key}`}
+        onKeyDown={event => {
+          if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229 || event.altKey || event.ctrlKey || event.metaKey) return;
+          if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); return; }
+          const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+          const index = buttons.findIndex(button => button === document.activeElement);
+          let next: HTMLButtonElement | undefined;
+          if (event.key === "ArrowRight" || event.key === "ArrowDown") next = buttons[(index + 1) % buttons.length];
+          if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = buttons[(index - 1 + buttons.length) % buttons.length];
+          if (event.key === "Home") next = buttons[0];
+          if (event.key === "End") next = buttons.at(-1);
+          if (next) { event.preventDefault(); event.stopPropagation(); next.click(); next.focus({ preventScroll: true }); }
+        }}>
+        <span id={`${id}-${option.key}`} className="canvas-image-preset-options__title">{option.label}</span>
+        <div className="canvas-image-preset-options__choices">
+          {option.values.map(value => <button key={value.value} type="button" role="radio" aria-checked={values[option.key] === value.value}
+            tabIndex={values[option.key] === value.value ? 0 : -1} data-tooltip={value.label}
+            onClick={() => changeOption(option.key, value.value)}><span>{value.label}</span></button>)}
+        </div>
+      </div>)}
     </div>, document.body) : null}
   </div>;
 }

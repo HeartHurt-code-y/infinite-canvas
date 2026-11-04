@@ -60,9 +60,21 @@ fn hidden_command(binary: &Path) -> tokio::process::Command {
 }
 
 async fn run_output(binary: &Path, args: &[String]) -> BackendResult<std::process::Output> {
+    run_output_with_timeout(binary, args, Duration::from_secs(180)).await
+}
+
+/// 同 [`run_output`]，但允许调用方指定单次执行的最长等待。
+///
+/// 探测公网素材时长时必须用短超时：地址不可达时不能让一次生成任务在
+/// 这里空等三分钟。
+async fn run_output_with_timeout(
+    binary: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> BackendResult<std::process::Output> {
     let mut command = hidden_command(binary);
     command.args(args);
-    let result = tokio::time::timeout(Duration::from_secs(180), command.output())
+    let result = tokio::time::timeout(timeout, command.output())
         .await
         .map_err(|_| invalid("媒体处理超时，请检查本地文件。"))??;
     if !result.status.success() {
@@ -80,14 +92,30 @@ pub(crate) async fn stream_duration(
     source: &str,
     audio: bool,
 ) -> BackendResult<f64> {
-    local_file(source)?;
+    stream_duration_with_timeout(ffmpeg, source, audio, Duration::from_secs(180)).await
+}
+
+/// 探测指定流（音频或视频）的时长，`timeout` 限制单次探测的最长等待。
+///
+/// `source` 可以是本地路径，也可以是 ffprobe 能直接读取的 http(s) 地址。
+pub(crate) async fn stream_duration_with_timeout(
+    ffmpeg: &Path,
+    source: &str,
+    audio: bool,
+    timeout: Duration,
+) -> BackendResult<f64> {
+    // 公网地址交给 ffprobe 自己取；本地路径必须是真的存在的文件。
+    let remote = source.starts_with("http://") || source.starts_with("https://");
+    if !remote {
+        local_file(source)?;
+    }
     let ffprobe = ffmpeg.with_file_name(if cfg!(windows) {
         "ffprobe.exe"
     } else {
         "ffprobe"
     });
     if ffprobe.is_file() {
-        let result = run_output(
+        let result = run_output_with_timeout(
             &ffprobe,
             &[
                 "-v".into(),
@@ -100,6 +128,7 @@ pub(crate) async fn stream_duration(
                 "json".into(),
                 source.into(),
             ],
+            timeout,
         )
         .await?;
         let parsed: Value = serde_json::from_slice(&result.stdout)?;
@@ -120,6 +149,11 @@ pub(crate) async fn stream_duration(
         {
             return Ok(duration);
         }
+    }
+    if remote {
+        // 回退路径是「解码整段流」，对公网地址等于把素材完整下载一遍，
+        // 代价与风险都不可接受；量不到就交给调用方按「未知时长」处理。
+        return Err(invalid("无法读取公网素材的时长。"));
     }
     decoded_stream_duration(ffmpeg, source, audio).await
 }

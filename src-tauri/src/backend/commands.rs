@@ -388,6 +388,9 @@ fn build_generation_model_catalog(
             .clone()
             .or_else(|| definition.remote_model_id.clone())
             .unwrap_or_else(|| binding.model_definition_id.clone());
+        if remote_model_id == super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING {
+            continue;
+        }
         entries.push(GenerationModelCatalogEntry {
             provider_connection_id: binding.provider_connection_id.clone(),
             provider_display_name: provider.display_name.clone(),
@@ -405,7 +408,10 @@ fn build_generation_model_catalog(
 pub fn list_model_definitions(
     state: State<'_, BackendState>,
 ) -> CommandResult<Vec<ModelDefinition>> {
-    state.storage.list_model_definitions().command()
+    state.storage.list_model_definitions().map(|mut definitions| {
+        definitions.retain(|definition| definition.remote_model_id.as_deref() != Some(super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING));
+        definitions
+    }).command()
 }
 
 #[tauri::command]
@@ -416,6 +422,10 @@ pub fn list_provider_model_bindings(
     state
         .storage
         .list_bindings(provider_connection_id.as_deref())
+        .map(|mut bindings| {
+            bindings.retain(|binding| binding.remote_model_id.as_deref() != Some(super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING));
+            bindings
+        })
         .command()
 }
 
@@ -656,11 +666,30 @@ pub fn start_generation(
 }
 
 #[tauri::command]
+pub async fn list_image_styles(state: State<'_, BackendState>, query: super::image_style_market::StyleMarketQuery) -> CommandResult<super::image_style_market::StyleMarketPage> {
+    super::image_style_market::browse(state.providers.client(), query).await.command()
+}
+
+#[tauri::command]
+pub async fn list_image_style_categories(state: State<'_, BackendState>) -> CommandResult<Value> {
+    super::image_style_market::categories(state.providers.client()).await.command()
+}
+
+#[tauri::command]
 pub fn start_canvas_image_generation(
     state: State<'_, BackendState>,
     command: super::canvas_image::StartCanvasImageCommand,
 ) -> CommandResult<String> {
-    super::canvas_image::compile(command).and_then(|generation| state.tasks.start(generation)).command()
+    use super::canvas_image::CanvasImageMode;
+    let mode = command.mode;
+    super::canvas_image::compile(command).and_then(|mut generation| {
+        match mode {
+            CanvasImageMode::Upscale => generation.model_definition_id = state.storage.ensure_image_upscaler(&generation.provider_connection_id)?,
+            CanvasImageMode::MaskedEdit => generation.model_definition_id = state.storage.ensure_image_region_editor(&generation.provider_connection_id)?,
+            _ => {}
+        }
+        state.tasks.start(generation)
+    }).command()
 }
 
 /// 调用方先生成 taskId 并写入节点配置。相同身份只返回原记录，不重复提交。
@@ -702,36 +731,6 @@ pub fn start_canvas_image_translation(
         }
         Ok(command.task_id)
     })();
-    result.command()
-}
-
-#[tauri::command]
-pub async fn list_canvas_image_presets(app: AppHandle) -> CommandResult<Vec<super::canvas_image::CanvasImagePreset>> {
-    let result = async {
-        let directory = app.path().app_data_dir()?;
-        tokio::task::spawn_blocking(move || super::canvas_image::list_presets(&directory)).await
-            .map_err(|error| BackendError::Conflict(format!("预设读取失败：{error}")))?
-    }.await;
-    result.command()
-}
-
-#[tauri::command]
-pub async fn save_canvas_image_preset(app: AppHandle, command: super::canvas_image::SaveCanvasImagePresetCommand) -> CommandResult<super::canvas_image::CanvasImagePreset> {
-    let result = async {
-        let directory = app.path().app_data_dir()?;
-        tokio::task::spawn_blocking(move || super::canvas_image::save_preset(&directory, command)).await
-            .map_err(|error| BackendError::Conflict(format!("预设保存失败：{error}")))?
-    }.await;
-    result.command()
-}
-
-#[tauri::command]
-pub async fn delete_canvas_image_preset(app: AppHandle, id: String) -> CommandResult<()> {
-    let result = async {
-        let directory = app.path().app_data_dir()?;
-        tokio::task::spawn_blocking(move || super::canvas_image::delete_preset(&directory, &id)).await
-            .map_err(|error| BackendError::Conflict(format!("预设删除失败：{error}")))?
-    }.await;
     result.command()
 }
 
@@ -878,6 +877,55 @@ pub async fn run_prompt_node(
         .command()
 }
 
+/// 创作台的文本生成：建任务 → 后台执行 → 立刻返回任务 ID。
+///
+/// 走任务模型而不是「等模型出结果再返回」：一次文本调用动辄几十秒，按在提交
+/// 按钮上会让创作台在第一条还在途时发不出第二条——这正是「生成时锁按钮」的
+/// 同一类问题。返回任务 ID 后由前端按任务轮询，状态与产物都进生成历史。
+#[tauri::command]
+pub async fn start_text_generation(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: super::prompt_optimize::StartTextGenerationCommand,
+) -> CommandResult<String> {
+    let internal = super::prompt_optimize::start_text_generation_command(command);
+    let deps = super::prompt_optimize::PromptVisionDeps {
+        app: &app,
+        storage: &state.storage,
+        lifecycle: &state.lifecycle,
+        providers: &state.providers,
+        assets: &state.assets,
+        staging: &state.staging,
+        local_base64_assets: &state.local_base64_assets,
+        local_results: &state.local_results,
+    };
+    let prepared = match super::prompt_optimize::prepare_text_task(&deps, &internal) {
+        Ok(prepared) => prepared,
+        Err(error) => return Err(error).command(),
+    };
+    let task_id = prepared.task_id.clone();
+    let logged_task_id = task_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<BackendState>();
+        let deps = super::prompt_optimize::PromptVisionDeps {
+            app: &app,
+            storage: &state.storage,
+            lifecycle: &state.lifecycle,
+            providers: &state.providers,
+            assets: &state.assets,
+            staging: &state.staging,
+            local_base64_assets: &state.local_base64_assets,
+            local_results: &state.local_results,
+        };
+        if let Err(error) =
+            super::prompt_optimize::run_prepared_text_task(&deps, &prepared, &internal).await
+        {
+            error!("[generation] 创作台文本生成失败: taskId={logged_task_id}, {error}");
+        }
+    });
+    Ok(task_id)
+}
+
 /// 文本节点悬浮生成器面板的「翻译提示词」：把当前正文翻成中文或英文。
 #[tauri::command]
 pub async fn translate_canvas_text(
@@ -901,7 +949,7 @@ pub async fn translate_canvas_text(
 }
 
 #[tauri::command]
-pub fn list_generation_tasks(
+pub async fn list_generation_tasks(
     state: State<'_, BackendState>,
     query: GenerationTaskListQuery,
 ) -> CommandResult<GenerationTaskPage> {
@@ -909,7 +957,7 @@ pub fn list_generation_tasks(
 }
 
 #[tauri::command]
-pub fn get_generation_task(
+pub async fn get_generation_task(
     state: State<'_, BackendState>,
     task_id: String,
 ) -> CommandResult<GenerationTaskDetail> {
@@ -917,7 +965,7 @@ pub fn get_generation_task(
 }
 
 #[tauri::command]
-pub fn get_generation_task_progress(
+pub async fn get_generation_task_progress(
     state: State<'_, BackendState>,
     task_id: String,
 ) -> CommandResult<GenerationTaskProgress> {
@@ -927,7 +975,7 @@ pub fn get_generation_task_progress(
 /// 取消在途生成任务：停止向供应商轮询、停止把产物写进磁盘。
 /// 终态任务（已成功/已失败）不动，历史保留。
 #[tauri::command]
-pub fn cancel_generation_task(
+pub async fn cancel_generation_task(
     state: State<'_, BackendState>,
     task_id: String,
 ) -> CommandResult<GenerationTaskDetail> {
@@ -1923,6 +1971,17 @@ pub async fn start_video_preparation(
     state: State<'_, BackendState>,
     command: StartVideoPreparationCommand,
 ) -> CommandResult<VideoPreparationJobRecord> {
+    state.video_preparation.start(command).await.command()
+}
+
+#[tauri::command]
+pub async fn start_video_frame_crop(
+    state: State<'_, BackendState>,
+    command: StartVideoPreparationCommand,
+) -> CommandResult<VideoPreparationJobRecord> {
+    if command.crop.is_none() {
+        return Err(BackendError::validation("请先选择要保留的画面范围。", Value::Null)).command();
+    }
     state.video_preparation.start(command).await.command()
 }
 

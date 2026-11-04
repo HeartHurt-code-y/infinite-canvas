@@ -64,9 +64,18 @@ struct PresetOption {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct OptionValue {
     value: String,
     instruction: String,
+    preset_label: Option<String>,
+    legacy: Option<LegacyOptionValue>,
+}
+
+#[derive(Deserialize)]
+struct LegacyOptionValue {
+    key: String,
+    value: String,
 }
 
 static CATALOG: LazyLock<Result<Catalog, String>> = LazyLock::new(|| {
@@ -82,7 +91,9 @@ pub fn compile(
     let catalog = CATALOG.as_ref().map_err(|error| BackendError::validation(
         "内置图片预设目录读取失败，请更新应用后重试", Value::String(error.clone()),
     ))?;
-    if selection.version != catalog.version {
+    // v1 人像参数只在本次请求中归一化；历史任务的冻结指令与结果保持原样。
+    let legacy_selection = selection.version == 1;
+    if !legacy_selection && selection.version != catalog.version {
         return Err(BackendError::validation("这份图片预设的版本已变化，请重新选择预设后生成", Value::Null));
     }
     let preset = catalog.groups.iter().flat_map(|group| &group.presets)
@@ -102,26 +113,41 @@ pub fn compile(
         "image" | "prompt" | "prompt_or_image" => {},
         _ => return Err(BackendError::validation("这份图片预设的输入定义无效，请更新应用", Value::Null)),
     }
-    if selection.options.keys().any(|key| !preset.options.iter().any(|option| &option.key == key)) {
+    if selection.options.iter().any(|(key, value)| !preset.options.iter().any(|option| {
+        &option.key == key || legacy_selection && option.values.iter().any(|item| {
+            item.legacy.as_ref().is_some_and(|legacy| &legacy.key == key && &legacy.value == value)
+        })
+    })) {
         return Err(BackendError::validation("图片预设包含失效选项，请重新选择预设", Value::Null));
     }
     let mut options = BTreeMap::new();
-    let mut instruction = format!("\n\n图片预设「{}」：\n{}", preset.label, preset.instruction);
+    let mut label = preset.label.clone();
+    let mut option_instructions = String::new();
     for option in &preset.options {
-        let value = selection.options.get(&option.key).unwrap_or(&option.default);
+        let legacy_value = legacy_selection.then(|| option.values.iter().find(|item| {
+            item.legacy.as_ref().is_some_and(|legacy| selection.options.get(&legacy.key) == Some(&legacy.value))
+        })).flatten();
+        let value = selection.options.get(&option.key)
+            .or_else(|| legacy_value.map(|item| &item.value)).unwrap_or(&option.default);
         let selected = option.values.iter().find(|item| &item.value == value)
             .ok_or_else(|| BackendError::validation(
                 format!("「{}」的{}选项已失效，请重新选择", preset.label, option.label), Value::Null,
             ))?;
-        instruction.push_str(&format!("\n{}：{}", option.label, selected.instruction));
+        if let Some(selected_label) = &selected.preset_label {
+            label = selected_label.clone();
+        }
+        if !selected.instruction.is_empty() {
+            option_instructions.push_str(&format!("\n{}：{}", option.label, selected.instruction));
+        }
         options.insert(option.key.clone(), selected.value.clone());
     }
+    let instruction = format!("\n\n图片预设「{}」：\n{}{}", label, preset.instruction, option_instructions);
     // 不改写现有文字、附件、素材身份或引用顺序，编译文本追加为独立片段。
     generation.prompt.push(PromptSegment::Text { text: instruction.clone() });
     generation.image_preset_snapshot = Some(FrozenImagePreset {
         scene: preset.scene.clone(),
         version: catalog.version,
-        label: preset.label.clone(),
+        label,
         instruction_origin: catalog.instruction_origin.clone(),
         options,
         compiled_instruction: instruction,

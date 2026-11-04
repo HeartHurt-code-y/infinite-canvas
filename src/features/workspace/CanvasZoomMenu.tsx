@@ -33,6 +33,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { useDismissOnOutside, useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
 import "./CanvasChromeMenus.css";
 
@@ -175,14 +176,14 @@ export function CanvasZoomMenu({
    * 上方并让底边贴住触发器顶边（留 8px 缝）。缩放菜单挂在画布左下控件组时
    * 正好走「翻到上方」这条路径，与本仓库其他浮层一致。
    */
-  const { ref: panelRef } = useFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: panelRef, layerId } = useFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef,
     preferAbove: false,
     minWidth: MENU_WIDTH,
     maxHeight: 320,
   });
-  useDismissOnOutside(open, panelRef, anchorRef, () => onOpenChange(false));
+  useDismissOnOutside(open, panelRef, anchorRef, () => onOpenChange(false), layerId);
 
   /** 关闭并把焦点还给触发器（鼠标点菜单项后焦点不能丢在浮层上）。 */
   const close = useCallback(
@@ -208,20 +209,20 @@ export function CanvasZoomMenu({
   }, [open]);
 
   /*
-   * Esc 挂在 window 的捕获阶段：菜单里点到的可能不是可聚焦元素（菜单项之间的
-   * 空白、分隔线），那时焦点不在菜单内，挂在菜单上的 Esc 就收不到。
+   * Esc 关闭菜单：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 之前这段自己挂在 window 的**捕获阶段**：菜单里点到的可能不是可聚焦元素
+   * （菜单项之间的空白、分隔线），焦点不在菜单内时菜单自己的 `onKeyDown`
+   * 收不到 Esc——所以要挂在 window 上。仲裁器同样挂在 window（冒泡阶段），
+   * 焦点在哪都能收到，但**不会**抢在内层浮层之前动手。
    */
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    };
-    window.addEventListener("keydown", handleKeyDown, true);
-    return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, [close, open]);
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => close(),
+    },
+    open,
+  );
 
   const handlePanelKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const count = entries.length;

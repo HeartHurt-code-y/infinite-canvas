@@ -5,7 +5,6 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { useModalFocusTrap } from "../../components/useModalFocusTrap";
 import {
   backendErrorMessage,
-  frontendLog,
   generationClient,
   resumeGenerationResult,
   toMediaSrc,
@@ -31,9 +30,8 @@ import "./LongVideoProcess.css";
 /*
  * 创作过程弹窗的归属。
  *
- * 同一个画布节点会同时存在两个 LongVideoProcess 实例：画布上的卡片一份，
- * 展开的节点编辑区又克隆了一份（编辑区打开过一次后会常驻）。两边各有一份
- * open 状态的话，用户可以在两个地方各开一个弹窗——两层面板、两个焦点陷阱互相抢焦点。
+ * 创作过程只在卡片下方提供入口。按节点记录弹窗拥有者，仍防御 React Flow
+ * 克隆或替换实例时出现两个弹窗与焦点陷阱。
  *
  * 这里把「哪个实例拥有弹窗」放进模块级状态：谁点的「查看创作过程」，谁就是拥有者，
  * 另一个实例自动收起。
@@ -99,8 +97,6 @@ function ProcessDialog({
   const [budget, setBudget] = useState(job.submissionBudget);
   const shots = draft.shots;
   const continuity = draft.continuity;
-  const [planText, setPlanText] = useState<string | null>(null);
-  const [planTextError, setPlanTextError] = useState<unknown>(null);
   useEffect(() => setBudget(job.submissionBudget), [job.submissionBudget]);
   const run = (action: LongVideoAction) => {
     if (actionGuard.current) return;
@@ -287,12 +283,6 @@ function ProcessDialog({
             hint="「查询原任务」只对还在排队或生成的片段有效；已失败的片段可单独重试，已成功片段会保留。"
           />
         ) : null}
-        {planTextError ? (
-          <ErrorAlert
-            error={planTextError}
-            hint="规划原文只是参考：镜头清单以下方列表为准；列表不对时直接改，或用「重新规划」重来一次。"
-          />
-        ) : null}
         {readError ? (
           <ErrorAlert
             error={readError}
@@ -330,31 +320,6 @@ function ProcessDialog({
           <button type="button" disabled={busy} onClick={restoreDownloads}>
             恢复片段下载
           </button>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              setPlanTextError(null);
-              void generationClient
-                .get(job.plannerTaskId)
-                .then((detail) =>
-                  setPlanText(detail.textOutput?.rawModelOutput ?? "规划模型尚无完整输出。"),
-                )
-                .catch((failure: unknown) => {
-                  // 原始报错只进日志：它长这样（英文 + 一串 UUID）——「not found: generation task 3f2c…」
-                  // 对用户没有任何意义。界面上给一句人话，并说清这条原文只是参考。
-                  frontendLog(
-                    "warn",
-                    `[long-video] 读取规划原文失败：${backendErrorMessage(failure)}`,
-                  );
-                  setPlanTextError(
-                    new Error("读不到规划任务的原文：规划任务可能还没创建，或者已经被清理。"),
-                  );
-                });
-            }}
-          >
-            查看规划原文
-          </button>
           {!ended &&
           !longVideoRunning(job) &&
           job.shots.some((shot) => LONG_VIDEO_RETRYABLE_SHOT_STATUSES.includes(shot.status)) ? (
@@ -388,7 +353,7 @@ function ProcessDialog({
             </button>
           ) : null}
         </div>
-        {!ended ? (
+        {job.status === "awaiting_budget" ? (
           <div className="long-video-process__budget">
             <label>
               最多新建片段任务
@@ -434,12 +399,6 @@ function ProcessDialog({
               onChange={(event) => onDraftChange({ ...draft, continuity: event.target.value })}
             />
           </label>
-        ) : null}
-        {planText != null ? (
-          <details open>
-            <summary>规划模型原文</summary>
-            <textarea aria-label="规划模型原文" readOnly value={planText} />
-          </details>
         ) : null}
         <ol className="long-video-process__shots">
           {job.shots.map((shot, index) => (

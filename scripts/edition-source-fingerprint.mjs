@@ -6,6 +6,7 @@ import {
   assertComponentRoot,
   COMPONENT_REPO_ROOT,
   componentBytesSha256,
+  componentFileSha256,
   componentPathIsValid,
 } from "./runtime-resources.mjs";
 
@@ -73,6 +74,15 @@ function relativeSourcePath(filename, root) {
   requireValue(componentPathIsValid(relative), `Source path escapes the workspace: ${filename}`);
   return relative;
 }
+function assertUnchangedFile(before, after, filename) {
+  requireValue(
+    after.isFile() && !after.isSymbolicLink() &&
+      before.size === after.size &&
+      before.mtimeMs === after.mtimeMs && before.ctimeMs === after.ctimeMs &&
+      before.ino === after.ino,
+    `File changed while being fingerprinted: ${filename}`,
+  );
+}
 async function stableFile(filename, root) {
   await assertComponentRoot(path.dirname(filename), root);
   const before = await lstat(filename);
@@ -82,18 +92,20 @@ async function stableFile(filename, root) {
   );
   requireValue(before.size <= MAX_FILE_BYTES, `Source exceeds fingerprint budget: ${filename}`);
   const bytes = await readFile(filename);
-  const after = await lstat(filename);
-  requireValue(
-    after.isFile() &&
-      !after.isSymbolicLink() &&
-      before.size === bytes.length &&
-      before.size === after.size &&
-      before.mtimeMs === after.mtimeMs &&
-      before.ctimeMs === after.ctimeMs &&
-      before.ino === after.ino,
-    `Source changed while being fingerprinted: ${filename}`,
-  );
+  requireValue(before.size === bytes.length, `Source changed while being fingerprinted: ${filename}`);
+  assertUnchangedFile(before, await lstat(filename), filename);
   return bytes;
+}
+async function fingerprintExecutable(filename, root) {
+  await assertComponentRoot(path.dirname(filename), root);
+  const before = await lstat(filename);
+  requireValue(
+    before.isFile() && !before.isSymbolicLink() && before.size > 0,
+    `Native executable must be a nonempty regular file: ${filename}`,
+  );
+  const sha256 = await componentFileSha256(filename);
+  assertUnchangedFile(before, await lstat(filename), filename);
+  return { size: before.size, sha256 };
 }
 function snapshotDigest({ applicationVersion, edition, files }) {
   return componentBytesSha256(
@@ -206,7 +218,6 @@ export async function createEditionBuildSource({
   root = COMPONENT_REPO_ROOT,
 }) {
   root = path.resolve(root);
-  const bytes = await stableFile(executablePath, root);
   return {
     schemaVersion: 1,
     applicationVersion: snapshot.applicationVersion,
@@ -215,8 +226,7 @@ export async function createEditionBuildSource({
     sourceFiles: snapshot.files,
     nativeExecutable: {
       path: relativeSourcePath(executablePath, root),
-      size: bytes.length,
-      sha256: componentBytesSha256(bytes),
+      ...(await fingerprintExecutable(executablePath, root)),
     },
   };
 }
@@ -303,10 +313,10 @@ export async function assertEditionBuildSourceFreshness(
       SHA256.test(record.nativeExecutable.sha256),
     "Build native executable path/identity is invalid",
   );
-  const bytes = await stableFile(executablePath, path.resolve(root));
+  const executable = await fingerprintExecutable(executablePath, path.resolve(root));
   requireValue(
-    bytes.length === record.nativeExecutable.size &&
-      componentBytesSha256(bytes) === record.nativeExecutable.sha256,
+    executable.size === record.nativeExecutable.size &&
+      executable.sha256 === record.nativeExecutable.sha256,
     "Build source record is bound to a different native executable",
   );
   const current = await collectEditionSourceFingerprint({ root, edition });

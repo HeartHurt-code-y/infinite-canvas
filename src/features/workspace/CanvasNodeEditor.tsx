@@ -1,5 +1,7 @@
-import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { Icon } from "../../components/Icon";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
+import { CanvasReferencePickingContext } from "./canvasReferencePicking";
 import { videoNodeEditorPlacement } from "./videoNodeEditorPlacement";
 import type { CanvasNodeRect } from "./workspaceModel";
 import "./VideoGenerationNode.css";
@@ -14,7 +16,6 @@ export function CanvasNodeEditorShell({
   open,
   onClose,
   children,
-  expandOnOpen = false,
 }: {
   readonly nodeKey: string;
   readonly kindLabel?: string;
@@ -23,17 +24,16 @@ export function CanvasNodeEditorShell({
   readonly open: boolean;
   readonly onClose: () => void;
   readonly children: ReactNode;
-  readonly expandOnOpen?: boolean;
 }) {
   const elementRef = useRef<HTMLElement>(null);
   const lastControl = useRef<HTMLElement | null>(null);
   const lastRange = useRef<Range | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const previouslyOpen = useRef(false);
+  const reference = useContext(CanvasReferencePickingContext);
+  const pickingReference = reference?.session?.targetKey === nodeKey;
   useLayoutEffect(() => {
-    if (open && !previouslyOpen.current && expandOnOpen) setExpanded(true);
-    previouslyOpen.current = open;
-  }, [open, expandOnOpen]);
+    if (pickingReference) setExpanded(false);
+  }, [pickingReference]);
   const rememberFocus = useCallback((element: EventTarget | null = document.activeElement) => {
     if (!(element instanceof HTMLElement) || !elementRef.current?.contains(element)) return;
     if (
@@ -212,6 +212,7 @@ export function CanvasNodeEditorShell({
   }, [nodeKey, open, rememberFocus, restoreFocus]);
 
   const toggleExpanded = () => {
+    if (pickingReference) reference.setSession(null);
     rememberFocus();
     setExpanded((value) => !value);
     requestAnimationFrame(restoreFocus);
@@ -232,6 +233,7 @@ export function CanvasNodeEditorShell({
         ref={elementRef}
         id={`node-editor-${nodeKey}`}
         className={`video-node-editor canvas-node-editor${expanded ? " is-expanded" : ""}`}
+        data-media-kind={kindLabel === "视频生成" ? "video" : kindLabel === "图片生成" ? "image" : undefined}
         hidden={!open}
         role={expanded ? "dialog" : undefined}
         /*
@@ -253,8 +255,11 @@ export function CanvasNodeEditorShell({
         onBlurCapture={(event) => rememberFocus(event.target)}
         onFocusCapture={(event) => rememberFocus(event.target)}
         onKeyDown={(event) => {
+          // Portal 浮层的 React 事件仍会冒泡到这里；由浮层自己的 Escape 处理者关闭。
+          if (event.target instanceof Node && !event.currentTarget.contains(event.target)) return;
           if (event.nativeEvent.isComposing) return;
           if (event.key === "Escape") {
+            if (pickingReference) return;
             // Tiptap 会默认消费 Escape；引用候选和设置弹层通过 stopPropagation
             // 优先收起自身，冒泡到这里的 Escape 仍须关闭当前编辑层。
             event.preventDefault();
@@ -299,9 +304,9 @@ export function CanvasNodeEditorShell({
             }}
             onClick={toggleExpanded}
           >
-            <Icon name="corners-out" aria-hidden="true" size="sm" />
+            {(kindLabel === "视频生成" || kindLabel === "图片生成") ? <LibTVMediaIcon name="expand" size={16} /> : <Icon name="corners-out" aria-hidden="true" size="sm" />}
           </button>
-          <button
+          {kindLabel !== "视频生成" && kindLabel !== "图片生成" ? <button
             className="video-node-editor__close"
             type="button"
             aria-label={`收起${kindLabel === "视频生成" ? "视频" : kindLabel}编辑区`}
@@ -312,7 +317,7 @@ export function CanvasNodeEditorShell({
             }}
           >
             <Icon name="x" aria-hidden="true" size="sm" />
-          </button>
+          </button> : null}
         </div>
         <div className="video-node-editor__scroll">{children}</div>
       </aside>

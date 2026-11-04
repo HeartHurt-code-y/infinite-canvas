@@ -46,6 +46,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { JimengIcon } from "./JimengIcon";
 import type { CreateRecordFilter } from "./createPageModel";
 import { useCreateFloatingLayerAnchor, useDismissOnOutside } from "./useFloatingLayerAnchor";
@@ -340,7 +341,7 @@ export function CreateTopBar({
    *   - `gap: 12` + `preferAbove: false`：即梦这枚浮层**往下**弹，
    *     触发器底边 52 与浮层顶边 64 之间留 12px。
    */
-  const { ref: filterPopoverRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: filterPopoverRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open: filterOpen,
     anchorRef: filterTriggerRef,
     minWidth: 280,
@@ -350,7 +351,13 @@ export function CreateTopBar({
     preferAbove: false,
   });
   /* 点外部关闭：浮层与触发器都在 document.body 之外的 DOM 里，交给共享 hook。 */
-  useDismissOnOutside(filterOpen, filterPopoverRef, filterTriggerRef, () => setFilterOpen(false));
+  useDismissOnOutside(
+    filterOpen,
+    filterPopoverRef,
+    filterTriggerRef,
+    () => setFilterOpen(false),
+    layerId,
+  );
 
   /* 展开后把焦点交给输入框，否则用户还得再点一次。 */
   useEffect(() => {
@@ -362,20 +369,18 @@ export function CreateTopBar({
     if (filterOpen) filterPopoverRef.current?.focus();
   }, [filterOpen, filterPopoverRef]);
 
-  /* Esc 关掉浮层：浮层是最上层，Esc 归它。 */
-  useEffect(() => {
-    if (!filterOpen) return;
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setFilterOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, true);
-    };
-  }, [filterOpen]);
+  /*
+   * Esc 关掉筛选浮层：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 浮层是最上层，Esc 归它；但仲裁器保证**一次按键只关一层**。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => filterOpen,
+      handle: () => setFilterOpen(false),
+    },
+    filterOpen,
+  );
 
   return (
     <div className="create-topbar">

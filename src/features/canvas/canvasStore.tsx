@@ -25,6 +25,7 @@ import {
   type CanvasInputResolver,
 } from "../workspace/canvasInputs";
 import { decodePromptContentDocument, type PromptContentDocumentV1 } from "../../lib/promptContent";
+import { decodeDirectorScene, type DirectorScene } from "../workspace/directorScene";
 
 /** 画布里各提示词节点的 canonical 文档快照（按节点 key 索引）。 */
 export type PromptContentDocumentMap = Readonly<Record<string, PromptContentDocumentV1>>;
@@ -71,7 +72,22 @@ export type CanvasStoreNodeChange =
  * 画布六类节点的类型标签，即 nodesById 内每个条目的判别字段。
  * 标签沿用旧版平行数组的集合名；gen 一类内部仍以 data.kind 区分图片/视频/提示词。
  */
-export type CanvasNodeType = "asset" | "gen" | "screenplay" | "videoClip" | "result" | "output";
+export type CanvasNodeType = "asset" | "gen" | "screenplay" | "videoClip" | "director" | "result" | "output";
+
+export interface DirectorNodeData {
+  readonly key: string;
+  readonly kind: "director";
+  readonly name: string;
+  readonly x: number;
+  readonly y: number;
+  readonly measured?: CanvasNodeSize;
+  readonly assetGroupId?: string;
+  readonly rating?: number;
+  readonly scene: DirectorScene;
+  readonly prompt: string;
+  readonly panoramaKey: string | null;
+  readonly previewUrl: string | null;
+}
 
 /** 类型标签 → 节点数据类型。 */
 export interface CanvasNodesByType {
@@ -79,6 +95,7 @@ export interface CanvasNodesByType {
   gen: GenNodeData;
   screenplay: ScreenplayNodeData;
   videoClip: VideoClipNodeData;
+  director: DirectorNodeData;
   result: ResultNodeData;
   output: OutputNodeData;
 }
@@ -104,6 +121,7 @@ export interface CanvasDocumentV1 {
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
   readonly videoClipNodes?: readonly VideoClipNodeData[];
+  readonly directorNodes?: readonly DirectorNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -122,6 +140,7 @@ export interface CanvasDocumentV2 {
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
   readonly videoClipNodes?: readonly VideoClipNodeData[];
+  readonly directorNodes?: readonly DirectorNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -140,6 +159,7 @@ export interface CanvasNodeLists {
   readonly gen: readonly GenNodeData[];
   readonly screenplay: readonly ScreenplayNodeData[];
   readonly videoClip: readonly VideoClipNodeData[];
+  readonly director: readonly DirectorNodeData[];
   readonly result: readonly ResultNodeData[];
   readonly output: readonly OutputNodeData[];
 }
@@ -149,6 +169,7 @@ export interface CanvasNodesByKey {
   readonly gen: ReadonlyMap<string, GenNodeData>;
   readonly screenplay: ReadonlyMap<string, ScreenplayNodeData>;
   readonly videoClip: ReadonlyMap<string, VideoClipNodeData>;
+  readonly director: ReadonlyMap<string, DirectorNodeData>;
   readonly result: ReadonlyMap<string, ResultNodeData>;
   readonly output: ReadonlyMap<string, OutputNodeData>;
 }
@@ -206,7 +227,10 @@ export interface CanvasHistorySummary {
 }
 
 export interface CanvasCommands {
-  readonly groupNodes: (keys: readonly string[], groupId: string) => CanvasWriteResult;
+  readonly groupNodes: (keys: readonly string[], groupId: string, layout?: {
+    readonly group: CanvasGroup;
+    readonly positions: readonly CanvasStoreNodeChange[];
+  }) => CanvasWriteResult;
   readonly dissolveGroup: (groupId: string) => CanvasWriteResult;
   readonly updateGroup: (
     groupId: string,
@@ -427,6 +451,7 @@ const CANVAS_NODE_TYPES: readonly CanvasNodeType[] = [
   "gen",
   "screenplay",
   "videoClip",
+  "director",
   "result",
   "output",
 ];
@@ -456,6 +481,7 @@ function sameConnectionData(
       first.name === second.name &&
       first.previewUrl === second.previewUrl &&
       first.videoUrl === second.videoUrl &&
+      first.libraryResource === second.libraryResource &&
       first.libraryPickOrder === second.libraryPickOrder &&
       first.assetGroupId === second.assetGroupId
     );
@@ -482,7 +508,8 @@ function sameConnectionData(
     const first = previous as GenNodeData;
     const second = next as GenNodeData;
     return (
-      first.kind === second.kind && first.config === second.config && first.name === second.name
+      first.kind === second.kind && first.config === second.config && first.name === second.name &&
+      (first.kind !== "image" || second.kind !== "image" || first.imageGeneration === second.imageGeneration)
     );
   }
   if (type === "screenplay") {
@@ -566,6 +593,7 @@ function canvasNodeLists(nodesById: CanvasNodesById): CanvasNodeLists {
     gen: typeNodes(nodesById, "gen"),
     screenplay: typeNodes(nodesById, "screenplay"),
     videoClip: typeNodes(nodesById, "videoClip"),
+    director: typeNodes(nodesById, "director"),
     result: typeNodes(nodesById, "result"),
     output: typeNodes(nodesById, "output"),
   };
@@ -586,6 +614,7 @@ function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
     gen: connectionTypeNodesByKey(nodesById, "gen"),
     screenplay: connectionTypeNodesByKey(nodesById, "screenplay"),
     videoClip: connectionTypeNodesByKey(nodesById, "videoClip"),
+    director: connectionTypeNodesByKey(nodesById, "director"),
     result: connectionTypeNodesByKey(nodesById, "result"),
     output: connectionTypeNodesByKey(nodesById, "output"),
   };
@@ -809,9 +838,20 @@ function snapshotCanvasV2(
     version: 2,
     groups: state.groups,
     assetNodes: nodes.asset,
-    genNodes: nodes.gen,
+    genNodes: nodes.gen.map(node => node.kind === "image" && node.imageGeneration ? {
+      ...node,
+      imageGeneration: {
+        ...node.imageGeneration,
+        results: node.imageGeneration.results.map(result => {
+          const persisted = { ...result };
+          delete persisted.previewSrc;
+          return persisted;
+        }),
+      },
+    } : node),
     screenplayNodes: nodes.screenplay,
     videoClipNodes: nodes.videoClip,
+    ...(nodes.director.length ? { directorNodes: nodes.director } : {}),
     resultNodes: nodes.result,
     outputNodes: nodes.output.map(persistedOutputNode),
     assetEdges: state.assetEdges,
@@ -864,6 +904,7 @@ function normalizeCanvasDocument(
     ["gen", value["genNodes"] as readonly unknown[]],
     ["screenplay", Array.isArray(value["screenplayNodes"]) ? value["screenplayNodes"] : []],
     ["videoClip", Array.isArray(value["videoClipNodes"]) ? value["videoClipNodes"] : []],
+    ["director", Array.isArray(value["directorNodes"]) ? value["directorNodes"] : []],
     ["result", value["resultNodes"] as readonly unknown[]],
     ["output", Array.isArray(value["outputNodes"]) ? value["outputNodes"] : []],
   ];
@@ -880,9 +921,22 @@ function normalizeCanvasDocument(
         issues.push("节点 key 重复: " + key);
         continue;
       }
+      const directorScene = type === "director" ? decodeDirectorScene(rawNode["scene"]) : null;
+      if (type === "director" && !directorScene) {
+        issues.push("导演台场景格式无法读取：" + key);
+        continue;
+      }
       const data =
         type === "output"
           ? ({ ...rawNode, previewSrc: null } as unknown as CanvasNodeData)
+          : type === "director" ? ({
+            ...rawNode, kind: "director",
+            name: typeof rawNode["name"] === "string" && rawNode["name"].trim() ? rawNode["name"] : "导演台",
+            prompt: typeof rawNode["prompt"] === "string" ? rawNode["prompt"] : "",
+            scene: directorScene!,
+            panoramaKey: typeof rawNode["panoramaKey"] === "string" ? rawNode["panoramaKey"] : null,
+            previewUrl: typeof rawNode["previewUrl"] === "string" ? rawNode["previewUrl"] : null,
+          } as unknown as DirectorNodeData)
           : (rawNode as unknown as CanvasNodeData);
       nodesById[key] = { type, data } as CanvasNodeEntry;
     }
@@ -960,8 +1014,21 @@ function normalizeCanvasDocument(
   };
 }
 
-/** No node family restricts its incoming edges; only self-connections are rejected. */
 export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
+  if (target.type === "director") {
+    return (source.type === "asset" && source.data.kind === "image" && !source.data.libraryResource) ||
+      (source.type === "gen" && source.data.kind === "image") ||
+      (source.type === "output" && source.data.mediaType === "image");
+  }
+  if (source.type === "director") {
+    return target.type === "asset" && target.data.kind !== "audio" && !target.data.libraryResource;
+  }
+  if (target.type === "asset" && target.data.libraryResource) return false;
+  if (source.type === "asset" && source.data.libraryResource) {
+    return target.type === "gen" && (source.data.libraryResource.kind === "style"
+      ? target.data.kind === "image" && target.data.config.imageMode !== "upscale"
+      : target.data.kind === "video");
+  }
   return source.data.key !== target.data.key;
 }
 
@@ -1051,14 +1118,18 @@ function createCanvasStore(initialZoom = 100): {
           setPromptDocuments: (documents) => {
             set({ promptDocuments: documents });
           },
-          groupNodes: (keys, groupId) => {
+          groupNodes: (keys, groupId, layout) => {
             let result: CanvasWriteResult = "unchanged";
             set((state) => {
               if (!groupId || state.groups[groupId]) return state;
               const nodesById = regroupCanvasNodes(state.nodesById, keys, groupId);
               if (nodesById == null) return state;
               result = "applied";
-              return { nodesById, groups: reconcileCanvasGroups(state.groups, nodesById) };
+              const grouped = layout
+                ? applyCanvasStoreNodeChanges({ ...state, nodesById }, layout.positions).nodesById ?? nodesById
+                : nodesById;
+              const groups = layout ? { ...state.groups, [groupId]: layout.group } : state.groups;
+              return { nodesById: grouped, groups: reconcileCanvasGroups(groups, grouped) };
             });
             return result;
           },
@@ -1691,7 +1762,7 @@ function historySummary(store: CanvasStore): CanvasHistorySummary {
 function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplementation {
   const { store, flushPendingHistory } = createCanvasStore(initialZoom);
   const commands: CanvasCommands = {
-    groupNodes: (keys, groupId) => store.getState().groupNodes(keys, groupId),
+    groupNodes: (keys, groupId, layout) => store.getState().groupNodes(keys, groupId, layout),
     dissolveGroup: (groupId) => store.getState().dissolveGroup(groupId),
     updateGroup: (groupId, patch) => store.getState().updateGroup(groupId, patch),
     insertSubgraph: (nodes, edges, options) =>

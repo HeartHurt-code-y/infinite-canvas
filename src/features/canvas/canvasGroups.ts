@@ -12,6 +12,7 @@ export interface CanvasGroup {
   readonly id: string;
   readonly name: string;
   readonly collapsed: boolean;
+  readonly purpose?: "character" | "storyboard";
 }
 
 export type CanvasGroups = Readonly<Record<string, CanvasGroup>>;
@@ -47,6 +48,7 @@ export function decodeCanvasGroups(value: unknown, nodesById: CanvasNodesById): 
             ? record["name"].trim()
             : "未命名分组",
         collapsed: record["collapsed"] === true,
+        ...(record["purpose"] === "character" || record["purpose"] === "storyboard" ? { purpose: record["purpose"] } : {}),
       };
     }
   }

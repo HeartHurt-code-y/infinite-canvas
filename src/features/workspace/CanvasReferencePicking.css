@@ -1,0 +1,124 @@
+.workspace-shell.workspace-shell--reference-picking .workspace-header {
+  display: none;
+}
+
+.workspace-shell--reference-picking .canvas-stage {
+  grid-row: header-start / canvas-end;
+}
+
+/* Keep the flow viewport at its previous screen position when the header hides. */
+.workspace-shell--reference-picking .canvas-viewport {
+  inset-block-start: var(--size-header);
+}
+
+.canvas-reference-pick-bar {
+  --reference-blue: #1f6dff;
+  position: absolute;
+  z-index: calc(var(--z-modal) + 1);
+  inset-block-start: 12px;
+  inset-inline-start: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  width: max-content;
+  max-width: calc(100% - 24px);
+  padding: 12px;
+  border-radius: 16px;
+  background: var(--reference-blue);
+  color: white;
+  font-size: 13px;
+  transform: translateX(-50%);
+}
+
+.canvas-reference-pick-bar__message,
+.canvas-reference-pick-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvas-reference-pick-bar__message {
+  font-weight: 600;
+}
+
+.canvas-reference-pick-bar__icon,
+.canvas-reference-pick-bar__actions button {
+  display: inline-grid;
+  height: 32px;
+  min-width: 32px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgb(255 255 255 / 20%);
+  color: inherit;
+}
+
+.canvas-reference-pick-bar__actions button:first-child {
+  padding-inline: 12px;
+}
+
+.canvas-reference-pick-bar__actions button:last-child {
+  background: transparent;
+}
+
+.canvas-reference-pick-bar__actions button:hover {
+  background: rgb(255 255 255 / 28%);
+}
+
+.canvas-reference-pick-bar__actions button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.canvas-gen-node__tool-chip.canvas-reference-pick-trigger[aria-pressed="true"] {
+  background: var(--nt-bg-overlay-hover, #383838);
+  color: var(--nt-text-default);
+}
+
+.canvas-reference-picking .react-flow__node[data-reference-state] {
+  cursor: not-allowed;
+}
+
+.canvas-reference-picking .react-flow__node[data-reference-state] :is(button, img, video, audio) {
+  cursor: inherit;
+}
+
+.canvas-reference-picking .react-flow__node[data-reference-state="target"] {
+  cursor: default;
+}
+
+.canvas-reference-picking .react-flow__node:is([data-reference-state="available"], [data-reference-state="selected"]) {
+  cursor: crosshair;
+  border-radius: 12px;
+}
+
+.canvas-reference-picking .react-flow__node[data-reference-state="available"]:is(:hover, :focus-within) {
+  outline: 2px solid #a8caff;
+}
+
+.canvas-reference-picking .react-flow__node[data-reference-state="selected"] {
+  outline: 2px solid #3b82f6;
+}
+
+.canvas-reference-picking .react-flow__handle {
+  visibility: hidden;
+}
+
+.canvas-asset-drawer__reference-row:disabled,
+.workspace-shell--reference-picking .canvas-asset-drawer__group-heading button[role="checkbox"]:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.canvas-asset-drawer__node[data-reference-checked] {
+  background: rgb(59 130 246 / 20%);
+}
+
+.canvas-asset-drawer__reference-mark {
+  display: inline-flex;
+  margin-inline-start: auto;
+  color: #a8caff;
+}

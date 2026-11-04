@@ -82,6 +82,33 @@ pub struct StartVideoPreparationCommand {
     #[serde(default)]
     pub format: VideoPreparationAudioFormat,
     pub source_identity: Option<String>,
+    pub crop: Option<VideoPreparationCrop>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VideoPreparationCrop {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl VideoPreparationCrop {
+    fn validate(self, probe: &VideoPreparationProbe) -> BackendResult<()> {
+        if ![self.x, self.y, self.width, self.height].iter().all(|value| value.is_finite()) ||
+            self.x < 0.0 || self.y < 0.0 || self.width <= 0.0 || self.height <= 0.0 ||
+            self.x + self.width > 1.000001 || self.y + self.height > 1.000001 ||
+            self.width * f64::from(probe.width.min(probe.height)) < 2.0 ||
+            self.height * f64::from(probe.width.min(probe.height)) < 2.0 {
+            return Err(invalid("画面裁切范围无效，请重新选择画面区域。"));
+        }
+        Ok(())
+    }
+
+    fn filter(self) -> String {
+        format!("crop=trunc(iw*{:.9}/2)*2:trunc(ih*{:.9}/2)*2:iw*{:.9}:ih*{:.9}",
+            self.width, self.height, self.x, self.y)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +156,8 @@ pub struct VideoPreparationJobRecord {
     pub end_seconds: f64,
     pub audio_stream_index: Option<u32>,
     pub format: VideoPreparationAudioFormat,
+    #[serde(default)]
+    pub crop: Option<VideoPreparationCrop>,
     pub status: VideoPreparationStatus,
     pub progress: Option<f64>,
     pub output: Option<VideoPreparationOutput>,
@@ -241,6 +270,12 @@ impl VideoPreparationService {
         }
         let end = command.end_seconds.unwrap_or(probe.duration_seconds);
         validate_window(command.start_seconds, end, probe.duration_seconds)?;
+        if let Some(crop) = command.crop {
+            if command.operation != VideoPreparationOperation::ClipVideo {
+                return Err(invalid("画面裁切只能用于视频片段。"));
+            }
+            crop.validate(&probe)?;
+        }
         let audio = selected_audio(&probe, command.operation, command.audio_stream_index)?;
         if command.operation == VideoPreparationOperation::ExtractAudio
             && command.format == VideoPreparationAudioFormat::Original
@@ -258,6 +293,7 @@ impl VideoPreparationService {
             end_seconds: end,
             audio_stream_index: audio.as_ref().map(|stream| stream.index),
             format: command.format,
+            crop: command.crop,
             status: VideoPreparationStatus::Preparing,
             progress: Some(0.0),
             output: None,
@@ -451,6 +487,9 @@ impl VideoPreparationService {
             record.end_seconds,
             probe.duration_seconds,
         )?;
+        if let Some(crop) = record.crop {
+            crop.validate(&probe)?;
+        }
         let audio = selected_audio(&probe, record.operation, record.audio_stream_index)?;
         let (extension, mime) = output_format(record, audio.as_ref())?;
         let directory = job_directory(&self.inner.directory, &record.job_id)?;
@@ -750,7 +789,7 @@ fn processing_arguments(
                 "-crf".into(),
                 "18".into(),
                 "-vf".into(),
-                "pad=ceil(iw/2)*2:ceil(ih/2)*2".into(),
+                record.crop.map_or_else(|| "pad=ceil(iw/2)*2:ceil(ih/2)*2".into(), VideoPreparationCrop::filter),
                 "-pix_fmt".into(),
                 "yuv420p".into(),
             ]);
@@ -828,7 +867,7 @@ fn validate_output(
     Ok(())
 }
 
-fn command(binary: &Path) -> tokio::process::Command {
+pub(crate) fn command(binary: &Path) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(binary);
     command.stdin(Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]

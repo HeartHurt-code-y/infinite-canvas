@@ -172,13 +172,13 @@ export function CreateSelect({
     if (refocus) triggerRef.current?.focus();
   }, []);
 
-  const { ref: listRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: listRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: triggerRef,
     minWidth: popoverWidth,
     maxHeight: 320,
   });
-  useDismissOnOutside(open, listRef, triggerRef, () => setOpen(false));
+  useDismissOnOutside(open, listRef, triggerRef, () => setOpen(false), layerId);
 
   const commit = useCallback(
     (index: number) => {

@@ -33,14 +33,14 @@ function CreatePopover({
   readonly ariaLabel?: string;
   readonly children: ReactNode;
 }) {
-  const { ref: panelRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: panelRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef,
     preferAbove,
     minWidth,
     maxHeight: 420,
   });
-  useDismissOnOutside(open, panelRef, anchorRef, onClose);
+  useDismissOnOutside(open, panelRef, anchorRef, onClose, layerId);
 
   if (!open) return null;
   return createPortal(

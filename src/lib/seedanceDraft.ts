@@ -26,15 +26,23 @@ export function isSeedanceDraftTask(detail: GenerationTaskDetail): boolean {
   const resolved = record(detail.resolvedRequest);
   const parameters = record(logical?.["parameters"]) ?? record(resolved?.["parameters"]);
   const logicalDraft = parameters?.["draft"] === true;
+  /*
+   * 适配器身份取任务快照；快照缺失（旧后端）时回退到请求体。
+   *
+   * 快照是权威：请求体可能整包带 base64 素材，详情接口只回片段
+   * （body.metadata 正好落在被省略的那一半时就读不到）。
+   * 但开发环境的前后端可能不同步，旧后端没有这个快照字段——那就仍从
+   * 请求体里取，两条路任选其一都能认出草稿任务。
+   */
+  const snapshotAdapterId = detail.summary.adapterIdSnapshot;
   return detail.calls.some((call) => {
     const request = record(call.request);
-    const adapterId = request?.["adapterId"];
+    const requestAdapterId = request?.["adapterId"];
+    const adapterId =
+      snapshotAdapterId ?? (typeof requestAdapterId === "string" ? requestAdapterId : "");
     if (
       call.phase !== "submit" ||
-      !supportsSeedanceDraft(
-        typeof adapterId === "string" ? adapterId : "",
-        detail.summary.remoteModelIdSnapshot ?? "",
-      )
+      !supportsSeedanceDraft(adapterId, detail.summary.remoteModelIdSnapshot ?? "")
     ) {
       return false;
     }

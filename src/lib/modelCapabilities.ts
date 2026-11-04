@@ -612,6 +612,61 @@ export function isSeedance25VideoModel(modelId: string): boolean {
   return normalized.includes("seedance-2-5") || normalized.includes("seedance-2.5");
 }
 
+/**
+ * Seedance 全模态参考的素材上限。
+ *
+ * 来源：火山方舟《创建视频生成任务 API · 模型能力 / 传入单个音频要求》与
+ * 《视频生成教程 · 使用限制》：
+ * - Seedance 2.5：参考图片 30 张、参考视频 10 个（合计 ≤ 30 秒）、
+ *   参考音频 10 段（合计 ≤ 30 秒）；
+ * - Seedance 2.0 系列：参考图片 9 张、参考视频 3 个（合计 ≤ 15 秒）、
+ *   参考音频 3 段（合计 ≤ 15 秒）。
+ *
+ * 后端在提交前按同一份契约校验（Rust 的 `seedance_reference_limits`），这里是
+ * 同一份契约的前端镜像：上限在界面上提前说清，别让用户撞一次供应商 400
+ * 才知道参考音频不能超过半分钟。
+ */
+export interface SeedanceReferenceLimits {
+  readonly familyLabel: string;
+  readonly maxImages: number;
+  readonly maxVideos: number;
+  readonly maxAudios: number;
+  readonly maxVideoTotalSeconds: number;
+  readonly maxAudioTotalSeconds: number;
+}
+
+export function seedanceReferenceLimits(modelId: string): SeedanceReferenceLimits | null {
+  // RD 网关与按次系列是另一套契约；海外 Dreamina 的参考素材上限未在方舟文档
+  // 登记。这两类都不套用方舟原生的上限。
+  //
+  // 草稿样片也不排除：`doubao-seedance-2-5-260628` 既是普通 Seedance 2.5 的
+  // 模型 ID，又被草稿档案复用，而样片模式同样携带参考素材、同样受方舟上限
+  // 约束（只有 `draft_task` 晋升请求不携带参考素材，那条路径没有参考素材）。
+  if (isRdVideoModel(modelId) || perTaskVideoProfile(modelId)) return null;
+  if (isDreaminaSeedanceVideoModel(modelId)) return null;
+  if (isSeedance25VideoModel(modelId)) {
+    return {
+      familyLabel: "Seedance 2.5",
+      maxImages: 30,
+      maxVideos: 10,
+      maxAudios: 10,
+      maxVideoTotalSeconds: 30,
+      maxAudioTotalSeconds: 30,
+    };
+  }
+  if (isSeedance20VideoModel(modelId)) {
+    return {
+      familyLabel: "Seedance 2.0",
+      maxImages: 9,
+      maxVideos: 3,
+      maxAudios: 3,
+      maxVideoTotalSeconds: 15,
+      maxAudioTotalSeconds: 15,
+    };
+  }
+  return null;
+}
+
 function isDreaminaSeedanceVideoModel(modelId: string): boolean {
   return modelId.toLocaleLowerCase().includes("dreamina-seedance");
 }
@@ -826,6 +881,12 @@ function rdVideoParameters(modelId: string): Record<string, unknown> {
 
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  if (/^kling-(?:(?:video-)?v3(?:\.0)?|3\.0)(?:-omni)?$/i.test(modelId)) return {
+    duration: { type: "integer", label: "时长", default: 5, enum: Array.from({ length: 13 }, (_, index) => index + 3), order: 0 },
+    aspect_ratio: { type: "string", label: "画幅", default: "16:9", enum: ["16:9", "9:16", "1:1"], order: 1 },
+    mode: { type: "string", label: "生成模式", default: "std", enum: ["std", "pro"], order: 2 },
+    sound: { type: "string", label: "生成音频", default: "off", enum: ["off", "on"], order: 3 },
+  };
   if (isPixverseVideoModel(modelId)) return pixverseVideoParameters(modelId);
   const perTask = perTaskVideoProfile(modelId);
   if (perTask) {
@@ -1293,6 +1354,7 @@ export function modelParameterCapabilities(
       isMinimaxH3VideoModel(modelId) ||
       isPixverseVideoModel(modelId) ||
       isRdVideoModel(modelId) ||
+      /^kling-(?:(?:video-)?v3(?:\.0)?|3\.0)(?:-omni)?$/i.test(modelId) ||
       isGptImageModel(modelId) ||
       isGeminiImageModel(modelId) ||
       isSeedreamImageModel(modelId) ||

@@ -1,0 +1,191 @@
+{
+  "version": 1,
+  "source": "https://api.liblib.tv/api/video-control/camera-motion/list",
+  "capturedAt": "2026-11-03",
+  "items": [
+    {
+      "id": "cm_static_00000000000000000001",
+      "key": "static",
+      "name": "固定镜头",
+      "tagLabel": "固定镜头",
+      "prompt": "Locked-off camera. Motion occurs only within the fixed perspective of the motionless camera.",
+      "image": "/video-camera/static.webp"
+    },
+    {
+      "id": "cm_camera_follows_000000000002",
+      "key": "camera_follows",
+      "name": "跟随拍摄",
+      "tagLabel": "镜头跟随拍摄",
+      "prompt": "Follow shot, camera tracking the subject from behind.",
+      "image": "/video-camera/camera_follows.webp"
+    },
+    {
+      "id": "cm_crane_up_000000000000000003",
+      "key": "crane_up",
+      "name": "盘旋抬升",
+      "tagLabel": "镜头盘旋上升",
+      "prompt": "Camera crane up，镜头环绕上升，高空俯瞰全景.",
+      "image": "/video-camera/crane_up.webp"
+    },
+    {
+      "id": "cm_crane_down_0000000000000004",
+      "key": "crane_down",
+      "name": "盘旋下降",
+      "tagLabel": "镜头盘旋下降",
+      "prompt": "Crane shot down, 镜头环绕下降，camera focusing on subject, grand-scale to close-up.",
+      "image": "/video-camera/crane_down.webp"
+    },
+    {
+      "id": "cm_tilt_up_0000000000000000005",
+      "key": "tilt_up",
+      "name": "镜头上摇",
+      "tagLabel": "镜头上摇",
+      "prompt": "Camera tilt up, vertical tilting movement.",
+      "image": "/video-camera/tilt_up.webp"
+    },
+    {
+      "id": "cm_tilt_down_00000000000000006",
+      "key": "tilt_down",
+      "name": "镜头下摇",
+      "tagLabel": "镜头下摇",
+      "prompt": "Camera tilt down, vertical tilting movement.",
+      "image": "/video-camera/tilt_down.webp"
+    },
+    {
+      "id": "cm_pan_left_000000000000000007",
+      "key": "pan_left",
+      "name": "镜头左摇",
+      "tagLabel": "镜头左摇",
+      "prompt": "Camera pan left, horizontal panning shot.",
+      "image": "/video-camera/pan_left.webp"
+    },
+    {
+      "id": "cm_pan_right_00000000000000008",
+      "key": "pan_right",
+      "name": "镜头右摇",
+      "tagLabel": "镜头右摇",
+      "prompt": "Camera pan right, horizontal panning shot.",
+      "image": "/video-camera/pan_right.webp"
+    },
+    {
+      "id": "cm_pedestal_up_000000000000009",
+      "key": "pedestal_up",
+      "name": "镜头上升",
+      "tagLabel": "镜头垂直上升",
+      "prompt": "Camera pedestal up, camera rising vertically.",
+      "image": "/video-camera/pedestal_up.webp"
+    },
+    {
+      "id": "cm_pedestal_down_0000000000010",
+      "key": "pedestal_down",
+      "name": "镜头下降",
+      "tagLabel": "镜头垂直上降",
+      "prompt": "Camera pedestal down, camera lowering vertically.",
+      "image": "/video-camera/pedestal_down.webp"
+    },
+    {
+      "id": "cm_truck_left_0000000000000011",
+      "key": "truck_left",
+      "name": "镜头左移",
+      "tagLabel": "镜头向左平移",
+      "prompt": "Camera Dolly left.",
+      "image": "/video-camera/truck_left.webp"
+    },
+    {
+      "id": "cm_truck_right_000000000000012",
+      "key": "truck_right",
+      "name": "镜头右移",
+      "tagLabel": "镜头向右平移",
+      "prompt": "Camera Dolly right.",
+      "image": "/video-camera/truck_right.webp"
+    },
+    {
+      "id": "cm_dolly_in_000000000000000013",
+      "key": "dolly_in",
+      "name": "镜头前推",
+      "tagLabel": "镜头前推",
+      "prompt": "Camera dolly in, moving forward towards the subject, push in.",
+      "image": "/video-camera/dolly_in.webp"
+    },
+    {
+      "id": "cm_dolly_out_00000000000000014",
+      "key": "dolly_out",
+      "name": "镜头后移",
+      "tagLabel": "镜头后移",
+      "prompt": "Camera dolly out, pull away from the subject.",
+      "image": "/video-camera/dolly_out.webp"
+    },
+    {
+      "id": "cm_zoom_in_0000000000000000016",
+      "key": "zoom_in",
+      "name": "变焦推进",
+      "tagLabel": "镜头变焦推进",
+      "prompt": "Camera optical zoom in.",
+      "image": "/video-camera/zoom_in.webp"
+    },
+    {
+      "id": "cm_zoom_out_000000000000000015",
+      "key": "zoom_out",
+      "name": "变焦拉远",
+      "tagLabel": "镜头变焦拉远",
+      "prompt": "Camera optical zoom out.",
+      "image": "/video-camera/zoom_out.webp"
+    },
+    {
+      "id": "cm_dolly_zoom_0000000000000017",
+      "key": "dolly_zoom",
+      "name": "柯克变焦",
+      "tagLabel": "希区柯克变焦",
+      "prompt": "Camera optical dolly zoom.",
+      "image": "/video-camera/dolly_zoom.webp"
+    },
+    {
+      "id": "cm_orbit_around_00000000000018",
+      "key": "orbit_around",
+      "name": "环绕拍摄",
+      "tagLabel": "镜头360°环绕",
+      "prompt": "Orbit shot, 360-degree arc shot, camera circling the subject.",
+      "image": "/video-camera/orbit_around.webp"
+    },
+    {
+      "id": "cm_360_roll_000000000000000019",
+      "key": "360_roll",
+      "name": "滚筒旋转",
+      "tagLabel": "镜头滚筒前推",
+      "prompt": "The camera pushes in and doing a full 360-degree barrel roll.",
+      "image": "/video-camera/360_roll.webp"
+    },
+    {
+      "id": "cm_pov_00000000000000000000020",
+      "key": "pov",
+      "name": "第一视角",
+      "tagLabel": "第一人称视角",
+      "prompt": "POV shot, first-person perspective, seeing through eyes.",
+      "image": "/video-camera/pov.webp"
+    },
+    {
+      "id": "cm_drone_shot_0000000000000021",
+      "key": "drone_shot",
+      "name": "无人机",
+      "tagLabel": "无人机视角",
+      "prompt": "FPV drone shot, cinematic drone flight.",
+      "image": "/video-camera/drone_shot.webp"
+    },
+    {
+      "id": "cm_epic_helicopter_00000000022",
+      "key": "epic_helicopter",
+      "name": "高空航拍",
+      "tagLabel": "高空航拍视角",
+      "prompt": "Cinematic high-altitude aerial shot, slow grand sweeping movement, extremely stable.",
+      "image": "/video-camera/epic_helicopter.webp"
+    },
+    {
+      "id": "cm_handheld_000000000000000023",
+      "key": "handheld",
+      "name": "手持拍摄",
+      "tagLabel": "手持拍摄",
+      "prompt": "Handheld shot, natural camera shake.",
+      "image": "/video-camera/handheld.webp"
+    }
+  ]
+}

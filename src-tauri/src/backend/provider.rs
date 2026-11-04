@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 mod fzy;
 mod pixverse;
+#[path = "provider/image_upscale.rs"]
+mod image_upscale;
 
 use self::pixverse::{build_pixverse_video_body, parse_pixverse_video_task_id};
 
@@ -35,6 +37,7 @@ use super::{
         is_gateway_tts_model, is_grsai_pixel_image_model, is_pixverse_video_model,
         is_seedance_25_video_model, is_seedance_draft_video_model, operations_from_schema,
         provider_scoped_model_definition_id, schema_for_enabled_operations,
+        seedance_reference_limits,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
@@ -1473,6 +1476,31 @@ impl ProviderRuntime {
         Ok(context)
     }
 
+    /// 两个凭据引用背后是不是同一把密钥。
+    ///
+    /// Bearer 令牌网关（魔芋方言）的素材库按**密钥**隔离：同一主机上，素材库令牌
+    /// 能取到的素材，用生成主密钥去取会返回
+    /// `NotFound.asset_id: The specified asset ... is not found.`（2026-11-02 实测，
+    /// `https://47.94.250.161/v1/assets/get`）。因此「素材能不能被生成端解析」取决于
+    /// 两份凭据背后是否同一把密钥，而不是连接 id 是否相同——供应商专用素材库令牌
+    /// （`asset-library-token:{连接}`）与令牌组（`provider:{连接}:token:{分组}`）都会
+    /// 让两者不同。
+    ///
+    /// 读不到凭据时按「不相同」处理：宁可退化成公网可读地址，也不要把上游解析不了的
+    /// `asset://` 引用交给生成端。
+    pub(super) fn credentials_match(&self, left: &str, right: &str) -> bool {
+        if left == right {
+            return true;
+        }
+        let Ok(left_secret) = self.credentials.get(left) else {
+            return false;
+        };
+        let Ok(right_secret) = self.credentials.get(right) else {
+            return false;
+        };
+        left_secret.trim() == right_secret.trim()
+    }
+
     pub async fn submit(
         &self,
         task: &TaskExecutionRecord,
@@ -1530,6 +1558,9 @@ impl ProviderRuntime {
                         }
                         "grsai_image_inputs" => build_grsai_image_body(task, resolved)?,
                         "fzy_image_inputs" => build_fzy_image_body(task, resolved)?,
+                        "atlascloud_upscale_image" => self.build_image_upscale_body(task, attempt_id, &context, resolved).await?,
+                        "atlascloud_masked_image" => self.build_atlascloud_region_edit_body(task, attempt_id, &context, resolved).await?,
+                        "atlascloud_canvas_media_tool" => self.build_atlascloud_canvas_media_tool(task, attempt_id, &context, resolved).await?,
                         "atlascloud_image_inputs" => build_atlascloud_image_body(task, resolved)?,
                         "atlascloud_midjourney_image_inputs" => {
                             build_atlascloud_midjourney_image_body(task, resolved)?
@@ -1601,7 +1632,10 @@ impl ProviderRuntime {
                     Some(GatewayProfile::AtlasCloudVideo) => {
                         // Atlas 的视频家族各自一份契约（参数表与媒体字段不同），
                         // 按模型成员分发到对应的组包路径。
-                        if is_atlascloud_kling_video_model(
+                        if resolved.operation_schema.pointer("/request/mediaEncoding").and_then(Value::as_str)
+                            == Some("atlascloud_canvas_media_tool") {
+                            self.build_atlascloud_canvas_media_tool(task, attempt_id, &context, resolved).await?
+                        } else if is_atlascloud_kling_video_model(
                             task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
                         ) {
                             build_atlascloud_kling_video_body(task, resolved)?
@@ -3808,7 +3842,8 @@ impl ProviderRuntime {
             // 平台目录里已登记的成员返回固定清单；契约由 Atlas 方言改写生成
             // （端点、轮询、参数、成员能力各不相同）。
             self.resolve_token_group(provider_connection_id, token_group)?;
-            const ATLASCLOUD_MODELS: [(&str, &str, &str, &[GenerationOperation]); 7] = [
+            const ATLASCLOUD_MODELS: [(&str, &str, &str, &[GenerationOperation]); 8] = [
+                (super::model_schema::ATLASCLOUD_UPSCALER_MODEL, "图片高清（2× / 4×）", "Atlas Cloud", &[GenerationOperation::ImageToImage]),
                 (
                     "xai/grok-imagine-image-2.0/text-to-image",
                     "Grok Imagine Image 2.0（文生图）",
@@ -6317,7 +6352,14 @@ fn build_video_body(
     let has_media =
         !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty();
     ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if matches!(model, "kling-v3" | "kling-v3-omni")
+        && resolved.operation_schema.get("requestProfileId").and_then(Value::as_str)
+            == Some("moyu_video_metadata_v1")
+    {
+        return build_kling_v3_gateway_body(model, resolved);
+    }
     validate_seedance_25_video_task(model, resolved)?;
+    validate_seedance_reference_media(model, resolved)?;
     match resolved
         .operation_schema
         .pointer("/request/mediaEncoding")
@@ -6481,6 +6523,59 @@ fn build_video_body(
     Ok(Value::Object(body))
 }
 
+// Moyu's Kling 3 gateway uses root prompt/images and camelCase metadata,
+// not Seedance's metadata.content. An empty content array can override prompt.
+// Contract: https://doc.moyu.info/9316990m0 and /9285367m0.
+fn build_kling_v3_gateway_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
+    if !resolved.audios.is_empty() {
+        return Err(BackendError::validation("可灵 3.0 当前接口不接受音频参考素材", json!({ "model": model })));
+    }
+    let mut metadata = resolved.parameters.as_object().cloned().ok_or_else(|| {
+        BackendError::validation("视频参数格式无效", json!({ "model": model }))
+    })?;
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(video_prompt(resolved)));
+    for key in ["mode", "duration", "aspect_ratio"] {
+        if let Some(value) = metadata.remove(key) { body.insert(key.into(), value); }
+    }
+    let audio = metadata.remove("generateAudio")
+        .or_else(|| metadata.remove("generate_audio"))
+        .or_else(|| metadata.remove("sound").map(|value| json!(value == "on")));
+    if let Some(value) = audio { body.insert("generateAudio".into(), value); }
+    for (from, to) in [("negative_prompt", "negativePrompt"), ("cfg_scale", "cfgScale"), ("callback_url", "callbackUrl")] {
+        if let Some(value) = metadata.remove(from) { metadata.entry(to.to_string()).or_insert(value); }
+    }
+    let mut images = Vec::new();
+    for media in &resolved.images {
+        let reference = media.remote_reference.as_ref().ok_or_else(|| {
+            BackendError::validation("可灵图片需要可访问的素材地址", media.archive())
+        })?;
+        match media.role.as_str() {
+            "first_frame" => { metadata.insert("firstFrame".into(), json!({ "url": reference })); }
+            "last_frame" => { metadata.insert("lastFrame".into(), json!({ "url": reference })); }
+            _ => images.push(json!(reference)),
+        }
+    }
+    if !images.is_empty() { body.insert("images".into(), Value::Array(images)); }
+    if !resolved.videos.is_empty() {
+        if model != "kling-v3-omni" {
+            return Err(BackendError::validation("参考视频需要可灵 3.0 Omni 模型", json!({ "model": model })));
+        }
+        if body.get("generateAudio").and_then(Value::as_bool) == Some(true) {
+            return Err(BackendError::validation("可灵 3.0 Omni 参考视频不能同时生成音频，请关闭音频", json!({ "model": model })));
+        }
+        let videos = resolved.videos.iter().map(|media| {
+            media.remote_reference.as_ref().map(|reference| json!({ "url": reference }))
+                .ok_or_else(|| BackendError::validation("可灵视频需要可访问的素材地址", media.archive()))
+        }).collect::<BackendResult<Vec<_>>>()?;
+        metadata.insert("videos".into(), json!(videos));
+        metadata.insert("generateAudio".into(), json!(false));
+    }
+    if !metadata.is_empty() { body.insert("metadata".into(), Value::Object(metadata)); }
+    Ok(Value::Object(body))
+}
+
 pub(crate) fn seedance_video_task_type(
     local_type: Option<VideoTaskType>,
     parameters: &Value,
@@ -6563,6 +6658,182 @@ fn validate_seedance_25_video_task(
         }
     }
     Ok(())
+}
+
+/// Seedance 全模态参考的素材上限校验（提交前）。
+///
+/// 供应商在**提交之后**才校验参考素材的数量与时长，越限一律 400
+/// InvalidParameter，典型文案：
+/// "the parameter `content` specified in the request is not valid: the parameter
+/// audio total duration (seconds) specified in the request must be less than or
+/// equal to 30.2 for model doubao-seedance-2-5 in r2v"。
+///
+/// 这里按同一份契约（`model_schema::seedance_reference_limits`，来源是火山方舟
+/// 的模型能力文档）在提交前拦下来：失败发生在本地，不产生远程请求、不产生
+/// 费用，错误直接说清是哪段素材、实际多长、上限多少、该怎么改。
+fn validate_seedance_reference_media(model: &str, resolved: &ResolvedGeneration) -> BackendResult<()> {
+    let Some(limits) = seedance_reference_limits(model) else {
+        return Ok(());
+    };
+    let family = seedance_family_label(model);
+    let reference_images = resolved
+        .images
+        .iter()
+        .filter(|media| media.role == "reference_image")
+        .count();
+    let reference_videos = resolved
+        .videos
+        .iter()
+        .filter(|media| media.role == "reference_video")
+        .collect::<Vec<_>>();
+    let reference_audios = resolved
+        .audios
+        .iter()
+        .filter(|media| media.role == "reference_audio")
+        .collect::<Vec<_>>();
+    if reference_images > limits.max_images {
+        return Err(BackendError::validation(
+            format!(
+                "参考图片 {reference_images} 张，超过 {family} 的 {} 张上限，请先解绑多余的参考图。",
+                limits.max_images
+            ),
+            json!({
+                "model": model,
+                "kind": "reference_image_count",
+                "count": reference_images,
+                "limit": limits.max_images,
+            }),
+        ));
+    }
+    if reference_videos.len() > limits.max_videos {
+        return Err(BackendError::validation(
+            format!(
+                "参考视频 {} 个，超过 {family} 的 {} 个上限，请先解绑多余的参考视频。",
+                reference_videos.len(),
+                limits.max_videos
+            ),
+            json!({
+                "model": model,
+                "kind": "reference_video_count",
+                "count": reference_videos.len(),
+                "limit": limits.max_videos,
+            }),
+        ));
+    }
+    if reference_audios.len() > limits.max_audios {
+        return Err(BackendError::validation(
+            format!(
+                "参考音频 {} 段，超过 {family} 的 {} 段上限，请先解绑多余的参考音频。",
+                reference_audios.len(),
+                limits.max_audios
+            ),
+            json!({
+                "model": model,
+                "kind": "reference_audio_count",
+                "count": reference_audios.len(),
+                "limit": limits.max_audios,
+            }),
+        ));
+    }
+    // 单段时长：量不到时跳过（未知时长不等于违规，不在这里误伤用户）。
+    let single_media = reference_videos
+        .iter()
+        .map(|media| (*media, "参考视频"))
+        .chain(reference_audios.iter().map(|media| (*media, "参考音频")));
+    for (media, kind) in single_media {
+        let Some(duration) = media.duration_seconds else {
+            continue;
+        };
+        let name = media.display_name.trim();
+        let subject = if name.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind}《{name}》")
+        };
+        if duration > limits.max_single_seconds {
+            return Err(BackendError::validation(
+                format!(
+                    "{subject}时长 {duration:.1} 秒，超过 {family} 单段 {} 秒上限，请裁剪后再生成。",
+                    limits.max_single_seconds
+                ),
+                json!({
+                    "model": model,
+                    "kind": "reference_media_single_duration",
+                    "mediaKind": kind,
+                    "displayName": name,
+                    "durationSeconds": duration,
+                    "limit": limits.max_single_seconds,
+                }),
+            ));
+        }
+        if duration < limits.min_media_seconds {
+            return Err(BackendError::validation(
+                format!(
+                    "{subject}时长 {duration:.1} 秒，短于 {family} 单段 {} 秒下限。",
+                    limits.min_media_seconds
+                ),
+                json!({
+                    "model": model,
+                    "kind": "reference_media_single_duration",
+                    "mediaKind": kind,
+                    "displayName": name,
+                    "durationSeconds": duration,
+                    "limit": limits.min_media_seconds,
+                }),
+            ));
+        }
+    }
+    // 合计时长：供应商算的是「所有参考音频的总时长」，逐段合法不代表合计合法。
+    let audio_total = reference_audios
+        .iter()
+        .filter_map(|media| media.duration_seconds)
+        .sum::<f64>();
+    if audio_total > limits.max_audio_total_seconds {
+        return Err(BackendError::validation(
+            format!(
+                "参考音频总时长 {audio_total:.1} 秒（{} 段），超过 {family} 的 {} 秒上限，请裁剪音频或减少参考素材。",
+                reference_audios.len(),
+                limits.max_audio_total_seconds
+            ),
+            json!({
+                "model": model,
+                "kind": "reference_audio_total_duration",
+                "count": reference_audios.len(),
+                "totalSeconds": audio_total,
+                "limit": limits.max_audio_total_seconds,
+            }),
+        ));
+    }
+    let video_total = reference_videos
+        .iter()
+        .filter_map(|media| media.duration_seconds)
+        .sum::<f64>();
+    if video_total > limits.max_video_total_seconds {
+        return Err(BackendError::validation(
+            format!(
+                "参考视频总时长 {video_total:.1} 秒（{} 个），超过 {family} 的 {} 秒上限，请裁剪视频或减少参考素材。",
+                reference_videos.len(),
+                limits.max_video_total_seconds
+            ),
+            json!({
+                "model": model,
+                "kind": "reference_video_total_duration",
+                "count": reference_videos.len(),
+                "totalSeconds": video_total,
+                "limit": limits.max_video_total_seconds,
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// 面向用户的模型家族名（错误文案里用家族名比用模型 ID 好读）。
+fn seedance_family_label(model: &str) -> &'static str {
+    if is_seedance_25_video_model(model) {
+        "Seedance 2.5"
+    } else {
+        "Seedance 2.0"
+    }
 }
 
 /// 通用视频 body 的 prompt 渲染：由结构化 `content` 重建，媒体引用渲染为
@@ -7325,20 +7596,7 @@ fn extract_image_sources(value: &Value) -> Vec<ImageSource> {
             // Seedream 5.0 pro 图层拆分：data 项携带 z_index/name/description/bounding_box，
             // 用于把每个图层单独落为可编辑对象。
             let layer = if item.get("z_index").is_some() {
-                Some(ImageLayerMetadata {
-                    z_index: item.get("z_index").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    name: item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned),
-                    description: item
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                        .map(ToOwned::to_owned),
-                    bounding_box: item.get("bounding_box").cloned(),
-                })
+                image_layer_metadata(item)
             } else {
                 None
             };
@@ -7360,8 +7618,39 @@ fn extract_image_sources(value: &Value) -> Vec<ImageSource> {
             push_unique_image_url(&mut sources, url);
         }
     }
+    collect_atlascloud_layer_outputs(value, &mut sources);
     collect_additional_image_sources(value, &mut sources);
     sources
+}
+
+fn image_layer_metadata(item: &Value) -> Option<ImageLayerMetadata> {
+    let string = |key| item.get(key).and_then(Value::as_str)
+        .filter(|value| !value.is_empty()).map(ToOwned::to_owned);
+    Some(ImageLayerMetadata {
+        z_index: u32::try_from(item.get("z_index")?.as_u64()?).ok()?,
+        name: string("name"),
+        description: string("description"),
+        bounding_box: item.get("bounding_box").cloned(),
+    })
+}
+
+fn collect_atlascloud_layer_outputs(value: &Value, sources: &mut Vec<ImageSource>) {
+    let envelope = if value.get("outputs").is_some() { value } else {
+        match value.get("data") { Some(data) => data, None => return }
+    };
+    let (Some(outputs), Some(layers)) = (
+        envelope.get("outputs").and_then(Value::as_array),
+        envelope.get("layers").and_then(Value::as_array),
+    ) else { return };
+    if outputs.is_empty() || outputs.len() != layers.len() { return; }
+    for (output, layer) in outputs.iter().zip(layers) {
+        let (Some(url), Some(metadata)) = (output.as_str(), image_layer_metadata(layer)) else { continue };
+        push_unique_image_url(sources, url);
+        if let Some(ImageSource::Url { layer, .. }) = sources.iter_mut()
+            .find(|source| matches!(source, ImageSource::Url { url: existing, .. } if existing == url.trim())) {
+            if layer.is_none() { *layer = Some(metadata); }
+        }
+    }
 }
 
 fn collect_additional_image_sources(value: &Value, sources: &mut Vec<ImageSource>) {
@@ -7371,8 +7660,10 @@ fn collect_additional_image_sources(value: &Value, sources: &mut Vec<ImageSource
         "/result/image_urls",
         "/image_urls",
         "/images",
+        "/output",
         // Atlas Cloud 的结果在 `data.outputs`（托管链接数组）。
         "/data/outputs",
+        "/outputs",
     ];
     const URLS: &[&str] = &[
         "/output/url",

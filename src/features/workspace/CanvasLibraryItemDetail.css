@@ -1,0 +1,44 @@
+.canvas-library-detail {
+  min-height: 0;
+  padding: 8px 20px 20px;
+  overflow: auto;
+}
+
+.canvas-library-detail .canvas-library-detail__back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+  padding: 5px 7px;
+}
+
+.canvas-library-detail__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 24px;
+}
+
+.canvas-library-detail__body img {
+  width: min(420px, 100%);
+  max-height: 58vh;
+  object-fit: contain;
+  border-radius: 8px;
+  background: #181818;
+}
+
+.canvas-library-detail__summary {
+  flex: 1 1 200px;
+}
+
+.canvas-library-detail__summary h3 { margin: 0 0 8px; font-size: 18px; }
+.canvas-library-detail__summary p { color: var(--nt-text-muted, #999); font-size: 13px; }
+
+.canvas-library-detail .canvas-library-detail__apply {
+  padding: 8px 14px;
+  border-radius: 8px;
+  color: #1a1a1a;
+  background: #eee;
+}
+
+.canvas-library-detail .canvas-library-detail__apply:hover { background: #fff; }

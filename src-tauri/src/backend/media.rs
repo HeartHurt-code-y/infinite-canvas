@@ -1,21 +1,27 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use rand::Rng as _;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use tauri_plugin_log::log::{error, info, warn};
 use tokio::io::AsyncReadExt as _;
+use uuid::Uuid;
 
 use super::{
     asset_library::{
         AssetDelivery, AssetLibrary, AssetReadTrace, ResolveAsset, ResolvedAssetAccess,
     },
+    composer::{VideoCompositionService, VideoComposerEngineState},
     error::{BackendError, BackendResult},
     gateway_profile::GatewayProfile,
     local_base64_assets::{LocalBase64Library, extension_for_mime},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
+    media_source,
     media_proxy::MAX_MEDIA_FULL_BYTES,
-    model_schema::is_seedream_image_model,
+    model_schema::{is_seedream_image_model, seedance_reference_limits},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
         redact_request_value, redact_url_string,
@@ -45,6 +51,9 @@ pub struct MediaResolver {
     local_results: LocalResultService,
     staging: StagingService,
     local_base64_assets: LocalBase64Library,
+    /// FFmpeg 引擎：量出参考素材的真实时长。Seedance 对参考音频/参考视频有
+    /// 硬性时长上限，超限后由供应商以 400 拒绝，本地先量出来才能提前拦下。
+    composer: VideoCompositionService,
 }
 
 pub struct ResolvedBundle {
@@ -62,6 +71,8 @@ struct ResolveTargetRequest<'a> {
     content_index: Option<u32>,
     /// 图生图参考图是否必须读成本地字节。Seedream 图生图要公网 URL，不能走这条。
     needs_local_bytes: bool,
+    /// 是否需要量出素材的真实时长（只有对参考素材时长有硬上限的模型才需要）。
+    probe_duration: bool,
 }
 
 #[derive(Debug)]
@@ -78,6 +89,7 @@ struct PlannedMediaInput<'a> {
 struct MediaPlan<'a> {
     inputs: Vec<PlannedMediaInput<'a>>,
     rendered_prompt: String,
+    rendered_segments: Vec<String>,
     content: Vec<CompiledContentItem>,
 }
 
@@ -220,8 +232,10 @@ fn build_media_plan<'a>(
         .map(|input| (input.target, input))
         .collect::<HashMap<_, _>>();
     let mut rendered_prompt = String::new();
+    let mut rendered_segments = Vec::with_capacity(prompt.len());
     let mut content = Vec::with_capacity(prompt.len());
     for segment in prompt {
+        let start = rendered_prompt.len();
         match segment {
             PromptSegment::Text { text } => {
                 rendered_prompt.push_str(text);
@@ -245,10 +259,12 @@ fn build_media_plan<'a>(
                 });
             }
         }
+        rendered_segments.push(rendered_prompt[start..].to_string());
     }
     Ok(MediaPlan {
         inputs,
         rendered_prompt,
+        rendered_segments,
         content,
     })
 }
@@ -260,6 +276,7 @@ impl MediaResolver {
         local_results: LocalResultService,
         staging: StagingService,
         local_base64_assets: LocalBase64Library,
+        composer: VideoCompositionService,
     ) -> Self {
         Self {
             providers,
@@ -267,6 +284,7 @@ impl MediaResolver {
             local_results,
             staging,
             local_base64_assets,
+            composer,
         }
     }
 
@@ -330,8 +348,15 @@ impl MediaResolver {
         let MediaPlan {
             inputs,
             rendered_prompt,
+            rendered_segments,
             content,
         } = build_media_plan(&command.prompt, &command.explicit_media)?;
+        let parameters = super::video_storyboard::compile(
+            &command.parameters,
+            task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
+            &rendered_segments,
+            inputs.iter().any(|input| input.target.media_type() == MediaType::Video),
+        )?;
         let operation_schema = command
             .model_operation_schema_snapshot
             .clone()
@@ -352,6 +377,14 @@ impl MediaResolver {
             // 网关语音合成的音色复刻要把参考音频以 Base64 内联进请求体
             // （`audio_data`），因此解析阶段必须拿到本地字节，而不是公网 URL。
             || task.operation == GenerationOperation::SpeechGeneration;
+        // Seedance 全模态参考对参考音频/参考视频有硬性时长上限，超限后由供应商
+        // 以 400 InvalidParameter 拒绝（"the parameter audio total duration
+        // (seconds) ... must be less than or equal to 30.2"）。只有这些模型需要
+        // 量素材时长，其它模型不受影响，也不必多付一次 ffprobe。
+        let probe_duration = seedance_reference_limits(
+            task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
+        )
+        .is_some();
         for input in inputs {
             let (resolved, lease) = self
                 .resolve_target(
@@ -365,6 +398,7 @@ impl MediaResolver {
                         prompt_segment_index: input.prompt_segment_index,
                         content_index: input.content_index,
                         needs_local_bytes,
+                        probe_duration,
                     },
                 )
                 .await
@@ -418,7 +452,7 @@ impl MediaResolver {
             images,
             videos,
             audios,
-            parameters: command.parameters,
+            parameters,
             video_task_type: command.video_task_type,
             operation_schema,
         })
@@ -438,6 +472,7 @@ impl MediaResolver {
             prompt_segment_index,
             content_index,
             needs_local_bytes,
+            probe_duration,
         } = request;
         match target {
             MediaReferenceTarget::Asset {
@@ -461,6 +496,7 @@ impl MediaResolver {
                                     destination_provider_connection_id: task
                                         .provider_connection_id
                                         .clone(),
+                                    destination_credential_ref: task.api_key_ref_snapshot.clone(),
                                 }
                             },
                             trace: AssetReadTrace { task, attempt_id },
@@ -477,6 +513,18 @@ impl MediaResolver {
                         (None, Some(reference))
                     }
                 };
+                let duration_seconds = if probe_duration {
+                    self.probe_media_duration(
+                        *media_type,
+                        &resolved.mime_type,
+                        None,
+                        bytes.as_deref(),
+                        remote_reference.as_deref(),
+                    )
+                    .await
+                } else {
+                    None
+                };
                 Ok((
                     ResolvedMedia {
                         media_type: *media_type,
@@ -490,7 +538,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: resolved.mime_type,
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size: resolved.byte_size as u64,
                         sha256: resolved.sha256,
                         file_name: media_file_name(display_name, &resolved.file_extension),
@@ -531,6 +579,18 @@ impl MediaResolver {
                     )
                 })?;
                 validate_detected_type(*media_type, detected.mime_type())?;
+                let duration_seconds = if probe_duration {
+                    self.probe_media_duration(
+                        *media_type,
+                        detected.mime_type(),
+                        None,
+                        Some(bytes.as_slice()),
+                        Some(get_url.as_str()),
+                    )
+                    .await
+                } else {
+                    None
+                };
                 Ok((
                     ResolvedMedia {
                         media_type: *media_type,
@@ -543,7 +603,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
@@ -563,17 +623,43 @@ impl MediaResolver {
                 let record = self.local_base64_assets.get(asset_id, *media_type)?;
                 // 仅在本次模型协议要求公网 URL 时临时中转。该分支全程按文件流处理，
                 // 大视频不会先把 Base64 解码成完整 Vec 再复制一份到磁盘。
-                let (bytes, hash, remote_reference, lease) = if needs_local_bytes {
+                let (bytes, hash, remote_reference, lease, duration_seconds) = if needs_local_bytes {
                     let (_, bytes) = self.local_base64_assets.read_bytes(asset_id, *media_type)?;
                     if let Some(detected) = infer::get(&bytes) {
                         validate_detected_type(*media_type, detected.mime_type())?;
                     }
                     let hash = sha256_bytes(&bytes);
-                    (Some(bytes), hash, None, None)
+                    let duration_seconds = if probe_duration {
+                        self.probe_media_duration(
+                            *media_type,
+                            &record.mime_type,
+                            None,
+                            Some(bytes.as_slice()),
+                            None,
+                        )
+                        .await
+                    } else {
+                        None
+                    };
+                    (Some(bytes), hash, None, None, duration_seconds)
                 } else {
                     let path = self
                         .local_base64_assets
                         .decoded_path(asset_id, *media_type)?;
+                    // 临时文件删除前先量时长：读本地文件比让 ffprobe 去取公网
+                    // 地址快得多，也不依赖签名地址还有效。
+                    let duration_seconds = if probe_duration {
+                        self.probe_media_duration(
+                            *media_type,
+                            &record.mime_type,
+                            Some(path.as_path()),
+                            None,
+                            None,
+                        )
+                        .await
+                    } else {
+                        None
+                    };
                     let hash_result = LocalBase64Library::sha256_path(&path);
                     if hash_result.is_err() {
                         let _ = std::fs::remove_file(&path);
@@ -593,7 +679,7 @@ impl MediaResolver {
                         }
                         other => other,
                     })?;
-                    (None, hash, Some(lease.get_url.clone()), Some(lease))
+                    (None, hash, Some(lease.get_url.clone()), Some(lease), duration_seconds)
                 };
                 let file_name =
                     media_file_name(display_name, extension_for_mime(&record.mime_type));
@@ -609,7 +695,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key,
                         }),
                         mime_type: record.mime_type,
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size: record.byte_size,
                         sha256: hash,
                         file_name,
@@ -657,6 +743,18 @@ impl MediaResolver {
                     )
                 })?;
                 validate_detected_type(*media_type, detected.mime_type())?;
+                let duration_seconds = if probe_duration {
+                    self.probe_media_duration(
+                        *media_type,
+                        detected.mime_type(),
+                        Some(Path::new(path)),
+                        Some(bytes.as_slice()),
+                        None,
+                    )
+                    .await
+                } else {
+                    None
+                };
                 let (remote_reference, lease) = if needs_local_bytes {
                     (None, None)
                 } else {
@@ -679,7 +777,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
@@ -761,6 +859,18 @@ impl MediaResolver {
                     let remote_reference = Some(lease.get_url.clone());
                     (detected, hash, None, remote_reference, Some(lease))
                 };
+                let duration_seconds = if probe_duration {
+                    self.probe_media_duration(
+                        *media_type,
+                        detected.mime_type(),
+                        Some(Path::new(path)),
+                        None,
+                        None,
+                    )
+                    .await
+                } else {
+                    None
+                };
                 Ok((
                     ResolvedMedia {
                         media_type: *media_type,
@@ -773,7 +883,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size,
                         sha256: hash,
                         file_name: media_file_name(display_name, detected.extension()),
@@ -798,6 +908,24 @@ impl MediaResolver {
                         json!({ "url": redact_url_string(url) }),
                     ));
                 }
+                // Public style references must also work with multipart/data-URI models.
+                // Download image bytes only when the selected request encoding needs them.
+                if *media_type == MediaType::Image && needs_local_bytes {
+                    let bytes = self.download_asset_bytes(url).await?;
+                    let detected = infer::get(&bytes).ok_or_else(|| BackendError::validation(
+                        "风格参考链接没有返回可识别的图片，请重新选择。", Value::Null))?;
+                    validate_detected_type(*media_type, detected.mime_type())?;
+                    return Ok((ResolvedMedia {
+                        media_type: *media_type, type_position, role: role.to_string(),
+                        display_name: display_name.to_string(),
+                        stable_identity: json!({"kind":"url","url":redact_url_string(url),"canvasNodeKey":canvas_node_key}),
+                        mime_type: detected.mime_type().to_string(), duration_seconds: None,
+                        byte_size: bytes.len() as u64, sha256: sha256_bytes(&bytes),
+                        file_name: media_file_name(display_name, detected.extension()),
+                        bytes: Some(bytes), remote_reference: None,
+                        prompt_segment_index, content_index,
+                    }, None));
+                }
                 // 扩展名仅用于产物命名展示；URL 无扩展名时退化为占位后缀。
                 let url_extension = url
                     .split('?')
@@ -805,6 +933,12 @@ impl MediaResolver {
                     .and_then(|path| path.rsplit('.').next())
                     .filter(|segment| !segment.contains('/') && !segment.is_empty())
                     .unwrap_or("url");
+                // 公网地址只能让 ffprobe 自己去取；取不到就按「未知时长」处理。
+                let duration_seconds = if probe_duration {
+                    self.probe_media_duration(*media_type, "", None, None, Some(url)).await
+                } else {
+                    None
+                };
                 Ok((
                     ResolvedMedia {
                         media_type: *media_type,
@@ -817,7 +951,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: String::new(),
-                        duration_seconds: None,
+                        duration_seconds,
                         byte_size: 0,
                         sha256: String::new(),
                         file_name: media_file_name(display_name, url_extension),
@@ -830,6 +964,79 @@ impl MediaResolver {
                 ))
             }
         }
+    }
+
+    /// 量出参考素材的真实时长（秒）。
+    ///
+    /// Seedance 全模态参考对参考音频/参考视频有硬性时长上限，超限后由供应商
+    /// 以 400 InvalidParameter 拒绝（"the parameter audio total duration
+    /// (seconds) specified in the request is not valid: ... must be less than or
+    /// equal to 30.2 for model doubao-seedance-2-5 in r2v"）。本地量出真实
+    /// 时长，请求构造阶段就能在提交前拦下来。
+    ///
+    /// 三条取值路径按代价排序：本地文件 → 已经读进内存的字节（落一份临时
+    /// 文件再量）→ 公网地址（交给 ffprobe 自己取，带短超时）。都拿不到就返回
+    /// `None`：量不到时长不等于素材违规，不在这里误伤用户。
+    async fn probe_media_duration(
+        &self,
+        media_type: MediaType,
+        mime_type: &str,
+        local_path: Option<&Path>,
+        bytes: Option<&[u8]>,
+        remote_reference: Option<&str>,
+    ) -> Option<f64> {
+        if !matches!(media_type, MediaType::Audio | MediaType::Video) {
+            return None;
+        }
+        let status = self.composer.engine_status();
+        if status.state != VideoComposerEngineState::Ready {
+            // 引擎没就绪就不探测：补装引擎可能耗时数分钟，不能让它卡住生成。
+            return None;
+        }
+        let ffmpeg = PathBuf::from(status.binary_path?);
+        let audio = matches!(media_type, MediaType::Audio);
+        if let Some(path) = local_path {
+            return media_source::stream_duration(&ffmpeg, &path.to_string_lossy(), audio)
+                .await
+                .ok();
+        }
+        if let Some(bytes) = bytes {
+            // 落盘量时长的代价与素材体积成正比：超大文件不值得为一次校验
+            // 再写一遍磁盘，跳过即可（未知时长不会误伤请求）。
+            const MAX_PROBE_BYTES: usize = 64 * 1024 * 1024;
+            if bytes.len() > MAX_PROBE_BYTES {
+                return None;
+            }
+            let temporary = std::env::temp_dir().join(format!(
+                "canvas-reference-probe-{}.{}",
+                Uuid::new_v4(),
+                probe_extension(mime_type)
+            ));
+            if tokio::fs::write(&temporary, bytes).await.is_err() {
+                return None;
+            }
+            let duration = media_source::stream_duration(
+                &ffmpeg,
+                &temporary.to_string_lossy(),
+                audio,
+            )
+            .await
+            .ok();
+            let _ = tokio::fs::remove_file(&temporary).await;
+            return duration;
+        }
+        let reference = remote_reference?;
+        if !(reference.starts_with("http://") || reference.starts_with("https://")) {
+            return None;
+        }
+        media_source::stream_duration_with_timeout(
+            &ffmpeg,
+            reference,
+            audio,
+            std::time::Duration::from_secs(20),
+        )
+        .await
+        .ok()
     }
 
     /// 读取一个对象存储预签名地址的字节。
@@ -1024,6 +1231,25 @@ fn media_file_name(display_name: &str, extension: &str) -> String {
     format!("{}.{}", safe_file_stem(display_name), extension)
 }
 
+/// 临时探测文件用的扩展名。
+///
+/// ffprobe 靠容器 magic 也能识别文件，扩展名只是让它少走一次猜测；给不出
+/// 常见扩展名时用 `bin`（magic 仍然有效）。
+fn probe_extension(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/mpeg" | "audio/mpeg3" => "mp3",
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" => "m4a",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/ogg" | "audio/opus" => "ogg",
+        "audio/flac" | "audio/x-flac" => "flac",
+        "video/mp4" => "mp4",
+        "video/quicktime" => "mov",
+        "video/webm" => "webm",
+        "video/x-matroska" => "mkv",
+        _ => "bin",
+    }
+}
+
 /// 只读文件头判断本机素材的媒体类型。
 ///
 /// 类型判断只需要文件签名（都在文件开头），不必为了一个 `infer::get` 把几百 MB 的
@@ -1095,11 +1321,9 @@ fn image_edit_needs_local_bytes(
         return false;
     }
     // 饭众烟同名 Seedream 也接受 data URI；不能被下面的原生 Seedream URL 规则覆盖。
-    if operation_schema
+    if matches!(operation_schema
         .pointer("/request/mediaEncoding")
-        .and_then(Value::as_str)
-        == Some("fzy_image_inputs")
-    {
+        .and_then(Value::as_str), Some("fzy_image_inputs" | "atlascloud_canvas_media_tool")) {
         return true;
     }
     if remote_model_id.is_some_and(is_seedream_image_model) {

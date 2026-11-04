@@ -24,6 +24,7 @@ const sourceSchema = v.variant("kind", [
   v.object({ kind: v.literal("local_file"), path: text, ...sourceBase }),
 ]);
 const operationSchema = v.picklist(["extract_audio", "silent_video", "clip_video"]);
+const cropSchema = v.object({ x: positive, y: positive, width: positive, height: positive });
 const formatSchema = v.picklist(["wav", "original"]);
 const probeSchema = v.object({
   durationSeconds: v.pipe(positive, v.minValue(Number.EPSILON)),
@@ -69,6 +70,7 @@ const jobSchema = v.object({
 });
 
 export type VideoPreparationOperation = v.InferOutput<typeof operationSchema>;
+export type VideoPreparationCrop = v.InferOutput<typeof cropSchema>;
 export type VideoPreparationAudioFormat = v.InferOutput<typeof formatSchema>;
 export type VideoPreparationProbe = v.InferOutput<typeof probeSchema>;
 export type VideoPreparationOutput = v.InferOutput<typeof outputSchema>;
@@ -84,6 +86,7 @@ export interface StartVideoPreparationCommand {
   readonly format?: VideoPreparationAudioFormat;
   /** Bind the request to the exact source measured by probe, never a preview lease. */
   readonly sourceIdentity: string;
+  readonly crop?: VideoPreparationCrop;
 }
 
 const commandSchema = v.object({
@@ -95,6 +98,7 @@ const commandSchema = v.object({
   audioStreamIndex: v.optional(index),
   format: v.optional(formatSchema),
   sourceIdentity: text,
+  crop: v.optional(cropSchema),
 });
 
 function requireDesktop() {
@@ -132,7 +136,7 @@ export const videoPreparationClient = {
     if (validated.endSeconds != null && validated.endSeconds <= validated.startSeconds) {
       throw new Error("结束时间必须大于开始时间。");
     }
-    return invokeDesktop("start_video_preparation", jobSchema, { command: validated });
+    return invokeDesktop(validated.crop ? "start_video_frame_crop" : "start_video_preparation", jobSchema, { command: validated });
   },
   async get(jobId: string): Promise<VideoPreparationJob> {
     requireDesktop();

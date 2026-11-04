@@ -1,11 +1,45 @@
-.react-flow__node .canvas-gen-node.canvas-content-preview[data-node-kind="screenplay"]:has(.canvas-script-try) {
-  width: 350px;
-  height: auto;
+.canvas-content-preview.is-selected[data-script-card] .canvas-content-preview__surface {
+  border-width: 2px;
+}
+
+.react-flow__node .canvas-gen-node.canvas-content-preview[data-script-card] .canvas-gen-node__header {
+  padding: 0;
+  height: 18px;
+}
+
+.react-flow__node .canvas-flow-node [data-script-card] .canvas-gen-node__type-copy strong {
+  color: var(--color-muted);
+  font-weight: 400;
+}
+
+.canvas-script-try.canvas-text-try--compact { padding-top: 46px; }
+.canvas-script-try .canvas-text-try__icon { margin-bottom: 18px; }
+
+.canvas-text-generator--script .canvas-text-generator__toolbar {
+  min-height: 26px;
+  padding: 0 0 4px;
+}
+
+.canvas-text-generator--script .canvas-text-generator__prompt { padding-top: 12px; }
+
+.react-flow__node .canvas-flow-node [data-script-card] .canvas-text-generator--script .canvas-text-generator__input {
+  background-color: transparent;
+}
+
+.canvas-script-card__shots {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+  padding-left: 1.5em;
+}
+
+.canvas-script-card__shots li {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .canvas-script-generator__reference-add,
-.canvas-script-generator__reference,
-.canvas-script-editor__sources span {
+.canvas-script-generator__reference {
   display: inline-flex;
   max-width: 14rem;
   align-items: center;
@@ -23,8 +57,7 @@
   white-space: nowrap;
 }
 
-.canvas-script-generator__reference button,
-.canvas-script-editor__sources button {
+.canvas-script-generator__reference button {
   display: inline-grid;
   padding: 0;
   color: inherit;
@@ -34,7 +67,11 @@
   place-items: center;
 }
 
-.canvas-script-generator__reference-add { cursor: pointer; }
+.canvas-script-generator__reference-add {
+  min-height: 26px;
+  border-radius: 999px;
+  cursor: pointer;
+}
 
 .canvas-script-editor {
   display: flex;
@@ -45,7 +82,6 @@
   color: var(--color-text);
 }
 
-.canvas-script-editor__intro,
 .canvas-script-editor__section-head {
   display: flex;
   flex-wrap: wrap;
@@ -54,7 +90,6 @@
   gap: var(--space-xs);
 }
 
-.canvas-script-editor__intro span,
 .canvas-script-editor__section-head span,
 .canvas-script-editor__run span {
   color: var(--color-text-2);
@@ -62,7 +97,6 @@
 }
 
 .canvas-script-editor__settings,
-.canvas-script-editor__sources,
 .canvas-script-editor__references,
 .canvas-script-editor__actions,
 .canvas-script-editor__run,
@@ -74,6 +108,10 @@
 }
 
 .canvas-script-editor__settings > :first-child { flex: 1 1 14rem; }
+.canvas-script-editor__generation { padding: var(--space-sm); border: var(--rule-thin) solid var(--color-rule); border-radius: var(--radius-control); }
+.canvas-script-editor__generation > summary { cursor: pointer; }
+.canvas-script-editor__generation-body { display: grid; gap: var(--space-sm); margin-top: var(--space-sm); }
+.canvas-script-editor__step-actions { display: flex; justify-content: space-between; gap: var(--space-xs); }
 .canvas-script-editor__run,
 .canvas-script-editor__shot-head { justify-content: space-between; }
 
@@ -121,11 +159,18 @@
 .canvas-script-editor__request textarea { min-height: 96px; }
 .canvas-script-editor__fields textarea { min-height: 66px; }
 .canvas-script-editor__steps { display: flex; flex-wrap: wrap; gap: var(--space-xs); }
-.canvas-script-editor__steps button[aria-current="step"] {
+.canvas-script-editor .canvas-script-editor__steps button[aria-current="step"] {
   color: var(--color-accent-ink);
   background: var(--color-accent);
 }
 .canvas-script-editor__section { display: grid; gap: var(--space-sm); }
+.canvas-script-editor__asset-group { display: grid; gap: var(--space-sm); }
+.canvas-script-editor__asset-group + .canvas-script-editor__asset-group {
+  padding-top: var(--space-sm);
+  border-top: var(--rule-thin) solid var(--color-rule);
+}
+.canvas-script-editor__asset-group > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-xs); }
+.canvas-script-editor__asset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(270px, 100%), 1fr)); gap: var(--space-xs); }
 .canvas-script-editor__table-scroll { max-width: 100%; overflow: auto; border: var(--rule-thin) solid var(--color-rule); }
 .canvas-script-editor__table { width: 100%; min-width: 1500px; border-collapse: collapse; font-size: var(--text-sm); }
 .canvas-script-editor__table th,
@@ -172,3 +217,12 @@
 .canvas-script-batch__media figure { width: min(10rem, 100%); margin: 0; }
 .canvas-script-batch__media img, .canvas-script-batch__media video { display: block; width: 100%; max-height: 12rem; object-fit: contain; border-radius: var(--radius-control); }
 @media (max-width: 600px) { .canvas-script-editor__fields { grid-template-columns: 1fr; } }
+.canvas-script-batch__film {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid #3b3b3b;
+  border-radius: 10px;
+}
+.canvas-script-batch__film > label { display: flex; align-items: center; gap: 12px; }
+.canvas-script-batch__film > button { justify-self: start; }

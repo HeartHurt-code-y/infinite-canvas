@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import {
   CANVAS_TEXT_TRY_ACTIONS,
   type CanvasTextTryActionKey,
@@ -32,8 +32,8 @@ export const CanvasTextTryActions = memo(function CanvasTextTryActions({
   }
   return (
     <div className={`canvas-text-try${compact ? " canvas-text-try--compact" : ""}`}>
-      <CanvasChromeIcon
-        name="text-lines"
+      <LibTVMediaIcon
+        name="list-detail"
         size={90}
         className="canvas-text-try__icon"
       />
@@ -52,7 +52,7 @@ export const CanvasTextTryActions = memo(function CanvasTextTryActions({
                 onAction(action.key);
               }}
             >
-              <CanvasChromeIcon name={action.icon} size={14} />
+              <LibTVMediaIcon name={action.icon} size={14} />
               <span className="canvas-text-try__item-label">{action.label}</span>
             </button>
           ))}

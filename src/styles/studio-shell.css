@@ -380,32 +380,6 @@ button:active:focus-visible,
   border-color: var(--color-rule-faint);
 }
 
-/* Browsing templates is a list of tools, with one calm insertion action per row. */
-
-.connection-quick-add-menu {
-  width: var(--size-menu);
-  padding: var(--space-xs);
-  border-color: var(--color-rule);
-  box-shadow: var(--shadow-floating);
-}
-
-.connection-quick-add-menu .connection-quick-add-menu__heading {
-  padding: var(--space-sm);
-  border-color: var(--color-rule-faint);
-}
-
-.connection-quick-add-menu .connection-quick-add-menu__item {
-  gap: var(--space-sm);
-  min-height: var(--size-control-touch);
-  padding-inline: var(--space-sm);
-  font-size: var(--text-sm);
-}
-
-.connection-quick-add-menu .connection-quick-add-menu__item svg {
-  width: var(--icon-lg);
-  height: var(--icon-lg);
-}
-
 /* Native line patterns follow viewport pan and zoom; dashes stay understated.
    点阵取原站 liblib 画布的 --xy-background-pattern-dots-color-default。 */
 .canvas-react-flow .canvas-flow-bg--minor path {

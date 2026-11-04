@@ -31,13 +31,13 @@ export function AssetPanelHeader({
   onImport,
   multiSelect = false,
   onToggleMultiSelect,
-  onClose,
+  referenceMode = false,
 }: {
   readonly uploadActionLabel: string;
   readonly onImport: () => void;
   readonly multiSelect?: boolean;
   readonly onToggleMultiSelect?: () => void;
-  readonly onClose?: () => void;
+  readonly referenceMode?: boolean;
 }) {
   return (
     <div className="panel-title-row">
@@ -46,7 +46,7 @@ export function AssetPanelHeader({
         <h2>素材库</h2>
       </div>
       <div className="panel-title-row__actions">
-        <button
+        {!referenceMode ? <button
           type="button"
           className={`asset-multi-toggle${multiSelect ? " is-on" : ""}`}
           aria-pressed={multiSelect}
@@ -55,7 +55,7 @@ export function AssetPanelHeader({
           onClick={onToggleMultiSelect}
         >
           多选
-        </button>
+        </button> : null}
         <button
           type="button"
           className="square-action"
@@ -65,16 +65,6 @@ export function AssetPanelHeader({
         >
           <Icon name="upload-simple" aria-hidden="true" size="lg" />
         </button>
-        {onClose ? (
-          <button
-            type="button"
-            className="square-action mobile-panel-close--assets"
-            aria-label="关闭素材库"
-            onClick={onClose}
-          >
-            <Icon name="x" aria-hidden="true" size="lg" />
-          </button>
-        ) : null}
       </div>
     </div>
   );
@@ -848,8 +838,6 @@ export function AssetPagination({
  * 事件回调在 WorkspaceApp 侧组装（含刷新/翻页等副作用），这里只做展示与转发。
  */
 export function AssetPanel({
-  mobileOpen,
-  onCloseMobilePanel,
   uploadActionLabel,
   onImportLocalAssets,
   isOffline,
@@ -916,12 +904,10 @@ export function AssetPanel({
   pickOrderByKey = EMPTY_ASSET_PICK_ORDERS,
   onToggleMultiSelect = noopAssetPanelAction,
   onTogglePickedAsset = noopAssetPanelAction,
+  canReferenceAsset,
   onPlacePickedAssets = noopAssetPanelAction,
   onClearPickedAssets = noopAssetPanelAction,
 }: {
-  /** 移动端抽屉是否展开（mobilePanel === "assets"）。 */
-  readonly mobileOpen: boolean;
-  readonly onCloseMobilePanel: () => void;
   /** 上传按钮的 aria/tooltip 文案（按来源区分）。 */
   readonly uploadActionLabel: string;
   readonly onImportLocalAssets: () => void;
@@ -1001,6 +987,7 @@ export function AssetPanel({
   readonly pickOrderByKey?: ReadonlyMap<string, number>;
   readonly onToggleMultiSelect?: () => void;
   readonly onTogglePickedAsset?: (asset: AssetItem) => void;
+  readonly canReferenceAsset?: ((asset: AssetItem) => boolean) | undefined;
   readonly onPlacePickedAssets?: () => void;
   readonly onClearPickedAssets?: () => void;
 }) {
@@ -1034,17 +1021,16 @@ export function AssetPanel({
     onDeletePickedLocalAssets?.();
   };
   return (
-    <aside
+    <section
       id="asset-panel"
-      className={`asset-panel${mobileOpen ? " is-mobile-open" : ""}`}
+      className="asset-panel"
       aria-label="素材库"
-      inert={!mobileOpen}
     >
       <AssetPanelHeader
         uploadActionLabel={uploadActionLabel}
         multiSelect={multiSelect}
         onToggleMultiSelect={onToggleMultiSelect}
-        onClose={onCloseMobilePanel}
+        referenceMode={canReferenceAsset != null}
         onImport={() => {
           onImportLocalAssets();
         }}
@@ -1157,7 +1143,7 @@ export function AssetPanel({
         onSearchChange={onSearchChange}
         onRefreshCloud={cloudCollection === "object_storage" ? onRetryObjectStorage : onRetryCloud}
       />
-      {multiSelect ? (
+      {multiSelect && !canReferenceAsset ? (
         <div className="asset-multi-select" role="region" aria-label="多选素材">
           <span>
             {pickedCount > 0
@@ -1218,12 +1204,13 @@ export function AssetPanel({
         {visibleAssets.length > 0 ? (
           <AssetFlow
             assets={visibleAssets}
-            multiSelect={multiSelect}
+            multiSelect={multiSelect || canReferenceAsset != null}
+            canReferenceAsset={canReferenceAsset}
             pickOrderByKey={pickOrderByKey}
             onTogglePick={onTogglePickedAsset}
             onPreview={onPreviewAsset}
             onDropToCanvas={onDropAssetToCanvas}
-            onPreviewUnavailable={onPreviewUnavailable}
+            onPreviewUnavailable={canReferenceAsset ? undefined : onPreviewUnavailable}
           />
         ) : (
           <AssetEmptyState
@@ -1263,10 +1250,12 @@ export function AssetPanel({
         />
       ) : null}
       <p className="asset-panel__hint">
-        {multiSelect
+        {canReferenceAsset
+          ? "点击素材添加到当前节点，再次点击可取消引用。"
+          : multiSelect
           ? "点选顺序会记在素材上。放到画布后，用右下角框选把它们收成一组，再从组的端口连到生成节点。"
           : "单击素材查看源媒体与完整信息；拖到画布创建节点，连线后可在提示词中 @ 引用。也可开启多选一次放入。"}
       </p>
-    </aside>
+    </section>
   );
 }

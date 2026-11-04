@@ -516,6 +516,8 @@ pub struct GenerationTaskSummary {
     pub provider_connection_id: String,
     pub provider_display_name_snapshot: String,
     pub model_definition_id: String,
+    /// 供应商适配器快照。任务详情里的请求体会被截断，适配器身份改由这里给。
+    pub adapter_id_snapshot: String,
     pub remote_model_id_snapshot: Option<String>,
     pub remote_task_id: Option<String>,
     pub progress: Option<f64>,
@@ -546,13 +548,20 @@ pub struct ProviderCallRecord {
     pub task_id: String,
     pub attempt_id: String,
     pub phase: String,
+    /// 请求体。小报文是完整 JSON；大报文（整包 base64 素材）只带截断预览，
+    /// 原始字节数见 [`Self::request_bytes`]。
     pub request: Value,
+    /// 请求体原始字节数。大于预览长度即说明正文已被省略。
+    pub request_bytes: i64,
     pub sent_at: Option<i64>,
     pub response_received_at: Option<i64>,
     pub duration_ms: Option<i64>,
     pub http_status: Option<u16>,
     pub response_headers: Option<Value>,
+    /// 响应体（超长时已截断，原始字节数见 [`Self::response_bytes`]）。
     pub raw_response: Option<String>,
+    /// 响应体原始字节数。大于返回长度即说明正文已被截断。
+    pub response_bytes: Option<i64>,
     pub runtime_error: Option<Value>,
 }
 
@@ -616,7 +625,13 @@ pub struct GenerationTaskDetail {
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskProgress {
     pub summary: GenerationTaskSummary,
+    /// 逻辑请求快照：提示词、参数与素材引用都在这里。它是提交时的原始命令，
+    /// 不含解析后的整包素材，体量小到可以每次状态检查都带回来。
+    pub logical_request: Value,
     pub results: Vec<GenerationProgressResult>,
+    /// 文本任务的回答正文。文本生成没有媒体产物，正文就是交付物，
+    /// 轮询路径靠它渲染记录卡，不必再拉一次详情。
+    pub text_output: Option<TextGenerationOutputRecord>,
     pub final_error: Option<Value>,
 }
 
@@ -628,6 +643,8 @@ pub struct GenerationProgressResult {
     pub media_type: MediaType,
     pub save_status: SaveStatus,
     pub final_path: Option<String>,
+    /// 结果来源（远端地址或归档标记）。它只记身份，不含 base64 正文。
+    pub source: Value,
     pub error: Option<Value>,
 }
 

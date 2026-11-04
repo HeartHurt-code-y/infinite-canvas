@@ -1,4 +1,7 @@
 import { CanvasChromeIcon, type CanvasChromeIconName } from "./CanvasChromeIcons";
+import { CanvasDockLibrary } from "./CanvasDockLibrary";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
+import type { CanvasLibraryKind } from "./canvasLibraryResources";
 import "./CanvasChromeControls.css";
 
 /**
@@ -49,6 +52,7 @@ export function CanvasChromeControls({
         className="canvas-chrome-items__button"
         aria-label="资产管理"
         data-tooltip="资产管理"
+        aria-controls="canvas-asset-drawer"
         aria-pressed={assetsOpen}
         onClick={(event) => onOpenAssets(event.currentTarget)}
       >
@@ -111,19 +115,23 @@ export interface CanvasBottomDockProps {
    * liblib 浮坞第二格是「移动」：拖动画布内容。点一次切到「框选」模式，
    * 再点一次切回「移动」——原站是同一个位置上的模式切换。
    */
-  readonly marqueeActive: boolean;
-  readonly onToggleMarquee: () => void;
+  readonly handTool: boolean;
+  readonly onToggleHandTool: () => void;
+  readonly featuresOpen: boolean;
+  readonly onOpenFeatures: () => void;
+  readonly onOpenLibrary: (kind: CanvasLibraryKind) => void;
+  readonly onOpenCharacterStudio: () => void;
+  readonly characterStudioOpen: boolean;
   /** 打开教程（原站浮坞「教程」，对应本项目的 4 步新手引导）。 */
   readonly onOpenGuide?: () => void; /** 打开历史记录。 */
   readonly onOpenHistory: () => void;
   /** 悬停历史记录时预热弹窗，避免首次点击要等加载。 */
   readonly onPreloadHistory?: () => void;
   /** 打开快捷键面板。 */
-  readonly onOpenShortcuts: () => void;
-  /** 打开创作台（对应原站浮坞右侧的品牌胶囊）。 */
-  readonly onOpenStudio?: () => void;
-  /** 品牌胶囊文案。 */
-  readonly studioLabel?: string;
+  readonly shortcutsOpen: boolean;
+  readonly onOpenShortcuts: (trigger: HTMLButtonElement) => void;
+  readonly directorOpen: boolean;
+  readonly onToggleDirector: () => void;
 }
 
 /**
@@ -134,21 +142,25 @@ export interface CanvasBottomDockProps {
  *   + 右侧一枚 **48×48** 的品牌胶囊（TV Director，渐变圆球）。
  *   八个图标格都是 32×32、圆角 8、图标 20px。
  *
- * 角色造型室与全部功能在本项目没有对应能力，按项目约定保留位置与图标，
- * 标注「后端暂未接入」，而不是留一个点了没反应的空按钮。
  */
 export function CanvasBottomDock({
   onAddNode,
   addNodeOpen,
   addNodeTriggerRef,
-  marqueeActive,
-  onToggleMarquee,
+  handTool,
+  onToggleHandTool,
+  featuresOpen,
+  onOpenFeatures,
+  onOpenLibrary,
+  onOpenCharacterStudio,
+  characterStudioOpen,
   onOpenGuide,
   onOpenHistory,
   onPreloadHistory,
   onOpenShortcuts,
-  onOpenStudio,
-  studioLabel = "创作台",
+  shortcutsOpen,
+  directorOpen,
+  onToggleDirector,
 }: CanvasBottomDockProps) {
   const dockIcon = (name: CanvasChromeIconName) => <CanvasChromeIcon name={name} size={20} />;
   return (
@@ -169,28 +181,22 @@ export function CanvasBottomDock({
         <button
           type="button"
           className="canvas-bottom-dock__action"
-          aria-label={marqueeActive ? "框选" : "移动"}
-          aria-pressed={marqueeActive}
-          data-tooltip={marqueeActive ? "框选 · 框选节点" : "移动 · 拖动画布"}
-          onClick={onToggleMarquee}
+          aria-label={handTool ? "抓手工具" : "移动工具"}
+          aria-pressed={handTool}
+          data-tooltip={handTool ? "抓手工具 · 拖动画布 · 按 V 移动节点" : "移动工具 · 拖动节点，空白处框选 · 按 H 切换抓手"}
+          onClick={onToggleHandTool}
         >
-          {dockIcon(marqueeActive ? "grid3" : "move")}
+          {handTool ? <LibTVMediaIcon name="hand-n" size={20} /> : dockIcon("move")}
         </button>
+        <CanvasDockLibrary onChoose={onOpenLibrary} />
         <button
           type="button"
           className="canvas-bottom-dock__action"
-          aria-label="功能组件"
-          data-tooltip="功能组件（后端暂未接入）"
-          disabled
-        >
-          {dockIcon("grid2plus")}
-        </button>
-        <button
-          type="button"
-          className="canvas-bottom-dock__action"
-          aria-label="表情"
-          data-tooltip="表情（后端暂未接入）"
-          disabled
+          aria-label="角色造型室"
+          data-tooltip="角色造型室"
+          aria-haspopup="dialog"
+          aria-expanded={characterStudioOpen}
+          onClick={onOpenCharacterStudio}
         >
           {dockIcon("smile")}
         </button>
@@ -198,8 +204,10 @@ export function CanvasBottomDock({
           type="button"
           className="canvas-bottom-dock__action"
           aria-label="全部功能"
-          data-tooltip="全部功能（后端暂未接入）"
-          disabled
+          aria-haspopup="dialog"
+          aria-expanded={featuresOpen}
+          data-tooltip="全部功能"
+          onClick={onOpenFeatures}
         >
           {dockIcon("features")}
         </button>
@@ -219,7 +227,9 @@ export function CanvasBottomDock({
           className="canvas-bottom-dock__action"
           aria-label="快捷键"
           data-tooltip="快捷键"
-          onClick={onOpenShortcuts}
+          aria-haspopup="dialog"
+          aria-expanded={shortcutsOpen}
+          onClick={(event) => onOpenShortcuts(event.currentTarget)}
         >
           {dockIcon("keyboard")}
         </button>
@@ -235,17 +245,16 @@ export function CanvasBottomDock({
           {dockIcon("help")}
         </button>
       </div>
-      {onOpenStudio ? (
-        <button
-          type="button"
-          className="canvas-bottom-dock__brand"
-          aria-label={`打开${studioLabel}`}
-          data-tooltip={studioLabel}
-          onClick={onOpenStudio}
-        >
-          <span className="canvas-bottom-dock__brand-mark" aria-hidden="true" />
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="canvas-bottom-dock__brand"
+        aria-label="TV Director"
+        aria-expanded={directorOpen}
+        data-tooltip="TV Director"
+        onClick={onToggleDirector}
+      >
+        <span className="canvas-bottom-dock__brand-mark" aria-hidden="true" />
+      </button>
     </div>
   );
 }

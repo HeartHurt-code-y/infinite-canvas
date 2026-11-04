@@ -696,6 +696,36 @@
   gap: 2px;
 }
 
+/*
+ * 文本生成的产物区。
+ *
+ * 文本任务没有媒体格子，正文就是交付物：整块可读、可选中复制，宽度按
+ * 卡片走（不留四列网格的洞）。
+ */
+.create-record__text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+  padding: var(--space-xs) var(--space-2xs);
+  background: var(--color-create-block);
+  border-radius: var(--radius-create-control);
+}
+
+.create-record__text-body {
+  margin: 0;
+  color: var(--color-create-text);
+  font-family: var(--font-jimeng-montserrat);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.create-record__text .create-record__actions {
+  padding-top: 0;
+}
+
 .create-record__cell {
   position: relative;
   overflow: hidden;

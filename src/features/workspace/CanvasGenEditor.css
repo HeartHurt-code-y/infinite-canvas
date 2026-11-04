@@ -186,6 +186,10 @@
   border-radius: 8px;
 }
 
+.node-media-chip.is-reorderable {
+  touch-action: none;
+}
+
 .video-node-editor .node-media-chip.is-dragging {
   opacity: 0.6;
 }
@@ -262,19 +266,13 @@
   border-radius: 8px;
 }
 
-/* 素材名在原站不显示（只在标题里），这里保留给读屏与 tooltip。 */
+/* 素材名只供读屏；可见说明由 TooltipLayer 提供。 */
 .video-node-editor .node-media-chip__name {
   position: absolute;
   width: 1px;
   height: 1px;
   overflow: hidden;
   clip-path: inset(50%);
-}
-
-/* 原站的瓦片只有序号角标、@ 与解除连线；「随提示词 / 产物」这类来源信息
-   原站没有可见角标，这里收进瓦片的 title，不占视觉位。 */
-.video-node-editor .node-media-chip__origin {
-  display: none;
 }
 
 .video-node-editor .node-media-chip__unlink {
@@ -298,12 +296,6 @@
 .video-node-editor .node-media-chip:hover .node-media-chip__unlink,
 .video-node-editor .node-media-chip:focus-within .node-media-chip__unlink {
   opacity: 1;
-}
-
-/* 原站用拖拽排序，没有上移/下移按钮；这里在编辑层里隐藏它们（键盘排序走瓦片本身）。 */
-.video-node-editor .node-media-chip__reorder,
-.video-node-editor .node-media-chip__drag-handle {
-  display: none;
 }
 
 /* 提示词区：原站 relative flex-1 overflow-hidden rounded-xl p-2 min-h-20 */
@@ -376,10 +368,6 @@
  * 识别素材名仍留在提示词节点里（那是它的主场）。
  */
 .video-node-editor .prompt-mention__actions {
-  display: none;
-}
-
-.video-node-editor .prompt-mention__status:not(.is-prominent) {
   display: none;
 }
 
@@ -490,11 +478,6 @@
   flex-shrink: 0;
 }
 
-/* 全能参考：原站 py-1 pl-2 pr-2.5（左右内边距不对称）。 */
-.video-settings-control__trigger--universal {
-  padding: var(--space-2xs) 10px var(--space-2xs) var(--space-xs);
-}
-
 /*
  * 设置浮层：贴到触发器上（面板底边 = 触发器顶边 − 8px）。
  * 挂在编辑层 DOM 内（而不是 body）：编辑层是定位祖先，面板按相对坐标贴靠，
@@ -567,38 +550,6 @@
 
 .video-settings-panel .canvas-gen-node__operation {
   flex-wrap: wrap;
-}
-
-/* 高级设置：原站是浮层底部的一根 hairline + 12px 粗体标题，默认收起。 */
-.video-settings-advanced {
-  border-top: var(--rule-thin) solid var(--border-muted);
-}
-
-.video-settings-advanced__toggle {
-  display: block;
-  width: 100%;
-  padding: 12px var(--space-xs) var(--space-2xs);
-  color: #737373;
-  font-size: var(--text-xs);
-  font-weight: 700;
-  text-align: start;
-  background: transparent;
-  border: 0;
-}
-
-.video-settings-advanced__body {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-sm);
-  padding: var(--space-2xs) var(--space-xs) var(--space-xs);
-}
-
-.video-settings-advanced__body[hidden] {
-  display: none;
-}
-
-.video-settings-advanced__body > .canvas-gen-node__field {
-  min-width: 0;
 }
 
 .video-node-editor__backdrop {

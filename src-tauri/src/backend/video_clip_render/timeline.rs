@@ -10,6 +10,10 @@ pub struct ClipTransition { pub kind: String, pub seconds: f64 }
 pub struct ClipOverlay {
     pub id: String, pub kind: String, pub text: String, pub start: f64, pub end: f64,
     pub x: f64, pub y: f64, pub size: f64, pub color: String, pub background: bool, pub bold: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub font: Option<fonts::ClipFontRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub weight: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub highlight: Option<typography::WordHighlight>,
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub animation: Option<typography::TextAnimation>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +32,7 @@ impl ClipTimelineSettings {
         }
         let mut ids = std::collections::HashSet::new();
         for item in &self.overlays {
+            typography::validate(item)?;
             if item.id.is_empty() || !ids.insert(&item.id) || !matches!(item.kind.as_str(), "text" | "subtitle")
                 || item.text.chars().count() > 2000 || !item.start.is_finite() || !item.end.is_finite()
                 || item.start < 0.0 || item.end - item.start < 0.04 || item.end > 300.1
@@ -100,7 +105,12 @@ impl ClipRenderService {
         let mut ass_count = 0;
         for overlay in &command.settings.overlays {
             if (overlay.kind == "text" || burn) && overlay.start < elapsed && !overlay.text.trim().is_empty() {
-                ass.push_str(&ass_event(overlay, width, height, elapsed)); ass_count += 1;
+                let font = if let Some(font) = &overlay.font { Some(fonts::resolve(&self.inner.planner.app, font).await?) } else { None };
+                if let Some(font) = &font {
+                    tokio::fs::create_dir_all(directory.join("fonts")).await?;
+                    tokio::fs::copy(&font.path, directory.join("fonts").join(format!("{}.ttf",font.font.id))).await?;
+                }
+                ass.push_str(&typography::events(overlay, width, height, elapsed, font.as_ref())); ass_count += 1;
             }
         }
         if burn {
@@ -109,8 +119,8 @@ impl ClipRenderService {
                 if index > 0 { cursor -= overlap(&clips[index - 1], clip); }
                 if !clip.caption.trim().is_empty() && cursor < elapsed {
                     let overlay = ClipOverlay { id: String::new(), kind: "subtitle".into(), text: clip.caption.clone(), start: cursor, end: cursor + clip.end - clip.start,
-                        x: 50.0, y: 88.0, size: 4.5, color: "#ffffff".into(), background: false, bold: false };
-                    ass.push_str(&ass_event(&overlay, width, height, elapsed)); ass_count += 1;
+                        x: 50.0, y: 88.0, size: 4.5, color: "#ffffff".into(), background: false, bold: false, font: None, weight: None, highlight: None, animation: None };
+                    ass.push_str(&typography::events(&overlay, width, height, elapsed, None)); ass_count += 1;
                 }
                 cursor += clip.end - clip.start;
             }
@@ -122,7 +132,7 @@ impl ClipRenderService {
         let mut args = vec!["-i".into(), "joined.mp4".into()];
         if soft { args.extend(["-i".into(), "captions.srt".into()]); }
         args.extend(["-map".into(), "0:v:0".into(), "-map".into(), "0:a:0".into()]);
-        if ass_count > 0 { args.extend(["-vf".into(), "ass=overlays.ass".into()]); }
+        if ass_count > 0 { args.extend(["-vf".into(), "ass=overlays.ass:fontsdir=fonts".into()]); }
         if webm {
             args.extend(["-c:v".into(), "libvpx-vp9".into(), "-deadline".into(), "realtime".into(), "-cpu-used".into(), "5".into(), "-crf".into(), "32".into(), "-b:v".into(), "0".into(), "-c:a".into(), "libopus".into()]);
         } else if ass_count > 0 {
@@ -155,14 +165,7 @@ fn ass_header(width: u32, height: u32) -> String {
     let font = if cfg!(windows) { "Microsoft YaHei" } else if cfg!(target_os="macos") { "PingFang SC" } else { "Noto Sans CJK SC" };
     format!("[Script Info]\nScriptType: v4.00+\nPlayResX: {width}\nPlayResY: {height}\nWrapStyle: 0\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,{font},32,&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,0,2,30,30,0,1\nStyle: Box,{font},32,&H00FFFFFF,&H00FFFFFF,&H60000000,&H60000000,0,0,0,0,100,100,0,0,3,8,0,2,30,30,0,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
 }
-fn ass_time(seconds: f64) -> String {
+pub(super) fn ass_time(seconds: f64) -> String {
     let ticks = (seconds.max(0.0) * 100.0).round() as u64;
     format!("{}:{:02}:{:02}.{:02}", ticks / 360000, ticks / 6000 % 60, ticks / 100 % 60, ticks % 100)
-}
-fn ass_event(overlay: &ClipOverlay, width: u32, height: u32, duration: f64) -> String {
-    let style = if overlay.background { "Box" } else { "Default" };
-    let color = format!("{}{}{}", &overlay.color[5..7], &overlay.color[3..5], &overlay.color[1..3]);
-    let text = overlay.text.replace('\\', "＼").replace('{', "｛").replace('}', "｝").replace('\r', "").replace('\n', "\\N");
-    let background = if overlay.background { "\\bord8\\3c&H000000&\\3a&H60&\\shad0" } else { "\\bord1\\3c&H000000&\\3a&H40&\\shad0" };
-    format!("Dialogue: {},{},{},{style},,0,0,0,,{{\\an2\\pos({:.1},{:.1})\\fs{:.1}\\c&H{color}&\\b{}{background}}}{text}\n", if overlay.kind == "text" { 1 } else { 0 }, ass_time(overlay.start), ass_time(overlay.end.min(duration)), overlay.x / 100.0 * width as f64, overlay.y / 100.0 * height as f64, overlay.size / 100.0 * height as f64, if overlay.bold { 1 } else { 0 })
 }

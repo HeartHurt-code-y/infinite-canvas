@@ -23,7 +23,7 @@
   display: block;
   width: 622px;
   height: auto;
-  min-height: 400px;
+  min-height: var(--canvas-preview-min-height, 400px);
   gap: 0;
   padding: 0;
   overflow: visible;
@@ -39,7 +39,7 @@
  */
 .canvas-gen-node--image.canvas-node-preview,
 .canvas-gen-node--video.canvas-node-preview {
-  min-height: 0;
+  --canvas-preview-min-height: 0px;
 }
 
 /*
@@ -78,6 +78,16 @@
   white-space: nowrap;
 }
 
+.canvas-node-preview > .canvas-node-toolbar--media {
+  width: calc(100% / var(--canvas-media-title-scale, 1));
+  transform: scale(var(--canvas-media-title-scale, 1));
+  transform-origin: bottom left;
+}
+
+.canvas-node-preview > .canvas-node-toolbar--media .canvas-node-toolbar__label {
+  max-width: 100%;
+}
+
 .canvas-node-preview .canvas-node-toolbar__type {
   display: flex;
   min-width: 0;
@@ -102,14 +112,14 @@
   white-space: nowrap;
 }
 
-/* 原站的标题文字本身可改（cursor-text），这里用同样形态的按钮承载。 */
+/* 单击标题改名，拖动标题文字也能移动节点。 */
 .canvas-node-preview .canvas-node-toolbar__label--editable {
   padding: 0;
   font: inherit;
   text-align: start;
   background: transparent;
   border: 0;
-  cursor: text;
+  cursor: inherit;
 }
 
 /* 就地编辑标题：输入框 + 保存 / 取消。 */
@@ -219,6 +229,55 @@
   object-fit: cover;
 }
 
+.canvas-asset-node.canvas-asset-node--media,
+.react-flow__node .canvas-flow-node > .canvas-asset-node.canvas-asset-node--media,
+.react-flow__node.selected .canvas-flow-node > .canvas-asset-node.canvas-asset-node--media {
+  display: block;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.canvas-asset-node--media > .canvas-asset-node__visual {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: .5px solid var(--canvas-node-border, #363636);
+  border-radius: 12px;
+  background: var(--canvas-node-media-bg, #252525);
+}
+
+.react-flow__node.selected .canvas-asset-node--media > .canvas-asset-node__visual {
+  border-color: var(--canvas-node-border-selected, #a8a8a8);
+}
+
+.canvas-asset-node--media > .canvas-asset-node__visual :is(img, video) {
+  display: block;
+  object-fit: cover;
+}
+
+.canvas-media-ai-badge {
+  position: absolute;
+  z-index: 1;
+  top: 8px;
+  left: 8px;
+  padding: 1px 5px;
+  border: .5px solid #ffffff47;
+  border-radius: 5px;
+  background: #0002;
+  color: #ffffffa6;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.3;
+  pointer-events: none;
+}
+
 .canvas-node-preview__empty {
   display: grid;
   justify-items: center;
@@ -234,11 +293,7 @@
   opacity: 0.8;
 }
 
-/*
- * 媒体右上角的动作按钮：原站同一位置是「替换素材」
- * （24×24、bg-black/40、backdrop-blur-[10px]、rounded-md、图标 14px、
- *  hover bg-black/50）。本项目把同一个位置给「编辑」。
- */
+/* 键盘聚焦时才显示编辑入口；点选节点直接打开编辑区。 */
 .canvas-node-preview__media .canvas-node-preview__edit {
   position: absolute;
   top: 12px;
@@ -266,6 +321,16 @@
 .canvas-node-preview__media .canvas-node-preview__edit[aria-expanded="true"] {
   /* 原站 bg-black/50；待替换为令牌 --canvas-node-action-bg-hover */
   background: rgba(0, 0, 0, 0.5);
+}
+
+.canvas-node-preview__edit--keyboard {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.canvas-node-preview__edit--keyboard:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .canvas-node-preview__media .canvas-node-preview__edit:focus-visible {
@@ -441,4 +506,195 @@
 .video-settings-control__trigger[aria-expanded="true"],
 .video-settings-panel__heading button:hover {
   background: var(--color-surface-3);
+}
+
+/* Multi-image results stay inside their source node. */
+.canvas-node-preview__media .canvas-image-count {
+  position: absolute; top: 8px; left: 8px; z-index: 20;
+  display: inline-flex; align-items: center; gap: 8px; min-height: 0;
+  padding: 8px; color: white; font-size: 13px; line-height: 16px;
+  border: 0; border-radius: 8px; background: rgb(0 0 0 / 65%); cursor: pointer;
+}
+.canvas-image-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; width: 100%; }
+.canvas-image-results__tile {
+  position: relative; display: block; min-width: 0; width: 100%; aspect-ratio: 1;
+  margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 8px; background: #171717;
+}
+button.canvas-image-results__tile { cursor: pointer; }
+.canvas-image-results__tile img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.canvas-image-results__choose {
+  position: absolute; right: 8px; bottom: 8px; padding: 6px 8px; border-radius: 6px;
+  color: white; background: rgb(0 0 0 / 65%); font-size: 13px; opacity: 0;
+}
+.canvas-image-results__tile:hover .canvas-image-results__choose,
+.canvas-image-results__tile:focus-visible .canvas-image-results__choose { opacity: 1; }
+.canvas-image-results__tile:focus-visible, .canvas-image-count:focus-visible { outline: 2px solid white; outline-offset: -2px; }
+.canvas-image-results__tile[aria-pressed="true"] { cursor: default; }
+
+.canvas-image-results__tile.canvas-image-results__pending {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 140px;
+  background: var(--nt-bg-float);
+  color: var(--nt-text-secondary);
+  font-size: 13px;
+}
+
+.canvas-image-results__pending[data-failed] {
+  color: var(--color-danger, #f87171);
+}
+
+.video-node-status__details {
+  flex: 0 0 auto;
+  pointer-events: auto;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--nt-bg-overlay);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.video-node-status__progress .is-indeterminate {
+  width: 35%;
+  animation: canvas-task-progress 1.4s ease-in-out infinite;
+}
+
+@keyframes canvas-task-progress {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(290%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-node-status__progress .is-indeterminate { animation: none; }
+}
+:is(.canvas-image-result-actions, .canvas-video-result-actions) {
+  position: absolute;
+  top: var(--space-xs);
+  right: var(--space-xs);
+  z-index: 2;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--canvas-node-action-radius);
+  background: var(--canvas-node-action-bg);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  pointer-events: none;
+}
+.canvas-node-preview:hover :is(.canvas-image-result-actions, .canvas-video-result-actions),
+.react-flow__node.selected :is(.canvas-image-result-actions, .canvas-video-result-actions),
+:is(.canvas-image-result-actions, .canvas-video-result-actions):focus-within,
+.canvas-video-result-actions:has([aria-expanded="true"]) {
+  opacity: 1;
+  pointer-events: auto;
+}
+:is(.canvas-image-result-actions, .canvas-video-result-actions) > button {
+  display: grid;
+  place-items: center;
+  width: var(--canvas-node-action-size);
+  height: var(--canvas-node-action-size);
+  padding: 0;
+  border: 0;
+  border-radius: var(--canvas-node-action-radius);
+  background: transparent;
+  color: var(--nt-text-default);
+  cursor: pointer;
+}
+:is(.canvas-image-result-actions, .canvas-video-result-actions) > button:hover:not(:disabled) { background: var(--canvas-node-action-bg-hover); }
+:is(.canvas-image-result-actions, .canvas-video-result-actions) > button:disabled { opacity: .45; cursor: default; }
+.image-generation-preview__media:has(.canvas-image-result-actions) .canvas-node-preview__edit--keyboard {
+  top: auto;
+  bottom: var(--space-xs);
+}
+
+.video-generation-preview__media:has(.canvas-node-actions__trigger) .canvas-node-preview__edit--keyboard {
+  right: auto;
+  left: var(--space-xs);
+}
+
+.canvas-video-result-actions > button {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+.canvas-video-transport > .canvas-node-actions__trigger {
+  position: static;
+  opacity: 1;
+  pointer-events: auto;
+  backdrop-filter: none;
+}
+.canvas-video-transport {
+  position: absolute;
+  z-index: 3;
+  inset: auto 0 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 28px 12px 10px;
+  background: linear-gradient(transparent, rgb(0 0 0 / 55%));
+  color: white;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.canvas-video-transport button {
+  display: grid;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.canvas-video-transport button:disabled { opacity: .45; cursor: default; }
+.canvas-video-transport button:hover:not(:disabled) { background: rgb(0 0 0 / 50%); }
+.canvas-video-transport__seek {
+  appearance: none;
+  flex: 1;
+  min-width: 12px;
+  height: 14px;
+  margin: 0;
+  border: 0;
+  background: linear-gradient(white, white) left center no-repeat,
+    linear-gradient(rgb(255 255 255 / 30%), rgb(255 255 255 / 30%)) left center no-repeat;
+  cursor: pointer;
+}
+.canvas-video-transport__seek::-webkit-slider-thumb {
+  appearance: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: white;
+}
+.canvas-video-transport__volume { position: relative; }
+.canvas-video-transport__volume-popover {
+  position: absolute;
+  z-index: 1;
+  bottom: 100%;
+  left: 50%;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 6px;
+  transform: translateX(-50%);
+  border-radius: 8px;
+  background: rgb(0 0 0 / 75%);
+  visibility: hidden;
+}
+.canvas-video-transport__volume:is(:hover, :focus-within) .canvas-video-transport__volume-popover { visibility: visible; }
+.canvas-video-transport__volume-popover input {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 14px;
+  height: 80px;
+  margin: 0;
+  accent-color: white;
 }

@@ -1,6 +1,7 @@
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { ErrorCopyButton } from "../../components/ErrorCopyButton";
+import { Check } from "lucide-react";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   formatBytes,
@@ -286,6 +287,7 @@ function AssetCard({
   multiSelect = false,
   pickOrder = null,
   onTogglePick,
+  referenceSelectable,
   onPreviewUnavailable,
 }: {
   readonly asset: AssetItem;
@@ -295,6 +297,7 @@ function AssetCard({
   /** 多选时的点选序号，从 1 开始；未选中为 null。 */
   readonly pickOrder?: number | null;
   readonly onTogglePick?: () => void;
+  readonly referenceSelectable?: boolean | undefined;
   readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
@@ -397,23 +400,25 @@ function AssetCard({
   }, [onDropToCanvas]);
 
   const picked = pickOrder != null;
+  const referenceMode = referenceSelectable !== undefined;
   return (
     <div className="asset-card-shell">
       <button
         type="button"
         className={`asset-card${pointerDragging ? " is-dragging" : ""}${picked ? " is-picked" : ""}`}
-        disabled={awaitingCloudId}
+        disabled={awaitingCloudId || referenceSelectable === false}
         title={awaitingCloudId ? "素材处理中，完成后自动可用" : undefined}
+        data-tooltip={referenceSelectable === false && !awaitingCloudId ? "当前节点无法引用此素材" : undefined}
         aria-pressed={multiSelect ? picked : undefined}
         aria-label={
           awaitingCloudId
             ? `云端处理中，暂不可用：${asset.name}`
             : multiSelect
-              ? `选择${typeLabel}素材：${asset.name}${picked ? `，顺序 ${pickOrder}` : ""}`
+              ? `选择${typeLabel}素材：${asset.name}${picked && !referenceMode ? `，顺序 ${pickOrder}` : ""}`
               : `预览${typeLabel}素材详情：${asset.name}`
         }
         onPointerDown={(event) => {
-          if (awaitingCloudId) return;
+          if (awaitingCloudId || referenceMode) return;
           if (!event.isPrimary || event.button !== 0) return;
           pointerDragRef.current = {
             pointerId: event.pointerId,
@@ -536,11 +541,11 @@ function AssetCard({
         ) : null}
         {picked ? (
           <span className="asset-card__order" aria-hidden="true">
-            {pickOrder}
+            {referenceMode ? <Check size={12} /> : pickOrder}
           </span>
         ) : null}
       </button>
-      {multiSelect && !awaitingCloudId ? (
+      {multiSelect && !referenceMode && !awaitingCloudId ? (
         <button
           type="button"
           className="asset-card__peek"
@@ -566,6 +571,7 @@ export const AssetFlow = memo(function AssetFlow({
   multiSelect = false,
   pickOrderByKey = EMPTY_PICK_ORDERS,
   onTogglePick,
+  canReferenceAsset,
   onPreviewUnavailable,
 }: {
   readonly assets: readonly AssetItem[];
@@ -574,6 +580,7 @@ export const AssetFlow = memo(function AssetFlow({
   readonly multiSelect?: boolean;
   readonly pickOrderByKey?: ReadonlyMap<string, number>;
   readonly onTogglePick?: (asset: AssetItem) => void;
+  readonly canReferenceAsset?: ((asset: AssetItem) => boolean) | undefined;
   readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   return (
@@ -585,6 +592,7 @@ export const AssetFlow = memo(function AssetFlow({
           multiSelect={multiSelect}
           pickOrder={pickOrderByKey.get(assetPickKey(asset)) ?? null}
           onTogglePick={() => onTogglePick?.(asset)}
+          referenceSelectable={canReferenceAsset?.(asset)}
           onPreview={() => onPreview(asset)}
           onDropToCanvas={(clientX, clientY) => onDropToCanvas(asset, clientX, clientY)}
           onPreviewUnavailable={onPreviewUnavailable}

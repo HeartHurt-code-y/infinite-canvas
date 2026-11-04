@@ -563,6 +563,16 @@
     0 16px 24px -8px rgb(0 0 0 / 0.06), 0 4px 8px -4px rgb(0 0 0 / 0.04),
     0 1px 1px 0 rgb(0 0 0 / 0.02);
   --shadow-ll-menu: 0 8px 24px -4px rgb(0 0 0 / 0.32);
+  /* LibTV 2026-11-03 右键菜单公开样式：196px / 16px / 32px。 */
+  --canvas-context-menu-width: 196px;
+  --canvas-context-menu-radius: 16px;
+  --canvas-context-menu-row-height: 32px;
+  --canvas-context-menu-font-size: 13px;
+  --canvas-context-menu-shortcut-size: 12px;
+  --canvas-context-menu-shadow: 0 8px 32px rgb(0 0 0 / 0.15);
+  --canvas-node-action-size: 24px;
+  --canvas-node-action-radius: 6px;
+  --canvas-node-action-bg: #00000066;
 
   /* 尺寸：控件 28、顶栏按钮 32、抽屉 320、把手 12、AI 抽屉 400。 */
   --size-ll-control: 1.75rem;
@@ -641,6 +651,7 @@
   /* 每个组在运行时写入自己的颜色（内联样式）；这里的默认值是兜底。 */
   --canvas-group-color: var(--canvas-group-ink-1);
   /* liblib 视频生成编辑区，2026-10-26 登录态与截图。 */
+  --canvas-video-editor-bg: #1f1f1f;
   --canvas-video-switch-width: 38px;
   --canvas-video-switch-height: 20px;
   --canvas-video-switch-thumb: 16px;
@@ -654,6 +665,11 @@
   --canvas-video-preview-height: 350px;
   --canvas-image-preview-height: 350px;
   --canvas-image-empty-icon-size: 90px;
+  --canvas-image-empty-icon-color: #ffffff33;
+  --canvas-image-editor-bg: #1f1f1f;
+  --canvas-image-editor-radius: 20px;
+  --canvas-image-editor-border: #ffffff14;
+  --canvas-image-editor-shadow: 0 8px 16px -4px #0000000a, 0 2px 4px #0000000a;
   /* 图片预设：原站静态类名中的条目 / 图标尺寸；面板宽度按截图适配。 */
   --canvas-image-preset-width: 524px;
   --canvas-image-preset-row-height: 52px;

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { isInsideOpenPopup, useEscapeHandler } from "../../components/escapeArbiter";
 import { useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
 import {
   CAMERA_CONTROL_CATEGORIES, CAMERA_CONTROL_PANEL_WIDTH, cameraControlImageUrl,
@@ -8,7 +9,7 @@ import {
   editableCanvasCameraControl, readCanvasCameraPreferences, saveCanvasCameraPreferences,
   type CanvasCameraCategory, type CanvasCameraControl as CameraSettings,
 } from "../../lib/canvasCameraControl";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import type { ImageNodeConfig } from "./workspaceModel";
 import "./CanvasCameraControl.css";
 
@@ -73,7 +74,7 @@ function CameraColumn({ category, selectedKey, onChange }: {
   return <div className="canvas-camera-column">
     <button type="button" className="canvas-camera-column__step is-up" tabIndex={-1} aria-label={`上一项${category.label}`} aria-disabled={index === 0}
       onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.preventDefault(); event.stopPropagation(); if (index > 0) select(index - 1); }}>
-      <CanvasChromeIcon name="chevron-down" size={14} />
+      <LibTVMediaIcon name="icon-chevron-down-small" size={14} />
     </button>
     <div ref={windowRef} className="canvas-camera-column__window" role="spinbutton" tabIndex={0}
       aria-label={category.label} aria-valuemin={0} aria-valuemax={items.length - 1} aria-valuenow={index}
@@ -88,7 +89,7 @@ function CameraColumn({ category, selectedKey, onChange }: {
     </div>
     <button type="button" className="canvas-camera-column__step" tabIndex={-1} aria-label={`下一项${category.label}`} aria-disabled={index === items.length - 1}
       onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.preventDefault(); event.stopPropagation(); if (index < items.length - 1) select(index + 1); }}>
-      <CanvasChromeIcon name="chevron-down" size={14} />
+      <LibTVMediaIcon name="icon-chevron-down-small" size={14} />
     </button>
     <span className="canvas-camera-column__caption">{category.unit || selected.name}</span>
   </div>;
@@ -136,21 +137,30 @@ export function CanvasCameraControl({ config, active, triggerRef, openRequestId,
   }, [visible, layer.ref]);
   useEffect(() => {
     if (!visible) return;
-    const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key !== "Escape") return;
-      if (event.target instanceof Element && event.target.closest('[role="listbox"], [role="menu"], [aria-expanded="true"][role="combobox"]')) return;
-      event.preventDefault(); event.stopPropagation(); close();
-    };
     const otherPopup = (event: FocusEvent) => {
       if (!(event.target instanceof Element) || layer.ref.current?.contains(event.target) || triggerRef.current?.contains(event.target)) return;
       const popup = event.target.closest('[role="dialog"], [role="listbox"], [role="menu"]');
       const hostDialog = triggerRef.current?.closest('[role="dialog"]');
       if (popup && popup !== hostDialog) close(false);
     };
-    document.addEventListener("keydown", escape, true);
     document.addEventListener("focusin", otherPopup);
-    return () => { document.removeEventListener("keydown", escape, true); document.removeEventListener("focusin", otherPopup); };
+    return () => { document.removeEventListener("focusin", otherPopup); };
   }, [visible, close, layer.ref, triggerRef]);
+
+  /*
+   * Esc 关闭摄像机面板：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 之前这段自己挂在 document 的**捕获阶段**：抢在 React 冒泡处理之前，
+   * 面板里的下拉（`CanvasSelect`）想先关自己都来不及——用户在下拉里按 Esc，
+   * 关掉的是整个摄像机面板。仲裁器在冒泡阶段，内层浮层先认领。
+   */
+  useEscapeHandler(
+    {
+      canHandle: (event) => visible && !isInsideOpenPopup(event.target),
+      handle: () => close(),
+    },
+    visible,
+  );
 
   const commit = useCallback((value: CameraSettings) => {
     latest.current.onChange({ ...latest.current.config, cameraControl: value });
@@ -167,12 +177,12 @@ export function CanvasCameraControl({ config, active, triggerRef, openRequestId,
       disabled={locked} data-selected={enabled && !locked || undefined} data-tooltip={tooltip} onClick={() => {
         if (!open) setDraft(settingsForNode(config.cameraControl));
         setOpen(value => !value);
-      }}><CanvasChromeIcon name="aperture" size={16} /></button>
+      }}><LibTVMediaIcon name="lens-aperture" size={16} /></button>
     {visible ? createPortal(<div ref={layer.ref} id={id} className="canvas-camera-panel nodrag nopan" role="dialog" aria-labelledby={`${id}-title`}
       onPointerDown={event => event.stopPropagation()} onMouseDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()}
       onKeyDown={event => event.stopPropagation()}
       onDoubleClickCapture={event => { event.preventDefault(); event.stopPropagation(); }}>
-      <header><span id={`${id}-title`}>摄像机</span><button type="button" aria-label="关闭摄像机面板" data-tooltip="关闭摄像机面板" onClick={() => close()}><CanvasChromeIcon name="close" size={18} /></button></header>
+      <header><span id={`${id}-title`}>摄像机</span><button type="button" aria-label="关闭摄像机面板" data-tooltip="关闭摄像机面板" onClick={() => close()}><LibTVMediaIcon name="close" size={18} /></button></header>
       {issue ? <div className="canvas-camera-panel__error"><ErrorAlert error={issue} tone="warning" hint="重新选择任一摄影参数以确认设置，或关闭摄像机开关。" /></div> : null}
       <div className="canvas-camera-panel__columns"><div className="canvas-camera-panel__separator" />
         {CAMERA_CONTROL_CATEGORIES.map(category => <Fragment key={category.key}>
@@ -196,7 +206,7 @@ export function CanvasCameraControlBadge({ config, onOpen, onDisable }: {
 }) {
   if (!config.cameraControl?.enabled || config.imagePreset || cameraControlLocked(config)) return null;
   return <div className="canvas-camera-badge">
-    <button type="button" aria-label="打开摄像机控制" data-tooltip={canvasCameraSummary(config.cameraControl)} onClick={onOpen}><CanvasChromeIcon name="aperture" size={14} /><span>摄像机</span></button>
-    <button type="button" aria-label="关闭摄像机控制" data-tooltip="关闭摄像机控制" onClick={onDisable}><CanvasChromeIcon name="close" size={12} /></button>
+    <button type="button" aria-label="打开摄像机控制" data-tooltip={canvasCameraSummary(config.cameraControl)} onClick={onOpen}><LibTVMediaIcon name="lens-aperture" size={14} /><span>摄像机</span></button>
+    <button type="button" aria-label="关闭摄像机控制" data-tooltip="关闭摄像机控制" onClick={onDisable}><LibTVMediaIcon name="close" size={12} /></button>
   </div>;
 }

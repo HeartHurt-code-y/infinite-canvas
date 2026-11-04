@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import { ErrorAlert } from "../../components/ErrorAlert";
-import { generationClient, isDesktopRuntime, toMediaSrc, type GenerationTaskDetail, type ProviderCatalogEntry } from "../../lib/backend";
+import { generationClient, isDesktopRuntime, toMediaSrc, type GenerationTaskProgress, type ProviderCatalogEntry } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { modelParameterCapabilities, resolvedParameterValue, type ModelParameterValue } from "../../lib/modelCapabilities";
 import { isImageGenerationModel, isVideoGenerationModel, type ScreenplayNodeData } from "./workspaceModel";
 import type { ScriptBatchFrame, ScriptBatchKind, ScriptBatchStartRequest } from "./scriptGeneratorModel";
+import type { StoryboardFilmSource } from "./storyboardProject";
 
 const ACTIVE_STATUSES = new Set(["created", "submitting", "retry_wait", "queued", "running"]);
 const STATUS_LABELS: Readonly<Record<string, string>> = {
@@ -17,7 +18,7 @@ function frameKey(frame: ScriptBatchFrame): string {
   return frame.kind === "canvas" ? `node:${frame.sourceKey}` : `result:${frame.taskId}#${frame.resultIndex}`;
 }
 
-export function ScriptBatchPanel({ canvasId, node, active, running, providerCatalog, connectedMedia, onUpdate, onStart, onResume }: {
+export function ScriptBatchPanel({ canvasId, node, active, running, providerCatalog, connectedMedia, onUpdate, onStart, onResume, onFilm }: {
   readonly canvasId: string;
   readonly node: ScreenplayNodeData;
   readonly active: boolean;
@@ -27,6 +28,7 @@ export function ScriptBatchPanel({ canvasId, node, active, running, providerCata
   readonly onUpdate: (update: (config: ScreenplayNodeData["config"]) => ScreenplayNodeData["config"]) => void;
   readonly onStart: (key: string, request: ScriptBatchStartRequest) => void;
   readonly onResume: (key: string, batchId: string) => void;
+  readonly onFilm?: (sources: readonly StoryboardFilmSource[]) => Promise<void>;
 }) {
   const state = node.config.scriptGenerator;
   const batches = useMemo(() => state?.batches ?? [], [state?.batches]);
@@ -36,9 +38,13 @@ export function ScriptBatchPanel({ canvasId, node, active, running, providerCata
   const [paramsByModel, setParamsByModel] = useState<Record<string, Record<string, ModelParameterValue>>>({});
   const [useFrames, setUseFrames] = useState(true);
   const [useShotDuration, setUseShotDuration] = useState(true);
-  const [details, setDetails] = useState<Record<string, GenerationTaskDetail>>({});
+  const [details, setDetails] = useState<Record<string, GenerationTaskProgress>>({});
   const [loadError, setLoadError] = useState<unknown>(null);
   const [reload, setReload] = useState(0);
+  const [approval, setApproval] = useState<string | null>(null);
+  const [filmChoices, setFilmChoices] = useState<Readonly<Record<string, string>>>({});
+  const [filmError, setFilmError] = useState<unknown>(null);
+  const [openingFilm, setOpeningFilm] = useState(false);
   const onUpdateRef = useRef(onUpdate);
   onUpdateRef.current = onUpdate;
   const batchIdentity = JSON.stringify(batches.map((batch) => ({ id: batch.id, kind: batch.kind,
@@ -54,9 +60,16 @@ export function ScriptBatchPanel({ canvasId, node, active, running, providerCata
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
-      const results = await Promise.allSettled(tasks.map(({ item }) => generationClient.get(item.taskId)));
+      /*
+       * 轮询只走状态轻量接口（`get_progress`）：这个循环每 5 秒跑一轮，
+       * 每轮都要读全部批次项的任务。详情接口会把每次供应商调用的请求/响应
+       * 原样搬回前端（单个任务可达数 MB），批量轮询时会把 UI 线程堆满，
+       * 表现就是「生成时界面卡住、按钮点不动」。
+       * 这里只需要状态、错误与产物落盘信息，`get_progress` 已经带全。
+       */
+      const results = await Promise.allSettled(tasks.map(({ item }) => generationClient.getProgress(item.taskId)));
       if (cancelled) return;
-      const next: Record<string, GenerationTaskDetail> = {};
+      const next: Record<string, GenerationTaskProgress> = {};
       const recovered: { batchId: string; itemId: string }[] = [];
       let incomplete = false;
       let failure: unknown = null;
@@ -136,16 +149,38 @@ export function ScriptBatchPanel({ canvasId, node, active, running, providerCata
   const setParam = (key: string, value: ModelParameterValue) => setParamsByModel((current) => ({
     ...current, [chosenValue]: { ...(current[chosenValue] ?? {}), [key]: value },
   }));
-  const request = () => {
-    if (!chosenModel || !selected.length || invalid.length || missingFrames.length) return;
+  const pendingRequest = (): ScriptBatchStartRequest | null => {
+    if (!chosenModel || !selected.length || invalid.length || missingFrames.length) return null;
     const frames: Record<string, ScriptBatchFrame> = {};
     if (kind === "video" && useFrames) for (const shot of selected) {
       const frame = frameFor(shot.id);
       if (frame) frames[shot.id] = frame;
     }
-    onStart(node.key, { kind, shotIds: selected.map((shot) => shot.id), providerId: chosenModel.provider.provider.id,
-      modelDefinitionId: chosenModel.model.definitionId, parameters, frames, useShotDuration });
+    return { kind, shotIds: selected.map(shot => shot.id), providerId: chosenModel.provider.provider.id,
+      modelDefinitionId: chosenModel.model.definitionId, parameters, frames, useShotDuration };
   };
+  const request = pendingRequest();
+  const fingerprint = request ? JSON.stringify([request, selected, state?.assets, connectedMedia, node.config.materials]) : null;
+  const confirmed = fingerprint !== null && approval === fingerprint;
+  const filmRows = onFilm && kind === "video" ? selected.map(shot => {
+    const shotNumber = shots.indexOf(shot) + 1;
+    const choices = batches.filter(batch => batch.kind === "video").flatMap(batch =>
+      batch.items.filter(item => item.shotId === shot.id && details[item.taskId]?.summary.status === "succeeded")
+        .flatMap(item => (details[item.taskId]?.results ?? [])
+          .filter(result => result.mediaType === "video" && result.saveStatus === "succeeded" && result.finalPath)
+          .map(result => ({
+            value: `${result.taskId}#${result.resultIndex}`,
+            label: `${new Date(batch.createdAt).toLocaleString()} · 结果 ${result.resultIndex}`,
+            source: {
+              key: item.nodeKey, name: `镜头 ${shotNumber}`,
+              target: { kind: "local_result", generationTaskId: result.taskId, resultIndex: result.resultIndex,
+                mediaType: "video", canvasNodeKey: item.nodeKey },
+            } satisfies StoryboardFilmSource,
+          }))));
+    const saved = filmChoices[shot.id];
+    const choice = saved ? choices.find(item => item.value === saved) : choices.length === 1 ? choices[0] : undefined;
+    return { shot, shotNumber, choices, choice };
+  }) : [];
 
   return <section className="canvas-script-batch" aria-label="批量生成与结果">
     <div className="canvas-script-editor__section-head"><strong>批量生成与结果</strong><span>每个镜头对应独立任务，结果按镜头归集。</span></div>
@@ -203,9 +238,34 @@ export function ScriptBatchPanel({ canvasId, node, active, running, providerCata
     })}</div>
     {invalid.length ? <p>有 {invalid.length} 个已选镜头缺少提示词或需要核对资产关联。</p> : null}
     {missingFrames.length ? <p>有 {missingFrames.length} 个已选镜头需要选择已保存的首帧。</p> : null}
-    <p>将创建 {selected.length} 个独立{kind === "image" ? "图片" : "视频"}任务，按所选供应商计费。</p>
-    <button type="button" disabled={running || !chosenModel || !selected.length || invalid.length > 0 || missingFrames.length > 0}
-      onClick={request}>{running ? "处理中…" : kind === "image" ? "开始批量生图" : "开始批量生视频"}</button>
+    {confirmed ? <div className="canvas-script-editor__actions">
+      <span>将提交 {selected.length} 个任务，按 {chosenModel?.model.displayName} 的实际用量计费。</span>
+      <button type="button" disabled={running || !request} onClick={() => {
+        if (!request) return;
+        setApproval(null);
+        onStart(node.key, request);
+      }}>确认生成</button>
+      <button type="button" onClick={() => setApproval(null)}>取消</button>
+    </div> : <button type="button" disabled={running || !request}
+      onClick={() => setApproval(fingerprint)}>{running ? "处理中…" : kind === "image" ? "批量生成分镜图" : "批量生成视频"}</button>}
+    {onFilm && filmRows.some(row => row.choices.length) ? <div className="canvas-script-batch__film">
+      <div className="canvas-script-editor__section-head">
+        <strong>剪辑成片</strong><span>按当前分镜表顺序使用已保存的片段，进入时间轴后可调整。</span>
+      </div>
+      {filmRows.map(({ shot, shotNumber, choices, choice }) => <label key={shot.id}>
+        镜头 {shotNumber}
+        <CanvasSelect ariaLabel={`镜头 ${shotNumber} 成片片段`} value={choice?.value ?? ""}
+          options={[{ value: "", label: choices.length ? "选择视频结果" : "等待片段保存" }, ...choices]}
+          disabled={!choices.length || openingFilm} onChange={value => setFilmChoices(previous => ({ ...previous, [shot.id]: value }))} />
+      </label>)}
+      {filmError ? <ErrorAlert error={filmError} /> : null}
+      <button type="button" disabled={openingFilm || filmRows.some(row => !row.choice)}
+        onClick={() => {
+          setOpeningFilm(true);
+          setFilmError(null);
+          void onFilm(filmRows.flatMap(row => row.choice ? [row.choice.source] : [])).catch(setFilmError).finally(() => setOpeningFilm(false));
+        }}>{openingFilm ? "正在读取片段…" : "打开剪辑时间轴"}</button>
+    </div> : null}
     {loadError ? <ErrorAlert error={loadError} hint="请重试读取；查看结果不会再次生成。" /> : null}
     {batches.length ? <button type="button" onClick={() => setReload((value) => value + 1)}>刷新任务与结果</button> : null}
     {batches.slice().reverse().map((batch) => <details key={batch.id} className="canvas-script-batch__run" open>

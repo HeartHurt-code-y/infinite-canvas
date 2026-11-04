@@ -5,7 +5,8 @@
   },
   "bundle": {
     "resources": {
-      "resources/ffmpeg/": "ffmpeg/"
+      "resources/ffmpeg/": "ffmpeg/",
+      "resources/fonts/liblib-extended/": "fonts/liblib-extended/"
     }
   }
 }

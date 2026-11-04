@@ -23,13 +23,12 @@
 .react-flow__edge .canvas-flow-edge__line {
   fill: none;
   stroke: var(--canvas-edge);
-  stroke-width: 2;
   stroke-dasharray: none;
   pointer-events: none;
 }
 
 /* 指针悬停：#c0c8d0（原站 --canvas-edge-hover）。 */
-.react-flow__edge:hover .canvas-flow-edge__line {
+.react-flow__edge .canvas-flow-edge__line[data-highlight="true"] {
   stroke: var(--canvas-edge-hover);
 }
 
@@ -64,110 +63,88 @@
   }
 }
 
-/* ══════════════════════════════════════════════════════════════
-   连接手柄
-   原站实测：React Flow 手柄本体 0×0（不可见），内含
-     - 80×80 的圆形命中区（透明）
-     - 20×20 的可见旋钮（圆 + 描边 + 十字），默认 opacity 0，
-       节点悬停/选中时 opacity 1；旋钮中心在节点边缘外侧 15px。
-   ══════════════════════════════════════════════════════════════ */
-
+/*
+ * React Flow anchors the edge on the card. The visible button and its hit area
+ * share one centre just outside that edge.
+ */
 .react-flow__node .canvas-flow-handle {
+  top: 50%;
+  z-index: 20;
   width: 0;
   height: 0;
   min-width: 0;
   min-height: 0;
   padding: 0;
-  background: transparent;
   border: 0;
-  border-radius: 0;
-  box-shadow: none;
-  cursor: crosshair;
-  pointer-events: auto;
-  z-index: 20;
-}
-
-.react-flow__node .canvas-flow-handle--target {
-  top: 50%;
-  left: 0;
-  transform: translateY(-50%);
-}
-
-.react-flow__node .canvas-flow-handle--source {
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
-}
-
-/* 80×80 圆形命中区：贴着节点左右边缘中点，向节点外侧展开。 */
-.canvas-flow-handle__hit {
-  position: absolute;
-  top: 50%;
-  display: flex;
-  width: 80px;
-  height: 80px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
   background: transparent;
-  transform: translateY(-50%);
-  pointer-events: auto;
+  transform: none;
+  pointer-events: none;
+  outline: none;
 }
 
-.react-flow__node .canvas-flow-handle--target .canvas-flow-handle__hit {
-  right: 0;
-}
+.react-flow__node .canvas-flow-handle--target { left: 0; --handle-offset: -20px; }
+.react-flow__node .canvas-flow-handle--source { right: 0; --handle-offset: 20px; }
 
-.react-flow__node .canvas-flow-handle--source .canvas-flow-handle__hit {
-  left: 0;
-}
-
-/* 可见旋钮：20×20，圆心在节点边缘外侧 15px。 */
 .canvas-flow-handle__knob {
-  display: flex;
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
+  position: absolute;
+  top: 0;
+  left: var(--handle-offset);
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  cursor: crosshair;
+}
+
+.canvas-flow-handle.connectionindicator > .canvas-flow-handle__knob {
+  pointer-events: auto;
+}
+
+.canvas-flow-handle__circle {
+  display: grid;
+  box-sizing: border-box;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1.25px solid var(--color-text-3);
+  border-radius: 50%;
+  color: var(--color-text);
+  background: var(--color-bg-base);
   opacity: 0;
-  transition: opacity 150ms ease-out;
+  transform: scale(.9);
+  transition: opacity 120ms ease-out, transform 120ms ease-out, background-color 120ms ease-out, border-color 120ms ease-out;
+  pointer-events: none;
 }
 
-.react-flow__node .canvas-flow-handle--target .canvas-flow-handle__knob {
-  transform: translate(25px, 0) scale(1);
-}
-
-.react-flow__node .canvas-flow-handle--source .canvas-flow-handle__knob {
-  transform: translate(-25px, 0) scale(1);
-}
-
-.react-flow__node:hover .canvas-flow-handle__knob,
-.react-flow__node.selected .canvas-flow-handle__knob,
-.react-flow__node .canvas-flow-handle--highlight .canvas-flow-handle__knob {
+.react-flow__node:is(:hover, .selected) .canvas-flow-handle__circle,
+.canvas-flow-handle:is(:focus-visible, [aria-expanded="true"], .canvas-flow-handle--highlight, .connectingfrom, .connectingto) .canvas-flow-handle__circle {
   opacity: 1;
+  transform: scale(1);
 }
 
-.canvas-flow-handle__knob-fill {
-  fill: var(--canvas-handle-bg);
+.canvas-flow-handle__knob:hover > .canvas-flow-handle__circle,
+.canvas-flow-handle:is(:focus-visible, .connectingfrom, .valid) .canvas-flow-handle__circle {
+  border-color: var(--color-text);
+  background: var(--color-surface-3);
 }
 
-.canvas-flow-handle__knob-ring {
-  stroke: var(--canvas-handle-icon);
-  stroke-width: 1.2;
+.canvas-flow-handle__knob:active > .canvas-flow-handle__circle {
+  transform: scale(.92);
 }
 
-.canvas-flow-handle__knob-plus {
-  stroke: var(--canvas-handle-icon);
-  stroke-width: 1.5;
-  stroke-linecap: round;
+.canvas-viewport:is(.is-hand-tool, .is-panning) .canvas-flow-handle__circle,
+.react-flow__node.dragging .canvas-flow-handle__circle {
+  opacity: 0;
 }
 
-/* 连线中的目标端口高亮：原站没有脉冲动画，只把旋钮显示出来。 */
-.react-flow__node .canvas-flow-handle--highlight {
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-  animation: none;
-  transform: translateY(-50%);
+.canvas-viewport:is(.is-hand-tool, .is-panning) .canvas-flow-handle.connectionindicator > .canvas-flow-handle__knob,
+.react-flow__node.dragging .canvas-flow-handle.connectionindicator > .canvas-flow-handle__knob {
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .canvas-flow-handle__circle { transition: none; }
 }

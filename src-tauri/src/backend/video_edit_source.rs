@@ -475,6 +475,14 @@ pub async fn prepare_video_edit_source(
 }
 
 #[tauri::command]
+pub async fn prepare_canvas_media_source(
+    state: tauri::State<'_, BackendState>,
+    target: MediaReferenceTarget,
+) -> CommandResult<PreparedVideoEditSource> {
+    state.video_edit_sources.prepare_media(&target).await.command()
+}
+
+#[tauri::command]
 pub async fn release_video_edit_source(
     state: tauri::State<'_, BackendState>,
     preview_id: String,

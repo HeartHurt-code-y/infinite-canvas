@@ -779,21 +779,6 @@
   border-color: color-mix(in srgb, var(--color-warning) 32%, var(--color-rule));
 }
 
-/* Media remains edge-to-edge; the caption scrim follows the graphite palette. */
-.react-flow__node .canvas-asset-node--media::after {
-  background: linear-gradient(
-    to bottom,
-    transparent,
-    color-mix(in srgb, var(--color-bg-sunk) 88%, transparent)
-  );
-  border-radius: 0 0 calc(var(--radius-card) - var(--rule-thin))
-    calc(var(--radius-card) - var(--rule-thin));
-}
-
-.react-flow__node .canvas-asset-node--media > .canvas-asset-node__visual {
-  border-radius: calc(var(--radius-card) - var(--rule-thin));
-}
-
 .react-flow__node .canvas-asset-node .canvas-asset-node__name,
 .react-flow__node .canvas-result-node .canvas-result-node__title {
   font-family: var(--font-body);
@@ -807,19 +792,6 @@
   border-color: var(--color-rule);
   font-size: var(--text-base);
   line-height: var(--leading-body);
-}
-
-/* Keep the real handles visible; their position and hit targets stay untouched. */
-.react-flow__node .canvas-flow-handle {
-  background: var(--color-surface-2);
-  border-color: color-mix(in srgb, var(--color-accent) 65%, var(--color-rule-strong));
-  box-shadow: 0 0 0 var(--rule-active) var(--color-bg-base);
-}
-
-.react-flow__node .canvas-flow-handle:is(:hover, :focus-visible, .canvas-flow-handle--highlight) {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 var(--focus-halo-width) var(--color-accent-soft);
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -11,6 +11,117 @@
   border: 0;
 }
 
+.video-node-editor[data-media-kind="video"] {
+  background: var(--canvas-video-editor-bg);
+}
+
+.video-node-editor[data-media-kind="video"] .canvas-gen-node__tool-chips {
+  padding-right: var(--size-control-lg, 40px);
+}
+
+.video-settings-panel[data-media-kind="video"] {
+  background: var(--canvas-controls-bg);
+}
+
+.video-settings-panel[data-media-kind="video"] .canvas-gen-node__settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.video-settings-panel[data-media-kind="video"][data-video-settings-panel="model"] .canvas-gen-node__settings {
+  padding: var(--space-2xs);
+}
+
+.canvas-video-model-list {
+  display: grid;
+  gap: var(--space-2xs);
+}
+
+.canvas-video-model-list > button {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  text-align: start;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-ll-float);
+}
+
+.canvas-video-model-list > button:is(:hover, [aria-pressed="true"]) {
+  background: var(--canvas-chip-hover);
+}
+
+.canvas-video-model-list > button > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.canvas-video-model-list small {
+  display: block;
+  margin-top: var(--space-3xs);
+  color: var(--nt-text-muted);
+  font-size: var(--text-xs);
+}
+
+.video-settings-panel[data-media-kind="video"] .canvas-video-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-xs);
+}
+
+.video-settings-panel[data-media-kind="video"] .canvas-video-options--ratio {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.video-settings-panel[data-media-kind="video"] .canvas-video-options--ratio > button {
+  display: flex;
+  min-height: 64px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  border-radius: var(--radius-ll-float);
+}
+
+.canvas-video-ratio-shape {
+  display: block;
+  box-shadow: inset 0 0 0 1px currentColor;
+  border-radius: 2px;
+}
+
+.video-settings-panel[data-media-kind="video"] .canvas-video-options > button {
+  font-size: var(--text-xs);
+}
+
+.canvas-video-duration-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--nt-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.canvas-video-duration-heading > span { flex: 1; }
+.canvas-video-duration-value { display: flex; align-items: center; gap: var(--space-3xs); }
+.video-node-editor .canvas-video-duration-value input {
+  width: 44px;
+  padding: 0;
+  text-align: right;
+  font-size: var(--text-xs);
+  background: transparent;
+  border: 0;
+}
+.canvas-video-duration-heading > button { padding: 0; font-size: var(--text-xs); background: transparent; border: 0; }
+.canvas-video-duration-slider { width: 100%; height: 32px; margin: 0; appearance: none; background: var(--canvas-chip-bg); border: 0; border-radius: var(--radius-sm); }
+.canvas-video-duration-slider::-webkit-slider-thumb { width: 4px; height: 16px; appearance: none; background: var(--nt-text-default); border: 0; border-radius: var(--radius-sm); }
+
+.video-settings-panel[data-media-kind="video"] .canvas-video-options--count {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .canvas-video-advanced-trigger {
   display: inline-flex;
   width: var(--canvas-video-option-height);
@@ -25,6 +136,22 @@
 }
 
 .canvas-video-advanced-trigger[aria-expanded="true"] { background: var(--canvas-chip-hover); }
+.canvas-video-prompt-actions { display: flex; align-items: center; gap: var(--space-2xs); margin-left: auto; }
+.canvas-video-prompt-actions:empty { display: none; }
+.canvas-video-prompt-actions > button { display: inline-flex; width: 28px; height: 28px; align-items: center; justify-content: center; padding: 0; background: transparent; border: 0; border-radius: var(--radius-sm); }
+.canvas-video-prompt-actions > button:hover { background: var(--canvas-chip-hover); }
+.canvas-video-inputs { display: flex; min-width: 0; flex-wrap: wrap; align-items: flex-start; gap: 8px; padding-left: 4px; }
+.canvas-video-inputs[hidden] { display: none; }
+.video-node-editor .canvas-video-inputs > .node-media-inputs { padding: 0; }
+.canvas-video-effect-references { display: contents; }
+.canvas-video-effect-reference { position: relative; width: 48px; height: 48px; flex: 0 0 auto; }
+.canvas-video-effect-reference__preview { position: relative; display: grid; width: 100%; height: 100%; place-items: center; padding: 0; overflow: hidden; background: var(--nt-bg-float); border: var(--rule-thin) solid var(--border-default); border-radius: 8px; }
+.canvas-video-effect-reference__preview > img { width: 100%; height: 100%; object-fit: cover; }
+.canvas-video-effect-reference__preview > span { position: absolute; right: 0; bottom: 0; left: 0; background: rgb(0 0 0 / 50%); color: #fff; font-size: 10px; text-align: center; }
+.canvas-video-effect-reference__remove { position: absolute; top: 2px; right: 2px; display: grid; width: 15px; height: 15px; place-items: center; padding: 0; color: #fff; background: rgb(0 0 0 / 65%); border: 0; border-radius: 50%; opacity: 0; }
+.canvas-video-effect-reference:hover .canvas-video-effect-reference__remove, .canvas-video-effect-reference:focus-within .canvas-video-effect-reference__remove { opacity: 1; }
+.canvas-video-prompt-result textarea { min-height: 240px; resize: vertical; }
+.canvas-video-prompt-result footer { display: flex; justify-content: flex-end; gap: var(--space-xs); }
 .canvas-video-parameter { display: grid; grid-column: 1 / -1; gap: var(--space-xs); }
 .canvas-video-parameter > span { color: var(--nt-text-secondary); font-size: var(--text-xs); }
 .canvas-video-options { display: flex; flex-wrap: wrap; gap: var(--space-2xs); }
@@ -48,43 +175,27 @@
 .canvas-video-switch { position: relative; display: flex; min-height: var(--size-control-lg, 40px); align-items: center; justify-content: space-between; gap: var(--space-sm); cursor: pointer; }
 .canvas-video-switch > span { display: inline-flex; align-items: center; gap: var(--space-2xs); font-size: var(--text-sm); }
 .canvas-video-switch > input { position: absolute; right: 0; width: var(--canvas-video-switch-width); height: var(--canvas-video-switch-height); opacity: 0; }
-.canvas-video-switch > i { position: relative; width: var(--canvas-video-switch-width); height: var(--canvas-video-switch-height); flex-shrink: 0; background: var(--nt-text-muted); border-radius: var(--radius-full); }
+.canvas-video-switch > i { position: relative; width: var(--canvas-video-switch-width); height: var(--canvas-video-switch-height); flex-shrink: 0; background: var(--nt-text-muted); border-radius: var(--radius-pill); }
 .canvas-video-switch > i::after { position: absolute; top: var(--canvas-video-switch-inset); left: var(--canvas-video-switch-inset); width: var(--canvas-video-switch-thumb); height: var(--canvas-video-switch-thumb); background: var(--canvas-video-preview-bg); border-radius: 50%; content: ""; }
 .canvas-video-switch > input:checked + i { background: var(--nt-bg-invert); }
 .canvas-video-switch > input:checked + i::after { left: calc(100% - var(--canvas-video-switch-thumb) - var(--canvas-video-switch-inset)); }
 .canvas-video-switch > input:focus-visible + i { outline: var(--rule-active) solid var(--color-focus); outline-offset: var(--space-3xs); }
 .canvas-video-verification-provider { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: var(--space-xs); padding-block: var(--space-xs); font-size: var(--text-xs); }
 .canvas-video-verification-provider small { grid-column: 1 / -1; color: var(--nt-text-secondary); }
-.canvas-video-extra { grid-column: 1 / -1; min-width: 0; color: var(--nt-text-secondary); font-size: var(--text-xs); }
-.canvas-video-extra > summary { padding-block: var(--space-xs); cursor: pointer; }
-.canvas-video-extra > .canvas-gen-node__settings { display: grid; gap: var(--space-sm); }
+.canvas-video-reference-limits { grid-column: 1 / -1; color: var(--nt-text-secondary); font-size: var(--text-xs); }
 .canvas-video-tool-menu { position: fixed; z-index: var(--z-popover, 1000); display: grid; gap: var(--space-3xs); padding: var(--space-xs); overflow: auto; background: var(--panel-background); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: var(--radius-ll-float); box-shadow: var(--shadow-ll-float); }
-.canvas-video-tool-menu button { display: flex; min-height: var(--canvas-video-option-height); align-items: center; justify-content: space-between; gap: var(--space-xs); padding: var(--space-xs); text-align: start; background: transparent; border: 0; }
+.canvas-video-tool-menu button { display: flex; min-height: var(--canvas-video-option-height); align-items: center; justify-content: flex-start; gap: var(--space-xs); padding: var(--space-xs); text-align: start; background: transparent; border: 0; }
 .canvas-video-tool-menu button:hover:not(:disabled) { background: var(--canvas-chip-hover); }
-.canvas-video-tool-menu small { color: var(--nt-text-muted); }
-/*
- * 下面两条是**共享**的：图片节点与视频节点的「参考素材」都用
- * `CanvasReferenceTools`（上传 / 画布参考），所以拾取条与拾取光标不再只服务视频节点。
- * 类名里的 "video" 是这套样式最初只为视频节点写时留下的历史包袱，改名会牵动
- * 多处引用，先在这里说明归属，别再按名字误判成「只有视频节点用」。
- */
-.canvas-video-reference-bar { position: fixed; top: var(--space-md); left: 50%; z-index: var(--z-modal); display: flex; max-width: calc(100vw - var(--space-lg)); flex-wrap: wrap; align-items: center; justify-content: center; gap: var(--space-sm); padding: var(--space-xs) var(--space-sm); color: var(--nt-text-default); font-size: var(--text-sm); background: var(--panel-background); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: var(--radius-ll-float); transform: translateX(-50%); }
-.canvas-reference-picking .react-flow__node :is(img, video) { cursor: crosshair; }
 .canvas-video-modal-scrim { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: var(--space-md); background: var(--color-scrim); }
 .canvas-video-modal { display: grid; width: min(var(--canvas-video-modal-width), 100%); max-height: calc(100dvh - var(--space-xl)); gap: var(--space-sm); padding: var(--space-md); overflow: auto; color: var(--nt-text-default); background: var(--panel-background); border: var(--rule-thin) solid var(--canvas-controls-border); border-radius: var(--radius-ll-float); }
 .canvas-video-modal > header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
-.canvas-video-modal :is(label, .canvas-video-character-form) { display: grid; min-width: 0; gap: var(--space-xs); }
+.canvas-video-modal label { display: grid; min-width: 0; gap: var(--space-xs); }
 .canvas-video-modal :is(input, textarea) { width: 100%; min-width: 0; }
-.canvas-video-characters { display: grid; gap: var(--space-xs); }
-.canvas-video-characters article { display: flex; min-width: 0; align-items: center; gap: var(--space-sm); padding: var(--space-xs); background: var(--canvas-chip-bg); border-radius: var(--radius-sm); }
-.canvas-video-characters article > img { width: var(--canvas-video-thumb-size); height: var(--canvas-video-thumb-size); flex-shrink: 0; object-fit: cover; border-radius: var(--radius-sm); }
-.canvas-video-characters article > div { min-width: 0; flex: 1; }
-.canvas-video-characters p { display: -webkit-box; overflow: hidden; color: var(--nt-text-secondary); font-size: var(--text-xs); -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.canvas-video-mark-image { position: relative; width: fit-content; max-width: 100%; margin-inline: auto; touch-action: none; cursor: crosshair; }
-.canvas-video-mark-image > img { display: block; max-width: 100%; max-height: var(--canvas-video-preview-height); object-fit: contain; user-select: none; }
-.canvas-video-mark-image > svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-.canvas-video-mark-image rect { fill: var(--canvas-video-mark-fill); stroke: var(--canvas-video-mark-color); stroke-width: .5; }
 .canvas-gen-node--video .canvas-node-preview__media { height: var(--canvas-video-preview-height); background: var(--canvas-video-preview-bg); }
+
+[data-video-camera-muted="true"] .mention-chip[data-mark-id^="camera-preset:"] {
+  opacity: .45;
+}
 .canvas-video-empty { display: flex; width: 100%; height: 100%; flex-direction: column; align-items: flex-start; justify-content: center; gap: var(--space-sm); padding: var(--space-lg); color: var(--nt-text-default); }
 .canvas-video-empty > svg { width: var(--canvas-video-empty-play-size); height: var(--canvas-video-empty-play-size); align-self: center; margin-bottom: var(--space-sm); color: var(--nt-text-muted); fill: currentColor; }
 .canvas-video-empty > span { color: var(--nt-text-muted); font-size: var(--text-sm); }
@@ -95,9 +206,6 @@
   .video-node-editor .video-settings-controls { flex-wrap: wrap; }
   .canvas-video-mode.canvas-select { max-width: 100%; }
 }
-/* 长视频设置块（视频节点设置里的那一组）。原先放在 LongVideoProcess.css，
-   但它服务的是设置面板而不是创作过程弹窗——面板不该依赖弹窗模块是否被加载。 */
-.long-video-settings { display: grid; gap: var(--space-sm); }
-.long-video-settings label { display: grid; min-width: 0; gap: var(--space-xs); }
-.long-video-settings input[type="number"] { width: 100%; min-width: 0; }
-.long-video-settings small { color: var(--nt-text-muted); font-size: var(--text-xs); line-height: 1.5; }
+.canvas-video-duration-note { color: var(--nt-text-muted); font-size: var(--text-xs); line-height: 1.5; }
+
+@media (max-width: 520px) { .canvas-video-mark-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

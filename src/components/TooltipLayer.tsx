@@ -28,6 +28,7 @@
  * 真正给读屏用的描述是下面那个独立的 `sr-only` 元素。
  */
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { ESCAPE_PRIORITY_TOOLTIP, useEscapeHandler } from "./escapeArbiter";
 import { createPortal } from "react-dom";
 
 import { placeTooltip } from "./floatingLayer";
@@ -631,74 +632,6 @@ export function TooltipLayer() {
       keyboardRef.current = true;
     };
 
-    /**
-     * Escape 关闭说明。
-     *
-     * 挂在**冒泡阶段**：`defaultPrevented` 只有在别人处理完 Escape 之后才
-     * 读得到。本项目的 Escape 消费者都会 `preventDefault()` +
-     * `stopPropagation()` 认领这个键（`CanvasNodeEditor`、`CanvasSelect`、
-     * `SearchableMultiSelect`），所以这里跟同一条约定：**已经被别人处理过的
-     * Escape 不再动作**。
-     *
-     * 捕获阶段做不到这一点：那时还没有人处理过，`defaultPrevented` 恒为
-     * false，于是「关掉下拉菜单的 Escape」会顺手把画布上的说明也关掉，还给
-     * 那个触发器记上一笔「被 Escape 关过」——指针没离开前它的说明再也不出现。
-     */
-    const handleKeyDown = (event: KeyboardEvent) => {
-      /*
-       * 输入法组合中不处理 Escape。
-       *
-       * 组合期间的 Escape 归输入法（取消候选窗口），本项目所有 Escape 处理都
-       * 遵循这一条（`CanvasNodeEditor`、`PromptNodeViews`、
-       * `VideoNodeSettingsControls`、`NodeNameEditor` 都是先判
-       * `isComposing`／`keyCode === 229`）。这里漏掉会造成：用户在提示词
-       * 编辑器里按 Escape 取消候选，顺手把画布上的说明也关掉了——而且那一
-       * 处的说明还会被记成「被 Escape 关过」，指针没离开前都不再出现。
-       */
-      if (event.isComposing || event.keyCode === 229) return;
-      if (event.key !== "Escape") return;
-      /* 已被别的消费者认领的 Escape（菜单、编辑层）不再动作。 */
-      if (event.defaultPrevented) return;
-      /*
-       * Escape 关闭说明：关掉**当前显示着的那一条**。
-       *
-       * 只关视觉会留下「半关闭」状态——描述元素内容还在，读屏仍会念出说明，
-       * 而焦点没变、不会再有 `focusin` 来刷新它。所以同一条说明的读屏描述
-       * 要一起关掉（见下面「属于同一个触发器」的判断）。
-       *
-       * 不调 `preventDefault`/`stopPropagation`：Escape 在本项目里是关闭弹窗
-       * 与菜单的通用键（`CanvasSelect`、`SearchableMultiSelect` 都监听它），
-       * 本层不该抢掉那些行为。
-       */
-      /*
-       * 记住被关掉的那个触发器：指针若**还停在**它上面，短时间内不该又冒
-       * 出来（否则 Escape 看起来"没生效"——指针一动说明就复活）。
-       * 指针真正离开该触发器后才解除屏蔽（见 `handlePointerOut`）。
-       *
-       * 顺序要紧：**先记再隐藏**。`hide()` 会把 `anchorRef.current` 置空，
-       * 先隐藏再读就永远读到 null，屏蔽机制等于没写。
-       *
-       * `anchorRef` 为空说明气泡**还没显示**（还在 800ms 延迟里），这时要
-       * 用 `pendingAnchorRef` 记——否则「延迟中的说明」会在 Escape 之后照样
-       * 冒出来，Escape 看着像没生效。
-       */
-      dismissedRef.current = anchorRef.current ?? pendingAnchorRef.current;
-      /*
-       * 读屏描述**只在它属于同一个触发器**时一起关掉。
-       *
-       * 焦点在 B、鼠标悬停 A 时按 Escape：被关掉的是 A 的气泡，B 仍然聚焦
-       * 着，把 B 的说明也抽走会让读屏用户丢掉当前控件的说明，而且焦点没变、
-       * 不会再有 `focusin` 来刷新它。
-       */
-      const focusedAnchor = focusedRef.current?.anchor ?? null;
-      if (focusedAnchor === null || focusedAnchor === dismissedRef.current) {
-        updateFocused(null);
-        focusAnchorRef.current = null;
-        focusByKeyboardRef.current = false;
-      }
-      hide();
-    };
-
     /** 指针按下 → 焦点来源是指针，不该因聚焦而弹说明。 */
     const handlePointerDown = (event: PointerEvent) => {
       keyboardRef.current = false;
@@ -724,7 +657,6 @@ export function TooltipLayer() {
     document.addEventListener("focusin", handleFocusIn, true);
     document.addEventListener("focusout", handleFocusOut, true);
     document.addEventListener("keydown", handleKeyDownCapture, true);
-    document.addEventListener("keydown", handleKeyDown, false);
     return () => {
       document.removeEventListener("pointerover", handlePointerOver, true);
       document.removeEventListener("pointerout", handlePointerOut, true);
@@ -732,9 +664,63 @@ export function TooltipLayer() {
       document.removeEventListener("focusin", handleFocusIn, true);
       document.removeEventListener("focusout", handleFocusOut, true);
       document.removeEventListener("keydown", handleKeyDownCapture, true);
-      document.removeEventListener("keydown", handleKeyDown, false);
     };
   }, [clearHideTimer, clearShowTimer, hide, show, updateFocused]);
+
+  /*
+   * Escape 关闭说明：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 为什么不自己监听：自己挂一个 document 级监听 = 又一条与浮层 / 弹窗
+   * **平行**的 Escape 通道，两者互相看不见——「关掉下拉菜单的 Escape」会
+   * 顺手把画布上的说明也关掉（浮层先关、说明后关），或者说明先关、
+   * 浮层没关（用户以为没生效）。仲裁器一次只让一个处理者动手。
+   *
+   * 优先级给到浮层之下、画布背景动作之上（`ESCAPE_PRIORITY_TOOLTIP`）：说明是
+   * 全应用最外层的提示，不该抢在浮层 / 弹窗前面；但此刻用户眼前的就是它，
+   * Esc 应当先关掉它（连「延迟中、还没显示」的那条也一并压住）。
+   *
+   * `claim: false`：不消费这个键。Escape 在本项目里是关闭弹窗与菜单的通用键
+   * （`CanvasSelect`、`SearchableMultiSelect` 都监听它），本层不该抢掉那些
+   * 行为。输入法组合（`isComposing` / `keyCode === 229`）与「已被内层认领」
+   * （`defaultPrevented`）由仲裁器统一判断。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => anchorRef.current != null || pendingAnchorRef.current != null,
+      handle: () => {
+        /*
+         * 记住被关掉的那个触发器：指针若**还停在**它上面，短时间内不该又冒
+         * 出来（否则 Escape 看起来"没生效"——指针一动说明就复活）。
+         * 指针真正离开该触发器后才解除屏蔽（见 `handlePointerOut`）。
+         *
+         * 顺序要紧：**先记再隐藏**。`hide()` 会把 `anchorRef.current` 置空，
+         * 先隐藏再读就永远读到 null，屏蔽机制等于没写。
+         *
+         * `anchorRef` 为空说明气泡**还没显示**（还在 800ms 延迟里），这时要
+         * 用 `pendingAnchorRef` 记——否则「延迟中的说明」会在 Escape 之后照样
+         * 冒出来，Escape 看着像没生效。
+         */
+        dismissedRef.current = anchorRef.current ?? pendingAnchorRef.current;
+        /*
+         * 读屏描述**只在它属于同一个触发器**时一起关掉。
+         *
+         * 焦点在 B、鼠标悬停 A 时按 Escape：被关掉的是 A 的气泡，B 仍然聚焦
+         * 着，把 B 的说明也抽走会让读屏用户丢掉当前控件的说明，而且焦点没变、
+         * 不会再有 `focusin` 来刷新它。
+         */
+        const focusedAnchor = focusedRef.current?.anchor ?? null;
+        if (focusedAnchor === null || focusedAnchor === dismissedRef.current) {
+          updateFocused(null);
+          focusAnchorRef.current = null;
+          focusByKeyboardRef.current = false;
+        }
+        hide();
+      },
+      claim: false,
+      priority: ESCAPE_PRIORITY_TOOLTIP,
+    },
+    true,
+  );
 
   /*
    * 定位：量出气泡的**实测宽高**，再交给 `placeTooltip` 决定贴哪一侧。

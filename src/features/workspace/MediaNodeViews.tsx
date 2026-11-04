@@ -1,13 +1,19 @@
+import { ImageLightbox } from "../../components/ImageLightbox";
+import { CanvasNodeActionsMenu } from "./CanvasNodeActionsMenu";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useModalFocusTrap } from "../../components/useModalFocusTrap";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "../../lib/toast";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
+import { prepareCanvasMediaSource } from "../../lib/videoLocalEdit";
 import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { CanvasVideoTools } from "./CanvasVideoTools";
+import { videoCameraPresetsMuted } from "../../lib/videoCameraPresets";
+import { CanvasVideoPromptTools } from "./CanvasVideoPromptTools";
 import { CanvasReferenceTools, type CanvasReferenceToolsHandle } from "./CanvasReferenceTools";
 import { CanvasImageTools } from "./CanvasImageTools";
 import { CanvasImagePresetBadge } from "./CanvasImagePresetMenu";
@@ -48,8 +54,12 @@ import { artifactFileName } from "./artifactNames";
 import { localAssetNodeMediaUrl, signedUrlExpired } from "./localAssetMedia";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
-import { MediaGenerationPreview, MediaNodeTaskStatus } from "./VideoGenerationNode";
+import { CanvasVideoFrameCrop } from "./CanvasVideoFrameCrop";
+import { CanvasMediaNodeTitle, MediaGenerationPreview, MediaNodeTaskStatus, generationTaskNeedsAttention, nodeStatusTasks } from "./VideoGenerationNode";
+import type { CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasNodeEditorShell } from "./CanvasNodeEditor";
+import { CanvasLibraryResourceInputs } from "./CanvasLibraryResourceCard";
+import type { ConnectedLibraryResource } from "./canvasLibraryResources";
 import { useLocalVideoPoster, useMediaFileFingerprint } from "./localVideoPoster";
 import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
@@ -79,6 +89,7 @@ import {
   SAVE_STATUS_LABELS,
   TASK_STATUS_LABELS,
   assetNodeDimensions,
+  assetNodeReferenceTarget,
   fileBaseName,
   fileNameFromPath,
   formatTaskClock,
@@ -101,7 +112,10 @@ export function CanvasGenNode({
   starting,
   activeTask,
   latestTask,
+  tasks,
+  onOpenTask,
   connectedInputs,
+  libraryResources,
   inheritedInputs,
   inputSlotPositions,
   mentionCandidates,
@@ -117,6 +131,7 @@ export function CanvasGenNode({
   onReorderInput,
   onSizeChange,
   onImageConfigChange,
+  onOpenCharacterStudio,
   onVideoConfigChange,
   onAnnotateVideo,
   greenScreenResults,
@@ -130,7 +145,13 @@ export function CanvasGenNode({
   onCloseEditor,
   promptContents,
   previewOutput,
+  onSelectImageResult,
+  onPreviewImage,
+  onEnhanceImage,
+  onEditImageRegion,
+  featureRequest,
 }: {
+  readonly featureRequest?: CanvasInlineFeatureRequest | undefined;
   readonly canvasId: string;
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly descriptor: StaticNodeDescriptor;
@@ -140,7 +161,10 @@ export function CanvasGenNode({
   readonly startError: string | null;
   readonly activeTask: GenerationTaskSummary | null;
   readonly latestTask?: GenerationTaskSummary | null | undefined;
+  readonly tasks: readonly GenerationTaskSummary[];
+  readonly onOpenTask: (taskId: string) => void;
   readonly connectedInputs: readonly ConnectedAssetInput[];
+  readonly libraryResources: readonly ConnectedLibraryResource[];
   readonly inheritedInputs: readonly InheritedAssetInput[];
   /** 直连素材在其槽位表里的位置；参考清单据此保留空位、不自动上移。 */
   readonly inputSlotPositions?: ReadonlyMap<string, number> | undefined;
@@ -167,6 +191,7 @@ export function CanvasGenNode({
   readonly onReorderInput: (nodeKey: string, sourceKey: string, targetKey: string) => void;
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
+  readonly onOpenCharacterStudio: (key: string) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
   readonly greenScreenResults?: readonly GreenScreenResult[] | undefined;
   readonly onGreenScreenUseResult?: ((nodeKey: string, key: string) => void) | undefined;
@@ -182,12 +207,22 @@ export function CanvasGenNode({
   readonly onCloseEditor?: (() => void) | undefined;
   readonly promptContents?: PromptContentModule | undefined;
   readonly previewOutput?: OutputNodeData | null | undefined;
+  readonly onSelectImageResult: (key: string, resultKey: string) => void;
+  readonly onPreviewImage: (key: string) => void;
+  readonly onEnhanceImage: (key: string, preview: OutputNodeData) => void;
+  readonly onEditImageRegion: import("./CanvasImageRegionEditor").StartImageRegionEdit;
 }) {
   const isVideo = node.kind === "video";
+  const submissionBusy = starting || (isVideo && activeTask != null);
+  const statusTasks = node.kind === "image" && node.imageGeneration
+    ? tasks.filter(task => node.imageGeneration?.taskIds.includes(task.id))
+    : nodeStatusTasks(tasks, latestTask);
   const effectiveInputs = [...connectedInputs, ...inheritedInputs];
+  const linkedEffects = libraryResources.flatMap(({ resource }) => resource.kind === "effect" ? [resource.versionId] : []);
+  const linkedStyle = libraryResources.some(({ resource }) => resource.kind === "style");
   /** 提示词编辑会话：参考瓦片上的「@」按钮要靠它往提示词里插引用。 */
   const promptSessionRef = useRef<PromptContentEditorSession | null>(null);
-  const imageReferenceRef = useRef<CanvasReferenceToolsHandle>(null);
+  const presetReferenceRef = useRef<CanvasReferenceToolsHandle>(null);
   const imagePresetTriggerRef = useRef<HTMLButtonElement>(null);
   const imageCameraTriggerRef = useRef<HTMLButtonElement>(null);
   const [cameraOpenRequestId, setCameraOpenRequestId] = useState(0);
@@ -202,20 +237,29 @@ export function CanvasGenNode({
   const referenceInputCount = effectiveInputs.length;
   const promptLabelId = `${node.kind}-prompt-label-${node.key}`;
   const promptHintId = `${node.kind}-prompt-hint-${node.key}`;
-  const selectionReady = Boolean(
-    node.config.modelSelection.providerId && node.config.modelSelection.modelDefinitionId,
-  );
+  const selectionReady = !isVideo && node.config.imageMode === "upscale"
+    ? providerCatalog.some(entry => entry.provider.enabled && entry.provider.adapterId === "atlascloud_v1" && (!node.config.upscaleProviderId || node.config.upscaleProviderId === entry.provider.id))
+    : Boolean(node.config.modelSelection.providerId && node.config.modelSelection.modelDefinitionId);
   if (presentation === "card") {
     return (
       <><MediaGenerationPreview
+        featureRequest={featureRequest}
         node={node}
         selected={selected}
         editing={editorOpen}
         starting={starting}
         activeTask={activeTask}
         latestTask={latestTask}
+        tasks={tasks}
+        onOpenTask={onOpenTask}
         inputs={effectiveInputs}
         output={previewOutput}
+        onPreviewResult={onPreviewImage}
+        onEnhanceImage={onEnhanceImage}
+        onEditImageRegion={onEditImageRegion}
+        providerCatalog={providerCatalog}
+        onCloseEditor={onCloseEditor}
+        onSelectImageResult={onSelectImageResult}
         promptContents={promptContents}
         startError={startError}
         onSelect={onSelect}
@@ -234,34 +278,26 @@ export function CanvasGenNode({
           const intent = compileCanvasVideoMode(videoMode, effectiveInputs, node.config.mediaRoles);
           onVideoConfigChange(node.key, { ...node.config, videoMode, seedanceTaskMode: intent.taskMode, mediaRoles: intent.mediaRoles });
           (onEdit ?? onSelect)(node.key);
+          if (!effectiveInputs.some(input => input.kind === "image")) {
+            void presetReferenceRef.current?.addVideoFrames(videoMode);
+          }
         } : undefined}
-        onImagePreset={!isVideo ? (imageMode) => {
-          onImageConfigChange(node.key, { ...node.config, imageMode, ...(imageMode === "upscale" ? { imagePreset: undefined } : {}) });
+        onImagePreset={!isVideo ? (mode) => {
+          onImageConfigChange(node.key, { ...node.config, imageMode: mode === "upscale" ? "upscale" : "auto" });
           (onEdit ?? onSelect)(node.key);
-          if (imageMode === "image_to_image") void imageReferenceRef.current?.addFiles();
+          void presetReferenceRef.current?.addFiles();
         } : undefined}
-      />{!isVideo ? <CanvasReferenceTools ref={imageReferenceRef} node={node} active={false} headless /> : <LongVideoProcess canvasId={canvasId} nodeKey={node.key} />}</>
+      />
+      <CanvasReferenceTools ref={presetReferenceRef} node={node} active={false} headless disabled={submissionBusy} />
+      {isVideo ? <LongVideoProcess canvasId={canvasId} nodeKey={node.key} /> : null}</>
     );
   }
 
-  const form = (
-    <div className="video-node-editor__form" aria-busy={starting || activeTask != null}>
-      {/*
-        原站 liblib 编辑区（实测 2026-10-22，1707×898 / DPR 1.5）：
-          面板根    flex flex-col gap-2 p-2（间隙 8 / 内边距 8）
-          工具行    flex flex-wrap items-center gap-1 pl-1 pt-1
-          缩略图行  nopan flex w-full min-w-0 flex-wrap items-start gap-2 pl-1
-          提示词区  relative flex-1 overflow-hidden rounded-xl p-2 min-h-20
-          底栏      flex w-full items-start gap-1
-        本项目原来把「提示词」标签行放在最上面、素材缩略图排在提示词之后，
-        这里按原站重排；标签行降级为仅供读屏使用（label / description 仍要挂上）。
-      */}
-      <div className="canvas-gen-node__tool-chips" role="group" aria-label="创作工具">
-        {isVideo ? <CanvasVideoTools node={node} active={editorOpen} inputs={effectiveInputs} sessionRef={promptSessionRef} onAnnotateVideo={onAnnotateVideo} /> : <CanvasImageTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} sessionRef={promptSessionRef} presetTriggerRef={imagePresetTriggerRef} cameraTriggerRef={imageCameraTriggerRef} cameraOpenRequestId={cameraOpenRequestId} providerCatalog={providerCatalog} onChange={config => onImageConfigChange(node.key, config)} />}
-      </div>
-      <GenerationInputChips
+  const referenceChips = (
+    <GenerationInputChips
         inputs={effectiveInputs}
-        {...(inputSlotPositions ? { positions: inputSlotPositions } : {})}
+        imageOnly={!isVideo}
+        {...(isVideo && inputSlotPositions ? { positions: inputSlotPositions } : {})}
         onUnlink={onUnlink}
         onInsertReference={(input) => {
           // 原站的 @ 在参考瓦片上：点一下把这份参考插进提示词。
@@ -274,6 +310,31 @@ export function CanvasGenNode({
         reorderableKeys={reorderableKeys}
         onReorder={(sourceKey, targetKey) => onReorderInput(node.key, sourceKey, targetKey)}
       />
+  );
+  const form = (
+    <div className="video-node-editor__form" aria-busy={submissionBusy}
+      data-video-camera-muted={isVideo && videoCameraPresetsMuted(node.config.videoMode ?? node.config.seedanceTaskMode) ? "true" : undefined}>
+      {/*
+        原站 liblib 编辑区（实测 2026-10-22，1707×898 / DPR 1.5）：
+          面板根    flex flex-col gap-2 p-2（间隙 8 / 内边距 8）
+          工具行    flex flex-wrap items-center gap-1 pl-1 pt-1
+          缩略图行  nopan flex w-full min-w-0 flex-wrap items-start gap-2 pl-1
+          提示词区  relative flex-1 overflow-hidden rounded-xl p-2 min-h-20
+          底栏      flex w-full items-start gap-1
+        本项目原来把「提示词」标签行放在最上面、素材缩略图排在提示词之后，
+        这里按原站重排；标签行降级为仅供读屏使用（label / description 仍要挂上）。
+      */}
+      <div className="canvas-gen-node__tool-chips" role="group" aria-label="创作工具">
+        {isVideo ? <CanvasVideoTools node={node} active={editorOpen} inputs={effectiveInputs} linkedEffects={linkedEffects} sessionRef={promptSessionRef} onAnnotateVideo={onAnnotateVideo} onOpenCharacterStudio={() => onOpenCharacterStudio(node.key)} onPromptChange={() => onVideoConfigChange(node.key, { ...node.config })} onEffectsChange={effectVersionIds => onVideoConfigChange(node.key, { ...node.config, effectVersionIds })} /> : <>
+          <CanvasImageTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} linkedStyle={linkedStyle} sessionRef={promptSessionRef} presetTriggerRef={imagePresetTriggerRef} cameraTriggerRef={imageCameraTriggerRef} cameraOpenRequestId={cameraOpenRequestId} providerCatalog={providerCatalog} onChange={config => onImageConfigChange(node.key, config)} />
+          {node.config.imageMode !== "upscale" ? <button type="button" className="canvas-gen-node__tool-chip" aria-haspopup="dialog"
+            onClick={() => onOpenCharacterStudio(node.key)}><LibTVMediaIcon name="asset-character" size={13} /><span>角色库</span></button> : null}
+        </>}
+      </div>
+      {isVideo ? <div className="canvas-video-inputs" hidden={effectiveInputs.length === 0 && !node.config.effectVersionIds?.length}>
+        {referenceChips}<div id={`video-effects-${node.key}`} className="canvas-video-effect-references" aria-label="已选特效" />
+      </div> : referenceChips}
+      <CanvasLibraryResourceInputs inputs={libraryResources} onUnlink={onUnlink} />
       <div className="canvas-gen-node__prompt-area">
         {/* 提示词是生成节点的唯一必填输入；原站编辑区没有可见标题，
             这里保留读屏用的标签与提示（aria-labelledby / aria-describedby 指向它们）。*/}
@@ -288,18 +349,18 @@ export function CanvasGenNode({
             : referenceInputCount > 0
               ? `${referenceInputCount} 个参考素材已连接`
               : "输入 @ 引用素材"}
+          {isVideo && videoCameraPresetsMuted(node.config.videoMode ?? node.config.seedanceTaskMode) ? "。当前模式下运镜标记暂不参与生成，切换模式后恢复。" : ""}
         </span>
-        {!isVideo ? <CanvasCameraControlBadge config={node.config} onOpen={() => setCameraOpenRequestId(value => value + 1)} onDisable={() => {
+        {!isVideo && node.config.imageMode !== "upscale" ? <CanvasCameraControlBadge config={node.config} onOpen={() => setCameraOpenRequestId(value => value + 1)} onDisable={() => {
           if (!node.config.cameraControl) return;
           const cameraControl = { ...node.config.cameraControl, enabled: false };
           onImageConfigChange(node.key, { ...node.config, cameraControl });
           saveCanvasCameraPreferences(cameraControl);
           imageCameraTriggerRef.current?.focus({ preventScroll: true });
         }} /> : null}
-        {!isVideo && node.config.imagePreset ? <CanvasImagePresetBadge config={node.config} active={editorOpen}
-          onChange={config => onImageConfigChange(node.key, config)} onReopen={() => imagePresetTriggerRef.current?.click()}
-          onClear={() => { onImageConfigChange(node.key, { ...node.config, imagePreset: undefined }); imagePresetTriggerRef.current?.focus({ preventScroll: true }); }} /> : null}
-        <PromptMentionInput
+        {!isVideo && !linkedStyle && node.config.imageMode !== "upscale" && node.config.styleReference ? <div className="canvas-image-style-reference"><img src={node.config.styleReference.imageUrl} alt="" referrerPolicy="no-referrer" /><span>风格参考 · {node.config.styleReference.name}</span><button type="button" aria-label="移除风格参考" onClick={() => onImageConfigChange(node.key, { ...node.config, styleReference: undefined })}><LibTVMediaIcon name="close" size={12} /></button></div> : null}
+        {!isVideo && node.config.imageMode === "upscale" && effectiveInputs.length === 0 ? <p className="canvas-image-upscale-hint">上传或连接一张需要放大的图片</p> : null}
+        <div className="canvas-gen-node__prompt-input" hidden={!isVideo && node.config.imageMode === "upscale"}><PromptMentionInput
           nodeKey={node.key}
           candidates={mentionCandidates}
           aliveCanvasNodeKeys={aliveCanvasNodeKeys}
@@ -308,9 +369,12 @@ export function CanvasGenNode({
           describedBy={promptHintId}
           expandable={false}
           autoLink={node.config.autoLink !== false}
-          {...(!isVideo ? { placeholder: canvasImagePreset(node.config.imagePreset?.scene)?.placeholder ?? CANVAS_IMAGE_PROMPT_PLACEHOLDER } : {})}
+          leadingContent={!isVideo && node.config.imageMode !== "upscale" && node.config.imagePreset ? <CanvasImagePresetBadge config={node.config} active={editorOpen}
+            onChange={config => onImageConfigChange(node.key, config)} onReopen={() => imagePresetTriggerRef.current?.click()}
+            onClear={() => { onImageConfigChange(node.key, { ...node.config, imagePreset: undefined }); imagePresetTriggerRef.current?.focus({ preventScroll: true }); }} /> : null}
+          placeholder={isVideo ? "描述你想要生成的画面内容，@引用素材" : canvasImagePreset(node.config.imagePreset?.scene)?.placeholder ?? CANVAS_IMAGE_PROMPT_PLACEHOLDER}
           onSession={handlePromptSession}
-        />
+        /></div>
       </div>
 
       {startError ? (
@@ -326,7 +390,6 @@ export function CanvasGenNode({
       <div className="canvas-gen-node__footer">
         {isVideo ? (
           <VideoNodeSettings
-            presentation="compact"
             active={editorOpen}
             advancedHostId={`video-advanced-${node.key}`}
             greenScreenResults={greenScreenResults}
@@ -340,36 +403,30 @@ export function CanvasGenNode({
             }
             config={node.config}
             providerCatalog={providerCatalog}
-            hasMediaInputs={effectiveInputs.length > 0}
             mediaInputs={effectiveInputs}
-            {...(onAnnotateVideo
-              ? {
-                  onAnnotateVideo: (input: ConnectedAssetInput | InheritedAssetInput) =>
-                    onAnnotateVideo(node.key, input),
-                }
-              : {})}
             onChange={(config) => onVideoConfigChange(node.key, config)}
           />
         ) : (
-          <ImageNodeSettings
+          <div className="canvas-image-model-controls"><ImageNodeSettings
             presentation="compact"
             active={editorOpen}
             advancedHostId={`image-advanced-${node.key}`}
             config={node.config}
             providerCatalog={providerCatalog}
-            hasMediaInputs={effectiveInputs.some(
+            hasMediaInputs={linkedStyle || effectiveInputs.some(
               (input) => input.kind === "image" || input.kind === "video",
             )}
             onChange={(config) => onImageConfigChange(node.key, config)}
-          />
+          /><div id={`image-tools-${node.key}`} className="canvas-image-toolbar-actions canvas-image-creation-tools" /></div>
         )}
         <div className="canvas-gen-node__footer-actions">
-          {!isVideo ? <div id={`image-tools-${node.key}`} className="canvas-image-toolbar-actions" /> : null}
+          {isVideo ? <CanvasVideoPromptTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} hasLinkedEffects={linkedEffects.length > 0} sessionRef={promptSessionRef} providerCatalog={providerCatalog} onChange={config => onVideoConfigChange(node.key, config)} /> : <div id={`image-translation-${node.key}`} className="canvas-image-toolbar-actions" />}
           {!isVideo ? <div id={`image-settings-${node.key}`} className="canvas-image-toolbar-actions" /> : null}
           <button
             type="button"
             className={`canvas-gen-node__start${starting ? " is-busy" : ""}`}
-            aria-label={isVideo ? "开始视频生成" : "开始图片生成"}
+            data-canvas-generate=""
+            aria-label={isVideo ? "开始视频生成" : node.config.imageMode === "upscale" ? "开始图片高清" : "开始图片生成"}
             aria-describedby={startError ? `generation-start-error-${node.key}` : undefined}
             data-state={starting ? "loading" : undefined}
             title={
@@ -377,20 +434,11 @@ export function CanvasGenNode({
                 ? `请先选择可用的供应商和${isVideo ? "视频" : "图片"}模型`
                 : isVideo
                   ? "点击开始视频生成"
-                  : "点击开始图片生成"
+                  : activeTask
+                    ? "提交新的图片生成任务"
+                    : "点击开始图片生成"
             }
-            disabled={
-              starting ||
-              !selectionReady ||
-              /*
-               * 该节点已有在途任务时必须禁用 —— 之前这个条件只对「绿幕视频」
-               * 生效，图片节点与普通视频节点在任务跑着的时候按钮仍可点，
-               * 再点一次就是**第二个付费任务**：两个任务各自计费、界面上多出
-               * 一张产物卡片，用户完全看不出自己重复提交了。
-               * 后端 start 不按 sourceNodeId 去重，所以客户端必须挡住。
-               */
-              activeTask != null
-            }
+            disabled={submissionBusy || !selectionReady}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -399,7 +447,7 @@ export function CanvasGenNode({
             }}
           >
             {starting ? (
-              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
+              <LibTVMediaIcon name="icon-loading" className="spin-icon" size={20} />
             ) : (
               <CanvasChromeIcon name="arrow-up" size={14} />
             )}
@@ -407,9 +455,10 @@ export function CanvasGenNode({
         </div>
       </div>
       <div id={`${isVideo ? "video" : "image"}-advanced-${node.key}`} hidden={!node.config.advancedOpen} />
-      {isVideo ? <LongVideoProcess canvasId={canvasId} nodeKey={node.key} /> : null}
-      {starting || activeTask ? (
-        <MediaNodeTaskStatus kind={node.kind} task={activeTask} starting={starting} />
+      {starting || activeTask || statusTasks.some(generationTaskNeedsAttention) ? (
+        <MediaNodeTaskStatus kind={node.kind} task={activeTask ?? latestTask ?? null} starting={starting}
+          tasks={statusTasks}
+          onOpenTask={onOpenTask} />
       ) : null}
     </div>
   );
@@ -497,20 +546,24 @@ function useMediaThumbnailSrc(
 function CanvasAssetNodeVideoVisual({
   videoUrl,
   finalPath = null,
+  localTarget = null,
   previewing,
   isRealAsset,
   mountMedia,
   onAspectRatioChange,
+  onPixelSize,
   onLoadError,
 }: {
-  readonly videoUrl: string;
+  readonly videoUrl: string | null;
   /** 已保存的原视频路径：静止封面走原生缓存，只在悬浮时播放原文件。 */
   readonly finalPath?: string | null;
+  readonly localTarget?: MediaReferenceTarget | null;
   readonly previewing: boolean;
   readonly isRealAsset: boolean;
   /** 节点是否在视口内（含余量）；false 时卸载视频元素。 */
   readonly mountMedia: boolean;
   readonly onAspectRatioChange: (aspectRatio: number) => void;
+  readonly onPixelSize: (width: number, height: number) => void;
   /** 视频加载失败（签名过期等）：向上冒泡给节点触发一次性续签。 */
   readonly onLoadError?: () => void;
 }) {
@@ -526,16 +579,29 @@ function CanvasAssetNodeVideoVisual({
     videoRef.current = video;
   }, []);
   const wasPreviewingRef = useRef(false);
+  const previewingRef = useRef(previewing);
+  previewingRef.current = previewing;
   /** 中间帧时间戳（loadedmetadata 后记录），作为封面帧与悬浮复播/复位位置。 */
   const coverTimeRef = useRef(0);
   const [readyVideoUrl, setReadyVideoUrl] = useState<string | null>(null);
   // 云端 TOS 签名 URL 走本地代理，避免 2 小时过期后画布视频节点加载失败。
-  const proxiedVideoUrl = toMediaProxyUrl(videoUrl) ?? videoUrl;
-  const coverReady = readyVideoUrl === proxiedVideoUrl;
+  const primarySrc = toMediaProxyUrl(videoUrl) ?? videoUrl;
   const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
-  const videoFailed = failedVideoUrl === proxiedVideoUrl;
-  const localVideo = isDesktopRuntime() && finalPath != null;
-  const poster = useLocalVideoPoster(localVideo ? finalPath : null, mountMedia);
+  const [failedPrimarySrc, setFailedPrimarySrc] = useState<string | null>(null);
+  const [localPreview, setLocalPreview] = useState<{
+    input: string | null; src: string | null; path: string | null;
+  } | null>(null);
+  // 本机导入素材优先用文件封面。WebView 的自定义协议可能只读到元数据，停在黑帧。
+  const needsLocalPreview = isDesktopRuntime() && localTarget != null &&
+    (localTarget.kind === "local_base64_asset" || primarySrc == null || failedPrimarySrc === primarySrc);
+  const fallback = needsLocalPreview && localPreview?.input === primarySrc ? localPreview : null;
+  const proxiedVideoUrl = needsLocalPreview && !fallback ? null : fallback?.src ?? primarySrc;
+  const coverReady = proxiedVideoUrl != null && readyVideoUrl === proxiedVideoUrl;
+  const videoFailed = proxiedVideoUrl != null ? failedVideoUrl === proxiedVideoUrl
+    : needsLocalPreview ? fallback != null : true;
+  const posterPath = finalPath ?? fallback?.path ?? null;
+  const localVideo = isDesktopRuntime() && posterPath != null;
+  const poster = useLocalVideoPoster(localVideo ? posterPath : null, mountMedia);
   const [failedPosterSrc, setFailedPosterSrc] = useState<string | null>(null);
   const posterSrc = poster.src !== failedPosterSrc ? poster.src : null;
   const posterFailed = poster.unavailable || (poster.src != null && posterSrc == null);
@@ -545,6 +611,37 @@ function CanvasAssetNodeVideoVisual({
   });
   const needsLocalDecoder = localVideo && (previewing || posterFailed);
   const mountVideo = mountMedia && (!localVideo || (needsLocalDecoder && decoderInView));
+  const refreshOnError = useRef(onLoadError);
+  refreshOnError.current = onLoadError;
+
+  useEffect(() => {
+    if (!mountMedia || !needsLocalPreview || !localTarget) return;
+    setLocalPreview(null);
+    let active = true;
+    let release: (() => Promise<void>) | undefined;
+    void prepareCanvasMediaSource(localTarget).then(preview => {
+      if (!active) { void preview.release(); return; }
+      release = preview.release;
+      setLocalPreview({ input: primarySrc, src: preview.src, path: preview.path });
+    }, () => { if (active) setLocalPreview({ input: primarySrc, src: null, path: null }); });
+    return () => { active = false; void release?.(); };
+  }, [localTarget, needsLocalPreview, primarySrc, mountMedia]);
+
+  const markVideoFailed = useCallback((src: string) => {
+    setReadyVideoUrl(null);
+    setFailedVideoUrl(src);
+    if (src === primarySrc) setFailedPrimarySrc(src);
+    refreshOnError.current?.();
+  }, [primarySrc]);
+
+  useEffect(() => {
+    if (!mountVideo || !proxiedVideoUrl || coverReady || videoFailed) return;
+    const timer = window.setTimeout(() => {
+      if ((videoRef.current?.readyState ?? 0) < HTMLMediaElement.HAVE_CURRENT_DATA) markVideoFailed(proxiedVideoUrl);
+      else setReadyVideoUrl(proxiedVideoUrl);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [coverReady, markVideoFailed, mountVideo, proxiedVideoUrl, videoFailed]);
 
   const seekToCover = (video: HTMLVideoElement) => {
     video.currentTime = coverTimeRef.current;
@@ -563,8 +660,16 @@ function CanvasAssetNodeVideoVisual({
       wasPreviewingRef.current = false;
       video.pause();
       seekToCover(video);
+    } else if (!localVideo && video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      // WebView 可以忽略 preload。显式请求首帧，拿到画面后立刻暂停在封面。
+      void video.play().then(() => {
+        if (videoRef.current === video && !previewingRef.current) {
+          video.pause();
+          seekToCover(video);
+        }
+      }).catch(() => undefined);
     }
-  }, [previewing, mountVideo, proxiedVideoUrl]);
+  }, [previewing, mountVideo, proxiedVideoUrl, localVideo]);
 
   return (
     <span className="media-frame-host" ref={needsLocalDecoder ? decoderRef : undefined}>
@@ -588,9 +693,9 @@ function CanvasAssetNodeVideoVisual({
             />
           ) : null}
           {posterSrc == null && (!coverReady || !mountVideo) && isRealAsset ? (
-            <AssetMediaState kind="video" state={videoFailed ? "unavailable" : "loading"} />
+            <AssetMediaState kind="video" state={videoFailed && (!localVideo || posterFailed) ? "unavailable" : "loading"} />
           ) : null}
-          {mountVideo && !videoFailed ? (
+          {mountVideo && proxiedVideoUrl && !videoFailed ? (
             <video
               key={proxiedVideoUrl}
               ref={attachVideo}
@@ -600,29 +705,29 @@ function CanvasAssetNodeVideoVisual({
               muted
               loop
               playsInline
-              preload={localVideo ? "auto" : "metadata"}
+              preload="auto"
               aria-hidden="true"
               tabIndex={-1}
               onLoadedMetadata={(event) => {
                 const video = event.currentTarget;
                 const aspectRatio = measuredAspectRatio(video.videoWidth, video.videoHeight);
-                if (aspectRatio != null) onAspectRatioChange(aspectRatio);
+                if (aspectRatio != null) {
+                  onAspectRatioChange(aspectRatio);
+                  onPixelSize(video.videoWidth, video.videoHeight);
+                }
                 coverTimeRef.current =
                   !localVideo && Number.isFinite(video.duration) && video.duration > 0
                     ? video.duration / 2
                     : 0;
-                if (!localVideo && !previewing) seekToCover(video);
               }}
               onSeeked={() => setReadyVideoUrl(proxiedVideoUrl)}
-              onLoadedData={() => {
-                setFailedVideoUrl(null);
+              onLoadedData={event => {
                 setReadyVideoUrl(proxiedVideoUrl);
+                if (!localVideo && !previewing && coverTimeRef.current > 0 && event.currentTarget.currentTime === 0) {
+                  seekToCover(event.currentTarget);
+                }
               }}
-              onError={() => {
-                setReadyVideoUrl(null);
-                setFailedVideoUrl(proxiedVideoUrl);
-                onLoadError?.();
-              }}
+              onError={() => markVideoFailed(proxiedVideoUrl)}
             />
           ) : null}
         </>
@@ -657,105 +762,20 @@ const ALL_CANVAS_SAVE_DESTINATIONS: readonly CanvasSaveDestination[] = [
   "object_storage",
 ];
 
-function CanvasMediaSaveMenu({
-  nodeKey,
-  name,
-  triggerLabel,
-  availableDestinations = ALL_CANVAS_SAVE_DESTINATIONS,
-  onSave,
-}: {
-  readonly nodeKey: string;
-  readonly name: string;
+function CanvasMediaSaveMenu({ triggerLabel, availableDestinations = ALL_CANVAS_SAVE_DESTINATIONS, onSave }: {
   readonly triggerLabel: string;
   readonly availableDestinations?: readonly CanvasSaveDestination[];
   readonly onSave: (destination: CanvasSaveDestination) => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const onOutsidePointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (!(target instanceof Node)) return;
-      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
-      setOpen(false);
-    };
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
-    document.addEventListener("pointerdown", onOutsidePointerDown, true);
-    document.addEventListener("keydown", onEscape, true);
-    return () => {
-      document.removeEventListener("pointerdown", onOutsidePointerDown, true);
-      document.removeEventListener("keydown", onEscape, true);
-    };
-  }, [open]);
-
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="canvas-asset-node__save nodrag nopan"
-        aria-label={triggerLabel}
-        aria-expanded={open}
-        aria-controls={`asset-save-menu-${nodeKey}`}
-        title="选择保存位置"
-        onPointerDown={(event) => event.stopPropagation()}
-        onMouseDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          setOpen((current) => !current);
-        }}
-      >
-        <Icon name="floppy-disk" aria-hidden="true" size="xs" />
+  return <CanvasNodeActionsMenu label={triggerLabel} tooltip="选择保存位置"
+    triggerClassName="canvas-node-actions__trigger--save" icon={<LibTVMediaIcon name="library-q4-saved" size={14} />}>
+    {CANVAS_SAVE_TARGETS.filter(({ destination }) => availableDestinations.includes(destination)).map(({ destination, label, icon }) => (
+      <button key={destination} type="button" onClick={() => onSave(destination)}>
+        <Icon name={icon} aria-hidden="true" size="xs" />
+        <span>保存到{label}</span>
       </button>
-      {open ? (
-        <div
-          ref={menuRef}
-          id={`asset-save-menu-${nodeKey}`}
-          className="canvas-asset-node__save-menu nodrag nopan nowheel"
-          role="group"
-          aria-label={`保存素材：${name}`}
-          onPointerDown={(event) => event.stopPropagation()}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-          onBlur={(event) => {
-            if (
-              !event.currentTarget.contains(event.relatedTarget) &&
-              !triggerRef.current?.contains(event.relatedTarget)
-            ) {
-              setOpen(false);
-            }
-          }}
-        >
-          {CANVAS_SAVE_TARGETS.filter(({ destination }) =>
-            availableDestinations.includes(destination),
-          ).map(({ destination, label, icon }) => (
-            <button
-              key={destination}
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                onSave(destination);
-                triggerRef.current?.focus();
-              }}
-            >
-              <Icon name={icon} aria-hidden="true" size="xs" />
-              <span>保存到{label}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </>
-  );
+    ))}
+  </CanvasNodeActionsMenu>;
 }
 
 export function CanvasAssetNode({
@@ -803,7 +823,9 @@ export function CanvasAssetNode({
   const typeLabel = ASSET_KIND_LABELS[node.kind];
   const awaitingCloudId = node.source !== "local" && isReviewTaskId(node.assetId);
   const isVideo = node.kind === "video";
+  const mediaCard = node.kind === "image" || isVideo;
   const [previewing, setPreviewing] = useState(false);
+  const [pixelSize, setPixelSize] = useState<{ width: number; height: number } | null>(null);
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
   const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>({
@@ -812,6 +834,8 @@ export function CanvasAssetNode({
   // 画布水合后会批量重签本地素材签名；已下载过的素材则直接复用会话内字节，
   // 既不必再等一次续签往返，也不受签名是否过期影响。
   const localMediaUrl = localAssetNodeMediaUrl(node);
+  const videoTarget = useMemo(() => isVideo && node.source === "local" && node.assetId
+    ? assetNodeReferenceTarget(node) : null, [isVideo, node.source, node.assetId, node.key, node.providerConnectionId]);
   const imageBytes = useMediaByteSource(node.assetId, node.kind, localMediaUrl);
   const effectivePreviewUrl = imageBytes.url ?? localMediaUrl;
   const imageReady = effectivePreviewUrl != null && loadedImageUrl === effectivePreviewUrl;
@@ -872,7 +896,7 @@ export function CanvasAssetNode({
   }, [localMediaUrl, node.videoUrl, attemptMediaRefresh]);
   return (
     <div
-      className={`canvas-asset-node${node.kind === "image" || node.kind === "video" ? " canvas-asset-node--media" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
+      className={`canvas-asset-node${mediaCard ? " canvas-asset-node--media canvas-node-preview" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       data-connection-target={node.key}
       onMouseDown={(event) =>
@@ -885,6 +909,9 @@ export function CanvasAssetNode({
         if (isVideo) setPreviewing(false);
       }}
     >
+      {mediaCard ? <CanvasMediaNodeTitle kind={node.kind} title={node.name} pixelSize={pixelSize}
+        processing={awaitingCloudId} /> : null}
+      {isVideo ? <CanvasVideoFrameCrop nodeKey={node.key} /> : null}
       <span
         className={`canvas-asset-node__visual${onPreview ? " canvas-asset-node__preview-button" : ""}`}
         ref={visualRef}
@@ -917,14 +944,16 @@ export function CanvasAssetNode({
             : undefined
         }
       >
-        {isVideo && node.videoUrl ? (
+        {isVideo ? (
           <CanvasAssetNodeVideoVisual
-            videoUrl={node.videoUrl}
+            videoUrl={localMediaUrl}
+            localTarget={videoTarget}
             previewing={previewing}
             isRealAsset={isRealAsset}
             mountMedia={visualInView}
             onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
-            onLoadError={() => attemptMediaRefresh(node.videoUrl)}
+            onPixelSize={(width, height) => setPixelSize({ width, height })}
+            onLoadError={() => attemptMediaRefresh(localMediaUrl)}
           />
         ) : node.kind === "image" ? (
           <>
@@ -941,6 +970,7 @@ export function CanvasAssetNode({
                   const image = event.currentTarget;
                   const aspectRatio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
                   if (aspectRatio != null) onAspectRatioChange(node.key, aspectRatio);
+                  setPixelSize({ width: image.naturalWidth, height: image.naturalHeight });
                   setLoadedImageUrl(effectivePreviewUrl);
                   setFailedImageUrl(null);
                 }}
@@ -964,11 +994,7 @@ export function CanvasAssetNode({
           </span>
         ) : null}
       </span>
-      {/*
-        素材节点的标题行（对齐原站 liblib）：
-        原站的标签在**媒体上方**——一行小字（名称 + 规格），灰白色，不是压在图上的白字。
-      */}
-      <span className="canvas-asset-node__header">
+      {!mediaCard ? <span className="canvas-asset-node__header">
         <span className="canvas-asset-node__identity">
           <AssetKindIcon kind={node.kind} />
           <span className="canvas-asset-node__name" title={node.name}>
@@ -988,23 +1014,16 @@ export function CanvasAssetNode({
             ? `${typeLabel} · 云端处理中`
             : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
         </span>
-      </span>
+      </span> : null}
       {isVideo && onPrepareVideo && !awaitingCloudId ? (
-        <div
-          className="artifact-actions nodrag nopan"
-          onMouseDown={(event) => event.stopPropagation()}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
+        <CanvasNodeActionsMenu label="视频素材操作" icon={<LibTVMediaIcon name="more-s" size={16} />}>
           <button type="button" onClick={() => onPrepareVideo(node.key)}>
             视频准备
           </button>
-        </div>
+        </CanvasNodeActionsMenu>
       ) : null}
       {onSaveToLibrary && !awaitingCloudId ? (
         <CanvasMediaSaveMenu
-          nodeKey={node.key}
-          name={node.name}
           triggerLabel={`保存素材：${node.name}`}
           onSave={(destination) => onSaveToLibrary(node.key, destination)}
         />
@@ -1044,7 +1063,7 @@ export function CanvasOutputLightbox({
   // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的画布上），Esc 关闭，
   // 关闭后焦点回到打开预览的那个元素。
   const trap = useModalFocusTrap({
-    active: true,
+    active: node.mediaType !== "image",
     onEscape: onClose,
     initialFocusRef: closeButtonRef,
   });
@@ -1059,6 +1078,8 @@ export function CanvasOutputLightbox({
       : node.mediaType === "audio"
         ? "音频产物"
         : "生成图片");
+
+  if (node.mediaType === "image") return <ImageLightbox items={[{ id: node.key, src: mediaSrc, name: mediaName }]} onClose={onClose} />;
 
   return createPortal(
     <div
@@ -1129,7 +1150,7 @@ export function CanvasAssetLightbox({
   // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的画布上），Esc 关闭，
   // 关闭后焦点回到打开预览的那个元素。
   const trap = useModalFocusTrap({
-    active: true,
+    active: node.kind !== "image",
     onEscape: onClose,
     initialFocusRef: closeButtonRef,
   });
@@ -1163,6 +1184,7 @@ export function CanvasAssetLightbox({
     });
   };
   if (mediaSrc == null) return null;
+  if (node.kind === "image") return <ImageLightbox items={[{ id: node.key, src: mediaSrc, name: node.name }]} onClose={onClose} onImageError={handleMediaError} />;
 
   return createPortal(
     <div
@@ -1292,11 +1314,13 @@ export function CanvasOutputNode({
   readonly onOpenHistory?: ((taskId: string) => void) | undefined;
   readonly onPrepareVideo?: ((key: string) => void) | undefined;
 }) {
+  const isImage = node.mediaType === "image";
   const isTextResult = node.mediaType === "text";
   const isVideo = node.mediaType === "video";
   const isAudio = node.mediaType === "audio";
   const mediaLabel = isVideo ? "视频" : isAudio ? "音频" : "图片";
   const [previewing, setPreviewing] = useState(false);
+  const [pixelSize, setPixelSize] = useState<{ width: number; height: number } | null>(null);
   const [copied, setCopied] = useState(false);
   const [resuming, setResuming] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -1315,6 +1339,7 @@ export function CanvasOutputNode({
   // 供应商结果已返回 → 立即展示媒体/文本；本地 finalPath 到达后再切换为长期引用。
   // 文本产物（Context-IR）以内联正文为准，不依赖 finalPath。
   const hasArtifact = isTextResult ? node.textContent != null : mediaSrc != null;
+  const mediaCard = (isImage || isVideo) && hasArtifact;
   const hasLocalArtifact = node.finalPath != null;
   const isPreviewOnly = !hasLocalArtifact && hasArtifact;
   const canUseAsGenerationReference = outputNodeReferenceTarget(node) != null;
@@ -1488,6 +1513,9 @@ export function CanvasOutputNode({
                         }`
                       : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
+  const mediaTitle = node.layer
+    ? `${node.layer.isBaseLayer ? "底图" : `图层 ${node.layer.zIndex}`}${node.layer.name ? ` · ${node.layer.name}` : ""}`
+    : node.name ?? savedResultName ?? (isVideo ? "视频节点" : "图片节点");
   const availableSaveDestinations: CanvasSaveDestination[] = [];
   if (onUploadToLocal) availableSaveDestinations.push("local");
   if (onUploadToCloud) availableSaveDestinations.push("cloud");
@@ -1495,7 +1523,7 @@ export function CanvasOutputNode({
 
   return (
     <div
-      className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
+      className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${mediaCard ? " canvas-asset-node--media canvas-node-preview" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       aria-busy={
         !(isTextResult && node.textContent != null) && (isRunning || isSaving || showSaveOverlay)
@@ -1559,6 +1587,11 @@ export function CanvasOutputNode({
         </>
       ) : mediaSrc != null ? (
         <>
+          {mediaCard ? <CanvasMediaNodeTitle kind={isVideo ? "video" : "image"} title={mediaTitle} pixelSize={pixelSize}
+            onRename={onRename && hasLocalArtifact ? name => {
+              void onRename(node.key, name).catch((error: unknown) => toast.error(`改名失败：${backendErrorMessage(error)}`));
+            } : undefined} /> : null}
+          {isVideo ? <CanvasVideoFrameCrop nodeKey={node.key} /> : null}
           <button
             type="button"
             ref={previewButtonRef}
@@ -1572,6 +1605,7 @@ export function CanvasOutputNode({
               onPreview(node.key);
             }}
           >
+            {mediaCard && node.origin === "generation" ? <span className="canvas-media-ai-badge">AI 生成</span> : null}
             {isVideo ? (
               <CanvasAssetNodeVideoVisual
                 videoUrl={mediaSrc}
@@ -1580,6 +1614,7 @@ export function CanvasOutputNode({
                 isRealAsset
                 mountMedia={previewInView}
                 onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
+                onPixelSize={(width, height) => setPixelSize({ width, height })}
               />
             ) : isAudio ? (
               <span className="waveform waveform--node" aria-hidden="true">
@@ -1604,11 +1639,12 @@ export function CanvasOutputNode({
                   const image = event.currentTarget;
                   const aspectRatio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
                   if (aspectRatio != null) onAspectRatioChange(node.key, aspectRatio);
+                  if (!imageThumbnail.src) setPixelSize({ width: image.naturalWidth, height: image.naturalHeight });
                 }}
               />
             )}
           </button>
-          <span className="canvas-asset-node__identity">
+          {!mediaCard ? <span className="canvas-asset-node__identity">
             <AssetKindIcon kind={node.mediaType} />
             <span
               className="canvas-asset-node__name"
@@ -1643,8 +1679,8 @@ export function CanvasOutputNode({
                 aria-label="已在对象存储"
               />
             ) : null}
-          </span>
-          <span className="canvas-asset-node__meta">
+          </span> : null}
+          {!mediaCard ? <span className="canvas-asset-node__meta">
             {node.origin === "composition"
               ? `合成视频 · ${isPreviewOnly ? "已导出浏览器下载" : "已保存到本机"}`
               : `${mediaLabel}产物 · ${
@@ -1658,7 +1694,7 @@ export function CanvasOutputNode({
                       ? "已保存到本机 · 可作为参考输入"
                       : "已连线来源节点 · 可作为参考输入"
                 }`}
-          </span>
+          </span> : null}
           {showSaveOverlay ? (
             <div className="canvas-output-node__save-overlay" aria-live="polite">
               <span className="canvas-output-node__save-overlay-label">
@@ -1780,28 +1816,28 @@ export function CanvasOutputNode({
           <span className="canvas-asset-node__meta">{metaLine}</span>
         </>
       )}
-      {(onRename && hasLocalArtifact) ||
-      onOpenHistory ||
+      {(onRename && hasLocalArtifact && !mediaCard) ||
+      (isImage && onUploadToLocal && hasLocalArtifact) ||
+      (onOpenHistory && node.mediaType !== "image") ||
       (onPrepareVideo && isVideo && hasArtifact) ||
       (hasLocalArtifact && isDesktopRuntime()) ? (
-        <div
-          className="artifact-actions nodrag nopan"
-          onMouseDown={(event) => event.stopPropagation()}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => event.stopPropagation()}
-        >
+        <CanvasNodeActionsMenu label="产物操作" icon={<LibTVMediaIcon name="more-s" size={16} />}>
           {onPrepareVideo && isVideo && hasArtifact ? (
             <button type="button" onClick={() => onPrepareVideo(node.key)}>
               视频准备
             </button>
           ) : null}
-          {onRename && hasLocalArtifact ? (
+          {onRename && hasLocalArtifact && !mediaCard ? (
             <NodeNameEditor
               name={fileBaseName(node.name ?? "产物") ?? "产物"}
               label="修改产物名称"
               onSave={(name) => onRename(node.key, name)}
             />
           ) : null}
+          {isImage && onUploadToLocal && hasLocalArtifact ? <button type="button"
+            disabled={node.uploadedToLocal === true} onClick={() => onUploadToLocal(node.key)}>
+            {node.uploadedToLocal ? "已保存到素材库" : "保存到素材库"}
+          </button> : null}
           {hasLocalArtifact && isDesktopRuntime() ? (
             <button
               type="button"
@@ -1823,22 +1859,20 @@ export function CanvasOutputNode({
                   .finally(() => setExporting(false));
               }}
             >
-              {exporting ? "导出中…" : "按名称导出"}
+              {node.mediaType === "image" ? (exporting ? "下载中…" : "下载图片") : (exporting ? "导出中…" : "按名称导出")}
             </button>
           ) : null}
-          {onOpenHistory ? (
+          {onOpenHistory && node.mediaType !== "image" ? (
             <button type="button" onClick={() => onOpenHistory(node.taskId)}>
               原任务
             </button>
           ) : null}
-        </div>
+        </CanvasNodeActionsMenu>
       ) : null}
       {availableSaveDestinations.length > 0 &&
-      (node.mediaType === "image" || node.mediaType === "video" || node.mediaType === "audio") &&
+      (node.mediaType === "video" || node.mediaType === "audio") &&
       node.finalPath != null ? (
         <CanvasMediaSaveMenu
-          nodeKey={node.key}
-          name={node.name ?? `${mediaLabel}产物`}
           triggerLabel={`保存产物：${node.name ?? `${mediaLabel}产物`}`}
           availableDestinations={availableSaveDestinations}
           onSave={(destination) => {
@@ -1848,7 +1882,7 @@ export function CanvasOutputNode({
           }}
         />
       ) : null}
-      {canUseAsGenerationReference || canConnectToComposer ? (
+      {!isImage && (canUseAsGenerationReference || canConnectToComposer) ? (
         <button
           type="button"
           className="canvas-asset-node__port"
@@ -2130,6 +2164,7 @@ function referenceAssetIdentity(
  */
 export function GenerationInputChips({
   inputs,
+  imageOnly = false,
   positions,
   onUnlink,
   onInsertReference,
@@ -2137,6 +2172,7 @@ export function GenerationInputChips({
   onReorder,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
+  readonly imageOnly?: boolean;
   readonly positions?: ReadonlyMap<string, number>;
   readonly onUnlink: (edgeId: string) => void;
   /**
@@ -2149,11 +2185,29 @@ export function GenerationInputChips({
   readonly onReorder?: (sourceKey: string, targetKey: string) => void;
 }) {
   const [dragSourceKey, setDragSourceKey] = useState<string | null>(null);
+  const pointerDragRef = useRef<{
+    pointerId: number;
+    sourceKey: string;
+    x: number;
+    y: number;
+  } | null>(null);
   const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
   if (inputs.length === 0) return null;
   const reorderableOrder = inputs
     .filter((input) => !("promptNodeKey" in input) && (reorderableKeys?.has(input.key) ?? true))
     .map((input) => input.key);
+  const clearPointerDrag = () => {
+    pointerDragRef.current = null;
+    setDragSourceKey(null);
+    setDropTargetKey(null);
+  };
+  const dropKeyAt = (source: HTMLElement, x: number, y: number) => {
+    const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-media-input-key]");
+    const key = target?.dataset["mediaInputKey"];
+    return target && source.parentElement?.contains(target) && key && reorderableOrder.includes(key)
+      ? key
+      : null;
+  };
   // 每个素材落在哪一行：直连素材按槽位位置落座——被解绑/删除的素材留下空槽，位置留着，
   // 其余素材不顶上来，新连线填回空槽后拿回原来的位置。没有槽位记录的素材（随提示词继承、
   // 旧文档残留连线）接在最后一行之后，不会插进前面的空槽（那会让它的编号小于后面的素材）。
@@ -2230,96 +2284,55 @@ export function GenerationInputChips({
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
-            className={`node-media-chip${inherited ? " is-inherited" : ""}${isOutput ? " is-output" : ""}${canReorder ? " is-reorderable nodrag nopan" : ""}${dragSourceKey === input.key ? " is-dragging" : ""}${dropTargetKey === input.key ? " is-drop-target" : ""}`}
-            draggable={canReorder}
+            className={`node-media-chip${!imageOnly && inherited ? " is-inherited" : ""}${!imageOnly && isOutput ? " is-output" : ""}${canReorder ? " is-reorderable nodrag nopan" : ""}${dragSourceKey === input.key ? " is-dragging" : ""}${dropTargetKey === input.key ? " is-drop-target" : ""}`}
+            data-media-input-key={input.key}
+            data-tooltip={input.name}
+            draggable={false}
             /*
              * 原站 liblib 的参考缩略图是 48×48 方块，靠拖拽排序，没有上移/下移按钮；
              * 编辑层里那两个按钮因此隐藏了，键盘排序改由方块自身承担
-             * （方块可聚焦，↑ / ↓ 调整顺序），拖拽仍然照旧可用。
+             * （方块可聚焦，↑ / ↓ 调整顺序）。排序使用指针捕获，避免 Windows
+             * WebView2 的原生文件拖放接管 HTML5 拖放；本机文件拖入仍保持原路径。
              */
             tabIndex={canReorder ? 0 : undefined}
             onKeyDown={(event) => {
-              if (!canReorder) return;
-              if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+              if (!canReorder || event.target !== event.currentTarget || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
+              if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
               event.preventDefault();
               event.stopPropagation();
-              const target = event.key === "ArrowUp" ? previousKey : nextKey;
+              const target = event.key === "ArrowUp" || event.key === "ArrowLeft" ? previousKey : nextKey;
               if (target == null) return;
               onReorder?.(input.key, target);
             }}
-            onPointerDown={canReorder ? (event) => event.stopPropagation() : undefined}
+            onPointerDown={canReorder ? (event) => {
+              event.stopPropagation();
+              if (event.button !== 0 || (event.target instanceof Element && event.target.closest("button"))) return;
+              event.preventDefault();
+              event.currentTarget.focus();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              pointerDragRef.current = { pointerId: event.pointerId, sourceKey: input.key, x: event.clientX, y: event.clientY };
+            } : undefined}
+            onPointerMove={canReorder ? (event) => {
+              const drag = pointerDragRef.current;
+              if (!drag || drag.pointerId !== event.pointerId || Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 4) return;
+              setDragSourceKey(drag.sourceKey);
+              const targetKey = dropKeyAt(event.currentTarget, event.clientX, event.clientY);
+              setDropTargetKey(targetKey === drag.sourceKey ? null : targetKey);
+            } : undefined}
+            onPointerUp={canReorder ? (event) => {
+              const drag = pointerDragRef.current;
+              if (!drag || drag.pointerId !== event.pointerId) return;
+              const moved = Math.hypot(event.clientX - drag.x, event.clientY - drag.y) >= 4;
+              const targetKey = dropKeyAt(event.currentTarget, event.clientX, event.clientY);
+              clearPointerDrag();
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+              if (moved && targetKey && targetKey !== drag.sourceKey) onReorder?.(drag.sourceKey, targetKey);
+            } : undefined}
+            onPointerCancel={canReorder ? clearPointerDrag : undefined}
+            onLostPointerCapture={canReorder ? clearPointerDrag : undefined}
             onMouseDown={canReorder ? (event) => event.stopPropagation() : undefined}
-            onDragStart={
-              canReorder
-                ? (event) => {
-                    event.stopPropagation();
-                    if (event.dataTransfer) {
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("application/x-infinite-canvas-input", input.key);
-                    }
-                    setDragSourceKey(input.key);
-                    setDropTargetKey(null);
-                  }
-                : undefined
-            }
-            onDragOver={
-              canReorder
-                ? (event) => {
-                    if (dragSourceKey == null || dragSourceKey === input.key) return;
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-                    setDropTargetKey(input.key);
-                  }
-                : undefined
-            }
-            onDragLeave={
-              canReorder
-                ? (event) => {
-                    if (
-                      event.relatedTarget instanceof Node &&
-                      event.currentTarget.contains(event.relatedTarget)
-                    )
-                      return;
-                    if (dropTargetKey === input.key) setDropTargetKey(null);
-                  }
-                : undefined
-            }
-            onDrop={
-              canReorder
-                ? (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    if (
-                      dragSourceKey != null &&
-                      dragSourceKey !== input.key &&
-                      reorderableOrder.includes(dragSourceKey)
-                    ) {
-                      onReorder?.(dragSourceKey, input.key);
-                    }
-                    setDragSourceKey(null);
-                    setDropTargetKey(null);
-                  }
-                : undefined
-            }
-            onDragEnd={
-              canReorder
-                ? () => {
-                    setDragSourceKey(null);
-                    setDropTargetKey(null);
-                  }
-                : undefined
-            }
+            onDragStart={(event) => event.preventDefault()}
           >
-            {canReorder ? (
-              <span
-                className="node-media-chip__drag-handle"
-                aria-hidden="true"
-                title="拖到其他素材行调整顺序"
-              >
-                ⋮⋮
-              </span>
-            ) : null}
             <span
               className="node-media-chip__order"
               aria-label={`参考素材传入顺序 ${orderNumber}`}
@@ -2337,12 +2350,13 @@ export function GenerationInputChips({
               maxWidth="7rem"
             />
             {/* 原站瓦片右下角是 @ 按钮：把这份参考插进提示词。 */}
-            {onInsertReference && !inherited ? (
+            {onInsertReference && (!inherited || imageOnly) ? (
               <button
                 type="button"
                 className="node-media-chip__mention nodrag nopan"
                 aria-label={`在提示词中引用：${input.name}`}
-                title="引用素材到提示词"
+                disabled={!input.target}
+                data-tooltip={input.target ? "引用素材到提示词" : "图片保存完成后可引用"}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -2364,63 +2378,11 @@ export function GenerationInputChips({
             >
               {input.name}
             </span>
-            {canReorder ? (
-              <span className="node-media-chip__reorder nodrag nopan">
-                <button
-                  type="button"
-                  aria-label={`上移参考素材：${input.name}`}
-                  title="上移一位"
-                  disabled={previousKey == null}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (previousKey != null) onReorder?.(input.key, previousKey);
-                  }}
-                >
-                  <Icon name="arrow-up" aria-hidden="true" size="2xs" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={`下移参考素材：${input.name}`}
-                  title="下移一位"
-                  disabled={nextKey == null}
-                  onMouseDown={(event) => event.stopPropagation()}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    if (nextKey != null) onReorder?.(input.key, nextKey);
-                  }}
-                >
-                  <Icon name="arrow-down" aria-hidden="true" size="2xs" />
-                </button>
-              </span>
-            ) : null}
-            {inherited ? (
-              <span
-                className="node-media-chip__origin"
-                title="由上游提示词节点的视觉理解素材自动继承"
-              >
-                随提示词
-              </span>
-            ) : (
-              <>
-                {isOutput ? (
-                  <span className="node-media-chip__origin" title="来自上游生成节点的已保存产物">
-                    产物
-                  </span>
-                ) : null}
-                <button
-                  type="button"
-                  className="node-media-chip__unlink"
-                  aria-label={`解除连线：${input.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onUnlink(input.edgeId);
-                  }}
-                >
-                  <Icon name="x" aria-hidden="true" size="2xs" />
-                </button>
-              </>
-            )}
+            {!inherited ? <button type="button" className="node-media-chip__unlink"
+              aria-label={"解除连线：" + input.name} data-tooltip="移除参考"
+              onClick={event => { event.stopPropagation(); onUnlink(input.edgeId); }}>
+              <Icon name="x" aria-hidden="true" size="2xs" />
+            </button> : null}
           </li>
         );
       })}

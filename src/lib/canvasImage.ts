@@ -1,19 +1,20 @@
 import * as v from "valibot";
-import { invokeDesktop, invokeDesktopVoid } from "./ipc";
-import type { StartGenerationCommand } from "./backend";
+import { invokeDesktop } from "./ipc";
+import type { ConfiguredModel, ProviderCatalogEntry, StartGenerationCommand } from "./backend";
+import type { ImageStyleReference } from "./imageStyleMarket";
 import type { CanvasImagePresetSelection } from "./canvasImagePresets";
 import type { CanvasCameraControl } from "./canvasCameraControl";
 
-export const CANVAS_IMAGE_MODES = [
-  { value: "auto", label: "自动" },
-  { value: "image_to_image", label: "图生图" },
-  { value: "upscale", label: "图片高清" },
-] as const;
-export type CanvasImageMode = (typeof CANVAS_IMAGE_MODES)[number]["value"];
+/** 保留旧画布模式的解码；新任务按实际参考素材自动选择操作。 */
+export type CanvasImageMode = "auto" | "image_to_image" | "upscale";
 
-export interface CanvasImageStyle {
-  readonly name: string;
-  readonly prompt: string;
+export const IMAGE_UPSCALER_MODEL = "atlascloud/image-upscaler";
+export const IMAGE_REGION_EDIT_BINDING = "atlascloud/masked-image-edit";
+export function resolveImageUpscaler(catalog: readonly ProviderCatalogEntry[], providerId?: string) {
+  const provider = catalog.find(entry => entry.provider.enabled && entry.provider.adapterId === "atlascloud_v1" && (!providerId || entry.provider.id === providerId));
+  if (!provider) return null;
+  const model: ConfiguredModel = { definitionId: `remote::${provider.provider.id}::${IMAGE_UPSCALER_MODEL}`, remoteModelId: IMAGE_UPSCALER_MODEL, displayName: "图片高清（2× / 4×）", operations: ["image_to_image"], operationSchema: {} };
+  return { provider, model };
 }
 
 export interface CanvasImageTranslationTask {
@@ -23,34 +24,17 @@ export interface CanvasImageTranslationTask {
   readonly generation: StartGenerationCommand;
 }
 
-const presetSchema = v.object({
-  id: v.string(),
-  kind: v.picklist(["style", "prompt"]),
-  name: v.string(),
-  text: v.string(),
-  updatedAt: v.number(),
-});
-export type CanvasImagePreset = v.InferOutput<typeof presetSchema>;
-
 /** 图片编辑器只负责本项目的素材和任务，不调用 liblib 私有接口。 */
 export const canvasImageClient = {
   translate: (command: { readonly taskId: string; readonly generation: StartGenerationCommand }) =>
     invokeDesktop("start_canvas_image_translation", v.string(), { command }),
   start: (command: {
     readonly generation: StartGenerationCommand;
-    readonly mode: CanvasImageMode;
-    readonly targetResolution?: string;
-    readonly style?: CanvasImageStyle;
+    readonly mode: CanvasImageMode | "masked_edit";
+    readonly styleReference?: ImageStyleReference;
+    readonly upscaleScale?: number;
     readonly preset?: CanvasImagePresetSelection;
     readonly cameraControl?: CanvasCameraControl;
     readonly panorama?: boolean;
   }) => invokeDesktop("start_canvas_image_generation", v.string(), { command }),
-  listPresets: () => invokeDesktop("list_canvas_image_presets", v.array(presetSchema)),
-  savePreset: (command: {
-    readonly id?: string;
-    readonly kind: "style" | "prompt";
-    readonly name: string;
-    readonly text: string;
-  }) => invokeDesktop("save_canvas_image_preset", presetSchema, { command }),
-  deletePreset: (id: string) => invokeDesktopVoid("delete_canvas_image_preset", { id }),
 };

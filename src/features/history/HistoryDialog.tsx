@@ -1,3 +1,5 @@
+import { ImageLightbox } from "../../components/ImageLightbox";
+import "./HistoryImageResults.css";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useModalFocusTrap } from "../../components/useModalFocusTrap";
@@ -38,6 +40,7 @@ import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
 import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
 import type { HistoryDateRange } from "./historyDateRange";
 import { RegenerateGenerationDialog } from "./RegenerateGenerationDialog";
+import { IMAGE_REGION_EDIT_BINDING } from "../../lib/canvasImage";
 import { frozenStartCommand, isRegenerableOperation } from "./regenerateGeneration";
 import {
   canPromoteSeedanceDraft,
@@ -389,12 +392,21 @@ function HistoryLightbox({
   // 模态焦点陷阱：焦点锁在预览里（Tab 不会跑到背后的历史面板上），Esc 关闭，
   // 关闭后焦点回到打开预览的那个元素。
   const trap = useModalFocusTrap({
-    active: true,
+    active: result?.mediaType !== "image",
     onEscape: onClose,
     initialFocusRef: closeButtonRef,
   });
 
   if (result == null) return null;
+  if (result.mediaType === "image") {
+    const images = results.filter(entry => entry.mediaType === "image" && entry.finalPath);
+    return <ImageLightbox items={images.map(entry => ({ id: entry.taskId + "#" + entry.resultIndex,
+      src: toMediaSrc(entry.finalPath!), name: resultDisplayName(entry) ?? "生成图片" }))}
+      index={images.indexOf(result)} onIndexChange={next => {
+        const entry = images[next];
+        if (entry) onIndexChange(results.indexOf(entry));
+      }} onClose={onClose} />;
+  }
   const hasPrev = index > 0;
   const hasNext = index < results.length - 1;
   return (
@@ -600,6 +612,8 @@ export function HistoryDialog({
   initialTab = "generation",
   initialTaskId,
   onRegenerateGeneration,
+  onRestoreImage,
+  onAddResource,
   onPromoteSeedanceDraft,
 }: {
   readonly open: boolean;
@@ -610,6 +624,8 @@ export function HistoryDialog({
   readonly initialTaskId?: string | null;
   /** 从历史重新生成时由宿主创建全新任务（并负责画布占位卡片）；缺省时直接调用 client.start。 */
   readonly onRegenerateGeneration?: (command: StartGenerationCommand) => Promise<string>;
+  readonly onRestoreImage?: (detail: GenerationTaskDetail, result: GenerationResultRecord) => Promise<void>;
+  readonly onAddResource?: ((result: GenerationResultRecord) => Promise<void>) | undefined;
   readonly onPromoteSeedanceDraft?: (draft: GenerationTaskDetail) => Promise<string>;
 }) {
   const [activeTab, setActiveTab] = useState<HistoryTab>(initialTab ?? "generation");
@@ -645,6 +661,10 @@ export function HistoryDialog({
   const [regenerateEditorTask, setRegenerateEditorTask] = useState<GenerationTaskDetail | null>(
     null,
   );
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreError, setRestoreError] = useState<unknown>(null);
+  const restoreBusyRef = useRef(false);
+  useEffect(() => setRestoreError(null), [selectedTaskId]);
   const [regenerateBusy, setRegenerateBusy] = useState(false);
   const [regenerateError, setRegenerateError] = useState<unknown>(null);
   const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
@@ -920,6 +940,7 @@ export function HistoryDialog({
   const sourceDraftTaskId = detail ? seedanceDraftSourceTaskId(detail) : null;
   const isDraft = detail ? isSeedanceDraftTask(detail) : false;
   const frozenCommand = useMemo(() => (detail ? frozenStartCommand(detail) : null), [detail]);
+  const isImageRegionEdit = frozenCommand?.modelDefinitionId.endsWith("::" + IMAGE_REGION_EDIT_BINDING) === true;
   /*
    * 长视频的片段任务不能从这里「重新生成」。
    *
@@ -1436,7 +1457,7 @@ export function HistoryDialog({
                             <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
                             直接重新生成
                           </button>
-                          <button
+                          {!isImageRegionEdit ? <button
                             type="button"
                             disabled={regenerateBusy}
                             aria-describedby={
@@ -1446,7 +1467,7 @@ export function HistoryDialog({
                             onClick={() => openRegenerateEditor(detail)}
                           >
                             修改后重新生成
-                          </button>
+                          </button> : null}
                         </div>
                         <p className="history-regenerate__note">
                           按原任务冻结的提示词与素材创建全新任务，原任务记录保持不变。
@@ -1530,6 +1551,7 @@ export function HistoryDialog({
                     className={`history-section${resultErrorsExist ? " history-section--with-inline-error" : ""}`}
                   >
                     <h3>生成结果（{detail.results.length}）</h3>
+                    {restoreError ? <ErrorAlert error={restoreError} /> : null}
                     {detail.results.length === 0 ? (
                       <p className="history-empty-note">该任务没有生成结果。</p>
                     ) : (
@@ -1537,10 +1559,14 @@ export function HistoryDialog({
                         {detail.results.map((result, index) => {
                           const isViewable =
                             result.finalPath != null && result.saveStatus === "succeeded";
+                          const isResource = result.mediaType === "image" || result.mediaType === "video" || result.mediaType === "audio";
+                          const restore = onAddResource
+                            ? isResource ? () => onAddResource(result) : null
+                            : onRestoreImage && result.mediaType === "image" ? () => onRestoreImage(detail, result) : null;
                           return (
                             <article
                               key={`${result.resultIndex}-${result.finalPath ?? index}`}
-                              className={`history-result${isViewable ? " history-result--viewable" : ""}`}
+                              className={`history-result${isViewable ? " history-result--viewable" : ""}${result.mediaType === "image" ? " history-result--image" : ""}`}
                             >
                               <button
                                 type="button"
@@ -1556,7 +1582,7 @@ export function HistoryDialog({
                                     src={toMediaSrc(result.finalPath)}
                                     finalPath={result.finalPath}
                                     mediaType={result.mediaType === "video" ? "video" : "image"}
-                                    alt={`结果 ${result.resultIndex + 1}`}
+                                    alt={`结果 ${index + 1}`}
                                   />
                                 ) : (
                                   <span className="history-result__visual">
@@ -1571,23 +1597,31 @@ export function HistoryDialog({
                                       result.finalPath?.split(/[\\/]/).pop() ??
                                       `结果 ${result.resultIndex}`}
                                   </span>
-                                  <span>
-                                    结果 {result.resultIndex + 1} ·{" "}
+                                  {result.mediaType !== "image" ? <span>
+                                    结果 {index + 1} ·{" "}
                                     {result.mediaType === "text"
                                       ? "文本"
                                       : result.mediaType === "video"
                                         ? "视频"
-                                        : "图片"}
+                                        : result.mediaType === "audio" ? "音频" : "图片"}
                                     {formatBytes(result.byteSize)
                                       ? ` · ${formatBytes(result.byteSize)}`
                                       : ""}
-                                  </span>
-                                  <span>
+                                  </span> : null}
+                                  {!isViewable ? <span>
                                     {SAVE_STATUS_LABELS[result.saveStatus] ?? result.saveStatus}
-                                  </span>
+                                  </span> : null}
                                 </span>
                               </button>
-                              {isViewable ? (
+                              {isViewable && restore ? <button type="button"
+                                className="history-result__restore" disabled={restoreBusy}
+                                onClick={() => {
+                                  if (restoreBusyRef.current) return;
+                                  restoreBusyRef.current = true; setRestoreBusy(true); setRestoreError(null);
+                                  void restore().catch((error: unknown) => setRestoreError(error))
+                                    .finally(() => { restoreBusyRef.current = false; setRestoreBusy(false); });
+                                }}>{onAddResource ? "添加到画布" : "恢复到画布"}</button> : null}
+                              {isViewable && result.mediaType !== "image" ? (
                                 <button
                                   type="button"
                                   className="history-result__reveal"

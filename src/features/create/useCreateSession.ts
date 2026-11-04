@@ -5,8 +5,14 @@
  *   - loadGenerationModelCatalog()   已接入的供应商、模型与参数能力表
  *   - modelParameterCapabilities()   模型声明的参数能力（比例/分辨率/数量/时长…）
  *   - generationClient.start()       提交生成
+ *   - textGenerationClient.start()   提交文本生成（走文本模型通道，不走媒体任务管线）
  *   - generationClient.list()        历史记录（按创作台专属 canvasId 归档）
- *   - generationClient.get()         任务详情：状态 + 产物
+ *   - generationClient.getProgress()  任务状态：状态 + 产物 + 提示词快照
+ *
+ * 刷新与轮询**只走状态轻量接口**：`get()` 是诊断详情，会把每次供应商调用的
+ * 完整请求体与原始响应体一并带回来（一次图片调用就是几 MB 整包 base64，
+ * 一个视频任务有几十次调用）。在生成期间每 1.5~6 秒拉一轮详情，等于让几十 MB
+ * 报文反复穿过 IPC 边界，界面会卡住、生成键也解不开。
  *
  * 轮询节奏是刻意压短的：提交后 1.2 秒起，以 1.5 秒为基准递增到 6 秒封顶。
  * 依据是即梦创作页的实测——它声明的轮询配置是 30 秒，实际客户端却按
@@ -16,13 +22,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ExplicitMediaInput,
   GenerationOperation,
-  GenerationTaskDetail,
   GenerationTaskStatus,
+  MediaReferenceTarget,
   MediaLibraryKind,
   ModelOperationSchema,
   PromptSegment,
 } from "../../lib/backend";
-import { generationClient, loadGenerationModelCatalog } from "../../lib/backend";
+import { generationClient, loadGenerationModelCatalog, textGenerationClient } from "../../lib/backend";
 import {
   generationParameters,
   modelParameterCapabilities,
@@ -67,6 +73,12 @@ export interface CreateRecord {
   readonly operation: GenerationOperation;
   readonly createdAt: number;
   readonly results: readonly CreateResultItem[];
+  /**
+   * 文本任务的回答正文。
+   *
+   * 文本生成没有媒体产物，正文就是交付物；媒体任务这里是 null。
+   */
+  readonly textOutput: string | null;
   readonly error: unknown;
   /** 本次任务应有的产物数（来自提交时的数量参数），用于生成中占位。 */
   readonly expectedCount: number;
@@ -128,7 +140,7 @@ export type CreateReferenceKind = "local_file" | "asset" | "local_base64_asset";
  *
  * 形状必须与 `MediaReferenceTarget` 的判别联合一一对应，不能自造字段。
  */
-export function referenceTargetOf(reference: CreateReference): ExplicitMediaInput["target"] {
+export function referenceTargetOf(reference: CreateReference): MediaReferenceTarget {
   if (reference.kind === "asset" && reference.assetId && reference.providerConnectionId) {
     return {
       kind: "asset",
@@ -170,47 +182,59 @@ export function referenceRoleOf(mediaType: MediaLibraryKind): string {
  * 所以能还原出三种合法来源里的两种（云端素材 / 本机 Base64 素材）；
  * 本机文件因为快照里只存了路径，也能还原。
  */
-function referencesOfDetail(detail: GenerationTaskDetail): readonly CreateReference[] {
+function referencesOfDetail(detail: { readonly logicalRequest?: unknown }): readonly CreateReference[] {
   const logical = detail.logicalRequest as
-    | { explicitMedia?: readonly ExplicitMediaInput[] }
+    | {
+        explicitMedia?: readonly ExplicitMediaInput[];
+        referenceInputs?: readonly { readonly target?: unknown; readonly displayName?: string }[];
+      }
     | null
     | undefined;
-  const media = logical?.explicitMedia;
-  if (!Array.isArray(media)) return [];
   const references: CreateReference[] = [];
-  for (const item of media) {
-    const target = item?.target;
-    if (target == null) continue;
-    const name = item.displayNameSnapshot ?? "";
-    if (target.kind === "asset") {
-      references.push({
-        kind: "asset",
-        name,
-        mediaType: target.mediaType,
-        assetId: target.assetId,
-        providerConnectionId: target.providerConnectionId,
-      });
-      continue;
+  const media = logical?.explicitMedia;
+  if (Array.isArray(media)) {
+    for (const item of media) {
+      const reference = referenceFromTarget(item?.target, item?.displayNameSnapshot ?? "");
+      if (reference) references.push(reference);
     }
-    if (target.kind === "local_base64_asset") {
-      references.push({
-        kind: "local_base64_asset",
-        name,
-        mediaType: target.mediaType,
-        assetId: target.assetId,
-      });
-      continue;
-    }
-    if (target.kind === "local_file") {
-      references.push({
-        kind: "local_file",
-        name,
-        mediaType: target.mediaType,
-        path: target.path,
-      });
+    return references;
+  }
+  // 文本生成的快照是 `referenceInputs`：只记素材身份，不含素材正文。
+  const inputs = logical?.referenceInputs;
+  if (Array.isArray(inputs)) {
+    for (const item of inputs) {
+      const reference = referenceFromTarget(item?.target, item?.displayName ?? "");
+      if (reference) references.push(reference);
     }
   }
   return references;
+}
+
+/** 素材目标 → 创作台的参考素材形状。 */
+function referenceFromTarget(target: unknown, name: string): CreateReference | null {
+  if (target == null || typeof target !== "object") return null;
+  const record = target as Record<string, unknown>;
+  const kind = record["kind"];
+  const mediaType = record["mediaType"];
+  if (typeof mediaType !== "string") return null;
+  const kindOfMedia = mediaType as MediaLibraryKind;
+  if (kind === "asset") {
+    const assetId = record["assetId"];
+    const providerConnectionId = record["providerConnectionId"];
+    if (typeof assetId !== "string" || typeof providerConnectionId !== "string") return null;
+    return { kind: "asset", name, mediaType: kindOfMedia, assetId, providerConnectionId };
+  }
+  if (kind === "local_base64_asset") {
+    const assetId = record["assetId"];
+    if (typeof assetId !== "string") return null;
+    return { kind: "local_base64_asset", name, mediaType: kindOfMedia, assetId };
+  }
+  if (kind === "local_file") {
+    const path = record["path"];
+    if (typeof path !== "string") return null;
+    return { kind: "local_file", name, mediaType: kindOfMedia, path };
+  }
+  return null;
 }
 
 export interface CreateSession {
@@ -280,17 +304,22 @@ function toResultItems(detail: {
 function promptOfDetail(detail: { readonly logicalRequest?: unknown }): string {
   const request = detail.logicalRequest;
   if (!request || typeof request !== "object") return "";
-  const prompt = (request as Record<string, unknown>)["prompt"];
+  const record = request as Record<string, unknown>;
+  const prompt = record["prompt"];
   if (typeof prompt === "string") return prompt;
-  if (!Array.isArray(prompt)) return "";
-  return prompt
-    .map((segment) => {
-      if (!segment || typeof segment !== "object") return "";
-      const item = segment as Record<string, unknown>;
-      return item["kind"] === "text" && typeof item["text"] === "string" ? item["text"] : "";
-    })
-    .join("")
-    .trim();
+  if (Array.isArray(prompt)) {
+    return prompt
+      .map((segment) => {
+        if (!segment || typeof segment !== "object") return "";
+        const item = segment as Record<string, unknown>;
+        return item["kind"] === "text" && typeof item["text"] === "string" ? item["text"] : "";
+      })
+      .join("")
+      .trim();
+  }
+  // 文本生成走的是文本命令（`StartTextGenerationCommand`），提示词在 userPrompt。
+  const userPrompt = record["userPrompt"];
+  return typeof userPrompt === "string" ? userPrompt : "";
 }
 
 /**
@@ -374,7 +403,7 @@ export function useCreateSession(): CreateSession {
   const refresh = useCallback(async () => {
     try {
       const page = await generationClient.list({ canvasId: CREATE_CANVAS_ID, limit: 50 });
-      const details = await Promise.all(page.items.map((item) => generationClient.get(item.id)));
+      const details = await Promise.all(page.items.map((item) => generationClient.getProgress(item.id)));
       const next: CreateRecord[] = details.map((detail) => {
         const summary = detail.summary;
         const expected = countExpected(detail);
@@ -386,6 +415,7 @@ export function useCreateSession(): CreateSession {
           operation: summary.operation,
           createdAt: summary.createdAt,
           results: toResultItems(detail),
+          textOutput: detail.textOutput?.optimizedPrompt ?? null,
           error: detail.finalError ?? null,
           expectedCount: expected,
           parameterLabels: describeRecordParameters(detail),
@@ -437,7 +467,7 @@ export function useCreateSession(): CreateSession {
       await Promise.all(
         ids.map(async (taskId) => {
           try {
-            const detail = await generationClient.get(taskId);
+            const detail = await generationClient.getProgress(taskId);
             if (cancelled) return;
             setRecords((previous) =>
               previous.map((record) =>
@@ -446,6 +476,7 @@ export function useCreateSession(): CreateSession {
                       ...record,
                       status: detail.summary.status,
                       results: toResultItems(detail),
+                      textOutput: detail.textOutput?.optimizedPrompt ?? null,
                       error: detail.finalError ?? null,
                       expectedCount: countExpected(detail),
                     }
@@ -478,6 +509,30 @@ export function useCreateSession(): CreateSession {
       setSubmitting(true);
       setSubmitError(null);
       try {
+        /*
+         * 文本生成不走媒体任务管线。
+         *
+         * 管线里 `text_generation` 是被显式拦掉的（文本模型不走图片/视频的请求
+         * 构造），所以创作台的「文本生成」必须走文本通道：建任务 → 后台执行 →
+         * 立刻返回任务 ID → 前端按任务轮询。这样它才有产物、才进生成历史，
+         * 也不会把提交按钮按住几十秒。
+         */
+        if (input.operation === "text_generation") {
+          const taskId = await textGenerationClient.start({
+            canvasId: CREATE_CANVAS_ID,
+            sourceNodeId: CREATE_SOURCE_NODE_ID,
+            providerConnectionId: input.model.providerConnectionId,
+            modelDefinitionId: input.model.modelDefinitionId,
+            userPrompt: input.prompt,
+            referenceInputs: input.references.map((reference) => ({
+              target: referenceTargetOf(reference),
+              displayName: reference.name,
+            })),
+          });
+          liveTasks.current.add(taskId);
+          await refresh();
+          return;
+        }
         const capabilities = modelParameterCapabilities(
           input.model.operationSchema,
           input.operation,

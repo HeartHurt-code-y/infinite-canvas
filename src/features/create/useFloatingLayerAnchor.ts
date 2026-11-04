@@ -24,8 +24,14 @@
  * 黑缝——参数面板上限 420、实际只有 120 时，面板会飘到触发器上方 300px，
  * 孤零零挂在视口中间。所以这里用 ResizeObserver 量面板自己的高度。
  */
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useId, useLayoutEffect, useRef } from "react";
 import { placeFloatingLayer, type FloatingLayerOptions } from "../../components/floatingLayer";
+import {
+  isInsideFloatingLayerFamily,
+  registerFloatingLayer,
+  unregisterFloatingLayer,
+  useFloatingLayerParentId,
+} from "./floatingLayerFamily";
 
 /**
  * 即梦创作台浮层相对触发器左边缘的左移量（px）。
@@ -54,6 +60,15 @@ export interface UseFloatingLayerAnchorOptions extends Omit<
 export interface FloatingLayerAnchor<T extends HTMLElement = HTMLElement> {
   /** 挂到浮层根节点上的 ref。 */
   readonly ref: React.RefObject<T | null>;
+  /**
+   * 本浮层在「浮层家族」里的 id。
+   *
+   * 浮层都是 portal 到 body 的，DOM 祖先关系在 portal 之后就没了，
+   * 「外层浮层里的下拉菜单算不算内部」只能靠显式的父子关系判。
+   * 这个 id 就是那棵树的节点 id：传给 `useDismissOnOutside`，
+   * 并通过 `FloatingLayerParentContext` 传给内层浮层。
+   */
+  readonly layerId: string;
 }
 
 /**
@@ -66,6 +81,9 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
 ): FloatingLayerAnchor<T> {
   const { open, anchorRef, minWidth, preferAbove, maxHeight, margin, leftOffset, gap, align, followAnchor } = options;
   const layerRef = useRef<T | null>(null);
+  const layerId = useId();
+  /** 本浮层挂在谁下面（顶层为 null）。portal 不改 React 树，context 照样传得到。 */
+  const parentLayerId = useFloatingLayerParentId();
   /*
    * 面板实际高度。
    *
@@ -145,7 +163,20 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
     return () => window.clearInterval(timer);
   }, [open, followAnchor, applyPosition]);
 
-  return { ref: layerRef };
+  /*
+   * 登记到「浮层家族」。
+   *
+   * 关闭即注销：父浮层要靠这张表判断「刚点的那个东西是不是我的子浮层」，
+   * 留着已关闭的层会让外层面板误判（该关的不关、不该关的关不掉）。
+   */
+  useLayoutEffect(() => {
+    const layer = layerRef.current;
+    if (!open || layer == null) return;
+    registerFloatingLayer(layerId, parentLayerId, layer);
+    return () => unregisterFloatingLayer(layerId);
+  }, [layerId, open, parentLayerId]);
+
+  return { ref: layerRef, layerId };
 }
 
 /**
@@ -177,6 +208,7 @@ export function useDismissOnOutside(
   layerRef: React.RefObject<HTMLElement | null>,
   anchorRef: React.RefObject<HTMLElement | null>,
   onDismiss: () => void,
+  layerId?: string,
 ): void {
   const dismissRef = useRef(onDismiss);
   useLayoutEffect(() => {
@@ -187,11 +219,20 @@ export function useDismissOnOutside(
     if (!open) return;
     const handleMousedown = (event: MouseEvent): void => {
       const target = event.target;
-      if (
-        target instanceof Node &&
-        (layerRef.current?.contains(target) || anchorRef.current?.contains(target))
-      ) {
-        return;
+      if (target instanceof Node) {
+        if (layerRef.current?.contains(target) || anchorRef.current?.contains(target)) {
+          return;
+        }
+        /*
+         * 子浮层里的点击也算「内部」。
+         *
+         * 子浮层（下拉菜单）是 portal 出去的独立 DOM 节点，DOM 上不属于
+         * 这个面板；但它在浮层家族上是面板的孩子。不认这一层的话，
+         * capture 阶段的这一下会先把面板关掉，菜单随之卸载，选项的
+         * click 永远轮不到——用户看到的现象是「点模型列表项，面板直接
+         * 没了，选择也没生效」。
+         */
+        if (layerId && isInsideFloatingLayerFamily(target, layerId)) return;
       }
       dismissRef.current();
     };

@@ -23,6 +23,7 @@ import type {
   CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { CanvasTabs } from "./CanvasTabs";
+import type { CanvasAssetDrawerTab } from "./CanvasAssetDrawer";
 import { CanvasDeleteDialog } from "./CanvasDeleteDialog";
 import { openCreateStudio } from "../create/openCreateStudio";
 import { WorkspaceApp } from "./WorkspaceApp";
@@ -88,6 +89,7 @@ export function CanvasWorkspace() {
   const canvasNames = useRef<Map<string, string>>(undefined!);
   canvasNames.current ??= new Map([[initialCanvasId, CANVAS_DOCUMENT_TITLE]]);
   const [activeCanvasId, setActiveCanvasId] = useState(initialCanvasId);
+  const [assetDrawerTab, setAssetDrawerTab] = useState<CanvasAssetDrawerTab | null>(null);
   const activeId = useRef(initialCanvasId);
   const [visited, setVisited] = useState<readonly string[]>([initialCanvasId]);
   const sessions = useRef<Map<string, CanvasSessionHandle>>(undefined!);
@@ -481,6 +483,9 @@ export function CanvasWorkspace() {
               services={services}
               canvasCatalog={canvases}
               onSelectCanvas={selectCanvas}
+              onCreateCanvas={createCanvas}
+              assetDrawerTab={assetDrawerTab}
+              onAssetDrawerTabChange={setAssetDrawerTab}
               canvasNavigation={
                 id === activeCanvasId ? (
                   <CanvasTabs

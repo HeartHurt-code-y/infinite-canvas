@@ -1,10 +1,11 @@
-import { Handle, Position, getBezierPath, type EdgeProps, type NodeProps } from "@xyflow/react";
-import { memo, useState } from "react";
+import { Handle, Position, getBezierPath, useStore, type EdgeProps, type NodeProps } from "@xyflow/react";
+import { memo, useCallback, useState } from "react";
 import type { CanvasFlowEdge, CanvasFlowNode } from "./workspaceModel";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import "./CanvasNodeCard.css";
 
 const CANVAS_NODE_INTERACTIVE_SELECTOR = [
-  "button:not(.canvas-asset-node__preview-button)",
+  "button:not(.canvas-asset-node__preview-button, .canvas-asset-group__chip, .canvas-node-toolbar__label--editable)",
   "input",
   "textarea",
   "select",
@@ -33,23 +34,11 @@ function protectCanvasControlFromDrag(target: EventTarget | null, boundary: HTML
   if (control != null && boundary.contains(control)) control.classList.add("nodrag");
 }
 
-/**
- * 连接手柄的内容：原站 liblib 的手柄本体是 0×0 的不可见元素，里面套一个 80×80 的
- * 圆形命中区，命中区正中再放一枚 20×20 的可见旋钮（圆 + 描边 + 十字）。
- * 旋钮默认透明，节点悬停 / 选中时才显形。
- */
 function CanvasHandleKnob() {
   return (
-    <>
-      <span className="canvas-flow-handle__hit" aria-hidden="true" />
-      <span className="canvas-flow-handle__knob" aria-hidden="true">
-        <svg width={20} height={20} viewBox="0 0 20 20" fill="none" focusable="false">
-          <circle cx={10} cy={10} r={9.35} className="canvas-flow-handle__knob-fill" />
-          <circle cx={10} cy={10} r={9.35} className="canvas-flow-handle__knob-ring" />
-          <path d="M10 6.5v7M6.5 10h7" className="canvas-flow-handle__knob-plus" />
-        </svg>
-      </span>
-    </>
+    <span className="canvas-flow-handle__knob" aria-hidden="true">
+      <span className="canvas-flow-handle__circle"><LibTVMediaIcon name="plus-s" size={14} /></span>
+    </span>
   );
 }
 
@@ -61,6 +50,7 @@ function CanvasHandleKnob() {
 export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
   data,
   selected,
+  isConnectable,
 }: NodeProps<CanvasFlowNode>) {
   return (
     <div
@@ -76,7 +66,6 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
       }
     >
       {data.content}
-      {selected && data.floatingToolbar ? data.floatingToolbar : null}
       {data.inputSummary ? (
         <div className="canvas-flow-input-summary" role="status" title={data.inputDetails}>
           {data.inputSummary}
@@ -103,7 +92,9 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
           role="button"
           aria-haspopup="menu"
           aria-keyshortcuts="Enter Space"
-          tabIndex={selected ? 0 : -1}
+          isConnectable={isConnectable}
+          tabIndex={selected && isConnectable ? 0 : -1}
+          onClick={(event) => event.stopPropagation()}
         >
           <CanvasHandleKnob />
         </Handle>
@@ -118,7 +109,9 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
           role="button"
           aria-haspopup="menu"
           aria-keyshortcuts="Enter Space"
-          tabIndex={selected ? 0 : -1}
+          isConnectable={isConnectable}
+          tabIndex={selected && isConnectable ? 0 : -1}
+          onClick={(event) => event.stopPropagation()}
         >
           <CanvasHandleKnob />
         </Handle>
@@ -149,6 +142,8 @@ const EDGE_FLOW_SEGMENTS = [
  */
 export const CanvasFlowEdgeView = memo(function CanvasFlowEdgeView({
   id,
+  source,
+  target,
   sourceX,
   sourceY,
   targetX,
@@ -159,6 +154,10 @@ export const CanvasFlowEdgeView = memo(function CanvasFlowEdgeView({
   data,
 }: EdgeProps<CanvasFlowEdge>) {
   const [hovered, setHovered] = useState(false);
+  const endpointSelected = useStore(useCallback(
+    (state) => Boolean(state.nodeLookup.get(source)?.selected || state.nodeLookup.get(target)?.selected),
+    [source, target],
+  ));
   const [path] = getBezierPath({
     sourceX,
     sourceY,
@@ -167,7 +166,7 @@ export const CanvasFlowEdgeView = memo(function CanvasFlowEdgeView({
     targetY,
     targetPosition,
   });
-  const flowing = selected === true || hovered;
+  const flowing = selected === true || hovered || endpointSelected;
   return (
     <>
       {/*
@@ -180,7 +179,8 @@ export const CanvasFlowEdgeView = memo(function CanvasFlowEdgeView({
         d={path}
         className={`canvas-flow-edge__line ${data?.edgeClassName ?? ""}`}
         fill="none"
-        strokeWidth={2}
+        data-highlight={hovered || endpointSelected || undefined}
+        strokeWidth={hovered ? 4 : selected ? 3 : 2}
       />
       {data?.removable ? (
         <path

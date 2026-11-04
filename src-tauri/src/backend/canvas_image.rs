@@ -1,17 +1,12 @@
-//! 图片节点的本地意图编译与个人预设。不会向 liblib 发送请求。
-//!
-//! 原站 upscaler 是私有服务。本项目通过用户选择的图生图模型做高清重建，
-//! 不承诺确定的输出像素；模型、凭据、素材和结果仍由 TaskService 冻结与恢复。
-use std::{io::Write as _, path::Path, sync::Mutex};
+//! 图片意图编译：公开样图风格参考、专用超分、预设与翻译。
+use std::sync::Mutex;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
-    storage::now_ms,
-    types::{GenerationOperation, MediaType, PromptSegment, StartGenerationCommand},
+    types::{GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment, StartGenerationCommand},
 };
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -21,12 +16,7 @@ pub enum CanvasImageMode {
     Auto,
     ImageToImage,
     Upscale,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CanvasImageStyle {
-    pub name: String,
-    pub prompt: String,
+    MaskedEdit,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,8 +25,8 @@ pub struct StartCanvasImageCommand {
     pub generation: StartGenerationCommand,
     #[serde(default)]
     pub mode: CanvasImageMode,
-    pub target_resolution: Option<String>,
-    pub style: Option<CanvasImageStyle>,
+    pub style_reference: Option<super::image_style_market::ImageStyleReference>,
+    pub upscale_scale: Option<u32>,
     pub preset: Option<super::image_presets::ImagePresetSelection>,
     pub camera_control: Option<super::camera_control::CanvasCameraControl>,
     #[serde(default)]
@@ -94,6 +84,41 @@ pub fn compile(command: StartCanvasImageCommand) -> BackendResult<StartGeneratio
     if !matches!(generation.operation, GenerationOperation::TextToImage | GenerationOperation::ImageToImage) {
         return Err(BackendError::validation("图片节点只能提交图片任务", Value::Null));
     }
+    if matches!(command.mode, CanvasImageMode::MaskedEdit) {
+        let media = &generation.explicit_media;
+        let valid_media = media.len() == 2 && ["image", "mask"].into_iter().all(|role|
+            media.iter().filter(|item| item.role == role && matches!(item.target,
+                MediaReferenceTarget::LocalFile { media_type: MediaType::Image, .. })).count() == 1
+        );
+        if !valid_media || !matches!(generation.prompt.as_slice(), [PromptSegment::Text { text }] if !text.trim().is_empty()) {
+            return Err(BackendError::validation("扩图和重绘需要一张底图、一张蒙版和一份文字描述。", Value::Null));
+        }
+        generation.operation = GenerationOperation::ImageToImage;
+        return Ok(generation);
+    }
+    if matches!(command.mode, CanvasImageMode::Upscale) {
+        generation.operation = GenerationOperation::ImageToImage;
+        generation.parameters = serde_json::json!({"outscale":command.upscale_scale.unwrap_or(2),"output_format":"png"});
+        generation.generation_count = 1;
+        // Retain media mentions so images pasted into the prompt remain valid inputs.
+        // The dedicated provider encoder sends no prompt to the upscaler.
+        return Ok(generation);
+    }
+    if let Some(style) = command.style_reference {
+        super::image_style_market::validate_reference(&style)?;
+        let next_position = generation.explicit_media.iter().filter_map(|item| item.type_position)
+            .chain(generation.prompt.iter().filter_map(|item| match item { PromptSegment::MediaReference { type_position, .. } => *type_position, _ => None })).max().unwrap_or(0) + 1;
+        let next_index = generation.explicit_media.iter().filter_map(|item| item.content_index)
+            .chain(generation.prompt.iter().filter_map(|item| match item { PromptSegment::MediaReference { content_index, .. } => *content_index, _ => None })).max().unwrap_or(0) + 1;
+        generation.prompt.push(PromptSegment::Text { text: format!("\n风格参考（{}）：", style.name) });
+        generation.prompt.push(PromptSegment::MediaReference {
+            mention_id: format!("style-reference:{}", style.id),
+            target: MediaReferenceTarget::Url { url: style.image_url, media_type: MediaType::Image, canvas_node_key: None },
+            display_name_snapshot: format!("风格参考：{}", style.name),
+            type_position: Some(next_position), content_index: Some(next_index),
+        });
+        generation.prompt.push(PromptSegment::Text { text: "。只参考这张样图的画风、色彩与质感，主体内容遵循用户描述；不要复制样图里的文字、水印和排版。".into() });
+    }
     let has_image = generation.explicit_media.iter().any(|input| input.target.media_type() == MediaType::Image)
         || generation.prompt.iter().any(|segment| matches!(segment, PromptSegment::MediaReference { target, .. } if target.media_type() == MediaType::Image));
     if matches!(command.mode, CanvasImageMode::ImageToImage | CanvasImageMode::Upscale) && !has_image {
@@ -107,106 +132,5 @@ pub fn compile(command: StartCanvasImageCommand) -> BackendResult<StartGeneratio
     if !camera_locked && let Some(camera_control) = command.camera_control {
         super::camera_control::compile(camera_control, &mut generation)?;
     }
-    if let Some(style) = command.style {
-        validate_text(&style.name, 100, "风格名称")?;
-        validate_text(&style.prompt, 10000, "风格描述")?;
-        generation.prompt.push(PromptSegment::Text { text: format!("\n画面风格「{}」：{}", style.name.trim(), style.prompt.trim()) });
-    }
-    if matches!(command.mode, CanvasImageMode::Upscale) {
-        let resolution = command.target_resolution.as_deref().unwrap_or("2K");
-        if !matches!(resolution, "1K" | "2K" | "4K") {
-            return Err(BackendError::validation("请选择 1K、2K 或 4K 高清目标", Value::Null));
-        }
-        generation.operation = GenerationOperation::ImageToImage;
-        generation.prompt.push(PromptSegment::Text { text: format!("\n对参考图片进行高清重建，目标清晰度 {resolution}。保留原图主体、身份、构图、文字和色彩，提升边缘、纹理与细节，减少压缩噪声，不添加新物体。实际输出尺寸遵循当前模型的参数。") });
-    }
     Ok(generation)
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanvasImagePreset {
-    pub id: String,
-    pub kind: String,
-    pub name: String,
-    pub text: String,
-    pub updated_at: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveCanvasImagePresetCommand {
-    pub id: Option<String>,
-    pub kind: String,
-    pub name: String,
-    pub text: String,
-}
-
-// 所有窗口共用同一把锁，读取、修改、原子替换构成一次事务。
-static PRESETS_LOCK: Mutex<()> = Mutex::new(());
-
-fn validate_text(value: &str, max: usize, label: &str) -> BackendResult<()> {
-    if value.trim().is_empty() || value.chars().count() > max {
-        return Err(BackendError::validation(format!("{label}不能为空，且不能超过 {max} 字"), Value::Null));
-    }
-    Ok(())
-}
-
-fn read_presets(directory: &Path) -> BackendResult<Vec<CanvasImagePreset>> {
-    let path = directory.join("canvas-image-presets.json");
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-pub fn list_presets(directory: &Path) -> BackendResult<Vec<CanvasImagePreset>> {
-    let _guard = PRESETS_LOCK.lock().map_err(|_| BackendError::Conflict("预设库暂不可用，请重启应用".into()))?;
-    let mut presets = read_presets(directory)?;
-    presets.sort_by_key(|preset| std::cmp::Reverse(preset.updated_at));
-    Ok(presets)
-}
-
-fn write_presets(directory: &Path, presets: &[CanvasImagePreset]) -> BackendResult<()> {
-    std::fs::create_dir_all(directory)?;
-    let mut file = tempfile::NamedTempFile::new_in(directory)?;
-    file.write_all(&serde_json::to_vec_pretty(presets)?)?;
-    file.as_file().sync_all()?;
-    file.persist(directory.join("canvas-image-presets.json")).map_err(|error| error.error)?;
-    Ok(())
-}
-
-pub fn save_preset(directory: &Path, command: SaveCanvasImagePresetCommand) -> BackendResult<CanvasImagePreset> {
-    if !matches!(command.kind.as_str(), "style" | "prompt") {
-        return Err(BackendError::validation("预设类型无效", Value::Null));
-    }
-    validate_text(&command.name, 100, "预设名称")?;
-    validate_text(&command.text, 10000, "预设内容")?;
-    let _guard = PRESETS_LOCK.lock().map_err(|_| BackendError::Conflict("预设库暂不可用，请重启应用".into()))?;
-    let mut presets = read_presets(directory)?;
-    let index = if let Some(id) = &command.id {
-        Some(presets.iter().position(|preset| &preset.id == id && preset.kind == command.kind)
-            .ok_or_else(|| BackendError::NotFound("这份预设已删除，请重新读取".into()))?)
-    } else { None };
-    if index.is_none() && presets.len() >= 500 {
-        return Err(BackendError::validation("最多保存 500 份个人预设，请先清理不再使用的条目", Value::Null));
-    }
-    let preset = CanvasImagePreset {
-        id: command.id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        kind: command.kind,
-        name: command.name.trim().to_string(),
-        text: command.text.trim().to_string(),
-        updated_at: now_ms(),
-    };
-    if let Some(index) = index { presets[index] = preset.clone(); } else { presets.push(preset.clone()); }
-    write_presets(directory, &presets)?;
-    Ok(preset)
-}
-
-pub fn delete_preset(directory: &Path, id: &str) -> BackendResult<()> {
-    let _guard = PRESETS_LOCK.lock().map_err(|_| BackendError::Conflict("预设库暂不可用，请重启应用".into()))?;
-    let mut presets = read_presets(directory)?;
-    presets.retain(|preset| preset.id != id);
-    write_presets(directory, &presets)
 }

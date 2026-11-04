@@ -37,37 +37,11 @@
 .workspace-shell--immersive .canvas-stage {
   container: creative-stage / inline-size;
 }
-.workspace-shell--immersive .asset-panel {
-  position: absolute;
-  z-index: var(--z-modal);
-  inset: calc(var(--size-header) + var(--space-md)) auto var(--size-studio-dock-clearance)
-    var(--space-md);
-  display: flex;
-  width: min(calc(var(--size-assets) + var(--space-md)), calc(100% - 2 * var(--space-md)));
-  padding: var(--space-md);
-  visibility: hidden;
-  opacity: 0;
-  pointer-events: none;
-  background: var(--color-surface-1);
-  border: var(--rule-thin) solid var(--color-rule);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-raised);
-  transform: none;
-  transition: none;
-}
-.workspace-shell--immersive .asset-panel.is-mobile-open {
-  visibility: visible;
-  opacity: 1;
-  pointer-events: auto;
-}
 .workspace-shell--immersive .panel-title-row {
   gap: var(--space-xs);
 }
 .workspace-shell--immersive .panel-title-row__actions {
   gap: var(--space-2xs);
-}
-.workspace-shell--immersive .mobile-panel-close--assets {
-  position: static;
 }
 .workspace-shell--immersive .canvas-flow-bg--minor circle {
   fill: var(--color-grid-major);
@@ -180,26 +154,5 @@
   }
   .workspace-shell--immersive .canvas-viewport-dock {
     max-width: calc(100% - var(--space-3xl));
-  }
-}
-@media (max-height: 40rem) {
-  .workspace-shell--immersive .asset-panel {
-    bottom: var(--space-md);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-  .workspace-shell--immersive .asset-panel > * {
-    flex-shrink: 0;
-  }
-  .workspace-shell--immersive .asset-panel .panel-title-row {
-    position: sticky;
-    z-index: var(--z-raised);
-    top: 0;
-    background: var(--color-surface-1);
-  }
-  .workspace-shell--immersive .asset-panel .asset-grid {
-    flex: 0 0 auto;
-    min-height: var(--size-assets);
-    overflow: visible;
   }
 }

@@ -73,6 +73,11 @@
   background: var(--color-paper-2);
 }
 
+.canvas-select__option[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 .canvas-select__option.is-selected {
   color: var(--color-accent);
   font-weight: 700;

@@ -14,8 +14,9 @@
  * `radio-group-disabled-*` / `aspect-ratio-radio-group-disabled-*`）——
  * 这两个值交给后端决定，前端不猜。
  */
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { JimengIcon } from "./JimengIcon";
 import { CREATE_ASPECT_RATIOS } from "./createModel";
 import {
@@ -27,6 +28,10 @@ import {
 import { CreateModelSelect } from "./CreateModelSelect";
 import { useControllableOpen } from "./useControllableOpen";
 import { useDismissOnOutside, useCreateFloatingLayerAnchor } from "./useFloatingLayerAnchor";
+import {
+  FloatingLayerParentContext,
+  hasOpenChildLayer,
+} from "./floatingLayerFamily";
 import type { CreateModelOption } from "./useCreateSession";
 
 export interface CreateAgentPreferencesProps {
@@ -68,26 +73,28 @@ export function CreateAgentPreferences({
     () => readCreateSizeTokenPx(AGENT_POPUP_WIDTH_TOKENS.preferences, 486),
     [],
   );
-  const { ref: popoverRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: popoverRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: triggerRef,
     minWidth: popupWidth,
     maxHeight: 420,
   });
-  useDismissOnOutside(open, popoverRef, triggerRef, () => setOpen(false));
+  useDismissOnOutside(open, popoverRef, triggerRef, () => setOpen(false), layerId);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [close, open]);
+  /*
+   * Esc 关闭偏好面板：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * Escape 归最内层：面板里点开的下拉菜单自己先认领（元素级 React 处理器
+   * 用 `preventDefault()` 认领），子浮层开着时本层也让开——一次按键只关一层，
+   * 不会再出现「只想关下拉，整个面板却没了」。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => open && !hasOpenChildLayer(layerId),
+      handle: () => close(),
+    },
+    open,
+  );
 
   const selectedModel = models.find(
     (model) => model.modelDefinitionId === preferences.modelDefinitionId,
@@ -113,12 +120,19 @@ export function CreateAgentPreferences({
 
       {open
         ? createPortal(
-            <div
-              ref={popoverRef}
-              role="dialog"
-              aria-label={AGENT_COPY.preferencesTitle}
-              className="create-agent-preferences"
-            >
+            /*
+             * 面板里的下拉菜单（平台 / 模型）是 portal 出去的独立 DOM 节点，
+             * 但它们在**浮层家族**上是这个面板的孩子：点它们的选项不该把
+             * 面板关掉。用 context 把自己的 id 传下去，锚定 hook 会据此
+             * 登记父子关系。
+             */
+            <FloatingLayerParentContext.Provider value={layerId}>
+              <div
+                ref={popoverRef}
+                role="dialog"
+                aria-label={AGENT_COPY.preferencesTitle}
+                className="create-agent-preferences"
+              >
               <div className="create-agent-preferences__fields">
                 <section className="create-agent-preferences__field">
                   <header className="create-agent-preferences__title create-agent-preferences__title--primary">
@@ -217,7 +231,8 @@ export function CreateAgentPreferences({
                   </div>
                 </section>
               </div>
-            </div>,
+              </div>
+            </FloatingLayerParentContext.Provider>,
             document.body,
           )
         : null}

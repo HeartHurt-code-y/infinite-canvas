@@ -19,34 +19,40 @@
   inset: 0;
   /* 模态要盖过画布内的下拉浮层（它们在 --z-modal + 20）。 */
   z-index: calc(var(--z-modal) + 40);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--space-lg);
 }
 
 .canvas-shortcuts-dialog__backdrop {
   position: absolute;
   inset: 0;
-  background: var(--nt-modal-backdrop);
   cursor: default;
 }
 
 .canvas-shortcuts-dialog__panel {
-  position: relative;
+  position: absolute;
   display: flex;
-  /* 原站面板上限 1152px（72rem）；仓库暂无对应尺寸令牌，先按原站写死。 */
-  width: min(72rem, 100%);
-  max-height: calc(100dvh - var(--space-lg) * 2);
+  box-sizing: border-box;
+  container-type: inline-size;
   flex-direction: column;
   gap: var(--space-md);
   padding: var(--space-lg);
-  overflow: auto;
   background: var(--canvas-controls-bg);
   border: var(--rule-thin) solid var(--canvas-controls-border);
   border-radius: var(--radius-ll-float);
   box-shadow: var(--shadow-ll-float);
   color: var(--canvas-controls-text);
+}
+
+.canvas-shortcuts-dialog__panel::after {
+  position: absolute;
+  bottom: -7px;
+  left: var(--shortcuts-arrow);
+  width: 12px;
+  height: 12px;
+  transform: translateX(-50%) rotate(45deg);
+  border-right: var(--rule-thin) solid var(--canvas-controls-border);
+  border-bottom: var(--rule-thin) solid var(--canvas-controls-border);
+  background: var(--canvas-controls-bg);
+  content: "";
 }
 
 .canvas-shortcuts-dialog__close {
@@ -85,14 +91,16 @@
   grid-template-columns: minmax(0, 1fr);
   gap: var(--rule-thin);
   background: var(--canvas-controls-border);
+  overflow: auto;
+  min-height: 0;
 }
 
 .canvas-shortcuts-dialog__group {
   display: flex;
   min-width: 0;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md) var(--space-sm);
+  gap: var(--space-lg);
+  padding: 0 var(--space-lg);
   background: var(--canvas-controls-bg);
 }
 
@@ -115,7 +123,9 @@
 .canvas-shortcuts-dialog__entry {
   display: flex;
   min-width: 0;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
   gap: var(--space-2xs);
 }
 
@@ -131,9 +141,17 @@
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: end;
+  flex-shrink: 0;
   gap: var(--space-3xs);
   color: var(--canvas-controls-text);
   font-size: var(--text-sm);
+}
+
+.canvas-shortcuts-dialog__key-part {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
 }
 
 .canvas-shortcuts-dialog__key {
@@ -163,23 +181,6 @@
   font-size: var(--text-xs);
 }
 
-/*
- * 原站有、本项目尚未接入的快捷键：整条置灰并挂「待接入」角标。
- * 面板文案照抄原站，但不能让用户以为这些键位现在就能按。
- */
-.canvas-shortcuts-dialog__entry.is-unavailable {
-  opacity: 0.45;
-}
-
-.canvas-shortcuts-dialog__entry-pending {
-  padding: 0 var(--space-3xs);
-  border-radius: var(--radius-xs);
-  background: var(--nt-text-tertiary);
-  color: var(--panel-background);
-  font-size: var(--text-xs);
-  line-height: 1.6;
-}
-
 /* ── 画布右键上下文菜单 ─────────────────────────────────────────────────── */
 
 /*
@@ -200,39 +201,45 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
-  min-width: 11rem;
+  min-width: var(--canvas-context-menu-width);
   max-width: calc(100vw - var(--space-md) * 2);
   padding: var(--space-xs);
   overflow-y: auto;
   overscroll-behavior: contain;
   background: var(--canvas-controls-bg);
   border: var(--rule-thin) solid var(--canvas-controls-border);
-  border-radius: var(--radius-ll-float);
-  box-shadow: var(--shadow-ll-float);
+  border-radius: var(--canvas-context-menu-radius);
+  box-shadow: var(--canvas-context-menu-shadow);
   color: var(--canvas-controls-text);
 }
 
-.canvas-context-menu__item {
+.canvas-context-menu__item,
+.canvas-node-actions__menu button {
   display: flex;
   width: 100%;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--space-3xs);
-  padding: var(--space-2xs) var(--space-xs);
+  height: var(--canvas-context-menu-row-height);
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  padding: 0 var(--space-xs);
   border: none;
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--canvas-controls-text);
   font-family: inherit;
-  font-size: var(--text-sm);
+  font-size: var(--canvas-context-menu-font-size);
   line-height: 1.4;
   text-align: left;
   cursor: pointer;
   transition: background-color 120ms ease;
 }
 
-.canvas-context-menu__item:hover,
-.canvas-context-menu__item:focus-visible {
+.canvas-context-menu__item:hover:not(:disabled),
+.canvas-context-menu__item:focus-visible,
+.canvas-node-actions__menu button:hover:not(:disabled),
+.canvas-node-actions__menu button:focus-visible,
+.canvas-node-actions__menu button[aria-pressed="true"] {
   background: var(--canvas-controls-hover);
 }
 
@@ -245,27 +252,26 @@
   color: var(--color-error);
 }
 
-.canvas-context-menu__item-hint {
-  max-width: 100%;
-  overflow: hidden;
-  /* 正文级（菜单项右侧的快捷键提示）：用 secondary 达到 4.5:1。 */
-  color: var(--nt-text-secondary);
-  font-size: var(--text-xs);
-  text-overflow: ellipsis;
+.canvas-context-menu__shortcut {
+  color: var(--canvas-controls-text);
+  font-size: var(--canvas-context-menu-shortcut-size);
+  opacity: 0.4;
   white-space: nowrap;
 }
 
+.canvas-context-menu__item:disabled,
+.canvas-node-actions__menu button:disabled { opacity: 0.3; cursor: default; }
+
 /* ── 断点：分组列数 ─────────────────────────────────────────────────────── */
 
-/* 窄屏单列；中屏两列；宽屏三列（6 个分组刚好排满两行）。 */
-@media (min-width: 40rem) {
+@container (min-width: 31rem) {
   .canvas-shortcuts-dialog__groups {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (min-width: 64rem) {
+@container (min-width: 52rem) {
   .canvas-shortcuts-dialog__groups {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }

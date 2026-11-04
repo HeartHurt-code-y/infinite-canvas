@@ -54,7 +54,6 @@ export type RepositoryNodeKind =
   | "viral_remix"
   | "video_downloader"
   | "frame_extractor";
-export type MobilePanel = "assets" | null;
 
 export interface NodeModelSelection {
   readonly providerId: string;
@@ -135,6 +134,8 @@ export interface AssetUploadEntry {
 export interface CanvasNodeOrganization {
   /** 普通组织组身份。只组织节点，不授权或触发执行。沿用旧素材组字段以兼容存档。 */
   readonly assetGroupId?: string;
+  /** 画布节点的本地评级，0 或缺省表示未评级。 */
+  readonly rating?: number;
 }
 
 /** 从素材库拖到画布上生成的素材节点。旧文档未保存 source 时按 cloud 处理。 */
@@ -145,6 +146,8 @@ export interface AssetNodeData extends CanvasNodeOrganization {
   readonly providerConnectionId: string;
   readonly source?: AssetLibrarySource;
   readonly kind: AssetKind;
+  /** 底部素材库的风格／特效资源。缩略图只用于展示。 */
+  readonly libraryResource?: import("./canvasLibraryResources").CanvasLibraryResource;
   readonly name: string;
   readonly previewUrl: string | null;
   /** 可播放的视频源地址（视频素材节点：中间帧封面 + 悬浮播放）。 */
@@ -175,8 +178,6 @@ export interface AssetEdgeData {
 export interface CanvasFlowNodeData extends Record<string, unknown> {
   readonly groupMemberKeys?: readonly string[];
   readonly content: ReactNode;
-  /** 选中时浮在节点上方的工具条（liblib 的 .node-floating-ui）。 */
-  readonly floatingToolbar?: ReactNode;
   /** 编辑器独立于 React Flow 的视口卸载与缩放，按节点身份保留输入会话。 */
   readonly editorContent?: ReactNode;
   readonly hasSourceHandle: boolean;
@@ -321,9 +322,10 @@ export function fitMediaNodeDimensions(aspectRatio?: number): CanvasNodeDimensio
 }
 
 export function assetNodeDimensions(node: AssetNodeData): CanvasNodeDimensions {
+  if (node.libraryResource) return { width: 242, height: 242 };
   return node.kind === "audio"
     ? { width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT }
-    : fitMediaNodeDimensions(node.aspectRatio);
+    : fitMediaNodeDimensions(node.aspectRatio ?? (node.kind === "video" ? 16 / 9 : undefined));
 }
 
 export function measuredAspectRatio(width: number, height: number): number | null {
@@ -345,7 +347,7 @@ export const VIDEO_GEN_NODE_WIDTH = 622;
 export const VIDEO_GEN_NODE_HEIGHT = 350;
 export const VIDEO_GEN_NODE_COARSE_HEIGHT = 356;
 export const PROMPT_NODE_WIDTH = 350;
-export const PROMPT_NODE_HEIGHT = 400;
+export const PROMPT_NODE_HEIGHT = 350;
 export const PROMPT_NODE_COARSE_HEIGHT = 406;
 /** 音频节点：空态 320×350（原站 liblib 活体实测，见 docs/integrations/liblib-audio-node-re.md）。 */
 export const AUDIO_GEN_NODE_WIDTH = 320;
@@ -353,6 +355,7 @@ export const AUDIO_GEN_NODE_HEIGHT = 350;
 export const AUDIO_GEN_NODE_COARSE_HEIGHT = 356;
 export const SCREENPLAY_NODE_WIDTH = 622;
 export const SCREENPLAY_NODE_HEIGHT = 400;
+export const SCRIPT_GENERATOR_NODE_SIZE = 350;
 export const SCREENPLAY_NODE_COARSE_HEIGHT = 406;
 /** 智能剪辑节点：空态 350×350（原站实测），连接态封面区更宽。 */
 export const VIDEO_CLIP_NODE_WIDTH = 350;
@@ -476,6 +479,7 @@ export type GenNodeData =
   | (BaseGenNodeData & {
       readonly kind: "image";
       readonly config: ImageNodeConfig;
+      readonly imageGeneration?: import("./imageNodeResults").ImageNodeGeneration;
     })
   | (BaseGenNodeData & {
       readonly kind: "video";
@@ -750,6 +754,8 @@ export interface OutputLayerInfo {
  * 任务进行中先落下占位卡片展示进度，结果返回后先展示会话内预览，保存完成后切换到本地文件，失败展示完整原始错误。
  */
 export interface OutputNodeData extends CanvasNodeOrganization {
+  /** 视频生成默认在原节点内展示；用户主动展开的结果才单独铺到画布。 */
+  readonly standalone?: boolean;
   /** 用户改名独立于媒体身份和自动保存路径，结果补发不能覆盖。 */
   readonly customName?: string;
   /** 节点实例 id。 */
@@ -806,7 +812,7 @@ export function outputNodeDimensions(node: OutputNodeData): CanvasNodeDimensions
   }
   return node.finalPath == null && node.previewSrc == null
     ? { width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT }
-    : fitMediaNodeDimensions(node.aspectRatio);
+    : fitMediaNodeDimensions(node.aspectRatio ?? (node.mediaType === "video" ? 16 / 9 : undefined));
 }
 
 export function assetNodeKey(): string {
@@ -1928,7 +1934,7 @@ export function parseGenerationCountInput(raw: string, max: number = MAX_GENERAT
   return Math.min(max, Math.max(1, parsed));
 }
 
-/** 提示词优化功能已从图片/视频生成节点移除，交由独立「提示词生成与优化」节点承担。 */
+/** 图片节点的生成配置。 */
 export interface ImageNodeConfig {
   readonly cameraControl?: import("../../lib/canvasCameraControl").CanvasCameraControl | undefined;
   readonly imagePreset?: import("../../lib/canvasImagePresets").CanvasImagePresetSelection | undefined;
@@ -1936,7 +1942,9 @@ export interface ImageNodeConfig {
   readonly autoLink?: boolean;
   readonly advancedOpen?: boolean;
   readonly upscaleResolution?: "1K" | "2K" | "4K";
-  readonly style?: import("../../lib/canvasImage").CanvasImageStyle | undefined;
+  readonly upscaleProviderId?: string | undefined;
+  readonly upscaleScale?: 2 | 4;
+  readonly styleReference?: import("../../lib/imageStyleMarket").ImageStyleReference | undefined;
   readonly translationTask?: import("../../lib/canvasImage").CanvasImageTranslationTask | null;
   readonly modelSelection: NodeModelSelection;
   readonly generationCount: number;
@@ -1950,6 +1958,11 @@ export interface ImageNodeConfig {
 }
 
 export interface VideoNodeConfig {
+  readonly storyboard?: import("../../lib/videoStoryboard").VideoStoryboardConfig;
+  readonly effectVersionIds?: readonly number[];
+  readonly directorStyleKey?: string;
+  readonly translationTask?: import("../../lib/canvasImage").CanvasImageTranslationTask | null;
+  readonly promptOptimizationModelSelection?: NodeModelSelection;
   readonly longVideo?: import("../../lib/longVideo").LongVideoSettings;
   readonly longVideoRequest?: { readonly id: string; readonly fingerprint: string } | null;
   readonly longVideoDeliveries?: readonly string[];
@@ -2098,6 +2111,8 @@ export interface PromptNodeConfig {
   readonly conversation?: readonly PromptConversationEntry[];
   /** 当前可编辑输出（下发给下游节点）。 */
   readonly generatedPrompt: string;
+  /** 空正文也可保留已进入的手写状态。 */
+  readonly textResource?: true;
   /** 电影对白模式由用户确认的校验基准；不能用模型自报原文代替。 */
   readonly cinematicDialogueGuard?: CinematicDialogueGuard;
   /** 仅表示当前输出仍与最近一次通过项目校验的模型结果相同。 */
@@ -2599,11 +2614,13 @@ export function supportsGenerationNode(model: ConfiguredModel, nodeId: Generatio
 }
 
 export function isImageGenerationModel(model: ConfiguredModel): boolean {
-  return model.operations.includes("text_to_image") || model.operations.includes("image_to_image");
+  return !["atlascloud/image-upscaler", "atlascloud/masked-image-edit", "youchuan/v8.1/remove-background",
+    "bytedance/seedream-v5.0-pro/layer-decomposition"].includes(model.remoteModelId) &&
+    (model.operations.includes("text_to_image") || model.operations.includes("image_to_image"));
 }
 
 export function isVideoGenerationModel(model: ConfiguredModel): boolean {
-  return model.operations.includes("video_generation");
+  return model.remoteModelId !== "atlascloud/video-upscaler" && model.operations.includes("video_generation");
 }
 
 /** 语音（音频）生成模型：画布音频节点只认这一类。 */

@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 import { placeFloatingLayer } from "../../components/floatingLayer";
 import { ErrorAlert } from "../../components/ErrorAlert";
+import { useEscapeHandler } from "../../components/escapeArbiter";
+import { FloatingLayerParentContext, hasOpenChildLayer, isInsideFloatingLayerFamily,
+  registerFloatingLayer, unregisterFloatingLayer, useFloatingLayerParentId } from "../create/floatingLayerFamily";
 import { CanvasChromeIcon } from "./CanvasChromeIcons";
 import { PromptMentionInput } from "./PromptNodeViews";
 import { CanvasReferenceTools } from "./CanvasReferenceTools";
@@ -146,6 +149,7 @@ export function VideoClipEditor({
             <button
               type="button"
               className="video-clip-editor__submit"
+              data-canvas-generate=""
               aria-label="发送智能剪辑请求"
               // 报错与触发控件关联（WCAG 3.3.1）：键盘用户走到提交键就知道错在哪。
               aria-describedby={error ? `video-clip-error-${node.key}` : undefined}
@@ -232,6 +236,7 @@ function useFloatingPanel(
   onClose: () => void,
   /** 打开时聚焦哪个元素；不传就聚焦面板内第一个可操作元素。 */
   initialFocus?: () => HTMLElement | null,
+  layerId?: string,
 ): {
   readonly anchorRef: React.RefObject<HTMLElement | null>;
   readonly panelRef: React.Dispatch<React.SetStateAction<HTMLDivElement | null>>;
@@ -323,22 +328,23 @@ function useFloatingPanel(
     };
   }, [open, gap, minWidth, measuredHeight, panelRef]);
 
-  // Esc 关闭并回焦。
-  //
-  // 刻意**不**拦截 Tab：浮层是非模态的（菜单 / 参数面板），Tab 应当自然移出。
-  // 若在 capture 阶段就卸载浮层，浏览器还没转移焦点就找不到落脚点，焦点会丢到
-  // body（WCAG 2.4.3）。焦点真正离开浮层时由下面的 focusout 负责收起。
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      event.preventDefault();
-      event.stopPropagation();
-      closeAndRestoreFocus();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [open, closeAndRestoreFocus]);
+  /*
+   * Esc 关闭并回焦：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 之前这段自己挂在 document 的**捕获阶段**：抢在 React 冒泡处理之前把
+   * Escape 吃掉，浮层里的下拉（`CanvasSelect`）想先关自己都来不及。
+   *
+   * 刻意**不**拦截 Tab：浮层是非模态的（菜单 / 参数面板），Tab 应当自然移出。
+   * 若在卸载浮层前就拦掉 Tab，浏览器还没转移焦点就找不到落脚点，焦点会丢到
+   * body（WCAG 2.4.3）。焦点真正离开浮层时由下面的 focusout 负责收起。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => open && (!layerId || !hasOpenChildLayer(layerId)),
+      handle: () => closeAndRestoreFocus(),
+    },
+    open,
+  );
 
   // 焦点完全离开浮层与触发器时收起（Tab 出去 / Shift+Tab 出去 / 点了别处）。
   useEffect(() => {
@@ -348,11 +354,12 @@ function useFloatingPanel(
     const onFocusOut = (event: FocusEvent) => {
       const next = event.relatedTarget as Node | null;
       if (next && (panel.contains(next) || anchorRef.current?.contains(next))) return;
+      if (layerId && (next ? isInsideFloatingLayerFamily(next, layerId) : hasOpenChildLayer(layerId))) return;
       onCloseRef.current();
     };
     panel.addEventListener("focusout", onFocusOut);
     return () => panel.removeEventListener("focusout", onFocusOut);
-  }, [open, panelRef]);
+  }, [open, panelRef, layerId]);
 
   // 打开时把焦点移进浮层：键盘用户不需要 Tab 一路找过去。
   useEffect(() => {
@@ -378,21 +385,30 @@ function useFloatingPanel(
 function VideoClipReferenceButton({ node, disabled }: { readonly node: VideoClipNodeData; readonly disabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [referenceError, setReferenceError] = useState<string | null>(null);
+  const layerId = useId();
+  const parentLayerId = useFloatingLayerParentId();
   useEffect(() => { if (disabled) setOpen(false); }, [disabled]);
-  const { anchorRef, panelRef, panelElement, placement } = useFloatingPanel(open, 8, 260, () => setOpen(false));
+  const { anchorRef, panelRef, panelElement, placement } = useFloatingPanel(open, 8, 260, () => setOpen(false), undefined, layerId);
+  useLayoutEffect(() => {
+    if (!open || !panelElement) return;
+    registerFloatingLayer(layerId, parentLayerId, panelElement);
+    return () => unregisterFloatingLayer(layerId);
+  }, [open, panelElement, layerId, parentLayerId]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: PointerEvent) => {
-      if (event.target instanceof Node && !anchorRef.current?.contains(event.target) && !panelElement?.contains(event.target)) setOpen(false);
+      if (event.target instanceof Node && !anchorRef.current?.contains(event.target) && !isInsideFloatingLayerFamily(event.target, layerId)) setOpen(false);
     };
     document.addEventListener("pointerdown", outside, true);
     return () => document.removeEventListener("pointerdown", outside, true);
-  }, [open, anchorRef, panelElement]);
+  }, [open, anchorRef, layerId]);
   // Keep the tools mounted while picking: closing the popover must not cancel canvas picking.
   return <>
-    <button ref={anchorRef as React.RefObject<HTMLButtonElement | null>} type="button" className="canvas-gen-node__tool-chip" aria-label="添加参考素材" aria-expanded={open} aria-haspopup="dialog" disabled={disabled} onClick={() => setOpen(value => !value)}><CanvasChromeIcon name="plus" size={12} /><span>参考</span></button>
+    <button ref={anchorRef as React.RefObject<HTMLButtonElement | null>} type="button" className="canvas-gen-node__tool-chip" data-reference-panel-trigger aria-label="添加参考素材" aria-expanded={open} aria-haspopup="dialog" disabled={disabled} onClick={() => setOpen(value => !value)}><CanvasChromeIcon name="plus" size={12} /><span>参考</span></button>
     <FloatingPanel keepMounted open={open} panelRef={panelRef} placement={placement} className="video-clip-editor__reference-panel" role="dialog" ariaLabel="添加剪辑参考">
-      <CanvasReferenceTools node={node} active disabled={disabled} onError={setReferenceError} />
+      <FloatingLayerParentContext.Provider value={layerId}>
+        <CanvasReferenceTools node={node} active disabled={disabled} onError={setReferenceError} />
+      </FloatingLayerParentContext.Provider>
     </FloatingPanel>
     {referenceError ? <ErrorAlert error={referenceError} variant="inline" hint="检查素材后重新添加；添加参考不会发起生成。" /> : null}
   </>;

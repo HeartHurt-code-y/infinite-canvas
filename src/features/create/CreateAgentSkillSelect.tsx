@@ -18,6 +18,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { JimengIcon } from "./JimengIcon";
 import {
   AGENT_COPY,
@@ -76,31 +77,32 @@ export function CreateAgentSkillSelect({
    * 所以在运行时把令牌读成 px，而不是在代码里写死 365。
    */
   const popupWidth = useMemo(() => readCreateSizeTokenPx(AGENT_POPUP_WIDTH_TOKENS.skill, 365), []);
-  const { ref: popoverRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: popoverRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: triggerRef,
     minWidth: popupWidth,
     maxHeight: 432,
   });
-  useDismissOnOutside(open, popoverRef, triggerRef, () => setOpen(false));
+  useDismissOnOutside(open, popoverRef, triggerRef, () => setOpen(false), layerId);
 
   useEffect(() => {
     if (!open) return;
     searchRef.current?.focus();
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [close, open]);
+  /*
+   * Esc 关闭技能浮层：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 内层浮层先认领的 Escape 不再动作（仲裁器统一判断 `defaultPrevented`），
+   * 一次按键只关一层。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => close(),
+    },
+    open,
+  );
 
   return (
     <>

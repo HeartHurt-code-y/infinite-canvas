@@ -2,6 +2,7 @@ import * as v from "valibot";
 import { invokeDesktop } from "./ipc";
 import type { ExplicitMediaTarget, StartGenerationCommand, StartVideoClipCommand } from "./backend";
 import type { VideoClipParams } from "../features/workspace/videoClipModes";
+import { fontRefSchema, animationSchema, highlightSchema, type ClipFontRef, type ClipTextAnimation, type ClipWordHighlight } from "./clipTypography";
 
 const nodeKey = { canvasNodeKey: v.exactOptional(v.nullable(v.string())) };
 const mediaType = v.picklist(["video", "image", "audio"]);
@@ -37,6 +38,10 @@ export interface ClipOverlay {
   readonly color: string;
   readonly background: boolean;
   readonly bold: boolean;
+  readonly font?: ClipFontRef | null;
+  readonly weight?: number;
+  readonly highlight?: ClipWordHighlight;
+  readonly animation?: ClipTextAnimation;
 }
 export interface ClipTimelineSettings {
   readonly format: "mp4" | "webm";
@@ -48,7 +53,7 @@ export interface ClipTimelineSettings {
 export const DEFAULT_CLIP_SETTINGS: ClipTimelineSettings = { format: "mp4", subtitles: "soft", muted: false, instructions: "", overlays: [] };
 const secondsSchema = v.pipe(v.number(), v.finite(), v.minValue(0));
 const percent = v.pipe(v.number(), v.finite(), v.minValue(0), v.maxValue(100));
-const overlaySchema = v.object({ id: v.string(), kind: v.picklist(["text", "subtitle"]), text: v.pipe(v.string(), v.maxLength(2000)), start: secondsSchema, end: secondsSchema, x: percent, y: percent, size: v.pipe(v.number(), v.finite(), v.minValue(1), v.maxValue(20)), color: v.pipe(v.string(), v.regex(/^#[0-9a-fA-F]{6}$/)), background: v.boolean(), bold: v.boolean() });
+const overlaySchema = v.object({ id: v.string(), kind: v.picklist(["text", "subtitle"]), text: v.pipe(v.string(), v.maxLength(2000)), start: secondsSchema, end: secondsSchema, x: percent, y: percent, size: v.pipe(v.number(), v.finite(), v.minValue(1), v.maxValue(20)), color: v.pipe(v.string(), v.regex(/^#[0-9a-fA-F]{6}$/)), background: v.boolean(), bold: v.boolean(), font: v.exactOptional(v.nullable(fontRefSchema)), weight: v.exactOptional(v.pipe(v.number(), v.integer(), v.minValue(100), v.maxValue(900))), highlight: v.exactOptional(highlightSchema), animation: v.exactOptional(animationSchema) });
 const settingsSchema = v.object({ format: v.picklist(["mp4", "webm"]), subtitles: v.picklist(["soft", "burn", "hidden"]), muted: v.optional(v.boolean(), false), instructions: v.optional(v.pipe(v.string(), v.maxLength(20000)), ""), overlays: v.pipe(v.array(overlaySchema), v.maxLength(200)) });
 const clipSchema = v.object({ target: targetSchema, sourceIdentity: v.exactOptional(v.nullable(v.string())), name: v.string(), start: secondsSchema, end: secondsSchema, volume: v.pipe(v.number(), v.finite(), v.minValue(0), v.maxValue(2)), fade: v.boolean(), caption: v.pipe(v.string(), v.maxLength(2000)), transition: v.exactOptional(v.nullable(v.object({ kind: v.picklist(["fade", "black", "white"]), seconds: v.pipe(v.number(), v.finite(), v.minValue(0.04), v.maxValue(2)) }))) });
 const projectSchema = v.object({ version: v.literal(1), name: v.string(), params: v.object({

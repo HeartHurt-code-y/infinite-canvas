@@ -1,0 +1,46 @@
+.canvas-gen-node__tool-chip.canvas-reference-upload__trigger[aria-expanded="true"] {
+  background: var(--nt-bg-overlay-hover, #323232);
+  color: var(--nt-text-default, #f5f5f5);
+}
+
+.canvas-reference-upload__menu {
+  position: fixed;
+  z-index: calc(var(--z-modal) + 20);
+  display: grid;
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 4px;
+  overflow: auto;
+  border: 1px solid var(--nt-border-neutral-l1);
+  border-radius: 6px;
+  background: var(--nt-bg-float);
+  box-shadow: var(--shadow-ll-menu);
+}
+
+.canvas-reference-upload__menu > button {
+  display: block;
+  min-height: 36px;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--nt-text-default, #f5f5f5);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.canvas-reference-upload__menu > button:is(:hover, :focus-visible):enabled {
+  background: var(--nt-bg-overlay);
+}
+
+.canvas-reference-upload__menu > button:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: -2px;
+}
+
+.canvas-reference-upload__scrim {
+  z-index: calc(var(--z-modal) + 30);
+}

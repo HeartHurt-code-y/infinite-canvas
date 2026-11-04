@@ -22,7 +22,7 @@ export const LONG_VIDEO_STATUSES = [
 ] as const;
 export type LongVideoStatus = (typeof LONG_VIDEO_STATUSES)[number];
 
-/** 片段状态：中央任务状态 + 长视频自己的两个本地状态（等待提交 / 等待重试）。 */
+/** 片段状态：中央任务状态 + 长视频本地状态（等待提交 / 等待重试 / 正在保存）。 */
 export const LONG_VIDEO_SHOT_STATUSES = [
   "pending",
   "pending_retry",
@@ -31,6 +31,7 @@ export const LONG_VIDEO_SHOT_STATUSES = [
   "retry_wait",
   "queued",
   "running",
+  "saving",
   "succeeded",
   "failed",
   "unknown",
@@ -59,6 +60,7 @@ export const LONG_VIDEO_SHOT_STATUS: Readonly<Record<LongVideoShotStatus, string
   retry_wait: "退避等待中",
   queued: "排队中",
   running: "生成中",
+  saving: "正在保存",
   succeeded: "正在保存",
   failed: "失败",
   unknown: "回执待核对",

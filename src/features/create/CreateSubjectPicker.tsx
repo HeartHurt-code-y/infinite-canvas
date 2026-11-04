@@ -14,9 +14,10 @@
  * 主体体系（`TODO(agent-subjects)`），因此默认空列表，空态必须做完整——
  * 否则用户只会看到一块空白。
  */
-import { useCallback, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useCallback, useMemo, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 import { JimengIcon } from "./JimengIcon";
 import {
   AGENT_COPY,
@@ -86,26 +87,27 @@ export function CreateSubjectPicker({
     () => readCreateSizeTokenPx(AGENT_POPUP_WIDTH_TOKENS.subject, 240),
     [],
   );
-  const { ref: popoverRef } = useCreateFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: popoverRef, layerId } = useCreateFloatingLayerAnchor<HTMLDivElement>({
     open,
     anchorRef: anchor,
     minWidth: popupWidth,
     maxHeight: 320,
   });
-  useDismissOnOutside(open, popoverRef, anchor, () => setOpen(false));
+  useDismissOnOutside(open, popoverRef, anchor, () => setOpen(false), layerId);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [close, open]);
+  /*
+   * Esc 关闭主体浮层：交给全应用唯一的仲裁器（`escapeArbiter`）。
+   *
+   * 之前这段自己挂在 window 的**捕获阶段**：抢在 React 冒泡处理之前把 Escape
+   * 吃掉——浮层里的控件想先认领都来不及，一次按键会把外层也一起关掉。
+   */
+  useEscapeHandler(
+    {
+      canHandle: () => open,
+      handle: () => close(),
+    },
+    open,
+  );
 
   const toggle = (subject: AgentSubject) => {
     const exists = selected.some((item) => item.referenceId === subject.referenceId);

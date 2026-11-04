@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
 import type { ClipEdit, ClipTimelineSettings } from "../../lib/videoClipEditing";
 import { prepareVideoEditSource } from "../../lib/videoLocalEdit";
 import type { VideoClipParams } from "./videoClipModes";
 import { clipTimelineLayout } from "./clipTimelineLayout";
+import { ClipTextOverlay } from "./ClipTextOverlay";
+import { loadClipFont } from "../../lib/clipTypography";
 
 const timeLabel = (seconds: number) => `${Math.floor(seconds / 60)}:${(seconds % 60).toFixed(2).padStart(5, "0")}`;
 type Layout = ReturnType<typeof clipTimelineLayout>[number];
@@ -45,7 +46,7 @@ function VideoLayer({ item, position, playing, active, opacity, gain, muted, onR
 /** One project clock drives both sides of a transition, captions, seeking and source previews. */
 export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, onError }: {
   clips: readonly ClipEdit[]; settings: ClipTimelineSettings; params: VideoClipParams;
-  seek: { readonly index: number; readonly nonce: number };
+  seek: { readonly index: number; readonly nonce: number; readonly time?: number };
   onPosition: (index: number, sourceSeconds: number, timelineSeconds: number) => void;
   onError: (error: unknown) => void;
 }) {
@@ -54,7 +55,15 @@ export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, 
   const [position, setPosition] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState<ReadonlySet<string>>(new Set());
+  const [fontsReady, setFontsReady] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
+  const [stageHeight, setStageHeight] = useState(350);
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  useEffect(() => {
+    const stage = stageRef.current; if (!stage) return;
+    const observer = new ResizeObserver(entries => setStageHeight(entries[0]?.contentRect.height ?? 350));
+    observer.observe(stage); return () => observer.disconnect();
+  }, []);
   const callbackRef = useRef({ onError, onPosition });
   useEffect(() => { callbackRef.current = { onError, onPosition }; }, [onError, onPosition]);
   const report = useCallback((error: unknown) => { setPlaying(false); callbackRef.current.onError(error); }, []);
@@ -62,7 +71,13 @@ export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, 
     if (current.has(key) === value) return current;
     const next = new Set(current); if (value) next.add(key); else next.delete(key); return next;
   }), []);
-  useEffect(() => { setPosition(layout[seek.index]?.start ?? 0); }, [seek.nonce, seek.index]);
+  const fontKeys = JSON.stringify(settings.overlays.map(item => item.font?.id ?? ""));
+  useEffect(() => {
+    let disposed = false; setFontsReady(false);
+    void Promise.all(settings.overlays.flatMap(item => item.font ? [loadClipFont(item.font)] : [])).then(() => { if (!disposed) setFontsReady(true); }).catch(error => { if (!disposed) report(error); });
+    return () => { disposed = true; };
+  }, [fontKeys, report]);
+  useEffect(() => { setPosition(Math.max(0, Math.min(total, seek.time ?? layout[seek.index]?.start ?? 0))); }, [seek.nonce, seek.index, seek.time]);
   useEffect(() => { setPlaying(false); setPosition(current => Math.min(current, total)); }, [clips, settings, total]);
   const now = Math.min(Math.max(0, position), Math.max(0, total - 0.001));
   const visible = layout.filter(item => now >= item.start && now < item.end);
@@ -70,7 +85,7 @@ export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, 
   const upcoming = current ? layout[current.index + (visible.length > 1 ? 2 : 1)] : undefined;
   const layers = upcoming && upcoming.start - now < 1 ? [...visible, upcoming] : visible;
   const buffered = visible.length > 0 && visible.every(item => ready.has(JSON.stringify([item.index, item.clip.target])));
-  const tick = playing && buffered;
+  const tick = playing && buffered && fontsReady;
   useEffect(() => {
     if (!tick) return;
     let frame = 0; let previous = performance.now(); let pending = 0;
@@ -88,6 +103,9 @@ export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, 
   }, [current?.index, now]);
   const ratio = params.aspectRatio.split(":").map(Number);
   const aspect = (ratio[0] ?? 16) / (ratio[1] ?? 9);
+  const shortSide = Number(params.resolution.replace("P", ""));
+  const outputHeight = aspect >= 1 ? shortSide : Math.round(shortSide / aspect / 2) * 2;
+  const pixelRatio = stageHeight / outputHeight;
   const transition = visible.length === 2 ? visible[0]?.clip.transition : null;
   const phase = visible.length === 2 ? (now - visible[1]!.start) / visible[0]!.overlap : 0;
   const captions = settings.subtitles === "hidden" ? [] : visible.filter(item => item.clip.caption.trim()).map(item => item.clip.caption);
@@ -110,15 +128,17 @@ export function ClipTimelinePlayer({ clips, settings, params, seek, onPosition, 
         return <VideoLayer key={JSON.stringify([item.index, item.clip.target])} item={item} position={now} playing={tick}
           active={visible.includes(item)} opacity={opacity} gain={gain} muted={settings.muted} onReady={prepared} onError={report} />;
       })}
-      {settings.overlays.filter(item => now >= item.start && now < item.end && (item.kind === "text" || settings.subtitles !== "hidden")).map(item => <span key={item.id} className="clip-timeline__overlay" style={{ left: `${item.x}%`, top: `${item.y}%`, fontSize: `${item.size}cqh`, color: item.color, fontWeight: item.bold ? 700 : 400, background: item.background ? "#000a" : "transparent" } as CSSProperties}>{item.text}</span>)}
+      {settings.overlays.filter(item => now >= item.start && now < item.end && (item.kind === "text" || settings.subtitles !== "hidden")).map(item => <ClipTextOverlay key={item.id} overlay={item} seconds={now} width={pixelRatio} height={pixelRatio} reducedMotion={reducedMotion} onError={report} />)}
       {captions.length > 0 ? <span className="clip-timeline__overlay" style={{ left: "50%", top: "88%", fontSize: "4.5cqh", color: "white" }}>{captions.join("\n")}</span> : null}
     </div>
     <div className="clip-timeline__transport">
-      <button type="button" aria-label={playing ? "暂停整片预览" : "播放整片预览"} disabled={!clips.length} onClick={() => { if (position >= total) setPosition(0); setPlaying(value => !value); }}>{playing ? "暂停" : "播放整片"}</button>
+      <button type="button" aria-label={playing ? "暂停整片预览" : "播放整片预览"} disabled={!clips.length || !fontsReady} onClick={() => { if (position >= total) setPosition(0); setPlaying(value => !value); }}>{playing ? "暂停" : "播放整片"}</button>
       <output aria-live="off">{timeLabel(position)} / {timeLabel(total)}</output>
       <button type="button" onClick={() => { void stageRef.current?.requestFullscreen().catch(report); }}>全屏预览</button>
     </div>
     <input type="range" aria-label="整片播放位置" min={0} max={Math.max(total, 0.001)} step={0.01} value={Math.min(position, total)} onChange={event => setPosition(event.target.valueAsNumber)} />
+    {settings.overlays.some(item => item.animation && item.animation.type !== "none") ? <label className="clip-timeline__check"><input type="checkbox" checked={reducedMotion} onChange={event => setReducedMotion(event.target.checked)} />减少预览动效（导出保留动画）</label> : null}
     {playing && !buffered ? <p role="status">正在准备下一段预览…</p> : null}
+    {!fontsReady ? <p role="status">正在准备预览字体…</p> : null}
   </section>;
 }

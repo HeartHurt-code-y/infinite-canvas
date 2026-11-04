@@ -3,6 +3,7 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { Icon, type IconName } from "../../components/Icon";
 import { CanvasNodeEditorShell } from "./CanvasNodeEditor";
 import { CanvasNodeTitle } from "./VideoGenerationNode";
+import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { PROMPT_NODE_WIDTH, type CanvasNodeDimensions } from "./workspaceModel";
 
 export interface NodeEditingProps {
@@ -32,7 +33,7 @@ export function CanvasContentNode({
   children,
   cardBody,
   floatingPanel,
-  expandEditorOnOpen = false,
+  scriptCard = false,
 }: NodeEditingProps & {
   readonly node: {
     readonly key: string;
@@ -58,7 +59,7 @@ export function CanvasContentNode({
   readonly onRemove?: ((key: string) => void) | undefined;
   readonly onSizeChange?: ((key: string, size: CanvasNodeDimensions) => void) | undefined;
   readonly onRename?: ((key: string, name: string) => void) | undefined;
-  readonly children: ReactNode;
+  readonly children?: ReactNode;
   /**
    * 卡片主体：给了就用它替换默认的「内容摘要」块。
    *
@@ -73,7 +74,7 @@ export function CanvasContentNode({
    * `docs/integrations/liblib-text-node-re.md` 第 4 节。
    */
   readonly floatingPanel?: ReactNode | undefined;
-  readonly expandEditorOnOpen?: boolean;
+  readonly scriptCard?: boolean;
 }) {
   const elementRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -103,7 +104,6 @@ export function CanvasContentNode({
           height: node.measured?.height ?? 400,
         }}
         open={editorOpen}
-        expandOnOpen={expandEditorOnOpen}
         onClose={onCloseEditor}
       >
         <div className="canvas-content-editor">{children}</div>
@@ -111,6 +111,17 @@ export function CanvasContentNode({
     );
 
   const errorId = `node-preview-error-${node.key}`;
+  const textCard = node.kind === "prompt";
+  const compactCard = textCard || scriptCard;
+  const editorButton = (
+    <button type="button" className={`canvas-node-preview__edit${compactCard ? " canvas-text-card__edit" : ""}`}
+      data-open-node-editor={node.key} aria-label={textCard ? "编辑文本节点" : `编辑${kindLabel}`}
+      aria-controls={`node-editor-${node.key}`} aria-expanded={editorOpen}
+      aria-describedby={error ? errorId : undefined} onClick={() => onEdit(node.key)}>
+      {scriptCard ? <LibTVMediaIcon name="pencil" size={14} /> : <Icon name="pencil-simple" aria-hidden="true" size="sm" />}
+      {compactCard ? null : <span>{editorOpen ? "编辑中" : "编辑"}</span>}
+    </button>
+  );
   return (
     <div
       ref={elementRef}
@@ -118,6 +129,7 @@ export function CanvasContentNode({
       className={`canvas-gen-node canvas-node-preview canvas-content-preview${selected ? " is-selected" : ""}`}
       data-connection-target={node.key}
       data-node-kind={node.kind}
+      data-script-card={scriptCard ? "" : undefined}
       aria-busy={busy}
       onMouseDown={(event) => {
         if ((event.target as Element).closest("button, details, summary")) return;
@@ -128,7 +140,7 @@ export function CanvasContentNode({
         <div className="canvas-gen-node__header">
           <span className="canvas-gen-node__type">
             <span className="canvas-gen-node__type-icon" aria-hidden="true">
-              <Icon name={icon} size="md" />
+              {compactCard ? <LibTVMediaIcon name="text-file" size={14} /> : <Icon name={icon} size="md" />}
             </span>
             <span className="canvas-gen-node__type-copy">
               {onRename ? (
@@ -152,28 +164,16 @@ export function CanvasContentNode({
             <p>{summary.trim().slice(0, 1400) || "选中节点，填写要求或连接上游内容开始创作。"}</p>
           </div>
         )}
-        <div className="canvas-node-preview__meta">
+        {compactCard ? editorButton : <div className="canvas-node-preview__meta">
           <div className="canvas-node-preview__summary">
             <span title={metadata}>{metadata}</span>
             <p role="status" aria-live="polite">
               {status}
             </p>
           </div>
-          <button
-            type="button"
-            className="canvas-node-preview__edit"
-            data-open-node-editor={node.key}
-            aria-label={`编辑${kindLabel}：${kindLabel}`}
-            aria-controls={`node-editor-${node.key}`}
-            aria-expanded={editorOpen}
-            aria-describedby={error ? errorId : undefined}
-            onClick={() => onEdit(node.key)}
-          >
-            <Icon name="pencil-simple" aria-hidden="true" size="sm" />
-            <span>{editorOpen ? "编辑中" : "编辑"}</span>
-          </button>
-        </div>
-        {error ? (
+          {editorButton}
+        </div>}
+        {error && !compactCard ? (
           <ErrorAlert
             id={errorId}
             error={error}

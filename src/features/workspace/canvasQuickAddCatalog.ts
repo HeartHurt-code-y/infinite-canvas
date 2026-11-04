@@ -1,7 +1,10 @@
 import type { IconName } from "../../components/Icon";
+import type { LibTVMediaIconName } from "./LibTVMediaIcon";
+import { DIRECTOR_NODE_SIZE } from "./directorScene";
 import {
   SCREENPLAY_NODE_COARSE_HEIGHT,
   SCREENPLAY_NODE_HEIGHT,
+  SCRIPT_GENERATOR_NODE_SIZE,
   SCREENPLAY_NODE_WIDTH,
   VIDEO_CLIP_NODE_HEIGHT,
   VIDEO_CLIP_NODE_WIDTH,
@@ -10,16 +13,11 @@ import {
 } from "./workspaceModel";
 
 /**
- * 画布「添加节点」菜单的条目。
- *
- * 清单与原站 liblib.tv 画布逐项对齐（实测：点击节点手柄弹出的
- * 「引用该节点生成」菜单，见 docs/integrations/liblib-canvas-re.md 第 3.3 节）：
- *
- *   文本 · 图片 · 视频 · 智能剪辑(Beta) · 导演台(NEW) · 逐帧拉片 · 音频 · 剧本 · 参考节点
+ * 画布「添加节点」和手柄连线菜单共用的创建类型。
  *
  * 本项目的端口方向与原站相反：原站从**左侧**手柄「引用该节点生成」，这里输出端口在右、
  * 输入端口在左，于是同一个菜单有两种方向——点右侧（输出）= 引用该节点生成（新节点在左），
- * 点左侧（输入）= 接入该节点（新节点在右）。菜单副标题会写明当前是哪一种。
+ * 点左侧（输入）= 接入该节点（新节点在右）。菜单标题写明当前方向。
  *
  * 原站没有的节点类型（网络爆款视频下载 / 视频抽帧 / 爆款视频复刻）已删除；
  * 原站有而本项目后端尚未提供的（导演台 / 逐帧拉片 / 参考节点）
@@ -36,13 +34,14 @@ export type CanvasQuickAddKind =
   | "shot_breakdown"
   | "audio"
   | "screenplay"
+  | "screenplay_legacy"
   | "reference";
 
 export interface CanvasQuickAddChoice {
   readonly kind: CanvasQuickAddKind;
   /** 与原站一致的条目文案。 */
   readonly label: string;
-  readonly icon: IconName;
+  readonly icon: LibTVMediaIconName;
   /** 原站在该条目右侧的角标（Beta / NEW / 模型版本）。 */
   readonly badge?: string;
   /**
@@ -52,24 +51,33 @@ export interface CanvasQuickAddChoice {
   readonly available?: boolean;
 }
 
-/** 画布创建菜单只列出能立刻建出来的节点；未接入的条目按原站保留位置。 */
+/** 连线菜单沿用节点手柄的可选类型；空白处菜单使用原站的精简清单。 */
 export const CANVAS_QUICK_ADD_CHOICES: readonly CanvasQuickAddChoice[] = [
-  { kind: "text", label: "文本", icon: "text-t" },
-  { kind: "image", label: "图片", icon: "image" },
-  { kind: "video", label: "视频", icon: "video-camera" },
-  { kind: "video_clip", label: "智能剪辑", icon: "film-strip", badge: "Beta" },
-  { kind: "director", label: "导演台", icon: "video-camera", badge: "NEW", available: false },
+  { kind: "text", label: "文本", icon: "menu-q4-text" },
+  { kind: "image", label: "图片", icon: "menu-q4-image" },
+  { kind: "video", label: "视频", icon: "menu-q4-video" },
+  { kind: "video_clip", label: "智能剪辑", icon: "menu-q4-smart-clip", badge: "Beta" },
+  { kind: "director", label: "导演台", icon: "menu-q4-director", badge: "NEW" },
   {
     kind: "shot_breakdown",
     label: "逐帧拉片",
-    icon: "film-strip",
+    icon: "smart-breakdown",
     badge: "SD 2.5",
     available: false,
   },
-  { kind: "audio", label: "音频", icon: "music-notes" },
-  { kind: "screenplay", label: "剧本", icon: "book-open-text" },
-  { kind: "reference", label: "参考节点", icon: "clipboard", available: false },
+  { kind: "audio", label: "音频", icon: "menu-q4-audio" },
+  { kind: "screenplay", label: "脚本", icon: "menu-q4-script" },
+  { kind: "reference", label: "参考节点", icon: "link", available: false },
 ];
+
+const ADD_NODE_ORDER = ["text", "screenplay", "image", "video", "director", "video_clip", "audio"];
+export const CANVAS_ADD_NODE_CHOICES = ADD_NODE_ORDER.flatMap(kind =>
+  CANVAS_QUICK_ADD_CHOICES.filter(choice => choice.kind === kind),
+);
+export const CANVAS_ADD_SCRIPT_CHOICES = [
+  { kind: "screenplay", label: "脚本", badge: "NEW" },
+  { kind: "screenplay_legacy", label: "脚本（旧版）", badge: "Beta" },
+] as const;
 
 /**
  * 某一类新建节点的尺寸。
@@ -92,6 +100,10 @@ export function quickAddNodeDimensions(kind: CanvasQuickAddKind): {
     case "audio":
       return genNodeDimensions("audio");
     case "screenplay":
+      return { width: SCRIPT_GENERATOR_NODE_SIZE, height: SCRIPT_GENERATOR_NODE_SIZE };
+    case "director":
+      return { width: DIRECTOR_NODE_SIZE, height: DIRECTOR_NODE_SIZE };
+    case "screenplay_legacy":
       return {
         width: SCREENPLAY_NODE_WIDTH,
         height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,

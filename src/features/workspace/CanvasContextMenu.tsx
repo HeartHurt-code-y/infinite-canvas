@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useRef, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
+import { useEscapeHandler } from "../../components/escapeArbiter";
 
 import { useDismissOnOutside, useFloatingLayerAnchor } from "../create/useFloatingLayerAnchor";
 import "./CanvasChromeOverlays.css";
@@ -11,6 +12,8 @@ export interface CanvasContextMenuItem {
   readonly label: string;
   /** 补充说明（照抄原站 i18n 的提示文案），显示在文案下方。 */
   readonly hint?: string;
+  readonly shortcut?: string;
+  readonly disabled?: boolean;
   /** 删除一类的高风险动作，用错误色区分。 */
   readonly danger?: boolean;
 }
@@ -22,34 +25,9 @@ export interface CanvasContextMenuProps {
   readonly onClose: () => void;
   /** 选中某个动作时回调，参数是条目的 id。 */
   readonly onSelect?: (action: string) => void;
-  /** 菜单条目；不传时用原站画布右键菜单的默认条目。 */
-  readonly items?: readonly CanvasContextMenuItem[];
+  /** 调用方按当前节点与结果状态给出实际可用条目。 */
+  readonly items: readonly CanvasContextMenuItem[];
 }
-
-/*
- * 默认条目：文案照抄 liblib.tv 原站 i18n
- * （copyNode / copyNodeTip / copyImage / copyText / createCopy / createCopyTip /
- *   deleteOtherVideos / expandAllVideos / shortcutLabelGroup /
- *   shortcutLabelCopyExpanded / addToCanvas / openAiAssistant /
- *   shortcutLabelFormatLayout）。
- */
-const DEFAULT_CONTEXT_MENU_ITEMS: readonly CanvasContextMenuItem[] = [
-  { id: "copyNode", label: "复制节点", hint: "仅复制当前节点" },
-  { id: "copyImage", label: "复制图片" },
-  { id: "copyText", label: "复制文本" },
-  {
-    id: "duplicate",
-    label: "创建副本",
-    hint: "复制当前所有参数，方便你尝试不同提示词和参考内容；请注意仅支持复制上游连线，下游连线需根据新需求手动连接",
-  },
-  { id: "deleteOtherVideos", label: "删除其他视频", danger: true },
-  { id: "expandAllVideos", label: "展开所有视频" },
-  { id: "group", label: "成组" },
-  { id: "copyExpanded", label: "复制整组" },
-  { id: "addToCanvas", label: "添加到画布" },
-  { id: "openAiAssistant", label: "打开 AI 助手" },
-  { id: "formatLayout", label: "整理画布" },
-];
 
 interface CanvasContextMenuLayerProps {
   readonly position: { readonly x: number; readonly y: number } | null;
@@ -78,7 +56,7 @@ function CanvasContextMenuLayer({
   const anchorRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  const { ref: layerRef } = useFloatingLayerAnchor<HTMLDivElement>({
+  const { ref: layerRef, layerId } = useFloatingLayerAnchor<HTMLDivElement>({
     open: true,
     anchorRef,
     minWidth: 196,
@@ -87,11 +65,12 @@ function CanvasContextMenuLayer({
     maxHeight: 320,
   });
 
-  useDismissOnOutside(true, layerRef, anchorRef, onClose);
+  useDismissOnOutside(true, layerRef, anchorRef, onClose, layerId);
+  useEscapeHandler({ canHandle: () => true, handle: onClose });
 
   // 打开时把焦点落到第一项，键盘用户可以直接用方向键走菜单。
   useEffect(() => {
-    itemRefs.current[0]?.focus();
+    itemRefs.current.find(item => item && !item.disabled)?.focus();
   }, []);
 
   const handleSelect = useCallback(
@@ -104,13 +83,8 @@ function CanvasContextMenuLayer({
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        onClose();
-        return;
-      }
-      const elements = itemRefs.current.filter((item): item is HTMLButtonElement => item !== null);
+      if (event.nativeEvent.isComposing || event.keyCode === 229 || event.defaultPrevented) return;
+      const elements = itemRefs.current.filter((item): item is HTMLButtonElement => item !== null && !item.disabled);
       if (elements.length === 0) return;
       const current = elements.findIndex((item) => item === document.activeElement);
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
@@ -154,7 +128,7 @@ function CanvasContextMenuLayer({
         onKeyDown={handleKeyDown}
       >
         {items.map((item, index) => {
-          const hintId = `${menuId}-hint-${item.id}`;
+          const shortcut = item.shortcut?.replace(/mod\+([a-z])/u, (_, key: string) => `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl+"}${key.toUpperCase()}`);
           return (
             <button
               key={item.id}
@@ -165,16 +139,12 @@ function CanvasContextMenuLayer({
               }}
               className={`canvas-context-menu__item${item.danger === true ? " is-danger" : ""}`}
               aria-label={item.label}
-              aria-describedby={item.hint !== undefined ? hintId : undefined}
-              title={item.hint}
+              disabled={item.disabled}
+              data-tooltip={item.hint}
               onClick={() => handleSelect(item.id)}
             >
               <span className="canvas-context-menu__item-label">{item.label}</span>
-              {item.hint !== undefined ? (
-                <span id={hintId} className="canvas-context-menu__item-hint">
-                  {item.hint}
-                </span>
-              ) : null}
+              {shortcut ? <span className="canvas-context-menu__shortcut" aria-hidden="true">{shortcut}</span> : null}
             </button>
           );
         })}
@@ -197,7 +167,7 @@ export function CanvasContextMenu({
   position,
   onClose,
   onSelect,
-  items = DEFAULT_CONTEXT_MENU_ITEMS,
+  items,
 }: CanvasContextMenuProps) {
   if (!open) return null;
 

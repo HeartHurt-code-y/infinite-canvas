@@ -19,6 +19,7 @@ const documentNodes = (document: CanvasDocumentV2): CanvasNodeEntry[] => [
   ...document.genNodes.map((data) => ({ type: "gen" as const, data })),
   ...(document.screenplayNodes ?? []).map((data) => ({ type: "screenplay" as const, data })),
   ...(document.videoClipNodes ?? []).map((data) => ({ type: "videoClip" as const, data })),
+  ...(document.directorNodes ?? []).map((data) => ({ type: "director" as const, data })),
   ...document.resultNodes.map((data) => ({ type: "result" as const, data })),
   ...(document.outputNodes ?? []).map((data) => ({ type: "output" as const, data })),
 ];
@@ -27,6 +28,7 @@ const documentNodes = (document: CanvasDocumentV2): CanvasNodeEntry[] => [
 export function captureCanvasNodes(
   document: CanvasDocumentV2,
   selectedKeys: ReadonlySet<string>,
+  edgeMode: "internal" | "incoming" | "none" = "internal",
 ): CanvasNodeClipboard {
   const all = documentNodes(document);
   const skippedPendingOutputs = all.filter(
@@ -61,8 +63,8 @@ export function captureCanvasNodes(
   return structuredClone({
     groups,
     nodes,
-    edges: document.assetEdges.filter(
-      (edge) => copiedKeys.has(edge.fromKey) && copiedKeys.has(edge.toKey),
+    edges: edgeMode === "none" ? [] : document.assetEdges.filter(
+      (edge) => copiedKeys.has(edge.toKey) && (copiedKeys.has(edge.fromKey) || edgeMode === "incoming"),
     ),
     promptContents,
     skippedPendingOutputs,
@@ -101,7 +103,7 @@ export function pasteCanvasNodes(
   }
   const copiedInputKey = (targetKey: string, sourceKey: string): string | null =>
     incomingByTarget.get(targetKey)?.has(sourceKey) === true
-      ? (keysByOldKey.get(sourceKey) ?? null)
+      ? (keysByOldKey.get(sourceKey) ?? sourceKey)
       : null;
   const copiedConnectedSource = (targetKey: string, sourceKey: string): string | null => {
     const pending = [targetKey];
@@ -111,7 +113,7 @@ export function pasteCanvasNodes(
       if (visited.has(key)) continue;
       visited.add(key);
       for (const parent of incomingByTarget.get(key) ?? []) {
-        if (parent === sourceKey) return keysByOldKey.get(sourceKey) ?? null;
+        if (parent === sourceKey) return keysByOldKey.get(sourceKey) ?? sourceKey;
         pending.push(parent);
       }
     }
@@ -148,6 +150,7 @@ export function pasteCanvasNodes(
             ...data,
             ...position,
             sourceNodeId: keysByOldKey.get(data.sourceNodeId) ?? data.sourceNodeId,
+            standalone: true,
           },
         };
       }
@@ -161,6 +164,9 @@ export function pasteCanvasNodes(
             data: {
               ...entry.data,
               ...position,
+              ...(entry.data.imageGeneration ? {
+                imageGeneration: { ...entry.data.imageGeneration, taskIds: [] },
+              } : {}),
               config: {
                 ...config,
                 // 翻译是原节点的一次付费任务，副本只复制创作配置。
@@ -222,6 +228,17 @@ export function pasteCanvasNodes(
                     ),
                   }),
               ...(mediaRoles == null ? {} : { mediaRoles }),
+              ...(config.storyboard == null ? {} : { storyboard: {
+                ...config.storyboard,
+                shots: config.storyboard.shots.map(shot => ({ ...shot, id: crypto.randomUUID(), document: {
+                  ...shot.document,
+                  items: shot.document.items.map(item => {
+                    if (item.kind !== "media_reference") return item;
+                    const copiedKey = keysByOldKey.get(item.canvasNodeKey);
+                    return copiedKey == null ? item : { ...item, canvasNodeKey: copiedKey, target: { ...item.target, canvasNodeKey: copiedKey } };
+                  }),
+                } })),
+              } }),
               ...(config.whiteModelControl == null
                 ? {}
                 : {
@@ -301,6 +318,12 @@ export function pasteCanvasNodes(
           },
         };
       }
+      case "director":
+        return { ...entry, data: { ...entry.data, ...position,
+          panoramaKey: entry.data.panoramaKey ? copiedConnectedSource(entry.data.key, entry.data.panoramaKey) ?? null : null,
+          scene: { ...entry.data.scene, objects: entry.data.scene.objects.map(item => item.imageKey
+            ? { ...item, imageKey: copiedConnectedSource(entry.data.key, item.imageKey) ?? undefined } : item) },
+        } };
       case "videoClip":
         return { ...entry, data: { ...entry.data, ...position, config: {
           ...entry.data.config, submission: null, agentSubmission: null, renderDeliveries: [],
@@ -313,7 +336,7 @@ export function pasteCanvasNodes(
     }
   });
   const edges = clipboard.edges.map((edge) => {
-    const fromKey = keysByOldKey.get(edge.fromKey)!;
+    const fromKey = keysByOldKey.get(edge.fromKey) ?? edge.fromKey;
     const toKey = keysByOldKey.get(edge.toKey)!;
     return { id: `${fromKey}->${toKey}`, fromKey, toKey };
   });

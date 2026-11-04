@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, type RefObject } from "react";
+import { isInsideOpenPopup, registerEscapeHandler } from "./escapeArbiter";
 
 /**
  * 模态焦点陷阱：`role="dialog" aria-modal="true"` 的弹窗统一挂这个 hook。
@@ -28,9 +29,14 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
  *
  * 键盘事件的归属
  * --------------
- * Esc 与 Tab 都监听在 `window` 的捕获阶段：焦点一旦被移出弹窗（点了遮罩、
- * 点了画布），挂在容器上的 `onKeyDown` 就收不到事件了。捕获阶段监听 + 模块级
- * 弹窗栈保证**只有最上层的弹窗**响应 Esc，嵌套弹窗不会互相抢。
+ * Tab 监听在 `window` 的**捕获阶段**：焦点一旦被移出弹窗（点了遮罩、点了
+ * 画布），挂在容器上的 `onKeyDown` 就收不到事件了，焦点陷阱必须最先跑。
+ *
+ * Esc **不再**自己监听：它交给 `escapeArbiter`（全应用唯一的 Escape 决策点）
+ * 仲裁，并由模块级弹窗栈保证**只有最上层的弹窗**响应 Esc，嵌套弹窗不会互相抢。
+ * 仲裁器排在冒泡阶段，元素级的 React 处理器（`CanvasSelect` / `CreateSelect`
+ * 的菜单）能先用 `preventDefault()` 认领这个键——弹窗里打开了下拉时，
+ * Esc 归下拉，不会把整个弹窗关掉。
  */
 
 /** 可聚焦元素选择器：与浏览器自身的 Tab 顺序口径一致（跳过 disabled 与负 tabindex）。 */
@@ -54,31 +60,6 @@ interface TrapEntry {
 }
 
 const trapStack: TrapEntry[] = [];
-
-/**
- * 判断事件是否发生在**已打开的下拉浮层**里。
- *
- * 浮层一律 portal 到 body，且用 `role="listbox"` / `role="menu"` 标记自己
- * （见 `CanvasSelect` 的 `.canvas-select__menu`、`CreateSelect` 的
- * `.create-select__menu`）。这里按 ARIA 角色而不是类名判定，任何组件只要
- * 用标准角色暴露浮层，Esc 的归属就是对的，不必在这里登记每个组件。
- *
- * 要覆盖**两种焦点位置**：
- *   1. 焦点在浮层内部（`CanvasSelect` / `CreateSelect` 打开时会把焦点移进
- *      listbox）——目标落在 listbox/menu 内部；
- *   2. 焦点在**展开状态的 combobox** 上（`SearchableMultiSelect` 的搜索框
- *      是 `role="combobox"`，而 listbox 是它的**兄弟节点**而非祖先，
- *      `closest` 找不到）——此时下拉同样是打开的，Esc 应当先关下拉。
- *
- * 触发器本身（未展开的 `role="combobox"`）不算，否则弹窗永远关不掉。
- */
-function isInsideOpenPopup(target: Element): boolean {
-  const popup = target.closest('[role="listbox"], [role="menu"]');
-  if (popup != null && popup.getClientRects().length > 0) return true;
-  // 展开状态的 combobox：下拉已打开，Esc 先关下拉而不是整个弹窗。
-  if (target.matches('[role="combobox"][aria-expanded="true"]')) return true;
-  return false;
-}
 
 /** 容器内当前真正可聚焦的元素：过滤掉隐藏的（display:none / aria-hidden）。 */
 function focusableElements(container: HTMLElement): HTMLElement[] {
@@ -236,26 +217,14 @@ export function useModalFocusTrap({
     trapStack.push(entry);
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      // 嵌套弹窗：只有栈顶那个响应，Esc 不会一次关掉两层。
-      if (trapStack[trapStack.length - 1] !== entry) return;
-      if (event.key === "Escape") {
-        /*
-         * 弹窗里打开了下拉（CanvasSelect / CreateSelect 等）时，Esc 应当**先关下拉**。
-         *
-         * 本监听在 window 的**捕获阶段**，必然先于 React 冒泡阶段的 onKeyDown 执行：
-         * 若这里无条件接管 Esc 并 stopImmediatePropagation，下拉自己的 Esc 分支永远
-         * 等不到，用户按下拉后按 Esc 得到的是「整个弹窗被关掉」——意图被反转。
-         * 因此这里识别出事件来自打开的浮层时，把 Esc 让给下拉去处理。
-         */
-        if (event.target instanceof Element && isInsideOpenPopup(event.target)) return;
-        const escape = latestRef.current.onEscape;
-        if (escape == null) return;
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        escape();
-        return;
-      }
+      /*
+       * 这里只管 Tab（焦点陷阱）：焦点一旦被移出弹窗，挂在容器上的
+       * `onKeyDown` 就收不到事件了，Tab 必须在**捕获阶段**兜住。
+       *
+       * Esc 交给 `escapeArbiter`：捕获阶段还没有人处理过 Escape，
+       * `defaultPrevented` 恒为 false，弹窗就会抢在内层浮层之前把 Esc 吃掉
+       *（用户只想关下拉，整个弹窗却没了）。仲裁器在冒泡阶段，内层先认领。
+       */
       if (event.key !== "Tab") return;
       const container = entry.container();
       if (container == null) return;
@@ -285,8 +254,28 @@ export function useModalFocusTrap({
     };
 
     window.addEventListener("keydown", handleKeyDown, true);
+    /*
+     * Esc：交给仲裁器，并保留「只有栈顶弹窗响应」的约定。
+     *
+     * 弹窗里打开了下拉（CanvasSelect / CreateSelect 等）时，Esc 应当**先关下拉**：
+     * 内层浮层自己注册的处理者优先（后注册 = 更内层），本层主动让开。
+     */
+    const unregisterEscape = registerEscapeHandler({
+      canHandle: (event) => {
+        // 嵌套弹窗：只有栈顶那个响应，Esc 不会一次关掉两层。
+        if (trapStack[trapStack.length - 1] !== entry) return false;
+        if (latestRef.current.onEscape == null) return false;
+        // 事件来自打开的下拉浮层 → 让给下拉去处理。
+        if (isInsideOpenPopup(event.target)) return false;
+        return true;
+      },
+      handle: () => {
+        latestRef.current.onEscape?.();
+      },
+    });
     return () => {
       window.removeEventListener("keydown", handleKeyDown, true);
+      unregisterEscape();
       const index = trapStack.indexOf(entry);
       if (index >= 0) trapStack.splice(index, 1);
       clearInert();

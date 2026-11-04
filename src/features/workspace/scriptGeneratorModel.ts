@@ -137,7 +137,7 @@ function field(value: unknown): string {
 }
 
 /** 只接受完整的 JSON 合同；解析失败时调用方保留原始任务结果，不自动重发。 */
-export function parseScriptGeneration(raw: string): { shots: ScriptShot[]; assets: ScriptAsset[] } {
+export function parseScriptGeneration(raw: string, existingAssets: readonly ScriptAsset[] = []): { shots: ScriptShot[]; assets: ScriptAsset[] } {
   const trimmed = raw.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(trimmed);
   let data: unknown;
@@ -173,6 +173,8 @@ export function parseScriptGeneration(raw: string): { shots: ScriptShot[]; asset
   }
   const refToAsset = new Map<string, string>();
   const duplicateRefs = new Set<string>();
+  const boundAssets = existingAssets.filter(asset => asset.reference);
+  const reusedAssetIds = new Set<string>();
   const assets = (Array.isArray(object["assets"]) ? object["assets"] : []).map((value): ScriptAsset => {
     const item = record(value);
     if (!item) throw new Error("模型返回的资产格式不完整；原始结果已保存在任务历史中。");
@@ -185,8 +187,15 @@ export function parseScriptGeneration(raw: string): { shots: ScriptShot[]; asset
     const ref = field(item["ref"]);
     if (ref && refToAsset.has(ref)) { refToAsset.delete(ref); duplicateRefs.add(ref); }
     else if (ref && !duplicateRefs.has(ref)) refToAsset.set(ref, id);
-    return { id, kind, name, description: field(item["description"]) };
+    const bound = boundAssets.find(asset => asset.id === ref && asset.kind === kind && !reusedAssetIds.has(asset.id));
+    if (bound) reusedAssetIds.add(bound.id);
+    return { id, kind, name, description: field(item["description"]), ...(bound ? { reference: bound.reference } : {}) };
   });
+  for (const asset of boundAssets) {
+    if (reusedAssetIds.has(asset.id)) continue;
+    assets.push(asset);
+    if (!duplicateRefs.has(asset.id) && !refToAsset.has(asset.id)) refToAsset.set(asset.id, asset.id);
+  }
   const rawShots = object["shots"] as unknown[];
   return { shots: shots.map((shot, index) => {
     const refs = record(rawShots[index])?.["assetRefs"];
@@ -242,7 +251,7 @@ export function restoreScriptTaskOutput(
 ): ScriptGeneratorState {
   const request = record(logicalRequest);
   if (request?.["scriptGenerator"] === true) {
-    const parsed = parseScriptGeneration(output);
+    const parsed = parseScriptGeneration(output, state.assets);
     return { ...replaceScriptTable(state, parsed.shots, parsed.assets), step: "confirm-shots" };
   }
   if (!request || request["scriptPromptCompose"] !== true || typeof request["userPrompt"] !== "string") {

@@ -8,9 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Icon } from "../../components/Icon";
-import { toast } from "../../lib/toast";
-import { CanvasChromeIcon } from "./CanvasChromeIcons";
+import { LibTVMediaIcon, mediaAspectRatioIcon } from "./LibTVMediaIcon";
 
 type SettingsSection = "model" | "parameters";
 
@@ -25,9 +23,7 @@ const POPUP_GAP = 8;
  *   模型按钮（图标 + 名称 + chevron）· 全能参考按钮 · 1px 分隔线 · 参数汇总按钮
  * 参数汇总按钮的文案就是原站的 `9:16 · 720p · 15s · 1个 ·` 那种汇总串。
  *
- * 「更多设置」不再是底栏上的第三个按钮（原站底栏没有这个按钮），而是收进
- * 参数浮层底部的「高级设置」折叠区——原站的高级设置也是这么放的：一根
- * hairline 上边框 + 12px 粗体标题，默认收起。
+ * 视频高级设置由 CanvasVideoSettings 在编辑区底部展开；这里仅保留模型、模式和参数。
  *
  * 浮层贴到触发器上：面板底边贴触发器顶边上方 8px（与项目浮层锚定约定一致，
  * 也与原站模型下拉的实际落点一致）。浮层挂在**编辑层 DOM 内**而不是 body：
@@ -38,24 +34,20 @@ export function VideoNodeSettingsControls({
   kind = "video",
   modelLabel,
   parameterLabel,
-  modeLabel,
+  parameterAccessory,
   active,
   model,
   parameters,
-  advanced,
   modeControl,
-  inlineAdvanced = false,
 }: {
   readonly kind?: "image" | "video";
   readonly modelLabel: string;
   readonly parameterLabel: string;
-  readonly modeLabel: string;
+  readonly parameterAccessory?: ReactNode;
   readonly active: boolean;
   readonly model: ReactNode;
   readonly parameters: ReactNode;
-  readonly advanced: ReactNode;
   readonly modeControl?: ReactNode;
-  readonly inlineAdvanced?: boolean;
 }) {
   const id = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -64,7 +56,6 @@ export function VideoNodeSettingsControls({
   const modelLayerRef = useRef<HTMLDivElement | null>(null);
   const parameterLayerRef = useRef<HTMLDivElement | null>(null);
   const [section, setSection] = useState<SettingsSection | null>(null);
-  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [host, setHost] = useState<HTMLElement | null>(null);
   const labelPrefix = kind === "image" ? "图片" : "视频";
 
@@ -86,7 +77,7 @@ export function VideoNodeSettingsControls({
       // 窄视口里浮层不能超出画布视口（视口 overflow: hidden 会把超出部分裁掉）。
       const stageWidth = stageBox ? stageBox.width : Number.POSITIVE_INFINITY;
       const width = Math.min(
-        Math.max(triggerBox.width, POPUP_WIDTH),
+        Math.max(triggerBox.width, kind === "video" && layer.dataset["videoSettingsPanel"] === "parameters" ? 340 : POPUP_WIDTH),
         Math.max(220, stageWidth - 16),
       );
       // 上方可用高度：浮层不能高到超出画布视口上沿。
@@ -99,9 +90,9 @@ export function VideoNodeSettingsControls({
       layer.style.left = `${left}px`;
       layer.style.bottom = `${hostBox.bottom - triggerBox.top + POPUP_GAP}px`;
       layer.style.width = `${width}px`;
-      layer.style.maxHeight = `${Math.max(160, room)}px`;
+      layer.style.maxHeight = `${Math.max(80, room - POPUP_GAP - 8)}px`;
     },
-    [host],
+    [host, kind],
   );
 
   useLayoutEffect(() => {
@@ -173,17 +164,18 @@ export function VideoNodeSettingsControls({
           ref={triggerRef}
           className="video-settings-control__trigger"
           aria-label={key === "model" ? `选择${labelPrefix}模型` : `${labelPrefix}参数`}
-          aria-describedby={`${id}-${key}-summary`}
+          aria-describedby={`${id}-${key}-summary${key === "parameters" && parameterAccessory ? " " + id + "-parameter-accessory" : ""}`}
           aria-haspopup="dialog"
           aria-expanded={active && section === key}
           aria-controls={`${id}-${key}`}
           data-video-settings-trigger={key}
-          title={label}
+          data-tooltip={label}
           onClick={() => openSection(key)}
         >
           {icon}
           <span id={`${id}-${key}-summary`}>{label}</span>
-          <Icon name="caret-down" size="xs" aria-hidden="true" />
+          {key === "parameters" && parameterAccessory ? <span id={id + "-parameter-accessory"}>{parameterAccessory}</span> : null}
+          <LibTVMediaIcon name="icon-chevron-down-small" size={12} />
         </button>
         {host == null
           ? null
@@ -191,11 +183,17 @@ export function VideoNodeSettingsControls({
               <div
                 id={`${id}-${key}`}
                 role="dialog"
+                /* 标签和留白点击先聚焦弹层，避免焦点落到画布后把弹层提前收掉。 */
+                tabIndex={-1}
                 aria-label={panel.title}
                 className="video-settings-panel"
                 data-video-settings-panel={key}
+                data-media-kind={kind}
                 ref={layerRef}
                 hidden={!active || section !== key}
+                onClick={(event) => {
+                  if (key === "model" && event.target instanceof Element && event.target.closest("[data-video-model-option]")) close(key);
+                }}
                 onKeyDown={(event) => {
                   if (
                     event.key !== "Escape" ||
@@ -208,33 +206,17 @@ export function VideoNodeSettingsControls({
                   close(key);
                 }}
               >
-                <div className="video-settings-panel__heading">
+                {kind !== "video" ? <div className="video-settings-panel__heading">
                   <strong>{panel.title}</strong>
                   <button
                     type="button"
                     aria-label={`收起${panel.title}`}
                     onClick={() => close(key)}
                   >
-                    <Icon name="x" size="sm" aria-hidden="true" />
+                    <LibTVMediaIcon name="close" size={16} />
                   </button>
-                </div>
+                </div> : null}
                 <div className="canvas-gen-node__settings">{panel.content}</div>
-                {key === "parameters" && !inlineAdvanced ? (
-                  <section className="video-settings-advanced">
-                    <button
-                      type="button"
-                      className="video-settings-advanced__toggle"
-                      aria-expanded={advancedOpen}
-                      title={`${modeLabel} · 更多${labelPrefix}设置`}
-                      onClick={() => setAdvancedOpen((open) => !open)}
-                    >
-                      高级设置
-                    </button>
-                    <div className="video-settings-advanced__body" hidden={!advancedOpen}>
-                      {advanced}
-                    </div>
-                  </section>
-                ) : null}
               </div>,
               host,
             )}
@@ -247,30 +229,16 @@ export function VideoNodeSettingsControls({
       {trigger(
         "model",
         modelLabel,
-        <CanvasChromeIcon name={kind === "image" ? "image" : "video"} size={14} />,
+        <LibTVMediaIcon name={kind === "video" ? "video-gen" : "image"} size={14} />,
         modelTriggerRef,
         modelLayerRef,
       )}
-      {/*
-        全能参考：原站底栏的第二项（本项目后端没有这个能力，按项目约定
-        结构定死、交互做全、点击给出明确说明）。
-      */}
-      {modeControl ?? <button
-        type="button"
-        className="video-settings-control__trigger video-settings-control__trigger--universal"
-        aria-label="全能参考"
-        title="全能参考（后端暂未接入）"
-        onClick={() => toast.error("全能参考后端暂未接入")}
-      >
-        <CanvasChromeIcon name="universal" size={14} />
-        <span>全能参考</span>
-        <Icon name="caret-down" size="xs" aria-hidden="true" />
-      </button>}
+      {modeControl}
       <span className="video-settings-controls__divider" aria-hidden="true" />
       {trigger(
         "parameters",
         parameterLabel,
-        <Icon name="bounding-box" size="sm" aria-hidden="true" />,
+        <LibTVMediaIcon name={mediaAspectRatioIcon(parameterLabel, kind === "image" ? "generation-setting-ratio-1-1" : "generation-setting-ratio-16-9")} size={16} />,
         parameterTriggerRef,
         parameterLayerRef,
       )}

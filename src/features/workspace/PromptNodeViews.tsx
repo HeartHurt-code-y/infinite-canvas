@@ -2,6 +2,7 @@ import { appDataDir, join } from "@tauri-apps/api/path";
 import { mkdir, remove, writeFile } from "@tauri-apps/plugin-fs";
 import { Icon, type IconSize } from "../../components/Icon";
 import { CanvasSelect } from "../../components/CanvasSelect";
+import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { localBase64AssetClient } from "../../lib/backend";
 import {
@@ -17,6 +18,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
@@ -30,7 +32,6 @@ import {
 import {
   isFzyVideoSchema,
   isMinimaxH3VideoModel,
-  isPixverseVideoModel,
   isWan30VideoModel,
   modelParameterCapabilities,
   resolvedParameterValue,
@@ -41,9 +42,6 @@ import {
 import {
   resolveSeedanceTask,
   seedanceTaskInputs,
-  seedanceTaskOptions,
-  selectSeedanceTask,
-  type SeedanceTaskMode,
 } from "../../lib/seedanceTasks";
 import {
   perTaskVideoProfile,
@@ -59,14 +57,12 @@ import {
   type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
 import { normalizePromptReferenceText } from "../../lib/promptReferences";
-import { referenceTokenFor, type PromptUnboundMention } from "../../lib/promptOrdinalMentions";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
 import { WhiteModelControlSection } from "./WhiteModelControlSection";
 import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
-import { preferredPanoramaParameters } from "../../lib/panorama";
 import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
 import { CanvasVideoSettings } from "./CanvasVideoSettings";
 import { CanvasImageSettings, CanvasImageParameterOptions, canvasImageHasOptionButtons } from "./CanvasImageSettings";
@@ -280,6 +276,7 @@ export function PromptMentionInput({
   placeholder,
   onSession,
   autoLink = false,
+  leadingContent,
 }: {
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
@@ -308,6 +305,8 @@ export function PromptMentionInput({
    */
   readonly onSession?: ((session: PromptContentEditorSession | null) => void) | undefined;
   readonly autoLink?: boolean;
+  /** 视觉前缀不进入提示词文档，不参与复制、撤销或引用解析。 */
+  readonly leadingContent?: ReactNode;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
   const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
@@ -373,24 +372,15 @@ export function PromptMentionInput({
   const [activeIndex, setActiveIndex] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [characterCount, setCharacterCount] = useState(0);
-  const [autoMentionResolvedNames, setAutoMentionResolvedNames] = useState<readonly string[]>([]);
   const [activeAmbiguity, setActiveAmbiguity] = useState<{
     readonly pattern: string;
     readonly displayName: string;
   } | null>(null);
-  /** 一次性识别结果（正在识别 / 已识别 / 待确认 / 未匹配）；常驻提示见下方 autoMentionFeedback。 */
+  /** 识别按钮的短暂状态与读屏反馈；不再渲染常驻状态面板。 */
   const [autoMentionFeedbackState, setAutoMentionFeedbackState] = useState<AutoMentionFeedback>(
     () => readyAutoMentionFeedback(candidates),
   );
-  /**
-   * 最近一次重扫里「写了位置词但没绑定」的正文片段（第一张 / 图3），连同当时各类素材的连接数。
-   * 正文或连线一变就清空：绑定不了是「此刻没有对应素材」，不是「点按钮那一刻没有」。
-   */
-  const [scanUnbound, setScanUnbound] = useState<{
-    readonly entries: readonly PromptUnboundMention[];
-    readonly candidates: readonly MentionCandidate[];
-  }>({ entries: [], candidates: [] });
-  /** 提示内容里已绑定的引用数：它是「@ 有没有被识别到」的直接证据，写进常驻提示里。 */
+  /** 提示内容里已绑定的引用数：它是「@ 有没有被识别到」的直接证据，用于读屏反馈。 */
   const [referenceCount, setReferenceCount] = useState(0);
   /**
    * 回到常驻提示。文案不在这里定：常驻提示的数字必须跟着当前连线与内容走，
@@ -464,13 +454,6 @@ export function PromptMentionInput({
   useEffect(() => {
     latestCandidatesRef.current = candidates;
   }, [candidates]);
-  const recognizableCandidates = useMemo(
-    () =>
-      candidates
-        .slice(0, 5)
-        .map((candidate, index) => ({ candidate, token: referenceTokenFor(candidates, index) })),
-    [candidates],
-  );
   const ambiguityOptions = candidateDescription.ambiguityOptions;
 
   const closeMenu = useCallback(() => {
@@ -520,8 +503,7 @@ export function PromptMentionInput({
       // 外部写入（弹窗「添加到生成节点」、存档恢复、@ 菜单插入）都会派发 input 事件，
       // 因此这里读到的引用数就是当前内容里的真实绑定数。
       setReferenceCount(view?.referenceCount ?? 0);
-      // 正文一变，上一轮的位置词结论就过期了：清掉，等下一次重扫重新判定。
-      setScanUnbound({ entries: [], candidates: [] });
+
       onTextChange?.(plainText);
     },
     [onTextChange],
@@ -719,16 +701,14 @@ export function PromptMentionInput({
         };
       const promptText = (input.textContent ?? "").replaceAll("\u200b", "").trim();
       if (resolution.converted > 0 || resolution.ambiguous > 0) {
-        const resolvedNames = sessionRef.current?.freshResolvedNames() ?? [];
+
         // 上面的合成 input 会安排下一轮扫描；本轮已经拿到确定结果，取消重复扫描。
         if (autoDetectTimerRef.current != null) {
           window.clearTimeout(autoDetectTimerRef.current);
           autoDetectTimerRef.current = null;
         }
-        // 合成 input 会先触发 scheduleAutoDetect 并清空旧结果；因此必须在它之后
-        // 写入本轮名称，才能让成功卡稳定展示“本次已绑定”的对象。
-        setAutoMentionResolvedNames(resolvedNames);
-        setScanUnbound({ entries: resolution.unbound, candidates });
+
+
         if (resolution.pending > 0) {
           openFirstPendingAmbiguity();
           setAutoMentionFeedbackState({
@@ -757,29 +737,28 @@ export function PromptMentionInput({
         return;
       }
 
-      setAutoMentionResolvedNames([]);
       if (resolution.pending > 0) {
-        setScanUnbound({ entries: [], candidates: [] });
+
         openFirstPendingAmbiguity();
         setAutoMentionFeedbackState({
           kind: "ambiguous",
           message: `仍有 ${resolution.pending} 处同名引用待确认`,
         });
       } else if (!promptText) {
-        setScanUnbound({ entries: [], candidates: [] });
+
         showReadyFeedback();
       } else if (candidates.length === 0) {
-        setScanUnbound({ entries: [], candidates: [] });
+
         setAutoMentionFeedbackState({ kind: "empty", message: "未连接素材，暂时无法引用" });
       } else if (mode === "names") {
-        setScanUnbound({ entries: resolution.unbound, candidates });
+
         setAutoMentionFeedbackState({
           kind: "no-match",
           message:
-            resolution.unbound.length > 0 ? "有位置词没能绑定" : "正文里没有可绑定的位置词或素材名",
+            resolution.unbound.length > 0 ? "有位置词未绑定，请使用 @ 选择对应素材" : "没有新增引用，已有引用保持不变",
         });
       } else {
-        setScanUnbound({ entries: [], candidates: [] });
+
         showReadyFeedback();
       }
     },
@@ -795,7 +774,7 @@ export function PromptMentionInput({
       feedbackResetTimerRef.current = null;
     }
     if (!menuOpen && !composingRef.current) {
-      setAutoMentionResolvedNames([]);
+
       setAutoMentionFeedbackState({ kind: "scanning", message: "正在识别素材引用…" });
     }
     autoDetectTimerRef.current = window.setTimeout(() => {
@@ -818,19 +797,6 @@ export function PromptMentionInput({
     [insertMention, removeActiveMentionQuery, scheduleAutoDetect],
   );
 
-  /**
-   * 从状态条的参考名清单直接插入引用：先清掉光标处仍在编辑的 "@查询词"，
-   * 再插到当前光标位置。用户不必记住写法，点一下就等于手输了一条完整引用。
-   */
-  const insertReferenceFromList = useCallback(
-    (candidate: MentionCandidate) => {
-      if (replaceTypedQueryOnSelectRef.current) removeActiveMentionQuery();
-      replaceTypedQueryOnSelectRef.current = false;
-      setActiveAmbiguity(null);
-      insertMention(candidate);
-    },
-    [insertMention, removeActiveMentionQuery],
-  );
 
   /** 标注引用插入的是区域标记，不是素材，因此不走素材自动识别。 */
   const insertAnnotationMention = useCallback(
@@ -896,7 +862,7 @@ export function PromptMentionInput({
       window.clearTimeout(feedbackResetTimerRef.current);
       feedbackResetTimerRef.current = null;
     }
-    setAutoMentionResolvedNames([]);
+
     setAutoMentionFeedbackState({ kind: "scanning", message: "正在重新扫描已连接素材…" });
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
@@ -936,7 +902,7 @@ export function PromptMentionInput({
       });
     } else {
       setActiveAmbiguity(null);
-      setAutoMentionResolvedNames([]);
+
       showReadyFeedback();
       if (rebinds.length > 0) {
         if (feedbackResetTimerRef.current != null) {
@@ -971,68 +937,6 @@ export function PromptMentionInput({
     autoMentionFeedbackState.kind === "ready"
       ? readyAutoMentionFeedback(candidates, referenceCount)
       : autoMentionFeedbackState;
-
-  const autoMentionFeedbackIcon =
-    autoMentionFeedback.kind === "scanning" ? (
-      <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="xs" />
-    ) : autoMentionFeedback.kind === "success" ? (
-      <Icon name="check-circle" aria-hidden="true" size="xs" />
-    ) : autoMentionFeedback.kind === "ambiguous" || autoMentionFeedback.kind === "no-match" ? (
-      <Icon name="warning-circle" aria-hidden="true" size="xs" />
-    ) : (
-      <Icon name="sparkle" aria-hidden="true" size="xs" />
-    );
-
-  const isProminentAutoMentionFeedback =
-    autoMentionFeedback.kind === "success" ||
-    autoMentionFeedback.kind === "ambiguous" ||
-    autoMentionFeedback.kind === "no-match";
-  const autoMentionFeedbackTitle =
-    autoMentionFeedback.kind === "ready"
-      ? "使用 @ 或参考名引用素材"
-      : autoMentionFeedback.kind === "scanning"
-        ? "正在识别素材引用…"
-        : autoMentionFeedback.kind === "success"
-          ? "自动引用完成"
-          : autoMentionFeedback.kind === "ambiguous"
-            ? "发现同名素材，需要确认"
-            : autoMentionFeedback.kind === "no-match"
-              ? "没有识别到可绑定的素材"
-              : "暂无可自动引用素材";
-  const autoMentionFeedbackDetail =
-    autoMentionFeedback.kind === "no-match"
-      ? `${autoMentionFeedback.message}。识别的是位置词（图1、参考图2、第2张图）与已连接素材名；点下方参考名可直接插入引用。`
-      : autoMentionFeedback.kind === "success"
-        ? `${autoMentionFeedback.message}，已转换成高亮 @ 引用。`
-        : autoMentionFeedback.kind === "ambiguous"
-          ? `${autoMentionFeedback.message}。请选择具体对象后继续。`
-          : autoMentionFeedback.message;
-  /** 位置词已经扫过一轮（成功或没识别到）才算「本次结果」，避免刚打开就说没绑定。 */
-  const scannedThisRound =
-    autoMentionFeedback.kind === "success" || autoMentionFeedback.kind === "no-match";
-  /**
-   * 未绑定的位置词提示：条数是本轮扫描的结论，原因文案按判定当时的连接数生成，
-   * 不随之后的连线变化改写——否则同一句话会被改口成另一种理由。
-   */
-  const unboundMentionHints = useMemo(() => {
-    if (!scannedThisRound) return [];
-    return scanUnbound.entries.map((entry) => {
-      if (entry.reason !== "out-of-range") {
-        return { text: entry.text, hint: "未绑定 · 不写序号时按传入顺序生效，点参考名可绑定" };
-      }
-      return {
-        text: entry.text,
-        hint: `没有第 ${entry.text.replace(/^\D+/u, "")} 个参考素材（当时连了 ${entry.candidateCount} 个）`,
-      };
-    });
-  }, [scanUnbound, scannedThisRound]);
-  /**
-   * 参考名清单就是「这个按钮认识什么」的答案，所以只要这次没识别到、
-   * 或者正文里还有没绑定的位置词，就一并展示出来供直接插入。
-   */
-  const showReferenceList =
-    recognizableCandidates.length > 0 &&
-    (autoMentionFeedback.kind === "no-match" || unboundMentionHints.length > 0);
 
   const editor = (
     <div
@@ -1112,10 +1016,11 @@ export function PromptMentionInput({
           </div>
         ) : null}
 
-        <div ref={fieldRef} className="prompt-mention__field">
+        <div ref={fieldRef} className="prompt-mention__field" data-leading-content={leadingContent ? "" : undefined}>
           {attachmentNotice != null && (
             <ErrorAlert error={attachmentNotice.message} hint={attachmentNotice.hint} />
           )}
+          {leadingContent ? <div className="prompt-mention__leading-content">{leadingContent}</div> : null}
           <div
             ref={attachInput}
             className="prompt-mention__editor"
@@ -1155,13 +1060,14 @@ export function PromptMentionInput({
                 void ingestAttachmentFiles(files);
                 return;
               }
-              // 统一插入纯文本并解析显式 @ 引用；普通素材名保留为正文。
+              // 统一插入纯文本；AutoLink 开启时继续把普通素材名绑定为引用。
               // 同时杜绝富文本 HTML 直接混入提示词。
               const text = event.clipboardData?.getData("text/plain") ?? "";
               event.preventDefault();
               const resolution = sessionRef.current?.pastePlainText(text);
               if (resolution?.pending) openFirstPendingAmbiguity();
-              runAutoDetect("explicit", resolution);
+              if (autoLink) runAutoDetect("names");
+              else runAutoDetect("explicit", resolution);
             }}
             onDrop={(event) => {
               const files = Array.from(event.dataTransfer?.files ?? []);
@@ -1283,8 +1189,7 @@ export function PromptMentionInput({
                 <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="xs" />
               ) : autoMentionFeedback.kind === "success" ? (
                 <Icon name="check-circle" aria-hidden="true" size="xs" />
-              ) : autoMentionFeedback.kind === "no-match" ||
-                autoMentionFeedback.kind === "ambiguous" ? (
+              ) : autoMentionFeedback.kind === "ambiguous" ? (
                 <Icon name="warning-circle" aria-hidden="true" size="xs" />
               ) : (
                 <Icon name="sparkle" aria-hidden="true" size="xs" />
@@ -1445,65 +1350,9 @@ export function PromptMentionInput({
           ) : null}
         </div>
 
-        <div
-          id={autoMentionStatusId}
-          className={`prompt-mention__status is-${autoMentionFeedback.kind}${isProminentAutoMentionFeedback ? " is-prominent" : ""}`}
-          role="status"
-          aria-label={`自动引用状态：${autoMentionFeedbackTitle}。${autoMentionFeedbackDetail}`}
-          aria-live="polite"
-          aria-atomic="true"
-          data-state={autoMentionFeedback.kind}
-        >
-          <span className="prompt-mention__status-icon" aria-hidden="true">
-            {autoMentionFeedbackIcon}
-          </span>
-          <span className="prompt-mention__status-copy">
-            <strong>{autoMentionFeedbackTitle}</strong>
-            <small>{autoMentionFeedbackDetail}</small>
-          </span>
-          {unboundMentionHints.length > 0 ? (
-            <span className="prompt-mention__unbound" aria-label="没能绑定的位置词">
-              <span className="prompt-mention__recognizable-label">未绑定</span>
-              {unboundMentionHints.slice(0, 3).map((entry) => (
-                <span key={entry.text} className="prompt-mention__unbound-tag" title={entry.hint}>
-                  <strong>「{entry.text}」</strong>
-                  <small>{entry.hint}</small>
-                </span>
-              ))}
-            </span>
-          ) : null}
-          {showReferenceList ? (
-            <span className="prompt-mention__recognizable" aria-label="可引用的参考名">
-              <span className="prompt-mention__recognizable-label">点参考名插入引用</span>
-              {recognizableCandidates.map(({ candidate, token }) => (
-                <button
-                  key={candidate.canvasNodeKey}
-                  type="button"
-                  className="prompt-mention__recognizable-tag"
-                  title={`插入 ${token} 的引用（${candidate.name}）`}
-                  aria-label={`插入 ${token} 的引用：${candidate.name}`}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => insertReferenceFromList(candidate)}
-                >
-                  <strong>{candidate.name}</strong>
-                  <small>{token}</small>
-                </button>
-              ))}
-              {candidates.length > recognizableCandidates.length ? (
-                <span className="prompt-mention__recognizable-more">
-                  +{candidates.length - recognizableCandidates.length}
-                </span>
-              ) : null}
-            </span>
-          ) : null}
-          {autoMentionFeedback.kind === "success" && autoMentionResolvedNames.length > 0 ? (
-            <span className="prompt-mention__resolved" aria-label="本次已绑定素材">
-              {autoMentionResolvedNames.slice(0, 5).map((name) => (
-                <span key={name}>@{name}</span>
-              ))}
-            </span>
-          ) : null}
-        </div>
+        <span id={autoMentionStatusId} className="sr-only" role="status" aria-live="polite">
+          {autoMentionFeedback.message}
+        </span>
 
         {expanded ? (
           <div className="prompt-mention__expanded-footer">
@@ -1569,7 +1418,7 @@ export function ImageNodeSettings({
   readonly hasMediaInputs: boolean;
   readonly onChange: (config: ImageNodeConfig) => void;
 }) {
-  const operation: GenerationOperation = hasMediaInputs || (config.imageMode != null && config.imageMode !== "auto") ? "image_to_image" : "text_to_image";
+  const operation: GenerationOperation = hasMediaInputs || config.styleReference != null ? "image_to_image" : "text_to_image";
   const availableProviders = providerCatalog.filter(
     (entry) => entry.provider.enabled && entry.models.some(isImageGenerationModel),
   );
@@ -1608,8 +1457,14 @@ export function ImageNodeSettings({
   );
   const modelParameterCapabilitiesWithoutCount = parameterCapabilities.filter(
     (capability) =>
-      capability.key !== "n" && !(capability.key === "max_images" && sequentialMode !== "auto"),
-  );
+      capability.key !== "n" && capability.key !== "mask" && capability.key !== "mask_url" &&
+      !(capability.key === "max_images" && sequentialMode !== "auto"),
+  ).map((capability): ModelParameterCapability => capability.key === "background" && capability.options.length === 0 ? {
+    ...capability,
+    label: "背景",
+    defaultValue: capability.defaultValue || "auto",
+    options: [{ value: "auto", label: "自动" }, { value: "opaque", label: "保留" }, { value: "transparent", label: "透明" }],
+  } : capability);
 
   const modelFields = (
     <>
@@ -1692,27 +1547,8 @@ export function ImageNodeSettings({
   );
   const parameterFields = (
     <>
-      <div className="canvas-gen-node__field canvas-gen-node__field--count">
-        <span>生成数量</span>
-        {presentation === "compact" ? <span className="canvas-video-options" role="group" aria-label="图片数量">{[1, 2, 4].map(count => <button key={count} type="button" aria-pressed={config.generationCount === count} onClick={() => onChange({ ...config, generationCount: count })}>{count}张</button>)}</span> : null}
-        <input
-          aria-label="图片生成数量"
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={supportsBatchCount ? undefined : countMaximum}
-          value={config.generationCount}
-          onChange={(event) =>
-            onChange({
-              ...config,
-              generationCount: parseGenerationCountInput(event.target.value, countMaximum),
-            })
-          }
-        />
-      </div>
-
       {modelParameterCapabilitiesWithoutCount.map((capability) => presentation === "compact" && canvasImageHasOptionButtons(capability) ? (
-        <CanvasImageParameterOptions key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => onChange({ ...config, parameterValues: { ...config.parameterValues, [capability.key]: value }, ...((capability.key === "resolution" || capability.key === "image_size") && ["1K", "2K", "4K"].includes(String(value).toUpperCase()) ? { upscaleResolution: String(value).toUpperCase() as "1K" | "2K" | "4K" } : {}) })} />
+        <CanvasImageParameterOptions key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => onChange({ ...config, parameterValues: { ...config.parameterValues, [capability.key]: value } })} />
       ) : (
         <GenerationParameterField
           key={capability.key}
@@ -1727,46 +1563,23 @@ export function ImageNodeSettings({
           }
         />
       ))}
-    </>
-  );
-  const advancedFields = (
-    <>
-      <div className="canvas-gen-node__operation" role="status" aria-live="polite">
-        <span className="canvas-gen-node__operation-icon" aria-hidden="true">
-          <Icon name="image-square" size="md" />
-        </span>
-        <span className="canvas-gen-node__operation-copy">
-          <strong>{operation === "image_to_image" ? "图片参考生成" : "文生图"}</strong>
-          <small>
-            {operation === "image_to_image"
-              ? "已使用连入的图片或视频作为参考"
-              : "连接参考图片或视频后自动切换"}
-          </small>
-        </span>
-      </div>
-
-      <div className="canvas-gen-node__blocking">
-        <label className="canvas-gen-node__check">
-          <input
-            type="checkbox"
-            checked={Boolean(config.panoramaEnabled)}
-            onChange={(event) => {
-              const enabled = event.target.checked;
-              onChange({
-                ...config,
-                panoramaEnabled: enabled,
-                ...(enabled ? { imagePreset: undefined } : {}),
-                parameterValues: enabled
-                  ? {
-                      ...config.parameterValues,
-                      ...preferredPanoramaParameters(parameterCapabilities),
-                    }
-                  : config.parameterValues,
-              });
-            }}
-          />
-          <span>全景图</span>
-        </label>
+      <div className="canvas-gen-node__field canvas-gen-node__field--count">
+        <span>生成数量</span>
+        {presentation === "compact" ? <span className="canvas-video-options" role="group" aria-label="图片数量">{[...new Set([1, 2, 4, config.generationCount])].filter(count => count >= 1 && count <= countMaximum).sort((a, b) => a - b).map(count => <button key={count} type="button" aria-pressed={config.generationCount === count} onClick={() => onChange({ ...config, generationCount: count })}>{count}张</button>)}</span> : null}
+        {presentation !== "compact" ? <input
+          aria-label="图片生成数量"
+          type="number"
+          inputMode="numeric"
+          min={1}
+          max={countMaximum}
+          value={config.generationCount}
+          onChange={(event) =>
+            onChange({
+              ...config,
+              generationCount: parseGenerationCountInput(event.target.value, countMaximum),
+            })
+          }
+        /> : null}
       </div>
     </>
   );
@@ -1778,16 +1591,15 @@ export function ImageNodeSettings({
         active={active}
         config={config}
         capabilities={modelParameterCapabilitiesWithoutCount}
+        providerCatalog={providerCatalog}
         modelLabel={selectedModel?.displayName ?? "选择图片模型"}
         model={modelFields}
         parameters={parameterFields}
-        advanced={advancedFields}
         onChange={onChange}
       />
     );
   return (
     <div className="canvas-gen-node__settings" aria-label="图片生成参数">
-      {advancedFields}
       {modelFields}
       {parameterFields}
     </div>
@@ -1926,28 +1738,22 @@ function GenerationParameterField({
 export function VideoNodeSettings({
   config,
   providerCatalog,
-  hasMediaInputs,
   mediaInputs,
   onChange,
-  onAnnotateVideo,
   onGreenScreenGenerate,
   onGreenScreenUseResult,
   onImportGreenScreenVideo,
   greenScreenResults,
   greenScreenBusy,
-  presentation = "full",
   active = true,
   advancedHostId,
 }: {
-  readonly presentation?: "full" | "compact";
   readonly active?: boolean;
   readonly advancedHostId?: string | undefined;
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly hasMediaInputs: boolean;
   readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly onChange: (config: VideoNodeConfig) => void;
-  readonly onAnnotateVideo?: (input: ConnectedAssetInput | InheritedAssetInput) => void;
   readonly onGreenScreenGenerate?: (() => void) | undefined;
   readonly onGreenScreenUseResult?: ((key: string) => void) | undefined;
   readonly onImportGreenScreenVideo?: (() => void) | undefined;
@@ -1971,7 +1777,6 @@ export function VideoNodeSettings({
   const fzyVideo = isFzyVideoSchema(selectedModel?.operationSchema ?? {});
   const perTaskProfile = fzyVideo ? null : perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
   const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
-  const perTaskInputIssue = perTaskVideoUrlIssue(perTaskPublicUrls);
   const parameterCapabilities = selectedModel
     ? modelParameterCapabilities(
         selectedModel.operationSchema,
@@ -1995,9 +1800,6 @@ export function VideoNodeSettings({
     seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])),
     selectedModel?.operationSchema,
   );
-  const currentTaskLabel = seedanceTaskOptions(selectedModel?.remoteModelId ?? "").find(
-    (option) => option.value === taskState.mode,
-  )?.label;
   // These tools compile ordinary prompt/media requests; acceptance comes from the service.
   const showSeedanceExtras = taskState.enabled;
   const showSeedanceDraft = supportsSeedanceDraft(
@@ -2005,261 +1807,12 @@ export function VideoNodeSettings({
     selectedModel?.remoteModelId ?? "",
   );
   const seedanceDraftEnabled = showSeedanceDraft && config.parameterValues["draft"] === true;
-  const pixverse = !fzyVideo && isPixverseVideoModel(selectedModel?.remoteModelId ?? "");
-  const pixverseHasImages = (mediaInputs ?? []).some((input) => input.kind === "image");
 
-  const modelFields = (
+  const frameMode = config.videoMode ?? config.seedanceTaskMode ?? taskState.mode;
+  const frameIntent = compileCanvasVideoMode(frameMode, mediaInputs ?? [], taskState.mediaRoles);
+  const referenceFields = (
     <>
-      <div className="canvas-gen-node__field canvas-gen-node__field--provider">
-        <span>供应商</span>
-        <CanvasSelect
-          ariaLabel="供应商"
-          value={config.modelSelection.providerId}
-          options={[
-            ...(config.modelSelection.providerId ? [] : [{ value: "", label: "请选择供应商" }]),
-            ...(config.modelSelection.providerId && !selectedProvider
-              ? [
-                  {
-                    value: config.modelSelection.providerId,
-                    label: `${config.modelSelection.providerId}（不可用）`,
-                  },
-                ]
-              : []),
-            ...availableProviders.map((entry) => ({
-              value: entry.provider.id,
-              label: providerLabels.get(entry.provider.id) ?? entry.provider.displayName,
-            })),
-          ]}
-          onChange={(providerId) => {
-            const modelDefinitionId =
-              availableProviders
-                .find((entry) => entry.provider.id === providerId)
-                ?.models.find((model) => supportsGenerationNode(model, "video"))?.definitionId ??
-              "";
-            onChange({
-              ...config,
-              modelSelection: { providerId, modelDefinitionId },
-              parameterValues: {},
-              seedanceTaskMode: "auto",
-              mediaRoles: {},
-            });
-          }}
-        />
-      </div>
-
-      <div className="canvas-gen-node__field canvas-gen-node__field--model">
-        <span>视频模型</span>
-        <CanvasSelect
-          ariaLabel="视频模型"
-          value={config.modelSelection.modelDefinitionId}
-          options={[
-            ...(config.modelSelection.modelDefinitionId
-              ? []
-              : [{ value: "", label: "请选择视频模型" }]),
-            ...(config.modelSelection.modelDefinitionId && !selectedModel
-              ? [
-                  {
-                    value: config.modelSelection.modelDefinitionId,
-                    label: `${config.modelSelection.modelDefinitionId}（不可用）`,
-                  },
-                ]
-              : []),
-            ...availableModels.map((model) => ({
-              value: model.definitionId,
-              label: model.displayName,
-            })),
-          ]}
-          onChange={(modelDefinitionId) =>
-            onChange({
-              ...config,
-              modelSelection: {
-                ...config.modelSelection,
-                modelDefinitionId,
-              },
-              parameterValues: {},
-              seedanceTaskMode: "auto",
-              mediaRoles: {},
-            })
-          }
-        />
-      </div>
-    </>
-  );
-  const parameterFields = (
-    <>
-      <label className="canvas-gen-node__field canvas-gen-node__field--count">
-        <span>生成数量</span>
-        <input
-          type="number"
-          inputMode="numeric"
-          min={1}
-          max={MAX_GENERATION_COUNT}
-          value={config.generationCount}
-          onChange={(event) =>
-            onChange({
-              ...config,
-              generationCount: parseGenerationCountInput(event.target.value),
-            })
-          }
-        />
-      </label>
-
-      {taskState.parameterCapabilities.map((capability) => {
-        if (capability.key === "draft") return null;
-        if (taskState.enabled && capability.key === "omni_reference_task_type") return null;
-        // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
-        const taskType = String(config.parameterValues["task_type"] ?? "generation");
-        if (capability.key === "resolution" && taskType === "h3_context_ir") return null;
-        return (
-          <GenerationParameterField
-            key={capability.key}
-            capability={capability}
-            value={resolvedParameterValue(capability, taskState.parameterValues)}
-            hasMediaInputs={hasMediaInputs}
-            allowAutomatic
-            locked={
-              taskState.lockedParameters.includes(capability.key) ||
-              (seedanceDraftEnabled && capability.key === "resolution")
-            }
-            onChange={(value) => {
-              const parameterValues = { ...taskState.parameterValues, [capability.key]: value };
-              if (capability.optional && value === "") delete parameterValues[capability.key];
-              onChange({
-                ...config,
-                parameterValues,
-              });
-            }}
-          />
-        );
-      })}
-    </>
-  );
-  const advancedFields = (
-    <>
-      <div className="canvas-gen-node__operation" role="status" aria-live="polite">
-        <span className="canvas-gen-node__operation-icon" aria-hidden="true">
-          <Icon name="video-camera" size="md" />
-        </span>
-        <span className="canvas-gen-node__operation-copy">
-          <strong>
-            {taskState.enabled && taskState.mode !== "auto"
-              ? currentTaskLabel
-              : hasMediaInputs
-                ? "参考素材生成"
-                : "文生视频"}
-          </strong>
-          <small>{hasMediaInputs ? "已使用直连或随提示词继承的素材" : "连接素材后自动切换"}</small>
-        </span>
-      </div>
-
-      {perTaskProfile ? (
-        <div className="canvas-gen-node__media-roles" role="status">
-          <small>
-            按次计费：每条视频单独提交并收取一次固定费用；生成数量为 {config.generationCount}{" "}
-            时会创建 {config.generationCount} 个独立任务。
-          </small>
-          <small>
-            720P ·{" "}
-            {perTaskProfile.minimumDuration === perTaskProfile.maximumDuration
-              ? "固定 30 秒"
-              : `${perTaskProfile.minimumDuration}–${perTaskProfile.maximumDuration} 秒`}
-            ；以上为模型目录中的参考信息，素材和参数限制以服务端返回为准。
-          </small>
-          {perTaskInputIssue ? (
-            <ErrorAlert
-              error={perTaskInputIssue}
-              tone="warning"
-              variant="inline"
-              hint="按上面的模型要求调整素材后再生成。"
-            />
-          ) : null}
-        </div>
-      ) : null}
-      {perTaskProfile && (config.urlMedia?.length ?? 0) > 0 ? (
-        <div className="canvas-gen-node__media-roles" role="status">
-          <small>
-            已保留 {config.urlMedia?.length} 个文档/网页 URL；提交时保留当前输入，
-            接口能否表达这些素材由后端反馈。
-          </small>
-        </div>
-      ) : null}
-      {!perTaskProfile && perTaskPublicUrls.length > 0 ? (
-        <div className="canvas-gen-node__media-roles" role="status">
-          <small>
-            已保留 {perTaskPublicUrls.length} 个参考 URL；提交时保留当前输入，
-            接口能否表达这些素材由后端反馈。
-          </small>
-        </div>
-      ) : null}
-
-      {fzyVideo ? (
-        <div className="canvas-gen-node__media-roles" role="status" aria-label="饭众烟视频生成说明">
-          <small>本地参考图、视频和音频会先免费上传，再提交视频任务。</small>
-          <small>按秒计费模型按当前时长冻结费用；分辨率由模型档位决定，可留空。</small>
-          <small>首尾帧须成对使用，不能与参考图混用；具体支持范围由服务端返回。</small>
-        </div>
-      ) : null}
-      {pixverse ? (
-        <div className="canvas-gen-node__media-roles" role="status" aria-label="PixVerse 生成说明">
-          <small>
-            自动模式下，单图用于图生视频，多张参考图使用多图融合，首尾帧使用首尾帧生成；默认时长 5
-            秒。
-          </small>
-          <small>
-            {pixverseHasImages
-              ? "图生视频的画幅由参考图决定，服务端会忽略画幅参数。"
-              : "画幅参数仅在无参考图的文生视频中生效。"}
-          </small>
-          <small>1080p 需要账户开通权限；支持范围及参数组合以服务端返回为准。</small>
-          <small>视频和音频会先上传取得素材引用；视频延长、编辑或对口型请选择对应能力模式。</small>
-        </div>
-      ) : null}
-
-      {taskState.enabled ? (
-        <>
-          <div className="canvas-gen-node__field canvas-gen-node__field--model">
-            <span>任务类型</span>
-            <CanvasSelect
-              ariaLabel="任务类型"
-              value={taskState.mode}
-              disabled={config.greenScreen?.enabled}
-              options={seedanceTaskOptions(selectedModel?.remoteModelId ?? "").map((option) => ({
-                value: option.value,
-                label: option.label,
-              }))}
-              onChange={(mode) => {
-                const next = selectSeedanceTask(
-                    selectedModel?.remoteModelId ?? "",
-                    parameterCapabilities,
-                    config,
-                    mediaInputs ?? [],
-                    mode as SeedanceTaskMode,
-                    selectedModel?.operationSchema,
-                  );
-                onChange({ ...next, videoMode: mode as SeedanceTaskMode });
-              }}
-            />
-          </div>
-          <div className="canvas-gen-node__media-roles" role="status" aria-live="polite">
-            <small>{taskState.hint}</small>
-            {!parameterCapabilities.some(
-              (capability) => capability.key === "omni_reference_task_type",
-            ) &&
-            (taskState.mode === "edit" || taskState.mode === "extend") ? (
-              <small>
-                此模型通过提示词识别任务，请写明{taskState.mode === "edit" ? "编辑" : "延长"}意图。
-              </small>
-            ) : null}
-          </div>
-          {taskState.issue ? (
-            <ErrorAlert
-              error={taskState.issue}
-              tone="warning"
-              variant="inline"
-              hint="按上面的模型要求调整素材后再生成。"
-            />
-          ) : null}
-          {(taskState.mode === "first_frame" || taskState.mode === "first_last_frame") &&
+          {(frameMode === "first_frame" || frameMode === "first_last_frame") &&
           (mediaInputs?.length ?? 0) > 0 ? (
             <div className="canvas-gen-node__media-roles" aria-label="首尾帧素材">
               <ol className="canvas-gen-node__media-role-list">
@@ -2268,26 +1821,26 @@ export function VideoNodeSettings({
                     <AssetKindIcon kind={input.kind} size="md" />
                     <span className="canvas-gen-node__media-role-name">{input.name}</span>
                     <span>
-                      {taskState.mediaRoles[input.key] === "first_frame"
+                      {frameIntent.mediaRoles[input.key] === "first_frame"
                         ? "首帧"
-                        : taskState.mediaRoles[input.key] === "last_frame"
+                        : frameIntent.mediaRoles[input.key] === "last_frame"
                           ? "尾帧"
                           : "参考素材"}
                     </span>
                   </li>
                 ))}
               </ol>
-              {taskState.mode === "first_last_frame" && !taskState.issue ? (
+              {frameMode === "first_last_frame" && !taskState.issue ? (
                 <button
                   type="button"
                   className="canvas-gen-node__url-add"
                   onClick={() =>
                     onChange({
                       ...config,
-                      seedanceTaskMode: taskState.mode,
+                      seedanceTaskMode: frameMode,
                       parameterValues: taskState.parameterValues,
                       mediaRoles: Object.fromEntries(
-                        Object.entries(taskState.mediaRoles).map(([key, role]) => [
+                        Object.entries(frameIntent.mediaRoles).map(([key, role]) => [
                           key,
                           role === "first_frame"
                             ? "last_frame"
@@ -2304,25 +1857,36 @@ export function VideoNodeSettings({
               ) : null}
             </div>
           ) : null}
-          {taskState.mode === "edit" && onAnnotateVideo ? (
-            <div className="canvas-gen-node__media-roles" aria-label="视频局部编辑">
-              {(mediaInputs ?? [])
-                .filter((input) => input.kind === "video")
-                .map((input) => (
-                  <button
-                    type="button"
-                    className="canvas-gen-node__url-add"
-                    key={input.key}
-                    onClick={() => onAnnotateVideo(input)}
-                  >
-                    局部消除与编辑 · {input.name}
-                  </button>
-                ))}
-            </div>
-          ) : null}
-        </>
+      {fzyVideo ||
+      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
+      isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
+        <VideoMediaRoleSection
+          inputs={mediaInputs ?? []}
+          roles={config.mediaRoles ?? {}}
+          pairedFrames={fzyVideo}
+          onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
+        />
       ) : null}
-
+      {!fzyVideo &&
+      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
+        <VideoUrlMediaSection
+          urlMedia={config.urlMedia ?? []}
+          hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
+          onChange={(urlMedia) => onChange({ ...config, urlMedia })}
+        />
+      ) : null}
+      {perTaskProfile ? (
+        <PerTaskVideoUrlSection
+          profile={perTaskProfile}
+          urlMedia={perTaskPublicUrls}
+          connectedInputs={mediaInputs ?? []}
+          onChange={(perTaskUrlMedia) => onChange({ ...config, perTaskUrlMedia })}
+        />
+      ) : null}
+    </>
+  );
+  const modelFeatureFields = (
+    <>
       {showSeedanceExtras || config.greenScreen ? (
         <GreenScreenSection
           config={config.greenScreen}
@@ -2407,37 +1971,9 @@ export function VideoNodeSettings({
         </div>
       ) : null}
 
-      {fzyVideo ||
-      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
-      isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
-        <VideoMediaRoleSection
-          inputs={mediaInputs ?? []}
-          roles={config.mediaRoles ?? {}}
-          pairedFrames={fzyVideo}
-          onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
-        />
-      ) : null}
-      {!fzyVideo &&
-      isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
-        <VideoUrlMediaSection
-          urlMedia={config.urlMedia ?? []}
-          hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
-          onChange={(urlMedia) => onChange({ ...config, urlMedia })}
-        />
-      ) : null}
-      {perTaskProfile ? (
-        <PerTaskVideoUrlSection
-          profile={perTaskProfile}
-          urlMedia={perTaskPublicUrls}
-          connectedInputs={mediaInputs ?? []}
-          onChange={(perTaskUrlMedia) => onChange({ ...config, perTaskUrlMedia })}
-        />
-      ) : null}
     </>
   );
-
-  if (presentation === "compact")
-    return (
+  return (
       <CanvasVideoSettings
         config={config}
         onChange={onChange}
@@ -2447,18 +1983,26 @@ export function VideoNodeSettings({
         modelLabel={selectedModel?.displayName ?? "选择视频模型"}
         capabilities={taskState.parameterCapabilities}
         inputs={mediaInputs ?? []}
-        model={modelFields}
-        parameters={parameterFields}
-        advanced={advancedFields}
+        referenceSettings={referenceFields}
+        modelFeatures={modelFeatureFields}
+        model={<div className="canvas-video-model-list" aria-label="视频模型">
+          {availableProviders.flatMap(entry => entry.models
+            .filter(model => supportsGenerationNode(model, "video"))
+            .map(model => <button type="button" key={`${entry.provider.id}:${model.definitionId}`}
+              data-video-model-option
+              aria-pressed={config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId}
+              onClick={() => {
+                if (config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId) return;
+                onChange({ ...config, modelSelection: { providerId: entry.provider.id, modelDefinitionId: model.definitionId }, parameterValues: {}, seedanceTaskMode: "auto", videoMode: config.videoMode === "longVideo2video" ? "longVideo2video" : "auto", mediaRoles: {} });
+              }}>
+              <Icon name="video-camera" size="sm" aria-hidden="true" />
+              <span>{model.displayName}{availableProviders.length > 1 ? <small>{providerLabels.get(entry.provider.id) ?? entry.provider.displayName}</small> : null}</span>
+              {config.modelSelection.providerId === entry.provider.id && config.modelSelection.modelDefinitionId === model.definitionId ? <Icon name="check" size="sm" aria-hidden="true" /> : null}
+            </button>))}
+          {availableProviders.length === 0 ? <p role="status">请先在全局设置中配置视频模型。</p> : null}
+        </div>}
       />
     );
-  return (
-    <div className="canvas-gen-node__settings" aria-label="视频生成参数">
-      {modelFields}
-      {parameterFields}
-      {advancedFields}
-    </div>
-  );
 }
 
 /** 万相 3.0 连接素材角色的默认值（与后端 default_reference_role 对齐）。 */

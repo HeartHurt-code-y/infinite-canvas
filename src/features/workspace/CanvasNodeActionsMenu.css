@@ -1,0 +1,34 @@
+.canvas-node-actions__trigger {
+  position: absolute;
+  top: var(--space-xs);
+  right: var(--space-xs);
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: var(--canvas-node-action-size);
+  height: var(--canvas-node-action-size);
+  padding: 0;
+  border: 0;
+  border-radius: var(--canvas-node-action-radius);
+  background: var(--canvas-node-action-bg);
+  backdrop-filter: blur(4px);
+  color: var(--nt-text-default);
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+}
+.canvas-node-preview:hover .canvas-node-actions__trigger,
+.canvas-asset-node--output:hover .canvas-node-actions__trigger,
+.canvas-asset-node:hover .canvas-node-actions__trigger--save,
+.react-flow__node.selected .canvas-node-actions__trigger,
+.canvas-node-actions__trigger:focus-visible,
+.canvas-node-actions__trigger[aria-expanded="true"] {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.canvas-asset-node:has(> .canvas-node-actions__trigger:not(.canvas-node-actions__trigger--save)) > .canvas-node-actions__trigger--save {
+  right: calc(var(--space-xs) + var(--canvas-node-action-size) + 4px);
+}
+.canvas-node-actions__menu .node-name-editor { display: flex; flex-wrap: wrap; }
+.canvas-node-actions__menu .node-name-editor > button:first-child { flex: 1; }

@@ -18,7 +18,7 @@ import { readAppVersion } from "./write-latest-json.mjs";
 import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const STABLE_RESOURCE_DIRS = ["src-tauri/resources/ffmpeg"];
+export const STABLE_RESOURCE_DIRS = ["src-tauri/resources/ffmpeg", "src-tauri/resources/fonts/liblib-extended"];
 const SIGNED_FILE_UPDATE_DIRS = new Set(["src-tauri/resources/ffmpeg"]);
 
 async function fileSha256(filePath) {

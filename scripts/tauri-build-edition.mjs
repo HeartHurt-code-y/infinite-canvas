@@ -134,6 +134,16 @@ export function editionBundleRoot(plan) {
   return path.join(plan.targetDirectory, ...(target ? [target] : []), profile, "bundle");
 }
 
+async function removeEditionOutput(output, root) {
+  try {
+    await assertComponentRoot(path.dirname(output), root);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  await rm(output, { recursive: true, force: true });
+}
+
 /**
  * 清掉上一次构建留在 `bundle/` 里的产物。
  *
@@ -149,9 +159,7 @@ export function editionBundleRoot(plan) {
  * 后者是编译缓存，删了要重编十几分钟。
  */
 export async function cleanEditionBuildOutput(plan, root = COMPONENT_REPO_ROOT) {
-  const bundleRoot = editionBundleRoot(plan);
-  await assertComponentRoot(path.dirname(bundleRoot), root);
-  await rm(bundleRoot, { recursive: true, force: true });
+  await removeEditionOutput(editionBundleRoot(plan), root);
 }
 
 /**
@@ -161,8 +169,7 @@ export async function cleanEditionBuildOutput(plan, root = COMPONENT_REPO_ROOT) 
  * 的产物目录，让重跑既不幂等、也不干净。
  */
 export async function cleanEditionArtifactsOutput(output, root = COMPONENT_REPO_ROOT) {
-  await assertComponentRoot(path.dirname(output), root);
-  await rm(output, { recursive: true, force: true });
+  await removeEditionOutput(output, root);
 }
 
 export async function writeEditionOverrideConfig(plan, root = COMPONENT_REPO_ROOT) {

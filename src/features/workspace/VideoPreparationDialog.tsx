@@ -34,6 +34,8 @@ import {
 export interface VideoPreparationSource {
   readonly target: MediaReferenceTarget;
   readonly name: string;
+  readonly initialOperation?: VideoPreparationOperation;
+  readonly tool?: "remake";
 }
 
 interface VideoPreparationDialogProps {
@@ -50,6 +52,7 @@ const OPERATION_LABELS: Record<VideoPreparationOperation, string> = {
   silent_video: "导出无声视频",
   clip_video: "准确裁切片段",
 };
+
 const STATUS_LABELS: Record<VideoPreparationJob["status"], string> = {
   preparing: "读取原视频",
   processing: "正在处理",
@@ -113,7 +116,7 @@ export function VideoPreparationDialog({
   const [playing, setPlaying] = useState(false);
   const [startSeconds, setStartSeconds] = useState(0);
   const [endSeconds, setEndSeconds] = useState(0);
-  const [operation, setOperation] = useState<VideoPreparationOperation>("clip_video");
+  const [operation, setOperation] = useState<VideoPreparationOperation>(source.initialOperation ?? "clip_video");
   const [audioStreamIndex, setAudioStreamIndex] = useState<number | null>(null);
   const [format, setFormat] = useState<VideoPreparationAudioFormat>("wav");
   const [name, setName] = useState(() =>
@@ -312,12 +315,14 @@ export function VideoPreparationDialog({
     ? validateVideoPreparationRange(startSeconds, endSeconds, probe.durationSeconds)
     : null;
   const nameError = validateArtifactName(name);
+  const remakeRangeError = source.tool === "remake" && (endSeconds - startSeconds < 4 || endSeconds - startSeconds > 30);
   const lacksAudio = operation === "extract_audio" && audioStreamIndex == null;
   const canStart =
     desktop &&
     probe != null &&
     rangeError == null &&
     nameError == null &&
+    !remakeRangeError &&
     !lacksAudio &&
     busy == null;
 
@@ -417,7 +422,7 @@ export function VideoPreparationDialog({
     >
       <header className="video-preparation__header">
         <div>
-          <h2 id={headingId}>视频准备</h2>
+          <h2 id={headingId}>{source.tool === "remake" ? "片段重拍" : "视频准备"}</h2>
           <p>{source.name}</p>
         </div>
         <button type="button" ref={closeRef} onClick={onClose} aria-label="关闭视频准备">
@@ -582,7 +587,7 @@ export function VideoPreparationDialog({
           >
             <label>
               处理方式
-              <select
+              <select disabled={source.tool != null}
                 aria-label="处理方式"
                 value={operation}
                 onChange={(event) => setOperation(event.target.value as VideoPreparationOperation)}
@@ -606,7 +611,9 @@ export function VideoPreparationDialog({
                 maxLength={80}
               />
             </label>
-            {operation === "extract_audio" ? (
+            {source.tool === "remake" ? (
+              <p className="video-preparation__hint">选取 4–30 秒片段。导出后可进入 Seedance 2.5 重拍，生成时由供应商计费。</p>
+            ) : operation === "extract_audio" ? (
               <>
                 <label>
                   音轨
@@ -659,7 +666,7 @@ export function VideoPreparationDialog({
             {nameError ? <ErrorAlert error={nameError} hint="请换一个输出名称后重试。" /> : null}
             <button className="video-preparation__primary" type="submit" disabled={!canStart}>
               <Icon name={operation === "extract_audio" ? "waveform" : "film-strip"} size="sm" />
-              {busy === "start" ? "正在创建任务…" : OPERATION_LABELS[operation]}
+              {busy === "start" ? "正在创建任务…" : source.tool === "remake" ? "准备重拍片段" : OPERATION_LABELS[operation]}
             </button>
           </form>
           <section className="video-preparation__jobs" aria-label="视频准备任务">
@@ -795,7 +802,11 @@ export function VideoPreparationDialog({
                         }}
                       >
                         <Icon name="plus" size="sm" />
-                        {usedIds.has(selectedJob.jobId) ? "已加入画布" : "加入画布"}
+                        {usedIds.has(selectedJob.jobId) ? "已加入画布"
+                          : source.tool === "remake" && selectedJob.operation === "clip_video" &&
+                            selectedJob.source.canvasNodeKey === source.target.canvasNodeKey &&
+                            selectedJob.endSeconds - selectedJob.startSeconds >= 4 && selectedJob.endSeconds - selectedJob.startSeconds <= 30
+                            ? "继续重拍" : "加入画布"}
                       </button>
                       <button
                         type="button"
