@@ -364,6 +364,7 @@ export async function publishOnlineEdition({
   verifyRelease = verifyEditionRelease,
   dryRun = false,
   packageOnly = false,
+  updaterOnly = false,
   onProgress = () => {},
 }) {
   const plan = await prepareOnlinePublication({
@@ -373,9 +374,14 @@ export async function publishOnlineEdition({
     verifyRelease,
   });
   requireValue(!packageOnly || plan.platform.startsWith("darwin-"), "PKG-only publication requires macOS");
+  requireValue(!(packageOnly && updaterOnly), "PKG-only and updater-only publication are mutually exclusive");
+  requireValue(!updaterOnly || plan.platform.startsWith("darwin-"), "Updater-only publication requires macOS");
   const objects = packageOnly
     ? plan.objects.filter((entry) => entry.localPath?.endsWith(".pkg"))
-    : plan.objects;
+    : updaterOnly
+      ? plan.objects.filter((entry) => /\.app\.tar\.gz(?:\.sig)?$/.test(entry.localPath ?? ""))
+      : plan.objects;
+  requireValue(!updaterOnly || objects.length === 2, "Updater-only publication requires one archive and its signature");
   requireValue(!packageOnly || objects.length === 1, "PKG-only publication requires exactly one verified installer");
   const report = {
     schemaVersion: 1,
@@ -385,6 +391,7 @@ export async function publishOnlineEdition({
     channel: plan.channel,
     dryRun,
     packageOnly,
+    updaterOnly,
     objects: objects.map(({ objectKey, url, size, sha256 }) => ({
       objectKey,
       url,
@@ -566,17 +573,20 @@ export function parseOnlinePublishArgs(args) {
   const distributionAt = args.indexOf("--distribution-dir");
   const dryRun = args.includes("--dry-run");
   const packageOnly = args.includes("--package-only");
+  const updaterOnly = args.includes("--updater-only");
   requireValue(
     distributionAt >= 0 &&
       args[distributionAt + 1] &&
       !args[distributionAt + 1].startsWith("--") &&
-      args.length === 2 + (dryRun ? 1 : 0) + (packageOnly ? 1 : 0) &&
+      args.length === 2 + (dryRun ? 1 : 0) + (packageOnly ? 1 : 0) + (updaterOnly ? 1 : 0) &&
+      !(packageOnly && updaterOnly) &&
       args.filter((argument) => argument === "--distribution-dir").length === 1 &&
       args.filter((argument) => argument === "--package-only").length <= 1 &&
+      args.filter((argument) => argument === "--updater-only").length <= 1 &&
       args.filter((argument) => argument === "--dry-run").length <= 1,
-    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run] [--package-only]",
+    "Usage: node scripts/publish-online-updates.mjs --distribution-dir .cache/tauri-editions/online/artifacts/{version} [--dry-run] [--package-only | --updater-only]",
   );
-  return { distributionDirectory: args[distributionAt + 1], dryRun, packageOnly };
+  return { distributionDirectory: args[distributionAt + 1], dryRun, packageOnly, updaterOnly };
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
