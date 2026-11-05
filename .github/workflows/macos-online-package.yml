@@ -28,6 +28,10 @@ on:
         description: Cancel the previous run for this architecture (stalled releases only)
         type: boolean
         default: false
+      prebuilt_run:
+        description: Reuse a signed Windows artifact from this repository run (source hashes must match)
+        type: string
+        default: ""
       publish:
         description: Publish verified artifacts and the independent online update feed
         type: boolean
@@ -209,6 +213,9 @@ jobs:
     if: inputs.platform == 'windows'
     runs-on: windows-latest
     timeout-minutes: 180
+    permissions:
+      contents: read
+      actions: read
     env:
       CI: "true"
       RUST_MIN_STACK: "33554432"
@@ -238,7 +245,42 @@ jobs:
           cache-on-failure: true
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Restore signed Windows artifact and verify frozen source identity
+        if: inputs.prebuilt_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILT_RUN: ${{ inputs.prebuilt_run }}
+        shell: pwsh
+        run: |
+          if ($env:PREBUILT_RUN -notmatch '^[0-9]+$') { throw 'Invalid source run' }
+          $version = node -p "require('./package.json').version"
+          $distribution = Join-Path $PWD ".cache/tauri-editions/online/artifacts/$version"
+          $download = Join-Path $env:RUNNER_TEMP 'prebuilt-download'
+          $names = @(gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:PREBUILT_RUN/artifacts" --jq '.artifacts[]|select(.name|startswith("infinite-canvas-windows-online-"))|.name')
+          if ($LASTEXITCODE -ne 0 -or $names.Count -ne 1) { throw 'Expected one signed Windows artifact' }
+          gh run download $env:PREBUILT_RUN --repo $env:GITHUB_REPOSITORY --name $names[0] --dir $download
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the signed artifact' }
+          $artifactRoot = if (Test-Path (Join-Path $download 'distribution.json')) { $download } else { Join-Path $download $version }
+          if (-not (Test-Path (Join-Path $artifactRoot 'distribution.json'))) { throw 'Unexpected artifact layout' }
+          New-Item -ItemType Directory -Path $distribution -Force | Out-Null
+          foreach ($name in @('distribution.json','build-source.json','publish-manifest.json','latest.json')) {
+            Copy-Item -LiteralPath (Join-Path $artifactRoot $name) -Destination (Join-Path $distribution $name)
+          }
+          Copy-Item -LiteralPath (Join-Path $artifactRoot 'nsis') -Destination $distribution -Recurse
+          pnpm ffmpeg:prepare
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime preparation failed' }
+          $installers = @(Get-ChildItem -LiteralPath (Join-Path $distribution 'nsis') -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected one verified installer' }
+          $extracted = Join-Path $env:RUNNER_TEMP 'prebuilt-extracted'
+          & 'C:\Program Files\7-Zip\7z.exe' x $installers[0].FullName 'infinite-canvas.exe' "-o$extracted" -y -bso0 -bsp0
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the frozen executable' }
+          $native = Join-Path $PWD '.cache/tauri-editions/online/target/release/infinite-canvas.exe'
+          New-Item -ItemType Directory -Path (Split-Path $native) -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $extracted 'infinite-canvas.exe') -Destination $native -Force
+          node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises';import path from 'node:path';import {editionBuildPlan,writeEditionTargetMarker} from './scripts/tauri-build-edition.mjs';import {assertEditionBuildSourceFreshness} from './scripts/edition-source-fingerprint.mjs';import {verifyEditionRelease} from './scripts/verify-edition-release.mjs';const root=process.cwd();const version=JSON.parse(await readFile('package.json','utf8')).version;const directory=path.join(root,'.cache/tauri-editions/online/artifacts',version);const record=JSON.parse(await readFile(path.join(directory,'build-source.json'),'utf8'));await assertEditionBuildSourceFreshness(record,{root,edition:'online',applicationVersion:version,executablePath:path.join(root,'.cache/tauri-editions/online/target/release/infinite-canvas.exe')});await writeEditionTargetMarker(editionBuildPlan('online'),version);const manifestPath=path.join(directory,'publish-manifest.json');const manifest=JSON.parse(await readFile(manifestPath,'utf8'));for(const item of manifest.artifacts)item.localPath=path.join(directory,item.path);if(manifest.feed)manifest.feed.localPath=path.join(directory,'latest.json');await writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');console.log(JSON.stringify(await verifyEditionRelease({distributionDirectory:directory,requireSourceFreshness:true})));"
+          if ($LASTEXITCODE -ne 0) { throw 'Frozen artifact verification failed' }
       - name: Build signed Windows online installer
+        if: inputs.prebuilt_run == ''
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -250,8 +292,14 @@ jobs:
           New-Item -ItemType Directory -Path $validation -Force | Out-Null
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9438'
           $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $validation 'webview'
-          $executable = Join-Path $PWD '.cache/tauri-editions/online/target/release/infinite-canvas.exe'
-          $application = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) -WindowStyle Hidden -PassThru
+          $version = node -p "require('./package.json').version"
+          $installers = @(Get-ChildItem -LiteralPath ".cache/tauri-editions/online/artifacts/$version/nsis" -Filter '*.exe' -File)
+          if ($installers.Count -ne 1) { throw 'Expected one signed installer' }
+          $installed = Join-Path $validation 'installed'
+          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList @('/S', "/D=$installed") -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -notin @(0,3010)) { throw "Installer failed with exit $($setup.ExitCode)" }
+          $executable = Join-Path $installed 'infinite-canvas.exe'
+          $application = Start-Process -FilePath $executable -WorkingDirectory $installed -WindowStyle Normal -PassThru
           try {
             @'
           import { writeFile } from 'node:fs/promises';
