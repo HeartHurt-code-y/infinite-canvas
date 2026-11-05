@@ -1,8 +1,15 @@
-name: macOS Online Package
+name: Native Online Package
 
 on:
   workflow_dispatch:
     inputs:
+      platform:
+        description: Native package platform
+        type: choice
+        options:
+          - macos
+          - windows
+        default: macos
       architecture:
         description: Native Mac architecture
         type: choice
@@ -34,11 +41,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: macos-online-${{ inputs.architecture }}
+  group: ${{ inputs.platform == 'windows' && 'windows-online-x64' || format('macos-online-{0}', inputs.architecture) }}
   cancel-in-progress: ${{ inputs.replace_existing || false }}
 
 jobs:
   build:
+    if: inputs.platform != 'windows'
     runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || inputs.arm64_runner || 'macos-15' }}
     timeout-minutes: 180
     env:
@@ -103,6 +111,145 @@ jobs:
             echo "- Restored key: ${CACHE_MATCHED_KEY:-none}"
             echo '- Preparation and integrity checks always run; unchanged verified resources are reused.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  windows:
+    if: inputs.platform == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 180
+    env:
+      CI: "true"
+      RUST_MIN_STACK: "33554432"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache native build dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../.cache/tauri-editions/online/target
+          cache-on-failure: true
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build signed Windows online installer
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm tauri:build:online --bundles nsis
+      - name: Launch packaged application and create media nodes
+        shell: pwsh
+        run: |
+          $validation = Join-Path $env:RUNNER_TEMP 'canvas-release-validation'
+          New-Item -ItemType Directory -Path $validation -Force | Out-Null
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9438'
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $validation 'webview'
+          $executable = Join-Path $PWD '.cache/tauri-editions/online/target/release/infinite-canvas.exe'
+          $application = Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable) -WindowStyle Hidden -PassThru
+          try {
+            @'
+          import { writeFile } from 'node:fs/promises';
+          import path from 'node:path';
+          let targets;
+          for (let n = 0; n < 40; n++) {
+            try { targets = await fetch('http://127.0.0.1:9438/json').then(r => r.json()); if (targets.some(p => p.type === 'page')) break; } catch {}
+            await new Promise(r => setTimeout(r, 500));
+          }
+          const target = targets?.find(p => p.type === 'page' && p.url.includes('tauri.localhost'));
+          if (!target) throw new Error('Packaged application did not expose its main WebView');
+          const socket = new WebSocket(target.webSocketDebuggerUrl);
+          await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
+          let sequence = 0;
+          const pending = new Map();
+          const errors = [];
+          socket.addEventListener('message', event => {
+            const message = JSON.parse(event.data);
+            if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails.text);
+            const request = pending.get(message.id);
+            if (request) { pending.delete(message.id); clearTimeout(request.timer); message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result); }
+          });
+          const call = (method, params = {}) => new Promise((resolve, reject) => {
+            const id = ++sequence;
+            const timer = setTimeout(() => { pending.delete(id); reject(new Error(`WebView command timed out: ${method}`)); }, 15000);
+            pending.set(id, { resolve, reject, timer });
+            socket.send(JSON.stringify({ id, method, params }));
+          });
+          const run = async fn => {
+            const result = await call('Runtime.evaluate', { expression: `(${fn.toString()})()`, returnByValue: true, awaitPromise: true });
+            if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+            return result.result.value;
+          };
+          await call('Runtime.enable');
+          const version = await run(async () => {
+            const wait = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 100)); } throw new Error('Workspace did not become ready'); };
+            await wait(() => document.querySelector('button[aria-label="新建画布"]'));
+            [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '跳过' && b.getBoundingClientRect().width)?.click();
+            document.querySelector('button[aria-label="新建画布"]').click();
+            await wait(() => document.querySelector('.canvas-empty-hint button'));
+            [...document.querySelectorAll('.canvas-empty-hint button')].find(b => b.textContent.includes('图片生成')).click();
+            await wait(() => [...document.querySelectorAll('[contenteditable="true"]')].some(e => e.getBoundingClientRect().width));
+            [...document.querySelectorAll('[contenteditable="true"]')].find(e => e.getBoundingClientRect().width).focus();
+            return window.__TAURI__.core.invoke('plugin:app|version');
+          });
+          await call('Input.insertText', { text: 'Native release validation' });
+          await run(async () => {
+            document.querySelector('button[aria-label="添加节点"]').click();
+            for (let n = 0; n < 50; n++) {
+              const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '视频' && b.getBoundingClientRect().width);
+              if (button) { button.click(); return; }
+              await new Promise(r => setTimeout(r, 100));
+            }
+            throw new Error('Video node menu did not open');
+          });
+          await new Promise(r => setTimeout(r, 1500));
+          const state = await run(() => ({ nodes: document.querySelectorAll('.react-flow__node').length, renderLoop: document.body.innerText.includes('Maximum update depth') }));
+          const expected = JSON.parse(await import('node:fs').then(fs => fs.readFileSync('package.json', 'utf8'))).version;
+          if (version !== expected || state.nodes !== 2 || state.renderLoop || errors.length) throw new Error('Packaged media node acceptance failed');
+          const capture = await call('Page.captureScreenshot', { format: 'png' });
+          await writeFile(path.join(process.env.RUNNER_TEMP, 'canvas-release-validation', 'installed-app.png'), Buffer.from(capture.data, 'base64'));
+          console.log(JSON.stringify({ version, ...state, runtimeErrors: errors.length }));
+          socket.close();
+          '@ | Set-Content -LiteralPath (Join-Path $validation 'acceptance.mjs') -Encoding utf8
+            node (Join-Path $validation 'acceptance.mjs')
+            if ($LASTEXITCODE -ne 0) { throw 'Native application acceptance failed' }
+          } finally {
+            Stop-Process -Id $application.Id -ErrorAction SilentlyContinue
+          }
+      - name: Upload installation artifacts
+        if: ${{ !cancelled() && hashFiles('.cache/tauri-editions/online/artifacts/*/distribution.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinite-canvas-windows-online-${{ github.sha }}
+          path: .cache/tauri-editions/online/artifacts/*/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload application launch evidence
+        if: ${{ !cancelled() && hashFiles(format('{0}/canvas-release-validation/installed-app.png', runner.temp)) != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinite-canvas-windows-launch-${{ github.sha }}
+          path: ${{ runner.temp }}/canvas-release-validation/installed-app.png
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish verified Windows online update
+        if: inputs.publish
+        env:
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
       - name: Build and verify online DMG and updater
         id: verified-build
         env:
