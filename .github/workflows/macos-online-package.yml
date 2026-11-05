@@ -32,6 +32,10 @@ on:
         description: Reuse a signed Windows artifact from this repository run (source hashes must match)
         type: string
         default: ""
+      validated_installer_sha256:
+        description: Exact installer SHA256 after native desktop acceptance outside the hosted runner
+        type: string
+        default: ""
       publish:
         description: Publish verified artifacts and the independent online update feed
         type: boolean
@@ -250,6 +254,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PREBUILT_RUN: ${{ inputs.prebuilt_run }}
+          VALIDATED_INSTALLER_SHA256: ${{ inputs.validated_installer_sha256 }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         shell: pwsh
@@ -287,6 +292,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'NSIS recipe regeneration failed' }
           node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises';import path from 'node:path';import {verifyEditionRelease} from './scripts/verify-edition-release.mjs';const root=process.cwd();const version=JSON.parse(await readFile('package.json','utf8')).version;const directory=path.join(root,'.cache/tauri-editions/online/artifacts',version);const manifestPath=path.join(directory,'publish-manifest.json');const manifest=JSON.parse(await readFile(manifestPath,'utf8'));for(const item of manifest.artifacts)item.localPath=path.join(directory,item.path);if(manifest.feed)manifest.feed.localPath=path.join(directory,'latest.json');await writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');console.log(JSON.stringify(await verifyEditionRelease({distributionDirectory:directory,requireSourceFreshness:true})));"
           if ($LASTEXITCODE -ne 0) { throw 'Frozen artifact verification failed' }
+          if ($env:VALIDATED_INSTALLER_SHA256) {
+            if ($env:VALIDATED_INSTALLER_SHA256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid desktop acceptance hash' }
+            $actual = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $env:VALIDATED_INSTALLER_SHA256) { throw 'Desktop acceptance belongs to a different installer' }
+            Write-Host "Desktop accepted installer SHA256: $actual"
+          }
       - name: Build signed Windows online installer
         if: inputs.prebuilt_run == ''
         env:
@@ -294,6 +305,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: pnpm tauri:build:online --bundles nsis
       - name: Launch packaged application and create media nodes
+        if: inputs.validated_installer_sha256 == '' || inputs.prebuilt_run == ''
         shell: pwsh
         run: |
           $validation = Join-Path $env:RUNNER_TEMP 'canvas-release-validation'
