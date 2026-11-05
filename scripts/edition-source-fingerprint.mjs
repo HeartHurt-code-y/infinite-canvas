@@ -203,12 +203,20 @@ export async function collectEditionSourceFingerprint({
 }
 
 export function assertEditionSourcesUnchanged(before, after) {
+  const previous = new Map(before.files.map((file) => [file.path, file]));
+  const current = new Map(after.files.map((file) => [file.path, file]));
+  const changed = [...new Set([...previous.keys(), ...current.keys()])].filter((filename) => {
+    const left = previous.get(filename);
+    const right = current.get(filename);
+    return left?.size !== right?.size || left?.sha256 !== right?.sha256;
+  }).sort();
   requireValue(
     before.applicationVersion === after.applicationVersion &&
       before.edition === after.edition &&
       before.fingerprint === after.fingerprint &&
       JSON.stringify(before.files) === JSON.stringify(after.files),
-    "Compilation sources changed during edition build; refusing to archive a mixed or stale release",
+    "Compilation sources changed during edition build; refusing to archive a mixed or stale release" +
+      (changed.length ? `; changed inputs: ${changed.slice(0, 30).join(", ")}` : ""),
   );
 }
 

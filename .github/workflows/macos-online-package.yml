@@ -213,6 +213,11 @@ jobs:
       CI: "true"
       RUST_MIN_STACK: "33554432"
     steps:
+      - name: Keep checkout source bytes stable
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
       - name: Checkout
         uses: actions/checkout@v5
       - name: Set up pnpm
@@ -285,7 +290,6 @@ jobs:
             const wait = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 100)); } throw new Error('Workspace did not become ready'); };
             await wait(() => document.querySelector('button[aria-label="新建画布"]'));
             [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '跳过' && b.getBoundingClientRect().width)?.click();
-            document.querySelector('button[aria-label="新建画布"]').click();
             await wait(() => document.querySelector('.canvas-empty-hint button'));
             [...document.querySelectorAll('.canvas-empty-hint button')].find(b => b.textContent.includes('图片生成')).click();
             await wait(() => [...document.querySelectorAll('[contenteditable="true"]')].some(e => e.getBoundingClientRect().width));
