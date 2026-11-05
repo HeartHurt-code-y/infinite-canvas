@@ -112,6 +112,99 @@ jobs:
             echo '- Preparation and integrity checks always run; unchanged verified resources are reused.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build and verify online DMG and updater
+        id: verified-build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: bash scripts/build-macos-online.sh
+      - name: Launch installed application
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          validation_dir="$PWD/.cache/release-validation/$version"
+          mkdir -p "$validation_dir"
+          export IC_MAC_VALIDATION_DIR="$validation_dir"
+          app_name="$(node -p "require('./src-tauri/tauri.conf.json').productName")"
+          open -n "/Applications/$app_name.app"
+          swift - <<'SWIFT'
+          import Foundation
+          import CoreGraphics
+          let output = URL(fileURLWithPath: ProcessInfo.processInfo.environment["IC_MAC_VALIDATION_DIR"]!)
+          var applicationWindow: [String: Any]?
+          for _ in 0..<30 {
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+              applicationWindow = windows.first { window in
+                  let owner = window[kCGWindowOwnerName as String] as? String ?? ""
+                  let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
+                  return (owner == "infinite-canvas" || owner == "无限画布") &&
+                      (bounds["Width"] as? Double ?? 0) >= 600 && (bounds["Height"] as? Double ?? 0) >= 400
+              }
+              if applicationWindow != nil { break }
+              Thread.sleep(forTimeInterval: 1)
+          }
+          guard let window = applicationWindow, let windowID = window[kCGWindowNumber as String] as? Int else {
+              fatalError("Installed application did not show its main window")
+          }
+          Thread.sleep(forTimeInterval: 8)
+          let evidence = try JSONSerialization.data(withJSONObject: window, options: [.prettyPrinted, .sortedKeys])
+          try evidence.write(to: output.appendingPathComponent("installed-window.json"))
+          let capture = Process()
+          capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+          capture.arguments = ["-x", "-l", String(windowID), output.appendingPathComponent("installed-app.png").path]
+          try capture.run()
+          capture.waitUntilExit()
+          guard capture.terminationStatus == 0 else { fatalError("Could not capture installed application window") }
+          print("Installed application launched with a visible main window; screenshot recorded.")
+          SWIFT
+      # Save immediately after native verification, so a later publication or
+      # artifact-upload failure does not discard successfully prepared resources.
+      - name: Save verified runtime resources
+        if: steps.verified-build.outcome == 'success' && steps.runtime-resources-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            src-tauri/resources/ffmpeg
+          key: ${{ steps.runtime-resources-cache.outputs.cache-primary-key }}
+      - name: Upload installation artifacts
+        # Preserve materialized packages when verification fails, for diagnosis.
+        # Only the verified-build success path below can publish them publicly.
+        if: ${{ !cancelled() && hashFiles('.cache/tauri-editions/online/artifacts/*/distribution.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinite-canvas-macos-online-${{ inputs.architecture }}-${{ github.sha }}
+          path: |
+            .cache/tauri-editions/online/artifacts/*/
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Upload application launch evidence
+        if: ${{ !cancelled() && hashFiles('.cache/release-validation/*/installed-app.png') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: infinite-canvas-macos-launch-${{ inputs.architecture }}-${{ github.sha }}
+          path: .cache/release-validation/*/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish requested installation artifacts
+        if: inputs.publish && steps.verified-build.outcome == 'success'
+        env:
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          PKG_ONLY: ${{ inputs.package_only }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          publish_args=()
+          if [ "$PKG_ONLY" = "true" ]; then publish_args+=(--package-only); fi
+          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version" "${publish_args[@]}"
+      - name: Report installation boundary
+        run: |
+          {
+            echo 'macOS online PKG, DMG and updater signature verified. The PKG was actually installed with the system installer.'
+            echo 'Installation scripts are embedded. Install the PKG with: sudo installer -pkg <downloaded.pkg> -target /'
+            echo 'Apple notarization is not performed. Gatekeeper may block first installation; the PKG embeds install-macos.sh and runs it automatically.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   windows:
     if: inputs.platform == 'windows'
     runs-on: windows-latest
@@ -250,95 +343,3 @@ jobs:
         run: |
           $version = node -p "require('./package.json').version"
           pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
-      - name: Build and verify online DMG and updater
-        id: verified-build
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/build-macos-online.sh
-      - name: Launch installed application
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          validation_dir="$PWD/.cache/release-validation/$version"
-          mkdir -p "$validation_dir"
-          export IC_MAC_VALIDATION_DIR="$validation_dir"
-          app_name="$(node -p "require('./src-tauri/tauri.conf.json').productName")"
-          open -n "/Applications/$app_name.app"
-          swift - <<'SWIFT'
-          import Foundation
-          import CoreGraphics
-          let output = URL(fileURLWithPath: ProcessInfo.processInfo.environment["IC_MAC_VALIDATION_DIR"]!)
-          var applicationWindow: [String: Any]?
-          for _ in 0..<30 {
-              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-              applicationWindow = windows.first { window in
-                  let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-                  return (owner == "infinite-canvas" || owner == "无限画布") &&
-                      (bounds["Width"] as? Double ?? 0) >= 600 && (bounds["Height"] as? Double ?? 0) >= 400
-              }
-              if applicationWindow != nil { break }
-              Thread.sleep(forTimeInterval: 1)
-          }
-          guard let window = applicationWindow, let windowID = window[kCGWindowNumber as String] as? Int else {
-              fatalError("Installed application did not show its main window")
-          }
-          Thread.sleep(forTimeInterval: 8)
-          let evidence = try JSONSerialization.data(withJSONObject: window, options: [.prettyPrinted, .sortedKeys])
-          try evidence.write(to: output.appendingPathComponent("installed-window.json"))
-          let capture = Process()
-          capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-          capture.arguments = ["-x", "-l", String(windowID), output.appendingPathComponent("installed-app.png").path]
-          try capture.run()
-          capture.waitUntilExit()
-          guard capture.terminationStatus == 0 else { fatalError("Could not capture installed application window") }
-          print("Installed application launched with a visible main window; screenshot recorded.")
-          SWIFT
-      # Save immediately after native verification, so a later publication or
-      # artifact-upload failure does not discard successfully prepared resources.
-      - name: Save verified runtime resources
-        if: steps.verified-build.outcome == 'success' && steps.runtime-resources-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            src-tauri/resources/ffmpeg
-          key: ${{ steps.runtime-resources-cache.outputs.cache-primary-key }}
-      - name: Upload installation artifacts
-        # Preserve materialized packages when verification fails, for diagnosis.
-        # Only the verified-build success path below can publish them publicly.
-        if: ${{ !cancelled() && hashFiles('.cache/tauri-editions/online/artifacts/*/distribution.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-macos-online-${{ inputs.architecture }}-${{ github.sha }}
-          path: |
-            .cache/tauri-editions/online/artifacts/*/
-          include-hidden-files: true
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-      - name: Upload application launch evidence
-        if: ${{ !cancelled() && hashFiles('.cache/release-validation/*/installed-app.png') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-macos-launch-${{ inputs.architecture }}-${{ github.sha }}
-          path: .cache/release-validation/*/
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14
-      - name: Publish requested installation artifacts
-        if: inputs.publish && steps.verified-build.outcome == 'success'
-        env:
-          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
-          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
-          PKG_ONLY: ${{ inputs.package_only }}
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          publish_args=()
-          if [ "$PKG_ONLY" = "true" ]; then publish_args+=(--package-only); fi
-          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version" "${publish_args[@]}"
-      - name: Report installation boundary
-        run: |
-          {
-            echo 'macOS online PKG, DMG and updater signature verified. The PKG was actually installed with the system installer.'
-            echo 'Installation scripts are embedded. Install the PKG with: sudo installer -pkg <downloaded.pkg> -target /'
-            echo 'Apple notarization is not performed. Gatekeeper may block first installation; the PKG embeds install-macos.sh and runs it automatically.'
-          } >> "$GITHUB_STEP_SUMMARY"
