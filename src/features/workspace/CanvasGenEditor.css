@@ -25,6 +25,12 @@
   pointer-events: none;
 }
 
+.video-node-editor-host,
+.video-node-editor-presentation,
+.video-node-editor-window {
+  display: contents;
+}
+
 /*
  * 节点上方的头部条（React Flow NodeToolbar）。
  *
@@ -568,13 +574,91 @@
   transform: translate(-50%, -50%);
 }
 
+.video-node-editor-presentation[data-floating] {
+  position: fixed;
+  z-index: var(--z-modal);
+  inset: 0;
+  display: block;
+  pointer-events: none;
+}
+
+.video-node-editor-presentation[data-floating] .video-node-editor__backdrop {
+  background: rgb(0 0 0 / 50%);
+}
+
+.video-node-editor-presentation[data-floating] .video-node-editor-window {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  max-width: 90vw;
+  max-height: 90dvh;
+  transform: translate(-50%, -50%);
+}
+
+.video-node-editor-presentation[data-floating] .video-node-editor.is-expanded {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  transform: none;
+}
+
+.video-node-editor__resize {
+  position: absolute;
+  z-index: 7;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.video-node-editor__resize:is([data-edge="n"], [data-edge="s"]) {
+  right: 8px;
+  left: 8px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.video-node-editor__resize:is([data-edge="w"], [data-edge="e"]) {
+  top: 8px;
+  bottom: 8px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.video-node-editor__resize:is([data-edge="nw"], [data-edge="ne"], [data-edge="sw"], [data-edge="se"]) {
+  width: 12px;
+  height: 12px;
+}
+
+.video-node-editor__resize:is([data-edge="nw"], [data-edge="se"]) { cursor: nwse-resize; }
+.video-node-editor__resize:is([data-edge="ne"], [data-edge="sw"]) { cursor: nesw-resize; }
+.video-node-editor__resize[data-edge^="n"] { top: -4px; }
+.video-node-editor__resize[data-edge^="s"] { bottom: -4px; }
+.video-node-editor__resize[data-edge$="w"] { left: -4px; }
+.video-node-editor__resize[data-edge$="e"] { right: -4px; }
+
+.video-node-editor__resize[data-edge="se"]::after {
+  position: absolute;
+  inset: 1px 6px 6px 1px;
+  background: linear-gradient(135deg, transparent 44%, currentColor 44% 55%,
+    transparent 55% 70%, currentColor 70% 81%, transparent 81%);
+  color: var(--nt-text-muted);
+  content: "";
+}
+
 .video-node-editor.is-expanded .video-node-editor__scroll {
   display: flex;
   flex: 1;
 }
 
+.video-node-editor.is-expanded[data-media-kind] .video-node-editor__scroll {
+  overflow: hidden;
+}
+
 .video-node-editor.is-expanded .video-node-editor__form,
 .video-node-editor.is-expanded .canvas-gen-node__prompt-area,
+.video-node-editor.is-expanded .canvas-gen-node__prompt-input:not([hidden]),
 .video-node-editor.is-expanded .prompt-mention,
 .video-node-editor.is-expanded .prompt-mention__surface,
 .video-node-editor.is-expanded .prompt-mention__field {
@@ -586,7 +670,14 @@
 
 .video-node-editor.is-expanded .prompt-mention__input {
   flex: 1;
+  min-height: 0;
   max-height: none;
+}
+
+.video-node-editor.is-expanded[data-media-kind] .prompt-mention__input {
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-default) transparent;
 }
 
 .video-node-editor.is-expanded .prompt-mention__actions {

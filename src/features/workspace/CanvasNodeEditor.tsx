@@ -1,4 +1,5 @@
-import { useCallback, useContext, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useLayoutEffect, useRef, useState, type PointerEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Icon } from "../../components/Icon";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { CanvasReferencePickingContext } from "./canvasReferencePicking";
@@ -7,6 +8,21 @@ import { videoNodeEditorPlacement } from "./videoNodeEditorPlacement";
 import type { CanvasNodeRect } from "./workspaceModel";
 import "./VideoGenerationNode.css";
 import "./CanvasNodePresentation.css";
+
+const INITIAL_EXPANDED_SIZE = { width: 800, height: 600 };
+const RESIZE_EDGES = ["n", "s", "w", "e", "nw", "ne", "sw", "se"] as const;
+type ResizeEdge = (typeof RESIZE_EDGES)[number];
+
+interface EditorSelection {
+  readonly anchorNode: Node;
+  readonly anchorOffset: number;
+  readonly focusNode: Node;
+  readonly focusOffset: number;
+}
+
+function selectionOffset(node: Node, offset: number): number {
+  return Math.min(offset, node.nodeValue?.length ?? node.childNodes.length);
+}
 
 /** 编辑区保留在视口独立层；只更新几何位置，平移和缩放不重建输入 DOM。 */
 export function CanvasNodeEditorShell({
@@ -26,17 +42,41 @@ export function CanvasNodeEditorShell({
   readonly onClose: () => void;
   readonly children: ReactNode;
 }) {
+  const anchorRef = useRef<HTMLDivElement>(null);
   const elementRef = useRef<HTMLElement>(null);
   const lastControl = useRef<HTMLElement | null>(null);
-  const lastRange = useRef<Range | null>(null);
+  const lastSelection = useRef<EditorSelection | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [portalHost, setPortalHost] = useState<HTMLDivElement | null>(null);
+  const [expandedSize, setExpandedSize] = useState(INITIAL_EXPANDED_SIZE);
+  const resize = useRef<{
+    readonly pointer: number;
+    readonly edge: ResizeEdge;
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  } | null>(null);
+  const mediaKind = kindLabel === "视频生成" ? "video" : kindLabel === "图片生成" ? "image" : undefined;
   const reference = useContext(CanvasReferencePickingContext);
   const pickingReference = reference?.session?.targetKey === nodeKey;
   const marking = useContext(CanvasImageMarkingContext);
   const pickingElement = marking?.targetKey === nodeKey;
+  const expandedOpen = open && expanded && !pickingReference && !pickingElement;
+  const floating = expandedOpen && mediaKind !== undefined;
   useLayoutEffect(() => {
-    if (pickingReference || pickingElement) setExpanded(false);
-  }, [pickingReference, pickingElement]);
+    if (!open || pickingReference || pickingElement) setExpanded(false);
+  }, [open, pickingReference, pickingElement]);
+
+  useLayoutEffect(() => {
+    if (!mediaKind || !anchorRef.current) return;
+    const host = document.createElement("div");
+    host.className = "video-node-editor-host";
+    anchorRef.current.appendChild(host);
+    setPortalHost(host);
+    return () => host.remove();
+  }, [mediaKind]);
+
   const rememberFocus = useCallback((element: EventTarget | null = document.activeElement) => {
     if (!(element instanceof HTMLElement) || !elementRef.current?.contains(element)) return;
     if (
@@ -49,10 +89,15 @@ export function CanvasNodeEditorShell({
     if (element.isContentEditable) {
       const selection = window.getSelection();
       if (
-        selection?.rangeCount &&
-        element.contains(selection.getRangeAt(0).commonAncestorContainer)
+        selection?.anchorNode && selection.focusNode &&
+        element.contains(selection.anchorNode) && element.contains(selection.focusNode)
       ) {
-        lastRange.current = selection.getRangeAt(0).cloneRange();
+        lastSelection.current = {
+          anchorNode: selection.anchorNode,
+          anchorOffset: selection.anchorOffset,
+          focusNode: selection.focusNode,
+          focusOffset: selection.focusOffset,
+        };
       }
     }
   }, []);
@@ -70,18 +115,53 @@ export function CanvasNodeEditorShell({
       return;
     }
     if (control.closest("[hidden]")) return;
+    const selection = lastSelection.current;
     control.focus({ preventScroll: true });
-    if (control.isContentEditable && lastRange.current?.startContainer.isConnected) {
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(lastRange.current);
+    if (
+      control.isContentEditable && selection &&
+      control.contains(selection.anchorNode) && control.contains(selection.focusNode)
+    ) {
+      window.getSelection()?.setBaseAndExtent(
+        selection.anchorNode,
+        selectionOffset(selection.anchorNode, selection.anchorOffset),
+        selection.focusNode,
+        selectionOffset(selection.focusNode, selection.focusOffset),
+      );
     }
   }, []);
 
   useLayoutEffect(() => {
+    if (!floating) resize.current = null;
+    const parent = floating ? document.body : anchorRef.current;
+    if (!portalHost || !parent || portalHost.parentElement === parent) return;
+    // 只移动 portal 的宿主。编辑器、@ 引用、撤销历史与参数控件保留同一棵树。
+    const focused = document.activeElement instanceof HTMLElement &&
+      elementRef.current?.contains(document.activeElement) ? document.activeElement : null;
+    rememberFocus();
+    parent.appendChild(portalHost);
+    const frame = requestAnimationFrame(() => {
+      if (lastControl.current) {
+        restoreFocus();
+      } else {
+        const prompt = floating ? elementRef.current?.querySelector<HTMLElement>("[contenteditable='true']") : null;
+        (prompt ?? focused)?.focus({ preventScroll: true });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [floating, portalHost, rememberFocus, restoreFocus]);
+
+  useLayoutEffect(() => {
     const editor = elementRef.current;
-    const stage = editor?.closest<HTMLElement>(".canvas-viewport");
+    const stage = anchorRef.current?.closest<HTMLElement>(".canvas-viewport");
     if (!open || !editor || !stage) return;
+    if (expandedOpen) {
+      editor.style.visibility = "";
+      editor.style.left = "";
+      editor.style.top = "";
+      editor.style.width = "";
+      editor.style.maxHeight = "";
+      return;
+    }
     const viewport = stage.querySelector<HTMLElement>(".react-flow__viewport");
     const nodes = stage.querySelector(".react-flow__nodes");
     const docks = [
@@ -101,15 +181,7 @@ export function CanvasNodeEditorShell({
         if (wrapper)
           nodeObserver?.observe(wrapper, { attributes: true, attributeFilter: ["style", "class"] });
       }
-      editor.style.visibility =
-        !expanded && wrapper?.classList.contains("dragging") ? "hidden" : "";
-      if (expanded) {
-        editor.style.left = "";
-        editor.style.top = "";
-        editor.style.width = "";
-        editor.style.maxHeight = "";
-        return;
-      }
+      editor.style.visibility = wrapper?.classList.contains("dragging") ? "hidden" : "";
       const bounds = stage.getBoundingClientRect();
       const transform = viewport?.style.transform ?? "";
       const scale = /scale\(([-\d.e]+)\)/u.exec(transform);
@@ -193,7 +265,7 @@ export function CanvasNodeEditorShell({
       stage.removeEventListener("scroll", schedule);
       if (frame) cancelAnimationFrame(frame);
     };
-  }, [anchor.x, anchor.y, anchor.width, anchor.height, nodeKey, open, expanded]);
+  }, [anchor.x, anchor.y, anchor.width, anchor.height, nodeKey, open, expandedOpen, portalHost]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -212,34 +284,63 @@ export function CanvasNodeEditorShell({
       document.removeEventListener("pointerdown", capture, true);
       document.removeEventListener("selectionchange", capture);
     };
-  }, [nodeKey, open, rememberFocus, restoreFocus]);
+  }, [nodeKey, open, portalHost, rememberFocus, restoreFocus]);
 
   const toggleExpanded = () => {
     if (pickingReference) reference.setSession(null);
     if (pickingElement) marking.stop();
     rememberFocus();
-    setExpanded((value) => !value);
-    requestAnimationFrame(restoreFocus);
+    setExpanded(!expandedOpen);
+    if (!mediaKind) requestAnimationFrame(restoreFocus);
   };
-  return (
-    <div className="video-node-editor-anchor" data-expanded={open && expanded ? "true" : undefined}>
-      {open && expanded ? (
+
+  const startResize = (edge: ResizeEdge, event: PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || resize.current) return;
+    const rect = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!rect) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resize.current = {
+      pointer: event.pointerId, edge, x: event.clientX, y: event.clientY,
+      width: rect.width, height: rect.height,
+    };
+  };
+
+  const moveResize = (event: PointerEvent<HTMLDivElement>) => {
+    const start = resize.current;
+    if (!start || start.pointer !== event.pointerId) return;
+    const horizontal = start.edge.includes("e") ? 1 : start.edge.includes("w") ? -1 : 0;
+    const vertical = start.edge.includes("s") ? 1 : start.edge.includes("n") ? -1 : 0;
+    const width = Math.min(Math.floor(window.innerWidth * 0.9), Math.max(660,
+      Math.round(start.width + horizontal * 2 * (event.clientX - start.x))));
+    const height = Math.min(Math.floor(window.innerHeight * 0.9), Math.max(360,
+      Math.round(start.height + vertical * 2 * (event.clientY - start.y))));
+    setExpandedSize((size) => size.width === width && size.height === height ? size : { width, height });
+  };
+
+  const presentation = (
+    <div className="video-node-editor-presentation" data-floating={floating ? "" : undefined}>
+      {expandedOpen ? (
         <div
           className="video-node-editor__backdrop"
           aria-hidden="true"
+          onPointerDown={(event) => event.stopPropagation()}
           onMouseDown={(event) => {
             event.preventDefault();
+            event.stopPropagation();
             toggleExpanded();
           }}
         />
       ) : null}
+      <div className="video-node-editor-window" style={floating ? expandedSize : undefined}>
       <aside
         ref={elementRef}
         id={`node-editor-${nodeKey}`}
-        className={`video-node-editor canvas-node-editor${expanded ? " is-expanded" : ""}`}
-        data-media-kind={kindLabel === "视频生成" ? "video" : kindLabel === "图片生成" ? "image" : undefined}
+        className={`video-node-editor canvas-node-editor${expandedOpen ? " is-expanded" : ""}`}
+        data-media-kind={mediaKind}
         hidden={!open}
-        role={expanded ? "dialog" : undefined}
+        role={expandedOpen ? "dialog" : undefined}
         /*
          * 刻意**不**声明 `aria-modal`。
          *
@@ -261,18 +362,18 @@ export function CanvasNodeEditorShell({
         onKeyDown={(event) => {
           // Portal 浮层的 React 事件仍会冒泡到这里；由浮层自己的 Escape 处理者关闭。
           if (event.target instanceof Node && !event.currentTarget.contains(event.target)) return;
-          if (event.nativeEvent.isComposing) return;
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
           if (event.key === "Escape") {
             if (pickingReference || pickingElement) return;
             // Tiptap 会默认消费 Escape；引用候选和设置弹层通过 stopPropagation
             // 优先收起自身，冒泡到这里的 Escape 仍须关闭当前编辑层。
             event.preventDefault();
             event.stopPropagation();
-            if (expanded) toggleExpanded();
+            if (expandedOpen) toggleExpanded();
             else onClose();
             return;
           }
-          if (event.defaultPrevented || event.key !== "Tab" || !expanded) return;
+          if (event.defaultPrevented || event.key !== "Tab" || !expandedOpen) return;
           const controls = [
             ...(elementRef.current?.querySelectorAll<HTMLElement>(
               'button:not(:disabled), input:not(:disabled):not([type="file"]), select:not(:disabled), textarea:not(:disabled), [contenteditable="true"]',
@@ -296,19 +397,23 @@ export function CanvasNodeEditorShell({
           <button
             type="button"
             aria-label={
-              expanded
+              expandedOpen
                 ? `收起放大${kindLabel === "视频生成" ? "视频" : kindLabel}编辑器`
                 : "放大编辑提示词"
             }
-            aria-expanded={expanded}
-            title={expanded ? "收起" : "展开编辑"}
+            aria-expanded={expandedOpen}
+            data-tooltip={expandedOpen ? "收起" : "展开编辑"}
             onMouseDown={(event) => {
               rememberFocus();
               event.preventDefault();
             }}
             onClick={toggleExpanded}
           >
-            {(kindLabel === "视频生成" || kindLabel === "图片生成") ? <LibTVMediaIcon name="expand" size={16} /> : <Icon name="corners-out" aria-hidden="true" size="sm" />}
+            {mediaKind ? expandedOpen ? (
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M2 14 7 9M3 9h4v4M14 2 9 7M13 7H9V3" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : <LibTVMediaIcon name="expand" size={16} /> : <Icon name="corners-out" aria-hidden="true" size="sm" />}
           </button>
           {kindLabel !== "视频生成" && kindLabel !== "图片生成" ? <button
             className="video-node-editor__close"
@@ -325,6 +430,28 @@ export function CanvasNodeEditorShell({
         </div>
         <div className="video-node-editor__scroll">{children}</div>
       </aside>
+      {floating ? RESIZE_EDGES.map((edge) => (
+        <div
+          key={edge}
+          className="video-node-editor__resize"
+          data-edge={edge}
+          aria-hidden="true"
+          onPointerDown={(event) => startResize(edge, event)}
+          onPointerMove={moveResize}
+          onLostPointerCapture={(event) => {
+            if (resize.current?.pointer === event.pointerId) resize.current = null;
+          }}
+        />
+      )) : null}
+      </div>
     </div>
+  );
+  return (
+    <>
+      <div ref={anchorRef} className="video-node-editor-anchor">
+        {mediaKind ? null : presentation}
+      </div>
+      {portalHost ? createPortal(presentation, portalHost) : null}
+    </>
   );
 }
