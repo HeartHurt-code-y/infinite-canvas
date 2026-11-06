@@ -374,7 +374,7 @@ async function publishImmutable(transport, entry, onProgress) {
   return "uploaded";
 }
 
-/** The factory is not invoked until all local artifacts pass; dry-run never reads credentials. */
+/** Publication credentials are only loaded after the release and delta have been verified. */
 export async function publishOnlineEdition({
   distributionDirectory,
   root = COMPONENT_REPO_ROOT,
@@ -413,11 +413,14 @@ export async function publishVerifiedOnlinePlan({
   updaterOnly = false,
   onProgress = () => {},
 }) {
-  assertFeed(JSON.parse(plan.feedBody), plan.applicationVersion, plan.platform);
+  const feed = JSON.parse(plan.feedBody);
+  assertFeed(feed, plan.applicationVersion, plan.platform);
   requireValue(!packageOnly || plan.platform.startsWith("darwin-"), "PKG-only publication requires macOS");
   requireValue(!(packageOnly && updaterOnly), "PKG-only and updater-only publication are mutually exclusive");
   requireValue(!updaterOnly || plan.platform.startsWith("darwin-"), "Updater-only publication requires macOS");
-  requireValue(packageOnly || !plan.platform.startsWith("darwin-") || plan.macDelta,
+  requireValue(packageOnly || !plan.platform.startsWith("darwin-") ||
+    (plan.macDelta && feed.macDeltaManifest &&
+      plan.deltaObjects?.some((entry) => entry.url === feed.macDeltaManifest.url)),
     "macOS online feed publication requires a verified Apple Silicon delta");
   const nativeObjects = packageOnly
     ? plan.objects.filter((entry) => entry.localPath?.endsWith(".pkg"))

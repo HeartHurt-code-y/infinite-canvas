@@ -44,6 +44,7 @@ async function readPublishedArchive(version) {
 
 async function downloadArchive(source, filename) {
   assert.equal(source.url, archiveUrl(source.version));
+  assert(typeof source.signature === "string" && source.signature.length > 0, "Missing signed macOS updater archive");
   await run("/usr/bin/curl", [
     "--fail", "--silent", "--show-error", "--retry", "3", "--max-time", "600",
     "--max-filesize", String(maxArchiveBytes), "--output", filename, source.url,
@@ -103,10 +104,12 @@ async function buildDelta({ root, directory, baseline, version, targetArchive, e
   const config = JSON.parse(await readFile(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
   const pubkey = config.plugins.updater.pubkey;
   const baseArchive = await downloadArchive(baseline, path.join(directory, "base.app.tar.gz"));
-  const [baseApp, targetApp] = await Promise.all([
-    unpackSignedArchive(baseArchive, path.join(directory, "base"), pubkey),
-    unpackSignedArchive(targetArchive, path.join(directory, "target"), pubkey),
+  const baseApp = await unpackSignedArchive(baseArchive, path.join(directory, "base"), pubkey);
+  const baseVersion = await run("/usr/libexec/PlistBuddy", [
+    "-c", "Print :CFBundleShortVersionString", path.join(baseApp, "Contents/Info.plist"),
   ]);
+  assert.equal(baseVersion.stdout.trim(), baseline.version, "Signed macOS baseline has a different bundle version");
+  const targetApp = await unpackSignedArchive(targetArchive, path.join(directory, "target"), pubkey);
   const stage = await stageMacDelta({
     baseAppDir: baseApp, targetAppDir: targetApp, baseVersion: baseline.version, version,
     outDir: path.join(directory, "delta"),
