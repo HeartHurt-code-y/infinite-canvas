@@ -5,6 +5,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -149,6 +150,16 @@ export function VideoNodeSettingsControls({
     setSection((current) => (current === key ? null : key));
   };
 
+  const closeOnEscape = (event: KeyboardEvent<HTMLElement>, key: SettingsSection) => {
+    if (
+      !active || section !== key || event.key !== "Escape" || event.defaultPrevented ||
+      event.nativeEvent.isComposing || event.keyCode === 229
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    close(key);
+  };
+
   const trigger = (
     key: SettingsSection,
     label: string,
@@ -171,6 +182,7 @@ export function VideoNodeSettingsControls({
           data-video-settings-trigger={key}
           data-tooltip={label}
           onClick={() => openSection(key)}
+          onKeyDown={(event) => closeOnEscape(event, key)}
         >
           {icon}
           <span id={`${id}-${key}-summary`}>{label}</span>
@@ -194,17 +206,7 @@ export function VideoNodeSettingsControls({
                 onClick={(event) => {
                   if (key === "model" && event.target instanceof Element && event.target.closest("[data-video-model-option]")) close(key);
                 }}
-                onKeyDown={(event) => {
-                  if (
-                    event.key !== "Escape" ||
-                    event.defaultPrevented ||
-                    event.nativeEvent.isComposing
-                  )
-                    return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  close(key);
-                }}
+                onKeyDown={(event) => closeOnEscape(event, key)}
               >
                 {kind !== "video" ? <div className="video-settings-panel__heading">
                   <strong>{panel.title}</strong>
