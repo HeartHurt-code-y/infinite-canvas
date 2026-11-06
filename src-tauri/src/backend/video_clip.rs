@@ -528,6 +528,7 @@ pub fn prepare_generation_command(
         parameters,
         // 智能剪辑不是 Seedance 草稿/编辑链路，任务意图不参与供应商参数方言。
         video_task_type: None,
+        use_original_cloud_media: None,
         model_operation_schema_snapshot: None,
         generation_count: 1,
     })

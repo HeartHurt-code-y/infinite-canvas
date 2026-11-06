@@ -339,7 +339,7 @@ fn build_body_with_media(
     for (field, applicable) in [
         ("generate_multi_clip_switch", model.eq_ignore_ascii_case("PixVerse-V6") && matches!(action.as_str(), "text" | "img")),
         ("generate_audio_switch", matches!(action.as_str(), "text" | "img" | "transition" | "fusion" | "extend")),
-        ("template_id", action == "img"),
+        ("template_id", action == "img" && !model.eq_ignore_ascii_case("PixVerse-V6-Max")),
         ("restyle_id", action == "restyle"),
         ("sound_effect_switch", action == "sound_effect"),
         ("sound_effect_content", action == "sound_effect"),

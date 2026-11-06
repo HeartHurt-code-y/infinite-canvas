@@ -14,6 +14,7 @@ import { ErrorAlert } from "../../components/ErrorAlert";
 import { placeFloatingLayer } from "../../components/floatingLayer";
 import { backendErrorMessage, toMediaSrc, type GenerationTaskSummary, type ProviderCatalogEntry } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
+import { GATEWAY_TTS_REQUEST_PROFILE, speechRequestProfile } from "../../lib/providerAdapters";
 import type { PromptContentEditorSession, PromptContentModule } from "../../lib/promptContent";
 import { toast } from "../../lib/toast";
 import { artifactFileName, validateArtifactName } from "./artifactNames";
@@ -463,8 +464,11 @@ export function CanvasAudioNode({
   const submitHint = !selectionReady ? "请先选择可用的供应商和语音模型"
     : characterCount === 0 ? "请输入要生成的音频文本"
       : characterCount > AUDIO_NODE_PROMPT_MAX_LENGTH ? "音频文本最多 2000 字" : null;
-  const languageLabel =
-    AUDIO_NODE_LANGUAGES.find((item) => item.value === config.language)?.label ?? "中文";
+  const speechModel = providerCatalog.find(entry => entry.provider.id === config.modelSelection.providerId)
+    ?.models.find(model => model.definitionId === config.modelSelection.modelDefinitionId);
+  const automaticLanguage = speechRequestProfile(speechModel?.operationSchema) === GATEWAY_TTS_REQUEST_PROFILE;
+  const languageLabel = automaticLanguage ? "自动识别语种"
+    : AUDIO_NODE_LANGUAGES.find((item) => item.value === config.language)?.label ?? "中文";
   const sampleRateLabel =
     AUDIO_NODE_SAMPLE_RATES.find((item) => item.value === config.sampleRate)?.label ?? "24k";
   const formatLabel =
@@ -727,7 +731,10 @@ export function CanvasAudioNode({
             }}
           >
             <AudioPopover className="canvas-audio-node__format-popover">
-              <AudioFormatSection
+              {automaticLanguage ? <section className="canvas-audio-node__format-section">
+                <h4 className="canvas-audio-node__format-title">语种</h4>
+                <span>当前语音接口根据文本识别语种。</span>
+              </section> : <AudioFormatSection
                 title="语种"
                 options={AUDIO_NODE_LANGUAGES.map((item) => ({
                   value: String(item.value),
@@ -735,7 +742,7 @@ export function CanvasAudioNode({
                 }))}
                 value={config.language}
                 onChange={(value) => update({ language: value as AudioNodeLanguage })}
-              />
+              />}
               <AudioFormatSection
                 title="采样率"
                 options={AUDIO_NODE_SAMPLE_RATES.map((item) => ({

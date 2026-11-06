@@ -44,6 +44,10 @@ const ASSET_RESOLVE_RETRIES: u32 = 3;
 /// 尝试外再自动重试 3 次（共尝试 4 次），退避节奏为约 2s / 4s / 8s。
 const LOCAL_ASSET_DOWNLOAD_RETRIES: u32 = 3;
 
+// 这是选择传输方式的预算，不是模型的输入上限。按整组 Base64 长度计算，
+// 给提示词、参数和网关转发的 JSON 留空间。
+const FZY_IMAGE_INLINE_BUDGET: usize = 8 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct MediaResolver {
     providers: ProviderRuntime,
@@ -71,6 +75,7 @@ struct ResolveTargetRequest<'a> {
     content_index: Option<u32>,
     /// 图生图参考图是否必须读成本地字节。Seedream 图生图要公网 URL，不能走这条。
     needs_local_bytes: bool,
+    use_original_cloud_media: bool,
     /// 是否需要量出素材的真实时长（只有对参考素材时长有硬上限的模型才需要）。
     probe_duration: bool,
 }
@@ -269,6 +274,123 @@ fn build_media_plan<'a>(
     })
 }
 
+/// Check new requests against the public capabilities before opening files or staging media.
+/// Resumed observations continue to use the frozen task and its original contract.
+pub(crate) fn validate_new_video_request(
+    adapter: &str,
+    model: &str,
+    command: &mut StartGenerationCommand,
+    operation_schema: &Value,
+) -> BackendResult<()> {
+    use super::{canvas_model_capabilities as capabilities, types::VideoTaskType};
+
+    let policy = capabilities::video_capabilities(adapter, model);
+    let pixverse = GatewayProfile::from_operation_schema(operation_schema) == Some(GatewayProfile::PixVerse);
+    if policy.is_none() && !pixverse {
+        return Ok(());
+    }
+    let plan = build_media_plan(&command.prompt, &command.explicit_media)?;
+    let count = |kind| plan.inputs.iter().filter(|input| input.target.media_type() == kind).count();
+    let images = count(MediaType::Image);
+    let videos = count(MediaType::Video);
+    let audios = count(MediaType::Audio);
+    let has_role = |role: &str| plan.inputs.iter().any(|input| input.role == role);
+    let invalid = |reason: &str| BackendError::validation(reason, json!({ "model": model }));
+
+    if pixverse {
+        let value = |key: &str| command.parameters["metadata"].get(key).or_else(|| command.parameters.get(key));
+        let v6 = model.eq_ignore_ascii_case("pixverse-v6");
+        let action = value("action").and_then(Value::as_str).filter(|action| !action.is_empty())
+            .unwrap_or_else(|| {
+                if has_role("last_frame") { "transition" }
+                else if images > 1 || (v6 && videos > 0) || value("image_references").and_then(Value::as_array).is_some_and(|items| !items.is_empty()) { "fusion" }
+                else if images == 1 { "img" }
+                else { "text" }
+            });
+        let requested_omni = value("reference_mode").and_then(Value::as_str) == Some("omni")
+            || value("video_references").and_then(Value::as_array).is_some_and(|items| !items.is_empty());
+        for requested in [Some(action), requested_omni.then_some("fusion_omni")].into_iter().flatten() {
+            if let Some(reason) = capabilities::pixverse_action_restriction(model, requested) {
+                return Err(invalid(reason));
+            }
+        }
+        let omni = v6 && action == "fusion" && (requested_omni || videos > 0);
+        if videos > 0 && !omni && matches!(action, "text" | "img" | "transition" | "fusion" | "avatar") {
+            return Err(invalid("当前 PixVerse 模式不接收视频素材；请更换模式或移除视频。"));
+        }
+        if audios > 0 && matches!(action, "text" | "img" | "transition" | "fusion" | "extend") {
+            return Err(invalid("当前 PixVerse 模式不接收音频素材。"));
+        }
+        if action == "img" && images != 1 || action == "transition" && images != 2 {
+            return Err(invalid("PixVerse 图生视频需要 1 张图片，首尾帧需要 2 张图片。"));
+        }
+        if action == "extend" {
+            let source_ids = ["source_video_id", "video_media_id"].into_iter()
+                .filter(|key| value(key).is_some_and(|id| !id.is_null() && id.as_str() != Some(""))).count();
+            if videos + source_ids != 1 {
+                return Err(invalid("PixVerse 视频延长需要且仅能使用一个视频来源。"));
+            }
+        }
+        return Ok(());
+    }
+
+    let Some(policy) = policy else { return Ok(()); };
+    let frame_mode = if has_role("middle_frame") { Some("multi_frame") }
+        else if has_role("last_frame") { Some("first_last_frame") }
+        else if has_role("first_frame") { Some("first_frame") } else { None };
+    let explicit_mode = match command.video_task_type {
+        Some(VideoTaskType::FirstFrame) => Some("first_frame"),
+        Some(VideoTaskType::FirstLastFrame) => Some("first_last_frame"),
+        Some(VideoTaskType::Reference) => Some("reference"),
+        Some(VideoTaskType::Edit) => Some("edit"),
+        Some(VideoTaskType::Extend) => Some("extend"),
+        _ => None,
+    };
+    let legacy_mode = command.parameters.get("omni_reference_task_type").and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "edit" | "extend"));
+    let mode = explicit_mode.or(legacy_mode).or(frame_mode).unwrap_or_else(|| {
+        if plan.inputs.is_empty() { "text" }
+        else if images == 1 && videos == 0 && audios == 0 && (policy.veo.is_some() || !policy.supports_mode("reference")) { "first_frame" }
+        else { "reference" }
+    });
+    if [Some(mode), frame_mode, legacy_mode].into_iter().flatten().any(|mode| !policy.supports_mode(mode))
+        || plan.inputs.iter().any(|input| !policy.input_kinds.iter().any(|kind| kind == input.target.media_type().as_str()))
+        || policy.max_images.is_some_and(|maximum| images > maximum)
+        || policy.required_kind.as_ref().is_some_and(|kind| !plan.inputs.iter().any(|input| input.target.media_type().as_str() == kind))
+    {
+        return Err(invalid(&policy.reason));
+    }
+    if matches!(mode, "edit" | "extend") && videos == 0 {
+        return Err(invalid("请先连接要编辑或延长的视频。"));
+    }
+    if operation_schema.pointer("/request/mediaEncoding").and_then(Value::as_str) == Some("wan_media_array")
+        && matches!(mode, "first_frame" | "first_last_frame")
+        && (images != if mode == "first_frame" { 1 } else { 2 } || videos > 0 || audios > 0)
+    {
+        return Err(invalid("万相的首帧或首尾帧不能与其他参考素材混用。"));
+    }
+    if let Some(version) = operation_schema.pointer("/request/veoMediaVersion").and_then(Value::as_str) {
+        if mode == "first_frame" && images != 1 || mode == "first_last_frame" && images != 2
+            || mode == "reference" && images == 0
+        {
+            return Err(invalid("Veo 单首帧需要 1 张图，首尾帧需要 2 张图，参考图模式需要 1 至 3 张图。"));
+        }
+        let duration = command.parameters["duration"].as_i64().unwrap_or(8);
+        let high_resolution = command.parameters["resolution"].as_str()
+            .is_some_and(|value| value.eq_ignore_ascii_case("1080p") || value.eq_ignore_ascii_case("4k"));
+        if (version == "3" || mode == "reference" || high_resolution) && duration != 8 {
+            return Err(invalid("Veo 3、参考图模式或 1080P 及以上分辨率需要 8 秒时长。"));
+        }
+        command.video_task_type = Some(match mode {
+            "first_frame" => VideoTaskType::FirstFrame,
+            "first_last_frame" => VideoTaskType::FirstLastFrame,
+            "reference" => VideoTaskType::Reference,
+            _ => VideoTaskType::Auto,
+        });
+    }
+    Ok(())
+}
+
 impl MediaResolver {
     pub fn new(
         providers: ProviderRuntime,
@@ -365,6 +487,16 @@ impl MediaResolver {
             .get("requestProfileId")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let media_encoding = operation_schema
+            .pointer("/request/mediaEncoding")
+            .and_then(Value::as_str);
+        let fzy_image_inputs = task.operation == GenerationOperation::ImageToImage
+            && media_encoding == Some("fzy_image_inputs");
+        let veo_frames = operation_schema.pointer("/request/veoMediaVersion").is_some();
+        let veo_tail_position = if veo_frames && command.video_task_type == Some(super::types::VideoTaskType::FirstLastFrame) {
+            inputs.iter().find(|input| input.role == "last_frame").or_else(|| inputs.last())
+                .map(|input| input.type_position)
+        } else { None };
         // 已注册网关家族（按次、RD、PixVerse）通过供应商上传接口处理本地素材，
         // 因此解析阶段必须拿到本地字节；纯 URL 素材不受影响。
         let needs_local_bytes = GatewayProfile::from_profile_id(request_profile)
@@ -372,7 +504,7 @@ impl MediaResolver {
             || image_edit_needs_local_bytes(
                 task.operation,
                 task.remote_model_id_snapshot.as_deref(),
-                &operation_schema,
+                media_encoding,
             )
             // 网关语音合成的音色复刻要把参考音频以 Base64 内联进请求体
             // （`audio_data`），因此解析阶段必须拿到本地字节，而不是公网 URL。
@@ -381,11 +513,23 @@ impl MediaResolver {
         // 以 400 InvalidParameter 拒绝（"the parameter audio total duration
         // (seconds) ... must be less than or equal to 30.2"）。只有这些模型需要
         // 量素材时长，其它模型不受影响，也不必多付一次 ffprobe。
-        let probe_duration = seedance_reference_limits(
+        let seedance = seedance_reference_limits(
             task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
-        )
-        .is_some() || is_moyu_kling_v4_model(task.remote_model_id_snapshot.as_deref().unwrap_or_default());
+        ).is_some();
+        let use_original_cloud_media = task.operation == GenerationOperation::VideoGeneration
+            && seedance
+            && command.use_original_cloud_media == Some(true);
+        let probe_duration = seedance || is_moyu_kling_v4_model(task.remote_model_id_snapshot.as_deref().unwrap_or_default());
         for input in inputs {
+            let is_veo_tail = veo_tail_position == Some(input.type_position);
+            let inline_veo_image = is_veo_tail || (veo_frames && command.video_task_type == Some(super::types::VideoTaskType::Reference));
+            let fzy_remote_image = fzy_image_inputs
+                && input.target.media_type() == MediaType::Image
+                && match input.target {
+                    MediaReferenceTarget::Url { url, .. } => url.starts_with("https://"),
+                    MediaReferenceTarget::LocalAsset { .. } => true,
+                    _ => false,
+                };
             let (resolved, lease) = self
                 .resolve_target(
                     task,
@@ -393,11 +537,12 @@ impl MediaResolver {
                     ResolveTargetRequest {
                         target: input.target,
                         type_position: input.type_position,
-                        role: input.role,
+                        role: if is_veo_tail { "last_frame" } else { input.role },
                         display_name: input.display_name,
                         prompt_segment_index: input.prompt_segment_index,
                         content_index: input.content_index,
-                        needs_local_bytes,
+                        needs_local_bytes: (needs_local_bytes && !fzy_remote_image) || inline_veo_image,
+                        use_original_cloud_media,
                         probe_duration,
                     },
                 )
@@ -455,6 +600,9 @@ impl MediaResolver {
         }
 
         validate_media_encoding(task.operation, &images, &videos, &audios)?;
+        if fzy_image_inputs {
+            self.stage_large_fzy_image_inputs(&mut images, staging_leases).await?;
+        }
 
         // 每类数组直接遵循已经校验的同类编号；供应商不能再决定另一套顺序。
         images.sort_by_key(|media| media.type_position);
@@ -475,6 +623,38 @@ impl MediaResolver {
         Ok(resolved)
     }
 
+    async fn stage_large_fzy_image_inputs(
+        &self,
+        images: &mut [ResolvedMedia],
+        staging_leases: &mut Vec<StagingLease>,
+    ) -> BackendResult<()> {
+        let inline_bytes: usize = images.iter().filter_map(|image| {
+            image.bytes.as_ref().map(|bytes| {
+                // "data:" + MIME + ";base64," + padded Base64
+                13 + image.mime_type.len() + bytes.len().div_ceil(3) * 4
+            })
+        }).sum();
+        if inline_bytes <= FZY_IMAGE_INLINE_BUDGET || !self.staging.generation_input_enabled()? {
+            return Ok(());
+        }
+        for image in images {
+            let Some(bytes) = image.bytes.as_deref() else {
+                continue;
+            };
+            // 暂存解析时已校验并计算哈希的原件，避免重新读取可能已被替换的源文件。
+            let temporary = tempfile::NamedTempFile::new()?.into_temp_path();
+            tokio::fs::write(&temporary, bytes).await?;
+            let lease = self
+                .staging
+                .stage_for_remote_input(&temporary.to_string_lossy(), MediaType::Image)
+                .await?;
+            image.remote_reference = Some(lease.get_url.clone());
+            image.bytes = None;
+            staging_leases.push(lease);
+        }
+        Ok(())
+    }
+
     async fn resolve_target(
         &self,
         task: &TaskExecutionRecord,
@@ -489,6 +669,7 @@ impl MediaResolver {
             prompt_segment_index,
             content_index,
             needs_local_bytes,
+            use_original_cloud_media,
             probe_duration,
         } = request;
         match target {
@@ -498,7 +679,8 @@ impl MediaResolver {
                 media_type,
                 canvas_node_key,
             } => {
-                let preserve_asset_identity = task.operation == GenerationOperation::VideoGeneration
+                let preserve_asset_identity = !use_original_cloud_media
+                    && task.operation == GenerationOperation::VideoGeneration
                     && seedance_reference_limits(task.remote_model_id_snapshot.as_deref().unwrap_or_default()).is_some();
                 let resolution =
                     with_transport_retry("云端素材解析", ASSET_RESOLVE_RETRIES, || {
@@ -510,6 +692,8 @@ impl MediaResolver {
                             expected_media_type: *media_type,
                             delivery: if needs_local_bytes {
                                 AssetDelivery::Bytes
+                            } else if use_original_cloud_media {
+                                AssetDelivery::OriginalFile
                             } else {
                                 AssetDelivery::RemoteReadable {
                                     destination_provider_connection_id: task
@@ -547,7 +731,7 @@ impl MediaResolver {
                                     ResolveTargetRequest {
                                         target: &local_target, type_position, role, display_name,
                                         prompt_segment_index, content_index,
-                                        needs_local_bytes, probe_duration,
+                                        needs_local_bytes, use_original_cloud_media, probe_duration,
                                     },
                                 )).await?;
                                 media.stable_identity = json!({
@@ -974,7 +1158,7 @@ impl MediaResolver {
                 if *media_type == MediaType::Image && needs_local_bytes {
                     let bytes = self.download_asset_bytes(url).await?;
                     let detected = infer::get(&bytes).ok_or_else(|| BackendError::validation(
-                        "风格参考链接没有返回可识别的图片，请重新选择。", Value::Null))?;
+                        "素材链接没有返回可识别的图片，请重新选择。", Value::Null))?;
                     validate_detected_type(*media_type, detected.mime_type())?;
                     return Ok((ResolvedMedia {
                         media_type: *media_type, type_position, role: role.to_string(),
@@ -1370,7 +1554,7 @@ fn validate_detected_type(expected: MediaType, mime: &str) -> BackendResult<()> 
 fn image_edit_needs_local_bytes(
     operation: GenerationOperation,
     remote_model_id: Option<&str>,
-    operation_schema: &Value,
+    media_encoding: Option<&str>,
 ) -> bool {
     // 图生图参考图投递形态由模型契约决定，不能一律按「图生图 = 本地字节」处理：
     // - GPT Image 等走 multipart `/v1/images/edits`，Gemini 走 data URI，都需要 bytes。
@@ -1381,19 +1565,14 @@ fn image_edit_needs_local_bytes(
     if operation != GenerationOperation::ImageToImage {
         return false;
     }
-    // 饭众烟同名 Seedream 也接受 data URI；不能被下面的原生 Seedream URL 规则覆盖。
-    if matches!(operation_schema
-        .pointer("/request/mediaEncoding")
-        .and_then(Value::as_str), Some("fzy_image_inputs" | "atlascloud_canvas_media_tool")) {
+    // 饭众烟先解析本机参考图，再按整组的体积选择 data URI 或临时 URL。
+    if matches!(media_encoding, Some("fzy_image_inputs" | "atlascloud_canvas_media_tool")) {
         return true;
     }
     if remote_model_id.is_some_and(is_seedream_image_model) {
         return false;
     }
-    operation_schema
-        .pointer("/request/mediaEncoding")
-        .and_then(Value::as_str)
-        != Some("seedream_image_urls")
+    media_encoding != Some("seedream_image_urls")
 }
 
 /// 只拦截当前编码器无法保留的媒体类型，避免付费请求静默漏掉用户素材。

@@ -4,6 +4,7 @@ import {
   occupyingGenerationInputKeys,
 } from "../canvas/generationInputSlots";
 import { stripMarkdown } from "../../lib/promptContent";
+import { canvasStoryboardPreset } from "../../lib/canvasImagePresets";
 import { imageNodePreview } from "./imageNodeResults";
 import type { ConnectedLibraryResource } from "./canvasLibraryResources";
 import {
@@ -351,6 +352,9 @@ function buildInputSnapshot(
     const pending: { sourceKey: string; edgeId: string; name: string }[] = [];
     const libraryResources: ConnectedLibraryResource[] = [];
     const directEdges = incoming!.get(targetKey) ?? [];
+    const target = nodeByKey.gen.get(targetKey);
+    const useStoryboardFrames = target?.kind === "image" && target.config.imageMode !== "upscale"
+      && canvasStoryboardPreset(target.config.imagePreset?.scene) != null;
     for (const edge of directEdges) {
       const source = nodes.get(edge.fromKey);
       if (source?.type === "asset" && source.data.libraryResource) {
@@ -395,6 +399,9 @@ function buildInputSnapshot(
           name: entry?.type === "output" ? (entry.data.name ?? "待完成产物") : next.key,
         });
       }
+      // 分镜引用已有图片节点时，节点产物就是参考画面。原任务的输入仍可另行直连。
+      if (useStoryboardFrames && entry?.type === "gen" && entry.data.kind === "image"
+        && payload.media.some(item => item.kind === "image")) continue;
       for (let i = parents.length - 1; i >= 0; i--) {
         stack.push({ key: parents[i]!.fromKey, edgeId: next.edgeId });
       }

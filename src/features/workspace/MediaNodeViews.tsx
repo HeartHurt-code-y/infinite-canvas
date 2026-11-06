@@ -4,7 +4,7 @@ import { useReferenceMediaPreview } from "./ReferenceMediaPreview";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useModalFocusTrap } from "../../components/useModalFocusTrap";
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "../../lib/toast";
@@ -20,8 +20,9 @@ import { CanvasImageTools } from "./CanvasImageTools";
 import { CanvasImagePresetBadge } from "./CanvasImagePresetMenu";
 import { CanvasCameraControlBadge } from "./CanvasCameraControl";
 import { saveCanvasCameraPreferences } from "../../lib/canvasCameraControl";
-import { canvasImagePreset, CANVAS_IMAGE_PROMPT_PLACEHOLDER } from "../../lib/canvasImagePresets";
+import { canvasImagePreset, CANVAS_IMAGE_PROMPT_PLACEHOLDER, canvasStoryboardPreset, storyboardPresetInputIssue, storyboardPromptInput } from "../../lib/canvasImagePresets";
 import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
+import { modelOperationRestriction } from "../../lib/canvasModelCapabilities";
 import { DEFAULT_LONG_VIDEO } from "../../lib/longVideo";
 import { isSeedreamProImageModel, seedreamProParameterIssue } from "../../lib/seedreamPro";
 import { GPT_IMAGE_25_PROFILE, gptImage25Size, gptImage25SizeIssue } from "../../lib/gptImage25";
@@ -89,6 +90,7 @@ import type {
 } from "./workspaceModel";
 import {
   ASSET_KIND_LABELS,
+  allowsConcurrentNodeGeneration,
   SAVE_STATUS_LABELS,
   TASK_STATUS_LABELS,
   assetNodeDimensions,
@@ -135,6 +137,7 @@ export function CanvasGenNode({
   onReorderInput,
   onSizeChange,
   onImageConfigChange,
+  onStoryboardPresetSelect,
   onOpenCharacterStudio,
   onVideoConfigChange,
   onAnnotateVideo,
@@ -196,6 +199,7 @@ export function CanvasGenNode({
   readonly onReorderInput: (nodeKey: string, sourceKey: string, targetKey: string) => void;
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
+  readonly onStoryboardPresetSelect: (key: string, scene: string) => void;
   readonly onOpenCharacterStudio: (key: string) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
   readonly greenScreenResults?: readonly GreenScreenResult[] | undefined;
@@ -218,7 +222,7 @@ export function CanvasGenNode({
   readonly onEditImageRegion: import("./CanvasImageRegionEditor").StartImageRegionEdit;
 }) {
   const isVideo = node.kind === "video";
-  const submissionBusy = starting || (isVideo && activeTask != null);
+  const submissionBusy = starting || (activeTask != null && !allowsConcurrentNodeGeneration(node));
   const statusTasks = node.kind === "image" && node.imageGeneration
     ? tasks.filter(task => node.imageGeneration?.taskIds.includes(task.id))
     : nodeStatusTasks(tasks, latestTask);
@@ -240,7 +244,29 @@ export function CanvasGenNode({
       .map((input) => input.key),
   );
   const referenceInputCount = effectiveInputs.length;
-  const imageModel = !isVideo ? providerCatalog.find(entry => entry.provider.id === node.config.modelSelection.providerId)?.models.find(model => model.definitionId === node.config.modelSelection.modelDefinitionId) : undefined;
+  const storyboardPreset = !isVideo && node.config.imageMode !== "upscale" && presentation === "editor"
+    ? canvasStoryboardPreset(node.config.imagePreset?.scene) : undefined;
+  const subscribeStoryboardPrompt = useCallback(
+    (listener: () => void) => storyboardPreset ? promptContents?.subscribe(node.key, listener) ?? (() => {}) : () => {},
+    [storyboardPreset, promptContents, node.key],
+  );
+  const readStoryboardPrompt = useCallback(
+    () => storyboardPreset ? storyboardPromptInput(promptContents?.read(node.key)?.document) : "empty",
+    [storyboardPreset, promptContents, node.key],
+  );
+  const storyboardPrompt = useSyncExternalStore(subscribeStoryboardPrompt, readStoryboardPrompt);
+  const storyboardInputIssue = storyboardPreset
+    ? storyboardPresetInputIssue(storyboardPreset, storyboardPrompt, effectiveInputs.some(input => input.kind === "image"))
+    : null;
+  const hasMediaInputs = storyboardPrompt === "image" || storyboardPrompt === "text_and_image"
+    || effectiveInputs.some(input => input.kind === "image" || input.kind === "video");
+  const imageProvider = !isVideo ? providerCatalog.find(entry => entry.provider.id === node.config.modelSelection.providerId) : undefined;
+  const imageModel = imageProvider?.models.find(model => model.definitionId === node.config.modelSelection.modelDefinitionId);
+  const imageCapabilityIssue = !isVideo && node.config.imageMode !== "upscale" && imageProvider && imageModel
+    ? modelOperationRestriction(imageProvider.provider.adapterId, imageModel.remoteModelId,
+        node.config.styleReference != null || linkedStyle || hasMediaInputs
+          ? "image_to_image" : "text_to_image")
+    : undefined;
   const seedreamProContract = imageModel && Object.values(imageModel.operationSchema).some(operation =>
     (operation as Record<string, unknown> | undefined)?.["requestProfileId"] === "moyu_seedream_image_v1");
   const imageParameterIssue = !isVideo && node.config.imageMode !== "upscale" && imageModel && seedreamProContract && isSeedreamProImageModel(imageModel.remoteModelId)
@@ -339,7 +365,8 @@ export function CanvasGenNode({
       */}
       <div className="canvas-gen-node__tool-chips" role="group" aria-label="创作工具">
         {isVideo ? <CanvasVideoTools node={node} active={editorOpen} inputs={effectiveInputs} linkedEffects={linkedEffects} sessionRef={promptSessionRef} onAnnotateVideo={onAnnotateVideo} onOpenCharacterStudio={() => onOpenCharacterStudio(node.key)} onPromptChange={() => onVideoConfigChange(node.key, { ...node.config })} onEffectsChange={effectVersionIds => onVideoConfigChange(node.key, { ...node.config, effectVersionIds })} /> : <>
-          <CanvasImageTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} linkedStyle={linkedStyle} sessionRef={promptSessionRef} presetTriggerRef={imagePresetTriggerRef} cameraTriggerRef={imageCameraTriggerRef} cameraOpenRequestId={cameraOpenRequestId} providerCatalog={providerCatalog} onChange={config => onImageConfigChange(node.key, config)} />
+          <CanvasImageTools canvasId={canvasId} node={node} active={editorOpen} inputs={effectiveInputs} linkedStyle={linkedStyle} sessionRef={promptSessionRef} presetTriggerRef={imagePresetTriggerRef} cameraTriggerRef={imageCameraTriggerRef} cameraOpenRequestId={cameraOpenRequestId} providerCatalog={providerCatalog} onChange={config => onImageConfigChange(node.key, config)}
+            onStoryboardSelect={scene => onStoryboardPresetSelect(node.key, scene)} />
           {node.config.imageMode !== "upscale" ? <button type="button" className="canvas-gen-node__tool-chip" aria-haspopup="dialog"
             onClick={() => onOpenCharacterStudio(node.key)}><LibTVMediaIcon name="asset-character" size={13} /><span>角色库</span></button> : null}
         </>}
@@ -363,6 +390,7 @@ export function CanvasGenNode({
               ? `${referenceInputCount} 个参考素材已连接`
               : "输入 @ 引用素材"}
           {isVideo && videoCameraPresetsMuted(node.config.videoMode ?? node.config.seedanceTaskMode) ? "。当前模式下运镜标记暂不参与生成，切换模式后恢复。" : ""}
+          {storyboardInputIssue ? `。${storyboardInputIssue}` : null}
         </span>
         {!isVideo && node.config.imageMode !== "upscale" ? <CanvasCameraControlBadge config={node.config} onOpen={() => setCameraOpenRequestId(value => value + 1)} onDisable={() => {
           if (!node.config.cameraControl) return;
@@ -428,9 +456,7 @@ export function CanvasGenNode({
             advancedHostId={`image-advanced-${node.key}`}
             config={node.config}
             providerCatalog={providerCatalog}
-            hasMediaInputs={linkedStyle || effectiveInputs.some(
-              (input) => input.kind === "image" || input.kind === "video",
-            )}
+            hasMediaInputs={linkedStyle || hasMediaInputs}
             onChange={(config) => onImageConfigChange(node.key, config)}
           /><div id={`image-tools-${node.key}`} className="canvas-image-toolbar-actions canvas-image-creation-tools" /></div>
         )}
@@ -442,19 +468,19 @@ export function CanvasGenNode({
             className={`canvas-gen-node__start${starting ? " is-busy" : ""}`}
             data-canvas-generate=""
             aria-label={isVideo ? "开始视频生成" : node.config.imageMode === "upscale" ? "开始图片高清" : "开始图片生成"}
-            aria-describedby={startError ? `generation-start-error-${node.key}` : undefined}
+            aria-describedby={startError ? `generation-start-error-${node.key}` : storyboardInputIssue ? promptHintId : undefined}
             data-state={starting ? "loading" : undefined}
             title={
               !selectionReady
                 ? `请先选择可用的供应商和${isVideo ? "视频" : "图片"}模型`
                 : isVideo
-                  ? "点击开始视频生成"
+                  ? activeTask ? "提交新的视频生成任务" : "点击开始视频生成"
                   : activeTask
                     ? "提交新的图片生成任务"
                     : "点击开始图片生成"
             }
-            data-tooltip={imageParameterIssue ?? undefined}
-            disabled={submissionBusy || !selectionReady || imageParameterIssue != null}
+            data-tooltip={storyboardInputIssue ?? imageCapabilityIssue ?? imageParameterIssue ?? undefined}
+            disabled={submissionBusy || !selectionReady || storyboardInputIssue != null || imageCapabilityIssue != null || imageParameterIssue != null}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -1630,7 +1656,6 @@ export function CanvasOutputNode({
               onPreview(node.key);
             }}
           >
-            {mediaCard && node.origin === "generation" ? <span className="canvas-media-ai-badge">AI 生成</span> : null}
             {isVideo ? (
               <CanvasAssetNodeVideoVisual
                 videoUrl={mediaSrc}

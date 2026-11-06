@@ -262,22 +262,6 @@
   object-fit: cover;
 }
 
-.canvas-media-ai-badge {
-  position: absolute;
-  z-index: 1;
-  top: 8px;
-  left: 8px;
-  padding: 1px 5px;
-  border: .5px solid #ffffff47;
-  border-radius: 5px;
-  background: #0002;
-  color: #ffffffa6;
-  font-size: 10px;
-  font-weight: 500;
-  line-height: 1.3;
-  pointer-events: none;
-}
-
 .canvas-node-preview__empty {
   display: grid;
   justify-items: center;

@@ -149,6 +149,8 @@ trait AssetPort: Send + Sync {
 
     fn download(&self, url: String) -> PortFuture<Vec<u8>>;
 
+    fn can_read_file(&self, url: String) -> PortFuture<bool>;
+
     /// 流式下载远端素材到指定文件（覆盖写），返回写入的总字节数。
     /// `on_progress(done_bytes, total_bytes)`，`total` 未知（无 Content-Length）时为 0。
     /// 用于海外素材导入：下载落盘后以流式 multipart 直传，文件全程不整段驻留内存。
@@ -295,6 +297,26 @@ impl AssetPort for ProviderAssetAdapter {
         })
     }
 
+    fn can_read_file(&self, url: String) -> PortFuture<bool> {
+        let client = self.providers.client().clone();
+        Box::pin(async move {
+            let client = super::staging::fake_ip_aware_client(&url, client).await;
+            let response = client
+                .get(&url)
+                .header(reqwest::header::RANGE, "bytes=0-0")
+                .timeout(Duration::from_secs(12))
+                .send()
+                .await
+                .map_err(reqwest::Error::without_url)?;
+            let html = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/html"));
+            Ok(response.status().is_success() && !html && response.content_length() != Some(0))
+        })
+    }
+
     fn download_to_file(
         &self,
         url: String,
@@ -376,13 +398,14 @@ pub struct AssetReadTrace<'a> {
 #[derive(Debug, Clone)]
 pub enum AssetDelivery {
     Bytes,
+    OriginalFile,
     RemoteReadable {
         destination_provider_connection_id: String,
         /// 生成请求实际使用的凭据引用（模型绑定了令牌组时是分组凭据，否则是供应商
         /// 主密钥）。上游素材库按密钥隔离，交给生成端的 `asset://` 引用必须能被这把
         /// 密钥解析，否则上游会回「The specified asset ... is not found」。
         destination_credential_ref: String,
-        /// Seedance 的云素材必须保留审核身份，不能退回普通图片 URL。
+        /// 保留 Seedance 云素材的审核身份。
         preserve_asset_identity: bool,
     },
 }
@@ -2782,6 +2805,41 @@ impl AssetLibrary {
                     sha256,
                     file_extension: detected.extension().to_string(),
                     access: ResolvedAssetAccess::Bytes(bytes),
+                })
+            }
+            AssetDelivery::OriginalFile => {
+                // The asset API's file URL carries the media bytes. Preview and cover
+                // fields can be renditions and do not stand in for an original file.
+                let reference = [
+                    "url", "URL", "file_url", "fileUrl", "download_url", "downloadUrl",
+                    "origin_url", "originUrl", "source_url", "sourceUrl", "signed_url", "signedUrl",
+                ]
+                .iter()
+                .filter_map(|field| data.get(*field).and_then(Value::as_str).map(str::trim))
+                .find(|url| Url::parse(url).is_ok_and(|parsed| {
+                    matches!(parsed.scheme(), "http" | "https")
+                        && parsed.host().is_some()
+                        && parsed.username().is_empty()
+                        && parsed.password().is_none()
+                        && !media_proxy::signed_url_expired(&parsed, SystemTime::now())
+                }));
+                // A provider can echo a still-signed URL after deleting its staging object.
+                // Check readability before building a paid request with the address.
+                let reference = match reference {
+                    Some(url) if self.port.can_read_file(url.to_string()).await? => url,
+                    _ => {
+                        return Err(BackendError::validation(
+                            "供应商未提供可用的原文件地址。若此设备没有对应的导入原件，请连接原文件。",
+                            json!({ "identity": identity, "assetUnavailable": true }),
+                        ));
+                    }
+                };
+                Ok(ResolvedAsset {
+                    mime_type: media_type_wildcard(request.expected_media_type).to_string(),
+                    byte_size: 0,
+                    sha256: String::new(),
+                    file_extension: fallback_extension,
+                    access: ResolvedAssetAccess::RemoteReference(reference.to_string()),
                 })
             }
             AssetDelivery::RemoteReadable {

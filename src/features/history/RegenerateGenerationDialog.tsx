@@ -827,6 +827,7 @@ export function RegenerateGenerationDialog({
       modelDefinitionId: frozen.modelDefinitionId,
       prompt: prepared.frozen.segments,
       explicitMedia: prepared.frozen.explicitMedia,
+      ...(frozen.useOriginalCloudMedia ? { useOriginalCloudMedia: true } : {}),
       ...(frozen.parameters ? { parameters: frozen.parameters } : {}),
       ...(frozen.generationCount != null ? { generationCount: frozen.generationCount } : {}),
     });

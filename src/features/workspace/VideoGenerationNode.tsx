@@ -382,7 +382,6 @@ export function MediaGenerationPreview({
         }
         aria-label={`${name}的媒体预览`}
       >
-        {mediaSrc && output?.origin === "generation" ? <span className="canvas-media-ai-badge">AI 生成</span> : null}
         {/*
           点击节点即可编辑；仅在键盘聚焦时显示编辑入口，供键盘操作与焦点恢复使用。
         */}

@@ -1972,6 +1972,7 @@ export interface VideoNodeConfig {
   readonly videoMode?: import("../../lib/canvasVideoMode").CanvasVideoMode;
   readonly autoLink?: boolean;
   readonly autoVerifyMaterials?: boolean;
+  readonly useOriginalCloudMedia?: boolean;
   readonly verificationProviderId?: string;
   readonly advancedOpen?: boolean;
   readonly modelSelection: NodeModelSelection;
@@ -2622,6 +2623,12 @@ export function isImageGenerationModel(model: ConfiguredModel): boolean {
   return !["atlascloud/image-upscaler", "atlascloud/masked-image-edit", "youchuan/v8.1/remove-background",
     "bytedance/seedream-v5.0-pro/layer-decomposition"].includes(model.remoteModelId) &&
     (model.operations.includes("text_to_image") || model.operations.includes("image_to_image"));
+}
+
+/** Ordinary requests freeze independent inputs and results. Staged video workflows share state. */
+export function allowsConcurrentNodeGeneration(node: GenNodeData): boolean {
+  return node.kind === "image" || (node.kind === "video" &&
+    node.config.videoMode !== "longVideo2video" && node.config.greenScreen?.enabled !== true);
 }
 
 export function isVideoGenerationModel(model: ConfiguredModel): boolean {

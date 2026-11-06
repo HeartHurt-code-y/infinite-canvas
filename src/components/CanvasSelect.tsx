@@ -20,6 +20,7 @@ export interface CanvasSelectOption {
   readonly label: string;
   readonly icon?: ReactNode;
   readonly disabled?: boolean;
+  readonly description?: string | undefined;
 }
 
 function nextEnabledOption(options: readonly CanvasSelectOption[], current: number, step: number): number {
@@ -295,6 +296,8 @@ export function CanvasSelect({
                     id={optionId(index)}
                     aria-selected={option.value === value}
                     aria-disabled={option.disabled || undefined}
+                    aria-description={option.description}
+                    data-tooltip={option.description}
                     // 选项值原样挂在 DOM 上：测试按值选项，不必把值翻译成展示文案。
                     data-value={option.value}
                     className={`canvas-select__option${index === active ? " is-active" : ""}${option.value === value ? " is-selected" : ""}`}

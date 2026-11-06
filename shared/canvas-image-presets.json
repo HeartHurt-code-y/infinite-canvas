@@ -70,8 +70,8 @@
         {
           "scene": "frame_prediction_plus_3s",
           "label": "画面推演 - 3秒后",
-          "description": "基于物理逻辑，生成3秒后的动作结果。",
-          "placeholder": "",
+          "description": "推演画面后续动作",
+          "placeholder": "基于物理逻辑，推演3秒后的动作结果。可补充人物动作、物体运动或镜头要求。",
           "icon": "slash-frame-prediction-plus3s",
           "newFeature": false,
           "inputRequirement": "image",
@@ -85,7 +85,7 @@
         {
           "scene": "frame_prediction_minus_5s",
           "label": "画面推演 - 5秒前",
-          "description": "基于物理逻辑，反推5秒前的动作起因。",
+          "description": "还原画面前置状态",
           "placeholder": "基于物理逻辑，反推5秒前的动作起因。",
           "icon": "slash-frame-prediction-minus5s",
           "newFeature": false,

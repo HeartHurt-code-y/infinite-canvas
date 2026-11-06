@@ -90,6 +90,31 @@ function redact(value: string): string {
     );
 }
 
+/** Some gateways put a serialized upstream error, including echoed inputs, in error.message. */
+export function providerResponseErrorMessage(response: unknown, status: unknown): string | null {
+  const body = record(parseResponse(response));
+  const envelope = record(body?.["error"]);
+  const detail = record(parseResponse(envelope?.["message"]));
+  const message = detail?.["errorMessage"];
+  if (typeof message !== "string" || !message.trim() || looksLikeSerializedError(message)) {
+    return null;
+  }
+  const code = detail?.["errorCode"];
+  const labels: string[] = [];
+  if ((typeof status === "number" || typeof status === "string") && /^\d{3}$/.test(String(status))) {
+    labels.push(`HTTP ${status}`);
+  }
+  if ((typeof code === "number" || typeof code === "string") && /^[\w.-]{1,64}$/.test(String(code))) {
+    labels.push(`错误码 ${code}`);
+  }
+  const suffix = labels.length ? `（${labels.join("，")}）` : "";
+  const reason = redact(message.trim());
+  if (String(code) === "1007" && reason.toLowerCase() === "failed to parse request body") {
+    return `供应商无法解析请求体${suffix}。若使用了大参考图，可启用对象存储直连（TOS）或改用公网图片链接。`;
+  }
+  return `${reason.slice(0, 1000)}${suffix}`;
+}
+
 /**
  * 旧版持久化失败信封的前缀。
  *
@@ -116,6 +141,10 @@ function persistedError(value: unknown): PersistedError | null {
 export function formatErrorMessage(error: unknown): string {
   const persisted = persistedError(error) ?? persistedError(record(error)?.["message"]);
   if (persisted) return persisted.message;
+  const parsed = parseResponse(error);
+  const details = record(record(parsed)?.["details"]);
+  const providerMessage = providerResponseErrorMessage(details?.["rawResponse"], details?.["httpStatus"]);
+  if (providerMessage) return providerMessage;
   const parts: string[] = [];
   const seen = new Set<object>();
   const add = (value: unknown) => {
@@ -140,9 +169,7 @@ export function formatErrorMessage(error: unknown): string {
     collect(payload["error"], depth + 1);
   };
 
-  const parsed = parseResponse(error);
   collect(parsed);
-  const details = record(record(parsed)?.["details"]);
   if (details) {
     const status = details["httpStatus"];
     if (typeof status === "number" || (typeof status === "string" && /^\d{3}$/.test(status))) {

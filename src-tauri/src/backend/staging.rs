@@ -1527,6 +1527,13 @@ impl StagingService {
         Ok(())
     }
 
+    pub(super) fn generation_input_enabled(&self) -> BackendResult<bool> {
+        Ok(self
+            .storage
+            .get_tos_config()?
+            .is_some_and(|config| config.enabled))
+    }
+
     pub async fn stage_for_remote_input(
         &self,
         local_path: &str,

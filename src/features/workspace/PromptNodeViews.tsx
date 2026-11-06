@@ -75,6 +75,7 @@ import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
 import { CanvasVideoSettings } from "./CanvasVideoSettings";
 import { usePromptAttachmentInputs } from "./useNodePromptSummary";
 import { CanvasImageSettings, CanvasImageParameterOptions, canvasImageHasOptionButtons } from "./CanvasImageSettings";
+import { canvasStoryboardPreset, storyboardImageParameterValues } from "../../lib/canvasImagePresets";
 import { SeedreamProSizeSettings } from "./SeedreamProSizeSettings";
 import { GptImage25SizeSettings } from "./GptImage25SizeSettings";
 import { GPT_IMAGE_25_PROFILE } from "../../lib/gptImage25";
@@ -1464,10 +1465,15 @@ export function ImageNodeSettings({
     (supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT);
   // `n` 由上方「生成数量」字段承载，避免与模型参数区重复渲染。
   // Seedream 组图数量 `max_images` 仅在组图模式为 auto 时展示。
-  const sequentialMode = String(
-    config.parameterValues["sequential_image_generation"] ?? "disabled",
+  const requestProfileId = (selectedModel?.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"];
+  const parameterValues = storyboardImageParameterValues(
+    canvasStoryboardPreset(config.imageMode === "upscale" ? undefined : config.imagePreset?.scene),
+    parameterCapabilities,
+    config.parameterValues,
+    requestProfileId,
   );
-  const gptImage25 = (selectedModel?.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === GPT_IMAGE_25_PROFILE;
+  const sequentialMode = String(parameterValues["sequential_image_generation"] ?? "disabled");
+  const gptImage25 = requestProfileId === GPT_IMAGE_25_PROFILE;
   const modelParameterCapabilitiesWithoutCount = parameterCapabilities.filter(
     (capability) =>
       capability.key !== "n" && capability.key !== "mask" && capability.key !== "mask_url" &&
@@ -1481,8 +1487,8 @@ export function ImageNodeSettings({
   } : capability);
 
   const seedreamPro = selectedModel != null && isSeedreamProImageModel(selectedModel.remoteModelId) &&
-    (selectedModel.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === "moyu_seedream_image_v1";
-  const nanoBanana21 = (selectedModel?.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === NANO_BANANA_21_PROFILE;
+    requestProfileId === "moyu_seedream_image_v1";
+  const nanoBanana21 = requestProfileId === NANO_BANANA_21_PROFILE;
   const changeParameter = (key: string, value: ModelParameterValue) => {
     const next = { ...config.parameterValues, [key]: value };
     if (gptImage25 && key === "size") { delete next["aspect_ratio"]; delete next["resolution"]; }
@@ -1576,15 +1582,15 @@ export function ImageNodeSettings({
   );
   const parameterFields = (
     <>
-      {gptImage25 ? <GptImage25SizeSettings key={selectedModel?.definitionId} values={config.parameterValues} onChange={value => changeParameter("size", value)} /> : null}
-      {seedreamPro ? <SeedreamProSizeSettings key={selectedModel?.definitionId} values={config.parameterValues} onChange={value => changeParameter("size", value)} /> : null}
+      {gptImage25 ? <GptImage25SizeSettings key={selectedModel?.definitionId} values={parameterValues} onChange={value => changeParameter("size", value)} /> : null}
+      {seedreamPro ? <SeedreamProSizeSettings key={selectedModel?.definitionId} values={parameterValues} onChange={value => changeParameter("size", value)} /> : null}
       {modelParameterCapabilitiesWithoutCount.filter(capability => !seedreamPro || (capability.key !== "size" && capability.key !== "watermark")).map((capability) => presentation === "compact" && canvasImageHasOptionButtons(capability) ? (
-        <CanvasImageParameterOptions key={capability.key} capability={capability} ratioOptions={nanoBanana21 && capability.key === "aspect_ratio"} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => changeParameter(capability.key, value)} />
+        <CanvasImageParameterOptions key={capability.key} capability={capability} ratioOptions={nanoBanana21 && capability.key === "aspect_ratio"} value={resolvedParameterValue(capability, parameterValues)} onChange={value => changeParameter(capability.key, value)} />
       ) : (
         <GenerationParameterField
           key={capability.key}
           capability={capability}
-          value={resolvedParameterValue(capability, config.parameterValues)}
+          value={resolvedParameterValue(capability, parameterValues)}
           hasMediaInputs={hasMediaInputs}
           onChange={(value) => changeParameter(capability.key, value)}
         />
@@ -1617,6 +1623,7 @@ export function ImageNodeSettings({
         active={active}
         config={config}
         capabilities={modelParameterCapabilitiesWithoutCount}
+        parameterValues={parameterValues}
         seedreamPro={seedreamPro}
         gptImage25={gptImage25}
         providerCatalog={providerCatalog}

@@ -5,7 +5,7 @@ import { CanvasSelect } from "../../components/CanvasSelect";
 import {
   canvasVideoModeOptions,
   canvasVideoModeValue,
-  compileCanvasVideoMode,
+  compileCanvasVideoMode, canvasVideoModeRestriction, veoRequiresEightSeconds, VEO_DURATION_RESTRICTION,
   type CanvasVideoMode,
 } from "../../lib/canvasVideoMode";
 import {
@@ -19,7 +19,8 @@ import {
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import { isMoyuKlingV4Model } from "../../lib/klingV4";
 import { resolveSeedanceTask, seedanceTaskInputs, selectSeedanceTask } from "../../lib/seedanceTasks";
-import { PIXVERSE_PROFILE, PIXVERSE_ACTIONS, pixverseIntent, pixverseFieldVisible, pixverseHint } from "../../lib/pixverse";
+import { PIXVERSE_PROFILE, PIXVERSE_ACTIONS, pixverseIntent, pixverseFieldVisible, pixverseHint, pixverseRequestRestriction } from "../../lib/pixverse";
+import { pixverseActionRestriction, videoModelCapabilities } from "../../lib/canvasModelCapabilities";
 import {
   resolveLongVideoSettings,
 } from "../../lib/longVideo";
@@ -250,8 +251,10 @@ export function CanvasVideoSettings({
   };
   const mode = config.videoMode ?? config.seedanceTaskMode ?? "auto";
   const modeInputs = [...inputs, ...(config.perTaskUrlMedia ?? [])];
-  const selectedModel = providerCatalog.find(entry => entry.provider.id === config.modelSelection.providerId)
-    ?.models.find(model => model.definitionId === config.modelSelection.modelDefinitionId);
+  const selectedProvider = providerCatalog.find(entry => entry.provider.id === config.modelSelection.providerId);
+  const selectedModel = selectedProvider?.models.find(model => model.definitionId === config.modelSelection.modelDefinitionId);
+  const videoPolicy = selectedModel && selectedProvider
+    ? videoModelCapabilities(selectedProvider.provider.adapterId, selectedModel.remoteModelId) : undefined;
   const klingV4 = isMoyuKlingV4Model(selectedModel?.remoteModelId ?? "");
   const pixverse = (selectedModel?.operationSchema["video_generation"] as Record<string, unknown> | undefined)?.["requestProfileId"] === PIXVERSE_PROFILE;
   const pixverseV6 = selectedModel?.remoteModelId.toLowerCase() === "pixverse-v6";
@@ -273,16 +276,25 @@ export function CanvasVideoSettings({
   };
   const supportsVideoTasks = !!selectedModel && !isFzyVideoSchema(selectedModel.operationSchema) && (isSeedance25VideoModel(selectedModel.remoteModelId) || isSeedance20VideoModel(selectedModel.remoteModelId));
   const taskInputs = seedanceTaskInputs(modeInputs.map((input, index) => ({ key: "key" in input ? input.key : `url-${index}`, kind: input.kind })));
-  const seedanceIntent = compileCanvasVideoMode(mode as CanvasVideoMode, taskInputs, config.mediaRoles);
+  const seedanceIntent = compileCanvasVideoMode(mode as CanvasVideoMode, taskInputs, config.mediaRoles, videoPolicy);
   const seedance = resolveSeedanceTask(selectedModel?.remoteModelId ?? "", capabilities,
     { ...config, seedanceTaskMode: seedanceIntent.taskMode, mediaRoles: seedanceIntent.mediaRoles },
     taskInputs, selectedModel?.operationSchema);
   const effectiveValues = seedance.enabled ? seedance.parameterValues : config.parameterValues;
   const followingRatio = seedance.mode === "first_frame" || seedance.mode === "first_last_frame" ? "跟随首帧画幅"
     : seedance.mode === "edit" || seedance.mode === "extend" ? "跟随原片画幅" : "自适应画幅";
-  const modeOptions = canvasVideoModeOptions(mode, modeInputs, supportsVideoTasks, klingV4)
-    .map(option => supportsVideoTasks && option.value === "reference" ? { ...option, label: "参考生视频" } : option);
-  if (supportsVideoTasks) modeOptions.unshift({ value: "auto", label: "全参考 · 自动判断", disabled: taskInputs.length === 0 });
+  const modeOptions = canvasVideoModeOptions(mode, modeInputs, supportsVideoTasks, klingV4, videoPolicy)
+    .map(option => (supportsVideoTasks || videoPolicy) && option.value === "reference" ? { ...option, label: "参考生视频" } : option);
+  const modeRestriction = pixverse && selectedModel
+    ? pixverseRequestRestriction(selectedModel.remoteModelId, config.parameterValues, modeInputs, Object.values(config.mediaRoles ?? {}).includes("last_frame"))
+    : canvasVideoModeRestriction(videoPolicy, mode, modeInputs);
+  const veoEightSeconds = veoRequiresEightSeconds(videoPolicy, mode, modeInputs, config.parameterValues);
+  const durationRestriction = veoEightSeconds && Number(config.parameterValues["duration"] ?? 8) !== 8
+    ? VEO_DURATION_RESTRICTION : undefined;
+  if (supportsVideoTasks) {
+    const description = canvasVideoModeRestriction(videoPolicy, "auto", modeInputs);
+    modeOptions.unshift({ value: "auto", label: "全参考 · 自动判断", disabled: taskInputs.length === 0 || description !== undefined, description });
+  }
   const isLong = mode === "longVideo2video";
   const longSettings = resolveLongVideoSettings(config.longVideo, providerCatalog);
   // 调度参数保留在任务配置中；节点面板只编辑创作参数。
@@ -303,8 +315,15 @@ export function CanvasVideoSettings({
   const parameterOrder = (key: string) => /^(ratio|aspect_ratio)$/.test(key) ? 0 : /resolution|quality/.test(key) ? 1 : /duration|seconds/.test(key) ? 2 : 3;
   const primary = capabilities.filter((capability) => PRIMARY_KEYS.has(capability.key) &&
     (!pixverse || pixverseFieldVisible(capability.key, pixverseState)) &&
-    (!isLong || !/duration|seconds/.test(capability.key))).map(capability => pixverse && pixverseState.omni && capability.key === "aspect_ratio"
-      ? { ...capability, options: [{ value: "auto", label: "自动跟随" }, ...capability.options] } : capability);
+    (!isLong || !/duration|seconds/.test(capability.key))).map(capability => {
+      if (veoEightSeconds && capability.key === "duration") {
+        return { ...capability, options: capability.options.filter(option => Number(option.value) === 8) };
+      }
+      if (pixverse && pixverseState.omni && capability.key === "aspect_ratio") {
+        return { ...capability, options: [{ value: "auto", label: "自动跟随" }, ...capability.options] };
+      }
+      return capability;
+    });
   if (isLong) primary.push(LONG_VIDEO_DURATION);
   primary.sort((left, right) => parameterOrder(left.key) - parameterOrder(right.key));
   const audioCapability = primary.find(capability => /^(generate_audio|audio|generate_audio_switch)$/.test(capability.key));
@@ -331,6 +350,9 @@ export function CanvasVideoSettings({
   ].join(" · ");
   const parameterFields = (
     <>
+      {modeRestriction ? <small className="canvas-video-duration-note" role="status">{modeRestriction}</small> : null}
+      {durationRestriction ? <small className="canvas-video-duration-note" role="status">{durationRestriction}</small> : null}
+      {videoPolicy?.veo ? <small className="canvas-video-duration-note">首尾帧{videoPolicy.veo === "3.1" ? "和参考图" : ""}按 Google 字段提交，由当前渠道转发。</small> : null}
       {seedance.enabled && !isLong ? <small className="canvas-video-duration-note" role="note">{seedance.hint}</small> : null}
       {pixverse ? <small className="canvas-video-duration-note">{pixverseHint(pixverseState)}</small> : null}
       {pixverseState.durationFromVideo && pixverse ? <div className="canvas-video-parameter"><span>视频时长</span><span>匹配最长参考视频</span></div> : null}
@@ -442,6 +464,21 @@ export function CanvasVideoSettings({
         />
         <i aria-hidden="true" />
       </label>
+      {supportsVideoTasks && config.autoVerifyMaterials === false ? (
+        <label
+          className="canvas-video-switch"
+          data-tooltip="普通云素材使用原文件地址或本机导入原件。已授权真人等素材请保留云端审核身份。"
+        >
+          <span>云素材使用原文件</span>
+          <input
+            type="checkbox"
+            role="switch"
+            checked={config.useOriginalCloudMedia === true}
+            onChange={(event) => onChange({ ...config, useOriginalCloudMedia: event.target.checked })}
+          />
+          <i aria-hidden="true" />
+        </label>
+      ) : null}
       <label
         className="canvas-video-switch"
         data-tooltip="自动识别已连接素材的名称，并绑定成带素材身份的 @ 引用。"
@@ -470,18 +507,25 @@ export function CanvasVideoSettings({
         parameters={parameterFields}
         modeControl={pixverse ?
           <CanvasSelect className="canvas-video-mode" ariaLabel="PixVerse 能力模式" value={pixverseActionValue}
-            options={[{value: "", label: `自动 · ${PIXVERSE_ACTIONS.find(([value]) => value === pixverseState.action)?.[1] ?? pixverseState.action}${pixverseState.omni ? "（Omni）" : ""}`}, ...PIXVERSE_ACTIONS.map(([value,label])=>({value,label})), ...(pixverseV6 ? [{value:"fusion_omni",label:"全能参考（V6 Omni）"}] : [])]}
+            options={[
+              { value: "", label: `自动 · ${PIXVERSE_ACTIONS.find(([value]) => value === pixverseState.action)?.[1] ?? pixverseState.action}${pixverseState.omni ? "（Omni）" : ""}` },
+              ...PIXVERSE_ACTIONS.map(([value, label]) => {
+                const description = pixverseActionRestriction(selectedModel?.remoteModelId ?? "", value);
+                return { value, label, disabled: description !== undefined, description };
+              }),
+              ...(pixverseV6 ? [{ value: "fusion_omni", label: "全能参考（V6 Omni）" }] : []),
+            ]}
             onChange={setPixverseAction} /> :
           <CanvasSelect
             className="canvas-video-mode"
             ariaLabel="视频生成模式"
-            value={supportsVideoTasks && mode === "auto" ? "auto" : canvasVideoModeValue(mode, modeInputs)}
+            value={supportsVideoTasks && mode === "auto" ? "auto" : canvasVideoModeValue(mode, modeInputs, videoPolicy)}
             options={modeOptions.map(option => ({ ...option, icon: <LibTVMediaIcon name={videoModeIcon(option.value)} size={16} /> }))}
             chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={12} />}
             selectedIcon={<LibTVMediaIcon name="check" size={12} />}
             onChange={(value) => {
               const videoMode = value as CanvasVideoMode;
-              const intent = compileCanvasVideoMode(videoMode, inputs, config.mediaRoles);
+              const intent = compileCanvasVideoMode(videoMode, inputs, config.mediaRoles, videoPolicy);
               if (klingV4 && videoMode === "edit") {
                 const source = inputs.find(input => input.kind === "video" && config.mediaRoles?.[input.key] === "base_video")
                   ?? inputs.find(input => input.kind === "video");

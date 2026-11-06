@@ -391,13 +391,19 @@ fn build_generation_model_catalog(
         if remote_model_id == super::model_schema::ATLASCLOUD_REGION_EDIT_BINDING {
             continue;
         }
+        let operations = binding.enabled_operations.iter().copied().filter(|operation|
+            super::canvas_model_capabilities::operation_restriction(&provider.adapter_id, &remote_model_id, *operation).is_none()
+        ).collect::<Vec<_>>();
+        if operations.is_empty() {
+            continue;
+        }
         entries.push(GenerationModelCatalogEntry {
             provider_connection_id: binding.provider_connection_id.clone(),
             provider_display_name: provider.display_name.clone(),
             model_definition_id: binding.model_definition_id.clone(),
             remote_model_id,
             display_name: definition.display_name.clone(),
-            operations: binding.enabled_operations.clone(),
+            operations,
             operation_schema: definition.operations.clone(),
         });
     }
@@ -435,10 +441,15 @@ pub async fn fetch_provider_models(
     provider_connection_id: String,
     token_group: Option<String>,
 ) -> CommandResult<Vec<RemoteModelOption>> {
+    let provider = state.storage.get_provider_connection(&provider_connection_id).command()?;
     state
         .providers
         .list_models(&provider_connection_id, token_group.as_deref())
         .await
+        .map(|mut models| {
+            models.retain(|model| super::canvas_model_capabilities::retired_model_reason(&provider.adapter_id, &model.id).is_none());
+            models
+        })
         .command()
 }
 

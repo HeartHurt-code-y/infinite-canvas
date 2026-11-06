@@ -2,7 +2,7 @@ import { useId, useLayoutEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import type { ProviderCatalogEntry } from "../../lib/backend";
-import { resolvedParameterValue, type ModelParameterCapability } from "../../lib/modelCapabilities";
+import { resolvedParameterValue, type ModelParameterCapability, type ModelParameterValue } from "../../lib/modelCapabilities";
 import { seedreamProSummary } from "../../lib/seedreamPro";
 import { gptImage25Size } from "../../lib/gptImage25";
 import type { ImageNodeConfig } from "./workspaceModel";
@@ -36,13 +36,14 @@ export function canvasImageHasOptionButtons(capability: ModelParameterCapability
   return capability.options.length > 0;
 }
 
-export function CanvasImageSettings({ config, active, advancedHostId, triggerHostId, modelLabel, capabilities, model, parameters, providerCatalog, seedreamPro = false, gptImage25 = false, onChange }: {
+export function CanvasImageSettings({ config, active, advancedHostId, triggerHostId, modelLabel, capabilities, parameterValues, model, parameters, providerCatalog, seedreamPro = false, gptImage25 = false, onChange }: {
   readonly config: ImageNodeConfig;
   readonly active: boolean;
   readonly advancedHostId: string;
   readonly triggerHostId: string;
   readonly modelLabel: string;
   readonly capabilities: readonly ModelParameterCapability[];
+  readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly seedreamPro?: boolean;
   readonly gptImage25?: boolean;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
@@ -60,12 +61,12 @@ export function CanvasImageSettings({ config, active, advancedHostId, triggerHos
   const [triggerHost, setTriggerHost] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setHost(document.getElementById(advancedHostId)); }, [advancedHostId]);
   useLayoutEffect(() => { setTriggerHost(document.getElementById(triggerHostId)); }, [triggerHostId]);
-  const summary = seedreamPro ? [seedreamProSummary(config.parameterValues)] : capabilities.filter(capability => SUMMARY_KEYS.has(capability.key)).flatMap(capability => {
-    const value = resolvedParameterValue(capability, config.parameterValues);
+  const summary = seedreamPro ? [seedreamProSummary(parameterValues)] : capabilities.filter(capability => SUMMARY_KEYS.has(capability.key)).flatMap(capability => {
+    const value = resolvedParameterValue(capability, parameterValues);
     if (value === "" || value == null) return [];
     return [capability.options.find(option => option.value === value)?.label ?? String(value)];
   });
-  if (gptImage25) { const size = gptImage25Size(config.parameterValues); summary.unshift(size === "auto" ? "自动尺寸" : size.replace("x", " × ")); }
+  if (gptImage25) { const size = gptImage25Size(parameterValues); summary.unshift(size === "auto" ? "自动尺寸" : size.replace("x", " × ")); }
   const controls = <section className="canvas-video-advanced canvas-image-advanced" hidden={!active || upscale || !config.advancedOpen} aria-label="高级设置">
     <strong>高级设置</strong>
     <label className="canvas-video-switch" data-tooltip="自动匹配已连接素材的名称，并绑定成带素材身份的 @ 引用。">

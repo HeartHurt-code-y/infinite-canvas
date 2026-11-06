@@ -2573,6 +2573,9 @@ pub fn prepare_text_task(
                 &command.model_definition_id,
             )
         })?;
+    super::canvas_model_capabilities::validate_operation(
+        &provider.adapter_id, &remote_model_id, GenerationOperation::TextGeneration,
+    )?;
     let logical_request = serde_json::to_value(&command)?;
     let task_id = Uuid::new_v4().to_string();
     let canvas_id = command
@@ -2809,6 +2812,10 @@ pub async fn translate_canvas_text(
                 &command.model_definition_id,
             )
         })?;
+
+    super::canvas_model_capabilities::validate_operation(
+        &provider.adapter_id, &remote_model_id, GenerationOperation::TextGeneration,
+    )?;
 
     // 复用提示词节点的命令形状，好让文本调用链路（模型冻结、令牌分组、凭据解析、
     // 用量统计、失败收口）全部走同一条路径，不另开一套旁路。

@@ -31,6 +31,7 @@ import {
   type PromptSegment,
   type StartGenerationCommand,
 } from "../../lib/backend";
+import { providerResponseErrorMessage } from "../../lib/errorFormat";
 import { textResultFromSource } from "../workspace/workspaceModel";
 import { resultDisplayName } from "../workspace/artifactNames";
 import { subscribeArtifactNameChanges } from "../workspace/artifactNameSync";
@@ -245,12 +246,21 @@ function providerCallStatus(call: GenerationTaskDetail["calls"][number]): string
 }
 
 /** 先展示人能读懂的失败原因，完整错误记录按需展开，兼顾扫描效率与排障信息完整性。 */
-function HistoryDiagnostic({ label, value }: { readonly label: string; readonly value: unknown }) {
+function HistoryDiagnostic({
+  label,
+  value,
+  httpStatus,
+}: {
+  readonly label: string;
+  readonly value: unknown;
+  readonly httpStatus?: number | null;
+}) {
   const normalized = normalizeEmbeddedJson(value);
-  const message =
+  const message = providerResponseErrorMessage(normalized, httpStatus) ?? (
     isUnknownRecord(normalized) && typeof normalized["message"] === "string"
       ? backendErrorMessage(normalized)
-      : findDiagnosticMessage(normalized) ?? "没有可用的错误摘要，请展开查看完整技术详情。";
+      : findDiagnosticMessage(normalized) ?? "没有可用的错误摘要，请展开查看完整技术详情。"
+  );
   const kind = diagnosticKind(normalized);
   return (
     <div className="history-diagnostic" role="group" aria-label={label}>
@@ -1780,6 +1790,7 @@ export function HistoryDialog({
                                   <HistoryDiagnostic
                                     label="供应商调用失败"
                                     value={diagnosticValue}
+                                    httpStatus={call.httpStatus}
                                   />
                                 ) : null}
                                 <div className="history-call__payloads">

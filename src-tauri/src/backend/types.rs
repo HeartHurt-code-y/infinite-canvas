@@ -337,6 +337,9 @@ pub struct StartGenerationCommand {
     pub parameters: Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video_task_type: Option<VideoTaskType>,
+    /// Explicit Seedance delivery preference. Cloud identity remains in the task receipt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_original_cloud_media: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_operation_schema_snapshot: Option<Value>,
     #[serde(default = "default_generation_count")]

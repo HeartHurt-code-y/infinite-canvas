@@ -35,12 +35,13 @@ function usePresetDismiss(open: boolean, anchor: RefObject<HTMLElement | null>, 
   }, open);
 }
 
-export function CanvasImagePresetMenu({ config, active, getCapabilities, triggerRef, onChange }: {
+export function CanvasImagePresetMenu({ config, active, getCapabilities, triggerRef, onChange, onStoryboardSelect }: {
   readonly config: ImageNodeConfig;
   readonly active: boolean;
   readonly getCapabilities: () => readonly ModelParameterCapability[];
   readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onChange: (config: ImageNodeConfig) => void;
+  readonly onStoryboardSelect: (scene: string) => void;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -98,10 +99,15 @@ export function CanvasImagePresetMenu({ config, active, getCapabilities, trigger
           <h3 id={`${id}-${group.id}`}>{group.label}</h3>
           {group.presets.map(preset => <button type="button" key={preset.scene} role="menuitemradio" aria-checked={config.imagePreset?.scene === preset.scene}
             data-tooltip={preset.description} onClick={() => {
+              close();
+              triggerRef.current?.focus({ preventScroll: true });
+              if (group.id === "storyboard") {
+                onStoryboardSelect(preset.scene);
+                return;
+              }
               const selected = selectCanvasImagePreset(preset, getCapabilities(), config.parameterValues,
                 `${config.modelSelection.providerId}:${config.modelSelection.modelDefinitionId}`, config.imagePreset);
               onChange({ ...config, imagePreset: selected.selection, parameterValues: selected.parameterValues, imageMode: "auto", panoramaEnabled: false });
-              close(); triggerRef.current?.focus({ preventScroll: true });
             }}>
             <span className="canvas-image-preset-menu__icon"><LibTVMediaIcon name={preset.icon} size={20} />{preset.newFeature ? <i className="canvas-image-preset-new-dot" aria-hidden="true" /> : null}</span>
             <span>{canvasImagePresetLabel(preset, config.imagePreset?.scene === preset.scene ? config.imagePreset.options : undefined)}</span>

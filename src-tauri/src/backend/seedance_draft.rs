@@ -112,6 +112,7 @@ pub(crate) fn prepare_promotion(
         explicit_media: Vec::new(),
         parameters: json!({ "draft_task_id": remote_task_id }),
         video_task_type: None,
+        use_original_cloud_media: None,
         model_operation_schema_snapshot: source.model_operation_schema_snapshot,
         generation_count: 1,
     };

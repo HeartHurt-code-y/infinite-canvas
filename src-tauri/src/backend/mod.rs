@@ -3,6 +3,7 @@ pub mod brand_design;
 pub mod brand_models;
 pub mod commands;
 pub mod canvas_image;
+mod canvas_model_capabilities;
 pub mod camera_control;
 pub mod composer;
 pub mod cover_images;

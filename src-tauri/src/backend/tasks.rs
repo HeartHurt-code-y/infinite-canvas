@@ -390,6 +390,18 @@ impl GenerationTaskService {
             command.parameters.clone()
         };
         command.parameters = normalize_parameters(&operation_schema, &supplied_parameters)?;
+        if let Some(model_id) = binding.remote_model_id.as_deref() {
+            super::canvas_model_capabilities::validate_operation(&provider.adapter_id, model_id, command.operation)?;
+            if command.operation == GenerationOperation::VideoGeneration {
+                if operation_schema.pointer("/request/mediaEncoding").and_then(Value::as_str) == Some("veo_image_urls")
+                    && let Some(version) = super::canvas_model_capabilities::video_capabilities(&provider.adapter_id, model_id)
+                        .and_then(|policy| policy.veo.as_deref())
+                {
+                    operation_schema["request"]["veoMediaVersion"] = json!(version);
+                }
+                super::media::validate_new_video_request(&provider.adapter_id, model_id, &mut command, &operation_schema)?;
+            }
+        }
         command.model_operation_schema_snapshot = Some(operation_schema);
         // 模型绑定指定了令牌分组时，用该分组的密钥；否则用供应商主 API Key。
         // 先解析出密钥引用并校验其可用（resolve 会读取凭据），再冻结进任务快照。
@@ -2130,11 +2142,12 @@ fn is_retryable_generation_error(error: &BackendError) -> bool {
             details
                 .get("retryable")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-                || details
-                    .get("httpStatus")
-                    .and_then(Value::as_u64)
-                    .is_some_and(|status| (500..600).contains(&status))
+                .unwrap_or_else(|| {
+                    details
+                        .get("httpStatus")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|status| (500..600).contains(&status))
+                })
         }
         _ => false,
     }

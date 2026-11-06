@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { modelOperationRestriction } from "../../lib/canvasModelCapabilities";
 import {
   describeConnectivityTest,
   backendErrorMessage,
@@ -250,6 +251,14 @@ function operationsFromUsage(usage: ModelUsage): GenerationOperation[] {
   if (usage.imageToImage) operations.push("image_to_image");
   return operations;
 }
+
+const operationsByModelKind: Readonly<Record<ModelUsage["kind"], readonly GenerationOperation[]>> = {
+  none: [],
+  image: ["text_to_image", "image_to_image"],
+  video: ["video_generation"],
+  text: ["text_generation"],
+  speech: ["speech_generation"],
+};
 
 function emptyModelUsage(): ModelUsage {
   return { kind: "none", textToImage: false, imageToImage: false };
@@ -678,7 +687,8 @@ export function ProviderSettingsDialog({
     try {
       const selections = remoteModels.map((model) => {
         const usage = modelUsage[model.id] ?? emptyModelUsage();
-        const enabledOperations = operationsFromUsage(usage);
+        const enabledOperations = operationsFromUsage(usage).filter(operation =>
+          !modelOperationRestriction(draft.adapterId, model.id, operation));
         return {
           // 不信任来源数据中的 modelDefinitionId（历史 DB 可能存裸远程模型 ID），
           // 按后端规范 `remote::{provider}::{remote_model_id}` 构造，杜绝作用域校验失败。
@@ -1146,12 +1156,16 @@ export function ProviderSettingsDialog({
                 {visibleModels.length > 0 ? (
                   visibleModels.map((model) => {
                     const usage = modelUsage[model.id] ?? emptyModelUsage();
+                    const restriction = (operation: GenerationOperation) => modelOperationRestriction(draft.adapterId, model.id, operation);
+                    const reasons = new Set(Object.values(operationsByModelKind).flat()
+                      .flatMap(operation => restriction(operation) ?? []));
                     return (
                       <article className="model-option" key={model.id}>
                         <div className="model-option__identity">
                           <strong>{model.displayName}</strong>
                           <code>{model.id}</code>
                           {model.ownedBy ? <span>{model.ownedBy}</span> : null}
+                          {Array.from(reasons, reason => <span key={reason}>{reason}</span>)}
                         </div>
                         <div className="model-option__classification">
                           <div
@@ -1159,12 +1173,17 @@ export function ProviderSettingsDialog({
                             role="radiogroup"
                             aria-label={`${model.displayName}模型类型`}
                           >
-                            {(["none", "image", "video", "text", "speech"] as const).map((kind) => (
-                              <label key={kind}>
+                            {(["none", "image", "video", "text", "speech"] as const).map((kind) => {
+                              const operations = operationsByModelKind[kind];
+                              const reason = operations.length > 0 && operations.every(operation => restriction(operation))
+                                ? restriction(operations[0]!) : undefined;
+                              return <label key={kind} data-tooltip={reason}>
                                 <input
                                   type="radio"
                                   name={`model-kind-${model.id}`}
                                   checked={usage.kind === kind}
+                                  disabled={reason !== undefined}
+                                  aria-description={reason}
                                   onChange={() =>
                                     setModelUsage((current) => ({
                                       ...current,
@@ -1192,8 +1211,8 @@ export function ProviderSettingsDialog({
                                     文本模型
                                   </>
                                 )}
-                              </label>
-                            ))}
+                              </label>;
+                            })}
                           </div>
                           {usage.kind === "image" ? (
                             <div
@@ -1204,7 +1223,8 @@ export function ProviderSettingsDialog({
                               <label>
                                 <input
                                   type="checkbox"
-                                  checked={usage.textToImage}
+                                  checked={usage.textToImage && !restriction("text_to_image")}
+                                  disabled={restriction("text_to_image") !== undefined}
                                   onChange={(event) =>
                                     setModelUsage((current) => ({
                                       ...current,
@@ -1217,7 +1237,8 @@ export function ProviderSettingsDialog({
                               <label>
                                 <input
                                   type="checkbox"
-                                  checked={usage.imageToImage}
+                                  checked={usage.imageToImage && !restriction("image_to_image")}
+                                  disabled={restriction("image_to_image") !== undefined}
                                   onChange={(event) =>
                                     setModelUsage((current) => ({
                                       ...current,

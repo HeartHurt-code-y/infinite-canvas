@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import * as v from "valibot";
+import { modelOperationRestriction, retiredModelReason } from "./canvasModelCapabilities";
 import type { SeedanceTaskMode } from "./seedanceTasks";
 // 跨语言契约类型：由 ts-rs 从 src-tauri 的 Rust 类型生成（pnpm codegen），
 // 手写 union 一律不再维护；需要前端独有变体时在本地联合里显式扩展（见 StagingStatus）。
@@ -28,7 +29,11 @@ import {
 } from "./ipc";
 // 错误文本的还原规则收敛在 errorFormat：后端摘要与素材库摘要共用同一套判断，
 // 免得同一段 JSON 在两个地方被解读成两种样子。
-import { errorPayloadFromText, looksLikeSerializedError } from "./errorFormat";
+import {
+  errorPayloadFromText,
+  looksLikeSerializedError,
+  providerResponseErrorMessage,
+} from "./errorFormat";
 
 // IPC 收口在 ./ipc：invoke/listen 只在那里出现。这里 re-export 公共守卫与
 // 错误类型，保持既有 `from "./backend"` 导入路径稳定。
@@ -368,18 +373,20 @@ export const providerSettingsClient: ProviderSettingsClient = {
  * resurface as "not enabled" instead of disappearing on the next launch.
  */
 async function loadSavedProviderModels(providerConnectionId: string): Promise<RemoteModelOption[]> {
-  const [definitions, bindings] = await Promise.all([
+  const [definitions, bindings, providers] = await Promise.all([
     invokeDesktop("list_model_definitions", modelDefinitionsSchema),
     invokeDesktop("list_provider_model_bindings", providerModelBindingsSchema, {
       providerConnectionId,
     }),
+    providerSettingsClient.listProviderConnections(),
   ]);
+  const adapter = providers.find(provider => provider.id === providerConnectionId)?.adapterId ?? "";
   const definitionById = new Map(definitions.map((definition) => [definition.id, definition]));
 
   return bindings.flatMap((binding) => {
     const definition = definitionById.get(binding.modelDefinitionId);
     const remoteModelId = binding.remoteModelId ?? definition?.remoteModelId;
-    if (!definition || !remoteModelId) return [];
+    if (!definition || !remoteModelId || retiredModelReason(adapter, remoteModelId)) return [];
     // 不信任历史 definition.id：历史版本可能把裸远程模型 ID 直接存为模型定义 ID，
     // 一律按规范作用域构造，保证保存模型时与后端校验一致。
     const modelDefinitionId = providerScopedModelDefinitionId(providerConnectionId, remoteModelId);
@@ -422,7 +429,8 @@ export async function loadProviderCatalog(): Promise<ProviderCatalogEntry[]> {
             definitionId: definition.id,
             remoteModelId,
             displayName: definition.displayName,
-            operations: binding.enabledOperations,
+            operations: binding.enabledOperations.filter(operation =>
+              !modelOperationRestriction(provider.adapterId, remoteModelId, operation)),
             operationSchema: definition.operations,
           },
         ];
@@ -980,10 +988,10 @@ function backendErrorMessageOf(error: unknown): string | null {
   if (error != null && typeof error === "object" && !(error instanceof Error)) {
     const payload = error as Record<string, unknown>;
     const message = payload["message"];
+    const details = payload["details"] as Record<string, unknown> | null | undefined;
     // 旧任务只把通用包装消息放在顶层；仍要读出原始素材错误，不能要求用户
     // 展开整段诊断才能知道哪份参考已失效。
     if (typeof message === "string" && message.replace(BACKEND_ERROR_KIND_PREFIX, "").trim() === "media reference resolution failed") {
-      const details = payload["details"] as Record<string, unknown> | null | undefined;
       const source = details?.["sourceError"] as Record<string, unknown> | null | undefined;
       if (typeof source?.["message"] === "string") {
         const sourceDetails = source["details"] as Record<string, unknown> | null | undefined;
@@ -1009,6 +1017,8 @@ function backendErrorMessageOf(error: unknown): string | null {
         return `参考${label}${position}${name}解析失败：${reason}`;
       }
     }
+    const providerMessage = providerResponseErrorMessage(details?.["rawResponse"], details?.["httpStatus"]);
+    if (providerMessage) return providerMessage;
     if (typeof message === "string") return message;
   }
   return null;
@@ -1049,6 +1059,8 @@ function backendErrorTextMessage(value: string): string | null {
   }
   try {
     const payload: unknown = JSON.parse(body);
+    const providerMessage = providerResponseErrorMessage(payload, status);
+    if (providerMessage) return providerMessage;
     const upstream =
       payload != null && typeof payload === "object"
         ? (payload as Record<string, unknown>)["error"]
@@ -1807,6 +1819,8 @@ export interface StartGenerationCommand {
   readonly outputName?: string;
   /** 本地视频任务意图，仅用于参数校验及重试，不原样发送给供应商。 */
   readonly videoTaskType?: SeedanceTaskMode;
+  /** Freeze the user's choice of file delivery alongside the cloud reference. */
+  readonly useOriginalCloudMedia?: boolean;
   readonly canvasId: string;
   readonly sourceNodeId: string;
   readonly operation: GenerationOperation;

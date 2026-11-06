@@ -1,6 +1,7 @@
 import { useCallback, useContext, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import type { ProviderCatalogEntry } from "../../lib/backend";
+import { canvasStoryboardPreset } from "../../lib/canvasImagePresets";
 import { modelParameterCapabilities } from "../../lib/modelCapabilities";
 import type { PromptContentEditorSession } from "../../lib/promptContent";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
@@ -15,7 +16,7 @@ import "./CanvasImageEditor.css";
 
 type ImageNode = Extract<GenNodeData, { kind: "image" }>;
 
-export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, presetTriggerRef, cameraTriggerRef, cameraOpenRequestId, providerCatalog, onChange, linkedStyle }: {
+export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, presetTriggerRef, cameraTriggerRef, cameraOpenRequestId, providerCatalog, onChange, onStoryboardSelect, linkedStyle }: {
   readonly canvasId: string;
   readonly node: ImageNode;
   readonly active: boolean;
@@ -27,11 +28,13 @@ export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, p
   readonly cameraOpenRequestId: number;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly onChange: (config: ImageNodeConfig) => void;
+  readonly onStoryboardSelect: (scene: string) => void;
 }) {
   const [stylesOpen, setStylesOpen] = useState(false);
   const marking = useContext(CanvasImageMarkingContext);
   const markButton = useRef<HTMLButtonElement>(null);
   const upscale = node.config.imageMode === "upscale";
+  const storyboard = canvasStoryboardPreset(node.config.imagePreset?.scene);
   const closeStyles = useCallback(() => setStylesOpen(false), []);
   const [translating, setTranslating] = useState(false);
   const [footer, setFooter] = useState<HTMLElement | null>(null);
@@ -47,13 +50,13 @@ export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, p
       linkedStyle || node.config.styleReference != null || hasPromptImage || inputs.some(input => input.kind === "image" || input.kind === "video") ? "image_to_image" : "text_to_image", selectedModel.remoteModelId) : [];
   };
   useLayoutEffect(() => {
-    if (!active || upscale || !marking) return;
+    if (!active || upscale || storyboard || !marking) return;
     marking.register({ targetKey: node.key, sessionRef, restoreFocus: () => markButton.current?.focus({ preventScroll: true }) });
     return () => marking.register(null);
-  }, [active, upscale, node.key, sessionRef, marking?.register]);
+  }, [active, upscale, storyboard, node.key, sessionRef, marking?.register]);
   return <>
     <CanvasReferenceTools node={node} active={active} />
-    {!upscale ? <>
+    {!upscale && !storyboard ? <>
       <button ref={markButton} type="button" className="canvas-gen-node__tool-chip" aria-label="标记" aria-pressed={marking?.targetKey === node.key}
         onClick={() => { if (marking?.targetKey === node.key) marking.stop(); else marking?.start(); }}><LibTVMediaIcon name="mark" size={12} /><span>标记</span></button>
       <button type="button" className="canvas-gen-node__tool-chip" aria-pressed={linkedStyle || node.config.styleReference != null}
@@ -61,8 +64,8 @@ export function CanvasImageTools({ canvasId, node, active, inputs, sessionRef, p
         onClick={() => setStylesOpen(true)}><LibTVMediaIcon name="style" size={12} /><span>风格</span></button>
     </> : null}
     {footer && !upscale ? createPortal(<>
-      <CanvasImagePresetMenu config={node.config} active={active} getCapabilities={getPresetCapabilities} triggerRef={presetTriggerRef} onChange={onChange} />
-      <CanvasCameraControl config={node.config} active={active} triggerRef={cameraTriggerRef} openRequestId={cameraOpenRequestId} onChange={onChange} />
+      <CanvasImagePresetMenu config={node.config} active={active} getCapabilities={getPresetCapabilities} triggerRef={presetTriggerRef} onChange={onChange} onStoryboardSelect={onStoryboardSelect} />
+      {!storyboard ? <CanvasCameraControl config={node.config} active={active} triggerRef={cameraTriggerRef} openRequestId={cameraOpenRequestId} onChange={onChange} /> : null}
     </>, footer) : null}
     {translationHost && !upscale ? createPortal(<button type="button" aria-label="翻译提示词" data-tooltip="翻译提示词" onClick={() => setTranslating(true)}><LibTVMediaIcon name="translate" size={16} /></button>, translationHost) : null}
     {active && !upscale && stylesOpen ? <CanvasImageStyleMarket selected={node.config.styleReference} onSelect={styleReference => onChange({ ...node.config, styleReference })} onClose={closeStyles} /> : null}

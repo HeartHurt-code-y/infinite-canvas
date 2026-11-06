@@ -1703,23 +1703,43 @@ impl ProviderRuntime {
                         .filter_map(|media| media.remote_reference.as_deref())
                         .filter_map(|reference| reference.strip_prefix("asset://"))
                         .collect();
-                    // These references were just read with the frozen generation credentials.
-                    // An upstream NotFound now contradicts that receipt; re-uploading or
-                    // replaying a paid submission cannot repair the platform's routing.
-                    let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
-                    if !asset_ids.is_empty() && super::asset_library::asset_lookup_missing(&payload) {
-                        return Err(BackendError::protocol(
-                            "平台素材接口刚返回已就绪，但生成接口却报告素材不存在。请向平台核对素材与生成服务的归属和路由；本次不会自动重新入库或重发生成。",
-                            json!({
-                                "materialRoutingMismatch": true,
-                                "assetIds": asset_ids,
-                                "providerConnectionId": task.provider_connection_id,
-                                "model": task.remote_model_id_snapshot,
-                                "httpStatus": response.status,
-                                "rawResponse": response.body,
-                                "retryable": false,
-                            }),
-                        ));
+                    if !response.is_success() && !asset_ids.is_empty() {
+                        let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
+                        if let Some((channel_id, asset_id)) = seedance::rejected_channel_asset(&payload)
+                            && asset_ids.contains(&asset_id)
+                        {
+                            return Err(BackendError::protocol(
+                                format!("Seedance 渠道 {channel_id} 在组装请求时找不到素材 {asset_id}，平台已拒绝本次提交。普通素材可在高级设置中关闭「自动校验素材」并启用「云素材使用原文件」。需要保留审核身份的素材，请由供应商补齐该渠道的映射。"),
+                                json!({
+                                    "materialRoutingMismatch": true,
+                                    "channelId": channel_id,
+                                    "assetId": asset_id,
+                                    "providerConnectionId": task.provider_connection_id,
+                                    "model": task.remote_model_id_snapshot,
+                                    "providerRequestId": response.headers.get("moyuai-request-id")
+                                        .or_else(|| response.headers.get("x-request-id")),
+                                    "httpStatus": response.status,
+                                    "rawResponse": response.body,
+                                    "retryable": false,
+                                }),
+                            ));
+                        }
+                        // These references were read using the frozen generation credentials.
+                        // A missing asset here indicates a separate lookup in the generation route.
+                        if super::asset_library::asset_lookup_missing(&payload) {
+                            return Err(BackendError::protocol(
+                                "平台素材接口刚返回已就绪，但生成接口却报告素材不存在。请向平台核对素材与生成服务的归属和路由。",
+                                json!({
+                                    "materialRoutingMismatch": true,
+                                    "assetIds": asset_ids,
+                                    "providerConnectionId": task.provider_connection_id,
+                                    "model": task.remote_model_id_snapshot,
+                                    "httpStatus": response.status,
+                                    "rawResponse": response.body,
+                                    "retryable": false,
+                                }),
+                            ));
+                        }
                     }
                 }
                 let task_id = match family {
@@ -6941,6 +6961,11 @@ fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
     let prompt = wan_prompt(resolved);
+    let prompt = match resolved.video_task_type {
+        Some(VideoTaskType::Edit) => format!("编辑参考视频：\n{prompt}"),
+        Some(VideoTaskType::Extend) => format!("延长参考视频：\n{prompt}"),
+        _ => prompt,
+    };
     if !prompt.trim().is_empty() {
         body.insert(prompt_field, Value::String(prompt));
     }
@@ -6957,7 +6982,12 @@ fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
                     item.archive(),
                 )
             })?;
-            Ok(json!({ "type": item.role, "url": reference }))
+            let role = if item.media_type == MediaType::Video && item.role == "base_video" {
+                "reference_video"
+            } else {
+                &item.role
+            };
+            Ok(json!({ "type": role, "url": reference }))
         })
         .collect::<BackendResult<Vec<_>>>()?;
     if !media.is_empty() {
@@ -6972,10 +7002,8 @@ fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
     Ok(Value::Object(body))
 }
 
-/// Veo（Google Veo，魔芋AI 代理）视频请求体：`model`/`prompt`/`resolution`/
-/// `aspect_ratio`/`duration` 为顶层字段，`images` 为图生视频参考图 URL 数组
-/// （只支持公网 http/https URL，文档约定平台只取第一个），
-/// `negativePrompt`/`sampleCount`/`enhancePrompt`/`seed` 放入 `metadata` 对象。
+/// The gateway takes the starting image URL in `images`. Its metadata carries Google's
+/// separate `lastFrame` or `referenceImages` fields for newly frozen Veo media requests.
 fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
     validate_veo_media(resolved)?;
     let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
@@ -6988,11 +7016,12 @@ fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
     let prompt = video_prompt(resolved);
     body.insert(prompt_field, Value::String(prompt));
 
-    // 图生视频参考图：只支持公网 http(s) URL（暂存对象或远端素材的读取地址），
-    // 不支持 base64 / data URL 直传。
+    let inline_frames = resolved.operation_schema.pointer("/request/veoMediaVersion").is_some();
+    let reference_images = inline_frames && resolved.video_task_type == Some(VideoTaskType::Reference);
     let images = resolved
         .images
         .iter()
+        .filter(|image| !reference_images && (!inline_frames || image.role != "last_frame"))
         .map(|item| {
             let reference = item.remote_reference.as_ref().ok_or_else(|| {
                 BackendError::validation(
@@ -7016,18 +7045,53 @@ fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
         body.insert(media_field, Value::Array(images));
     }
 
-    // resolution/aspect_ratio/duration 落在顶层；metadata 可选参数按
-    // requestLocation: "metadata" 归入 metadata 对象。
-    insert_mapped_parameters(
-        &mut body,
-        &metadata_field,
-        mapped_parameters(resolved, "root")?,
-    )?;
+    let mut parameters = mapped_parameters(resolved, "root")?;
+    if let Some(index) = parameters.iter().position(|parameter|
+        parameter.container == "root" && parameter.field == metadata_field)
+    {
+        let explicit = parameters.remove(index).value;
+        if !explicit.is_object() {
+            return Err(BackendError::validation("Veo metadata 必须是 JSON 对象。", json!({ "model": model })));
+        }
+        body.insert(metadata_field.clone(), explicit);
+    }
+    insert_mapped_parameters(&mut body, &metadata_field, parameters)?;
+
+    let advanced_media = if reference_images {
+        let images = resolved.images.iter().map(|image| {
+            Ok(json!({ "image": veo_inline_image(image)?, "referenceType": "asset" }))
+        }).collect::<BackendResult<Vec<_>>>()?;
+        Some(("referenceImages", json!(images)))
+    } else if inline_frames && resolved.video_task_type == Some(VideoTaskType::FirstLastFrame) {
+        let last = resolved.images.iter().find(|image| image.role == "last_frame").ok_or_else(||
+            BackendError::validation("Veo 首尾帧需要尾帧图片。", json!({ "model": model })))?;
+        Some(("lastFrame", veo_inline_image(last)?))
+    } else { None };
+    if let Some((field, value)) = advanced_media {
+        let metadata = body.entry(metadata_field).or_insert_with(|| json!({}));
+        let metadata = metadata.as_object_mut().ok_or_else(||
+            BackendError::validation("Veo metadata 必须是 JSON 对象。", json!({ "model": model })))?;
+        if metadata.contains_key(field) {
+            return Err(BackendError::validation("Veo 的媒体参数与已连接的素材冲突。", json!({ "field": field })));
+        }
+        metadata.insert(field.to_string(), value);
+    }
 
     Ok(Value::Object(body))
 }
 
-/// Veo 仅接受图片参考输入（顶层 `images` URL 数组）；视频/音频素材不支持。
+fn veo_inline_image(image: &ResolvedMedia) -> BackendResult<Value> {
+    let bytes = image.bytes.as_deref().filter(|bytes| !bytes.is_empty()).ok_or_else(||
+        BackendError::validation("Veo 无法读取图片内容，请重新选择素材。", image.archive()))?;
+    Ok(json!({
+        "inlineData": {
+            "mimeType": image.mime_type,
+            "data": base64::engine::general_purpose::STANDARD.encode(bytes)
+        }
+    }))
+}
+
+/// The gateway cannot carry the original Google video object required for Veo extension.
 fn validate_veo_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
     if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
         return Err(BackendError::validation(
@@ -7365,7 +7429,7 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
             (
                 MediaType::Image,
                 "first_frame" | "last_frame" | "reference_image"
-            ) | (MediaType::Video, "reference_video")
+            ) | (MediaType::Video, "reference_video" | "base_video")
                 | (MediaType::Audio, "reference_audio")
                 | (_, "file" | "link")
         ) {

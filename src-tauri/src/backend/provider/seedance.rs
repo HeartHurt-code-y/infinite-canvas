@@ -99,10 +99,32 @@ pub(super) fn prompt(model: &str, resolved: &ResolvedGeneration) -> BackendResul
     Ok(prompt)
 }
 
+/// This gateway envelope reports a request-conversion rejection before upstream dispatch.
+pub(super) fn rejected_channel_asset(payload: &serde_json::Value) -> Option<(u64, &str)> {
+    if payload["code"].as_str() != Some("build_request_failed")
+        || !payload.get("data").is_some_and(serde_json::Value::is_null)
+        || payload.get("task_id").is_some()
+        || payload.get("id").is_some()
+    {
+        return None;
+    }
+    let message = payload["message"].as_str()?
+        .strip_prefix("convert request payload failed: asset ref: not found for channel ")?;
+    let (channel, asset_id) = message.split_once(": ")?;
+    Some((channel.parse().ok()?, asset_id.trim()))
+}
+
 pub(crate) fn failure_message(kind: &str, status: &str, failure: &serde_json::Value, parameters: Option<&serde_json::Value>) -> String {
     let code = failure.pointer("/upstreamError/code").or_else(|| failure.pointer("/error/code")).and_then(serde_json::Value::as_str).unwrap_or_default();
     let reason = failure.get("failReason").or_else(|| failure.pointer("/upstreamError/message")).and_then(serde_json::Value::as_str).unwrap_or_default();
     let follows_source = parameters.is_some_and(|p| p["ratio"].as_str() == Some("adaptive") && p["duration"].as_i64() == Some(-1));
+    if code == "NotFound.asset_id"
+        || ["failReason", "upstreamError", "error"].iter()
+            .filter_map(|key| failure.get(*key))
+            .any(super::super::asset_library::asset_lookup_missing)
+    {
+        return "平台已返回任务号，随后报告生成渠道无法读取云端素材。需保留审核身份时，请用任务号向供应商核对该渠道的素材映射。".to_string();
+    }
     match code {
         "OutputVideoSensitiveContentDetected" => "供应商生成后的视频未通过上游内容审核（OutputVideoSensitiveContentDetected）。这不是本地参数校验失败；应用不会自动重发，结算请以供应商记录为准。".to_string(),
         "InvalidParameter.TaskTypeConstraint" if follows_source && (reason.contains("`duration` must be -1") || reason.contains("`ratio` must be `adaptive`")) => "本次已提交跟随原片的画幅与时长（adaptive / -1），上游仍返回参数冲突。请凭任务 ID 核对供应商的参数转发；实际请求与原始回执已保留，应用未自动重发。".to_string(),

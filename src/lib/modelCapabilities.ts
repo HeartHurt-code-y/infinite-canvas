@@ -739,7 +739,7 @@ export const PIXVERSE_VIDEO_PROFILE_ID = "moyu_pixverse_video_v1";
 /** Only the model IDs documented by the Moyu PixVerse contract use this profile. */
 export function isPixverseVideoModel(modelId: string): boolean {
   const normalized = modelId.toLowerCase();
-  return normalized === "pixverse-v6" || normalized === "pixverse-c1";
+  return normalized === "pixverse-v6" || normalized === "pixverse-c1" || normalized === "pixverse-v6-max";
 }
 
 function pixverseVideoParameters(modelId: string): Record<string, unknown> {
@@ -764,7 +764,7 @@ function pixverseVideoParameters(modelId: string): Record<string, unknown> {
         "upscale",
         "avatar",
         "agent",
-      ],
+      ].filter(action => !pixverseActionRestriction(modelId, action)),
       requestLocation: "metadata",
       order: 7,
     },
@@ -1467,3 +1467,4 @@ export function modelSupportsBatchCount(
     (capability) => capability.key === "n" && capability.type === "integer",
   );
 }
+import { pixverseActionRestriction } from "./canvasModelCapabilities";

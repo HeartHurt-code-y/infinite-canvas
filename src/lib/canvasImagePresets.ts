@@ -1,6 +1,9 @@
 import * as v from "valibot";
 import rawCatalog from "../../shared/canvas-image-presets.json";
+import { GPT_IMAGE_25_PROFILE, gptImage25Size } from "./gptImage25";
 import type { ModelParameterCapability, ModelParameterValue } from "./modelCapabilities";
+import type { PromptContentDocumentV1 } from "./promptContent";
+import { SEEDREAM_PRO_RATIOS, SEEDREAM_PRO_RESOLUTIONS, seedreamProSize } from "./seedreamPro";
 
 const optionValueSchema = v.object({
   value: v.string(), label: v.string(), instruction: v.string(),
@@ -45,9 +48,39 @@ export const CANVAS_IMAGE_PRESET_VERSION = catalog.version;
 export const CANVAS_IMAGE_PRESET_GROUPS = catalog.groups;
 export const CANVAS_IMAGE_PRESETS = catalog.groups.flatMap(group => group.presets);
 export const CANVAS_IMAGE_PROMPT_PLACEHOLDER = "可直接文字生图，或上传图片输入文字指令对图片进行编辑，如：将背景改为雪夜";
+const storyboardPresets = catalog.groups.find(group => group.id === "storyboard")?.presets ?? [];
 
 export function canvasImagePreset(scene: string | undefined): BuiltinCanvasImagePreset | undefined {
   return CANVAS_IMAGE_PRESETS.find(preset => preset.scene === scene);
+}
+
+export function canvasStoryboardPreset(scene: string | undefined): BuiltinCanvasImagePreset | undefined {
+  return storyboardPresets.find(preset => preset.scene === scene);
+}
+
+type StoryboardPromptInput = "empty" | "text" | "image" | "text_and_image";
+
+export function storyboardPromptInput(document: PromptContentDocumentV1 | undefined): StoryboardPromptInput {
+  const items = document?.items ?? [];
+  const hasImage = items.some(item =>
+    (item.kind === "attachment" || item.kind === "media_reference") && item.target.mediaType === "image",
+  );
+  const hasText = items.some(item => item.kind === "text" && item.text.trim() !== "");
+  if (hasImage) return hasText ? "text_and_image" : "image";
+  return hasText ? "text" : "empty";
+}
+
+export function storyboardPresetInputIssue(
+  preset: BuiltinCanvasImagePreset,
+  prompt: StoryboardPromptInput,
+  hasConnectedImage: boolean,
+): string | null {
+  const hasImage = hasConnectedImage || prompt === "image" || prompt === "text_and_image";
+  const hasText = prompt === "text" || prompt === "text_and_image";
+  if (preset.inputRequirement === "prompt" && !hasText) return `请填写「${preset.label}」的剧情描述。`;
+  if (preset.inputRequirement === "image" && !hasImage) return `「${preset.label}」需要一张参考图。请上传或从画布引用。`;
+  if (preset.inputRequirement === "prompt_or_image" && !hasText && !hasImage) return `请为「${preset.label}」填写描述或添加参考图。`;
+  return null;
 }
 
 export function imagePresetOptionValues(preset: BuiltinCanvasImagePreset, saved?: Readonly<Record<string, string>>): Record<string, string> {
@@ -67,11 +100,51 @@ export function canvasImagePresetLabel(preset: BuiltinCanvasImagePreset, saved?:
   return preset.label;
 }
 
-const PARAMETER_KEYS: Readonly<Record<string, readonly string[]>> = {
+const PARAMETER_KEYS = {
   ratio: ["ratio", "aspect_ratio"],
   resolution: ["resolution", "image_size"],
   quality: ["quality"],
-};
+} as const satisfies Readonly<Record<string, readonly string[]>>;
+
+/** 分镜默认值在显示和提交时按实际操作的模型契约计算，移除预设后恢复普通模型默认值。 */
+export function storyboardImageParameterValues(
+  preset: BuiltinCanvasImagePreset | undefined,
+  capabilities: readonly ModelParameterCapability[],
+  parameterValues: Readonly<Record<string, ModelParameterValue>>,
+  requestProfileId: unknown,
+): Readonly<Record<string, ModelParameterValue>> {
+  if (!preset) return parameterValues;
+  const values = { ...parameterValues };
+  const { ratio, resolution, quality } = preset.defaults;
+  const hasSize = ["size", "ratio", "aspect_ratio", "resolution", "image_size"].some(key => key in values);
+  if (!hasSize && ratio && resolution) {
+    if (requestProfileId === GPT_IMAGE_25_PROFILE) {
+      values["size"] = gptImage25Size({ aspect_ratio: ratio, resolution });
+    } else if (requestProfileId === "moyu_seedream_image_v1" && values["layer_decomposition"] !== true) {
+      const sizeRatio = SEEDREAM_PRO_RATIOS.find(value => value === ratio);
+      const tier = SEEDREAM_PRO_RESOLUTIONS.find(value => value === resolution) ?? "2K";
+      if (sizeRatio) values["size"] = seedreamProSize(tier, sizeRatio);
+    }
+  }
+  const defaults: readonly { readonly keys: readonly string[]; readonly choices: readonly (string | undefined)[] }[] = [
+    { keys: PARAMETER_KEYS.ratio, choices: [ratio] },
+    { keys: [...PARAMETER_KEYS.resolution, "size"], choices: [resolution, "4K", "2K", "1.5K", "1K"] },
+    { keys: PARAMETER_KEYS.quality, choices: [quality] },
+  ];
+  for (const { keys, choices } of defaults) {
+    if (keys.some(key => key in values)) continue;
+    for (const capability of capabilities) {
+      if (!keys.includes(capability.key)) continue;
+      const option = choices
+        .map(choice => capability.options.find(item => String(item.value).toLowerCase() === choice?.toLowerCase()))
+        .find(item => item != null);
+      if (!option) continue;
+      values[capability.key] = option.value;
+      break;
+    }
+  }
+  return values;
+}
 
 /**
  * 原站私有模型 ID 与支持白名单不进入本项目。只匹配当前模型真实声明的枚举，
@@ -89,8 +162,17 @@ export function selectCanvasImagePreset(
   const applied: Record<string, ModelParameterValue> = Object.fromEntries(
     Object.entries(priorApplied ?? {}).filter(([key, value]) => parameterValues[key] === value),
   );
-  for (const [semantic, wanted] of Object.entries(preset.defaults)) {
-    const capability = capabilities.find(item => PARAMETER_KEYS[semantic]?.includes(item.key));
+  const storyboard = canvasStoryboardPreset(preset.scene);
+  if (storyboard) {
+    // 旧版把预设默认值写进参数；切换时只移除仍由预设持有的值。
+    for (const key of Object.keys(applied)) {
+      delete values[key];
+      delete applied[key];
+    }
+  }
+  for (const [semantic, wanted] of Object.entries(storyboard ? {} : preset.defaults)) {
+    const keys: readonly string[] | undefined = (PARAMETER_KEYS as Readonly<Record<string, readonly string[]>>)[semantic];
+    const capability = capabilities.find(item => keys?.includes(item.key));
     if (!capability) continue;
     const option = capability.options.find(item => String(item.value).toLowerCase() === wanted.toLowerCase());
     if (!option) continue;

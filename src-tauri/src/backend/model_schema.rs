@@ -443,7 +443,7 @@ fn apply_speech_dialect(schema: &mut Value, identity: &str) -> bool {
 }
 
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
-    // 两个完整 PixVerse 型号有明确的视频合同，不能被目录通用 chat 标签覆盖。
+    // 已知 PixVerse 型号的视频能力不能被目录通用 chat 标签覆盖。
     // 若目录提供视频扩展 Schema，仍保留其中的自定义参数与标记。
     if is_pixverse_video_model(model_id) {
         if let Some(schema) = advertised_schema(item)
@@ -531,7 +531,8 @@ fn is_wan_30_video_model(model_id: &str) -> bool {
 
 /// 只接受文档的完整型号，避免把 PixVerse-V5 或未来后缀型号误套 V6/C1 能力。
 pub(crate) fn is_pixverse_video_model(model_id: &str) -> bool {
-    model_id.eq_ignore_ascii_case("PixVerse-V6") || model_id.eq_ignore_ascii_case("PixVerse-C1")
+    ["PixVerse-V6", "PixVerse-C1", "PixVerse-V6-Max"].iter()
+        .any(|id| model_id.eq_ignore_ascii_case(id))
 }
 
 fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
@@ -597,6 +598,10 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
             "type": "boolean", "label": "多镜头", "default": false,
             "requestLocation": "metadata", "order": 4
         });
+    }
+    if let Some(actions) = parameters["action"]["enum"].as_array_mut() {
+        actions.retain(|action| action.as_str().is_some_and(|action|
+            super::canvas_model_capabilities::pixverse_action_restriction(model_id, action).is_none()));
     }
     Some(json!({
         "resultType": "video",
@@ -3908,6 +3913,12 @@ pub fn refresh_pixverse_video_defaults(schema: &mut Value, model_id: &str) -> bo
                 canonical_parameters["action"]["enum"].clone(),
             );
             changed = true;
+        }
+        if let Some(options) = parameters.get_mut("action").and_then(|action| action.get_mut("enum")).and_then(Value::as_array_mut) {
+            let count = options.len();
+            options.retain(|action| action.as_str().is_some_and(|action|
+                super::canvas_model_capabilities::pixverse_action_restriction(model_id, action).is_none()));
+            changed |= options.len() != count;
         }
         return changed;
     }

@@ -1,3 +1,4 @@
+import { pixverseActionRestriction } from "./canvasModelCapabilities";
 import type { ModelParameterValue } from "./modelCapabilities";
 
 export const PIXVERSE_PROFILE = "moyu_pixverse_video_v1";
@@ -16,11 +17,34 @@ export function pixverseIntent(model: string, values: Readonly<Record<string, Mo
   const videos = inputs.filter(input => input.kind === "video").length;
   const audios = inputs.filter(input => input.kind === "audio").length;
   const v6 = model.toLowerCase() === "pixverse-v6";
+  const templates = model.toLowerCase() !== "pixverse-v6-max";
   const explicit = String(values["action"] ?? "");
   const action = explicit || (hasLastFrame ? "transition" : videos && v6 || images > 1 ? "fusion" : images ? "img" : "text");
   const omni = v6 && action === "fusion" && (values["reference_mode"] === "omni" || videos > 0);
   const hasVideoId = !!values["video_media_id"] || !!values["source_video_id"];
-  return { action, omni, images, videos, audios, durationFromVideo: omni && (videos > 0 || hasVideoId), ratio: action === "text" || action === "fusion", multiClip: v6 && (action === "text" || action === "img"), audio: ["text", "img", "transition", "fusion", "extend"].includes(action), videoInput: VIDEO_ACTIONS.has(action) || omni };
+  return { action, omni, images, videos, audios, templates, durationFromVideo: omni && (videos > 0 || hasVideoId), ratio: action === "text" || action === "fusion", multiClip: v6 && (action === "text" || action === "img"), audio: ["text", "img", "transition", "fusion", "extend"].includes(action), videoInput: VIDEO_ACTIONS.has(action) || omni };
+}
+
+export function pixverseRequestRestriction(
+  model: string,
+  values: Readonly<Record<string, ModelParameterValue>>,
+  inputs: readonly { kind: string }[],
+  hasLastFrame: boolean,
+): string | undefined {
+  const intent = pixverseIntent(model, values, inputs, hasLastFrame);
+  const restriction = pixverseActionRestriction(model, intent.action) ??
+    (values["reference_mode"] === "omni" ? pixverseActionRestriction(model, "fusion_omni") : undefined);
+  if (restriction) return restriction;
+  if (intent.videos > 0 && !intent.videoInput) return "当前 PixVerse 模式不接收视频素材；请更换模式或移除视频。";
+  if (intent.audios > 0 && ["text", "img", "transition", "fusion", "extend"].includes(intent.action)) {
+    return "当前 PixVerse 模式不接收音频素材。";
+  }
+  if (intent.action === "img" && intent.images !== 1 || intent.action === "transition" && intent.images !== 2) {
+    return "PixVerse 图生视频需要 1 张图片，首尾帧需要 2 张图片。";
+  }
+  const sources = intent.videos + Number(Boolean(values["source_video_id"])) + Number(Boolean(values["video_media_id"]));
+  if (intent.action === "extend" && sources !== 1) return "PixVerse 视频延长需要且仅能使用一个视频来源。";
+  return undefined;
 }
 
 export function pixverseFieldVisible(key: string, intent: ReturnType<typeof pixverseIntent>): boolean {
@@ -29,7 +53,7 @@ export function pixverseFieldVisible(key: string, intent: ReturnType<typeof pixv
   if (key === "duration") return !intent.durationFromVideo;
   if (key === "generate_audio_switch") return intent.audio;
   if (key === "generate_multi_clip_switch") return intent.multiClip;
-  if (key === "template_id") return intent.action === "img";
+  if (key === "template_id") return intent.action === "img" && intent.templates;
   if (key === "source_video_id" || key === "video_media_id") return intent.videoInput && intent.videos === 0;
   if (key === "restyle_id") return intent.action === "restyle";
   if (key === "audio_media_id" || key === "lip_sync_tts_content" || key === "lip_sync_tts_speaker_id") return intent.audios === 0 && (intent.action === "lip_sync" || intent.action === "avatar");

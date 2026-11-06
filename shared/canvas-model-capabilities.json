@@ -1,0 +1,269 @@
+{
+  "retiredModels": [
+    {
+      "models": ["gpt-image-1"],
+      "reason": "OpenAI 已于 2026 年 10 月 23 日下线 GPT Image 1。"
+    },
+    {
+      "models": ["gemini-2.5-flash-image-preview"],
+      "reason": "Google 已于 2026 年 1 月 15 日下线该 Gemini 预览型号。"
+    },
+    {
+      "models": ["gemini-3-pro-preview"],
+      "reason": "Google 已于 2026 年 3 月 9 日下线该 Gemini 预览型号。"
+    },
+    {
+      "models": ["gemini-3.1-flash-lite-preview"],
+      "reason": "Google 已于 2026 年 5 月 25 日下线该 Gemini 预览型号。"
+    },
+    {
+      "models": ["gemini-3.1-flash-image-preview", "gemini-3.1-flash-image-preview(按次)", "gemini-3-pro-image-preview", "gemini-3-pro-image-preview(按次)"],
+      "reason": "Google 已于 2026 年 6 月 25 日下线这些 Gemini 图片预览型号。"
+    },
+    {
+      "models": ["gemini-embedding-2-preview"],
+      "reason": "Google 已于 2026 年 8 月 10 日下线该 Gemini 嵌入预览型号。"
+    },
+    {
+      "models": ["claude-opus-4-20250514", "claude-sonnet-4-20250514"],
+      "reason": "Anthropic 已于 2026 年 6 月 15 日下线该 Claude 快照。"
+    },
+    {
+      "models": ["claude-opus-4-1-20250805"],
+      "reason": "Anthropic 已于 2026 年 8 月 5 日下线该 Claude 快照。"
+    },
+    {
+      "models": ["deepseek-v4-flash"],
+      "reason": "DeepSeek 已于 2026 年 9 月 10 日退役 V4 Flash，原官方别名临时转发到 V4.1 Flash。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": ["doubao-lite-32k-character-250228", "doubao-seed3d-1-0-250928"],
+      "reason": "该型号已于 2026 年 3 月 24 日在火山方舟停止服务。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": [
+        "doubao-seed-1-6-thinking-250615", "doubao-seed-1-6-thinking-250715",
+        "doubao-seed-1-6-flash-250715", "doubao-1-5-thinking-vision-pro-250428",
+        "doubao-1-5-thinking-pro-250415", "doubao-1-5-thinking-pro-m-250428",
+        "doubao-1-5-ui-tars-250428", "deepseek-v3-1-250821",
+        "doubao-seededit-3-0-i2i-250628", "kimi-k2-250905", "kimi-k2-thinking-251104"
+      ],
+      "reason": "该型号已于 2026 年 3 月 31 日在火山方舟停止服务。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": [
+        "deepseek-r1-250528", "deepseek-v3-250324", "deepseek-v3-1-terminus",
+        "doubao-1-5-pro-32k-character-250228", "doubao-seed-1-6-lite-251015",
+        "doubao-seedance-1-0-lite-i2v-250428", "doubao-seedance-1-0-lite-t2v-250428",
+        "doubao-seedream-3-0-t2i-250415"
+      ],
+      "reason": "该型号已于 2026 年 5 月 11 日在火山方舟停止服务。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": ["deepseek-v3-2-251201"],
+      "reason": "该型号已于 2026 年 7 月 30 日在火山方舟停止服务。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": [
+        "glm-4-7-251222", "deepseek-v4-flash-260425", "doubao-seed-code-preview-251028",
+        "doubao-seed-1-8-251228", "doubao-seed-1-6-vision-250815", "doubao-seed-1-6-250615",
+        "doubao-seed-1-6-251015", "doubao-seed-1-6-flash-250828",
+        "doubao-seed-1-6-flash-250615", "doubao-seedance-1-5-pro-251215"
+      ],
+      "reason": "该型号已于 2026 年 9 月 21 日在火山方舟停止服务。"
+    },
+    {
+      "adapters": ["volcengine_ark_v1"],
+      "models": ["doubao-seed-2-0-lite-260215", "doubao-seed-2-0-mini-260215"],
+      "reason": "该型号已于 2026 年 10 月 22 日在火山方舟停止服务。"
+    }
+  ],
+  "restrictedOperations": [
+    {
+      "prefixes": ["doubao-seedream-3-0-t2i"],
+      "operations": ["image_to_image"],
+      "reason": "Seedream 3.0 T2I 只支持文生图，参考图编辑需另选图生图模型。"
+    },
+    {
+      "models": ["kling-tts"],
+      "operations": ["video_generation", "speech_generation", "text_generation"],
+      "reason": "可灵 TTS 使用独立的语音接口，画布尚未接入。"
+    },
+    {
+      "prefixes": ["kling-avatar-"],
+      "operations": ["video_generation", "text_generation"],
+      "reason": "可灵数字人需要专用的角色图与驱动音频接口，画布尚未接入。"
+    },
+    {
+      "prefixes": ["wan2-1-14b-"],
+      "adapters": ["volcengine_ark_v1"],
+      "operations": ["video_generation"],
+      "reason": "当前方舟连接没有万相 2.1 的视频请求适配。"
+    },
+    {
+      "prefixes": ["gemini-embedding-", "doubao-embedding-", "text-embedding-"],
+      "operations": ["text_generation"],
+      "reason": "嵌入模型输出向量，无法在画布生成文本。"
+    },
+    {
+      "models": ["qwen3-rerank", "qwen3.7-text-rerank"],
+      "operations": ["text_generation"],
+      "reason": "重排序模型输出相关性评分，无法在画布生成文本。"
+    },
+    {
+      "prefixes": ["doubao-seed3d-"],
+      "operations": ["text_generation", "text_to_image", "image_to_image", "video_generation"],
+      "reason": "Seed3D 输出三维模型，画布尚未接入其生成接口。"
+    },
+    {
+      "prefixes": ["doubao-seededit-"],
+      "operations": ["text_generation"],
+      "reason": "SeedEdit 是图片编辑模型，无法在画布生成文本。"
+    }
+  ],
+  "video": [
+    {
+      "models": ["vidu/q4-preview/reference-to-video"],
+      "adapters": ["atlascloud_v1"],
+      "modes": ["reference"],
+      "inputKinds": ["image", "audio"],
+      "requiredKind": "image",
+      "reason": "当前接入的是 Vidu Q4 参考生视频接口，必须连接参考图，可附加参考音频。"
+    },
+    {
+      "models": ["kwaivgi/kling-v4.0/reference-to-video"],
+      "adapters": ["atlascloud_v1"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image", "video"],
+      "reason": "Atlas Cloud 当前的可灵 4.0 接口接收图片和视频，不提供画布编辑、延长或参考音频。"
+    },
+    {
+      "models": ["kling-v4"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame", "multi_frame", "edit"],
+      "inputKinds": ["image", "video"],
+      "reason": "当前可灵 4.0 接口支持多关键帧和视频编辑；音色使用音色 ID，尚未接入视频延长。"
+    },
+    {
+      "models": ["kling-v3-omni"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image", "video"],
+      "reason": "当前可灵 3.0 Omni 接口可使用参考视频进行运动控制，尚未接入视频编辑、延长或参考音频。"
+    },
+    {
+      "models": ["kling-v3"],
+      "modes": ["text", "first_frame", "first_last_frame"],
+      "inputKinds": ["image"],
+      "maxImages": 2,
+      "reason": "当前可灵 3.0 接口接收首帧或首尾帧；参考视频需要 Omni 版。"
+    },
+    {
+      "models": ["veo-3", "veo-3-fast"],
+      "adapters": ["moyu_v1"],
+      "veo": "3",
+      "modes": ["text", "first_frame", "first_last_frame"],
+      "inputKinds": ["image"],
+      "maxImages": 2,
+      "reason": "Veo 3 支持文生视频、单首帧和首尾帧。参考图模式需要 Veo 3.1。"
+    },
+    {
+      "models": ["veo-3.1", "veo-3.1-fast"],
+      "adapters": ["moyu_v1"],
+      "veo": "3.1",
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image"],
+      "maxImages": 3,
+      "reason": "Veo 3.1 支持首尾帧和最多 3 张参考图。延长需要 Google 原视频对象，当前连接尚未接入。"
+    },
+    {
+      "models": ["wan3.0-video", "wan3.0-video-prime", "wan3-0-video", "wan3-0-video-prime"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame", "edit", "extend"],
+      "inputKinds": ["image", "video", "audio"],
+      "reason": "万相 3.0 使用首帧、首尾帧或全模态参考；编辑和延长需要参考视频。"
+    },
+    {
+      "prefixes": ["minimax-h3"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image", "video", "audio"],
+      "reason": "MiniMax H3 可使用多模态参考；再生成和智能扩写使用各自的任务类型。"
+    },
+    {
+      "models": ["sp2.5-720p-30s-ch5", "sp2.5-720p-30s-ch6"],
+      "modes": ["text", "reference"],
+      "inputKinds": ["image", "audio"],
+      "reason": "当前按次接口只接收参考图和参考音频，未接入首尾帧、参考视频、编辑或延长。"
+    },
+    {
+      "prefixes": ["sp2.5-720p-"],
+      "modes": ["text", "reference"],
+      "inputKinds": ["image"],
+      "reason": "当前按次档位只接收参考图，未接入首尾帧、参考视频、参考音频、编辑或延长。"
+    },
+    {
+      "prefixes": ["doubao-seedance-2-", "doubao-seedance-2.", "seedance-2.0-", "seedance-2.5-", "rd-seedance-2.", "dreamina-seedance-2."],
+      "adapters": ["fzy_ai_v1"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image", "video", "audio"],
+      "reason": "饭众烟当前接口未接入独立的视频编辑或延长任务。"
+    },
+    {
+      "prefixes": ["doubao-seedance-2-0-", "doubao-seedance-2-5-", "doubao-seedance-2.5", "dreamina-seedance-2.", "rd-seedance-2.5-", "seedance-2.0-", "seedance-2.5-"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame", "edit", "extend"],
+      "inputKinds": ["image", "video", "audio"],
+      "reason": "Seedance 2.x 支持首尾帧、全模态参考、视频编辑与延长，未接入多关键帧模式。"
+    },
+    {
+      "prefixes": ["rd-seedance-2.0-", "seedance-2-mini-"],
+      "modes": ["text", "reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image", "video", "audio"],
+      "reason": "当前渠道的此型号未接入独立的视频编辑或延长任务。"
+    },
+    {
+      "prefixes": ["doubao-seedance-1-0-lite-t2v-"],
+      "modes": ["text"],
+      "inputKinds": [],
+      "reason": "Seedance 1.0 Lite T2V 仅支持文生视频。"
+    },
+    {
+      "prefixes": ["doubao-seedance-1-0-lite-i2v-"],
+      "modes": ["reference", "first_frame", "first_last_frame"],
+      "inputKinds": ["image"],
+      "requiredKind": "image",
+      "reason": "Seedance 1.0 Lite I2V 需要图片输入，不支持视频编辑或延长。"
+    },
+    {
+      "prefixes": ["doubao-seedance-1-0-pro-fast-"],
+      "modes": ["text", "first_frame"],
+      "inputKinds": ["image"],
+      "maxImages": 1,
+      "reason": "Seedance 1.0 Pro Fast 支持文生视频与单首帧图生视频。"
+    },
+    {
+      "prefixes": ["doubao-seedance-1-0-pro-", "doubao-seedance-1-5-pro-"],
+      "modes": ["text", "first_frame", "first_last_frame"],
+      "inputKinds": ["image"],
+      "maxImages": 2,
+      "reason": "该 Seedance 1.x 型号支持文生视频和首尾帧，不接收参考视频或参考音频。"
+    }
+  ],
+  "pixverse": [
+    {
+      "actions": ["multi_transition"],
+      "reason": "PixVerse 官方仅对 V5 开放智能多帧。"
+    },
+    {
+      "models": ["pixverse-c1", "pixverse-v6-max"],
+      "actions": ["extend", "fusion_omni"],
+      "reason": "PixVerse 官方仅对 V6 开放视频延长和视频参考。"
+    },
+    {
+      "models": ["pixverse-v6-max"],
+      "exceptActions": ["text", "img"],
+      "reason": "PixVerse V6 Max 当前仅开放文生视频和单图生视频。"
+    }
+  ]
+}

@@ -30,7 +30,7 @@ import { canPromoteSeedanceDraft, seedanceDraftPromotionProblem } from "../../li
 import { CanvasAtlasToolDialog, type CanvasAtlasToolOptions, type CanvasAtlasToolSession } from "./CanvasAtlasToolDialog";
 import { invokeDesktop } from "../../lib/ipc";
 import * as v from "valibot";
-import { canvasImagePreset, selectCanvasImagePreset } from "../../lib/canvasImagePresets";
+import { canvasImagePreset, canvasStoryboardPreset, selectCanvasImagePreset, storyboardImageParameterValues, storyboardPresetInputIssue, storyboardPromptInput } from "../../lib/canvasImagePresets";
 import { editableCanvasCameraControl } from "../../lib/canvasCameraControl";
 import { CanvasChromeIcon } from "./CanvasChromeIcons";
 import { CanvasAssetDrawerHost } from "./CanvasAssetDrawerHost";
@@ -190,12 +190,15 @@ import {
 import {
   generationParameters,
   isSeedance25VideoModel,
+  isWan30VideoModel,
   modelParameterCapabilities,
   type ModelParameterCapability,
   type ModelParameterOption,
   type ModelParameterValue,
 } from "../../lib/modelCapabilities";
-import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
+import { canvasVideoModeRestriction, compileCanvasVideoMode, veoRequiresEightSeconds, VEO_DURATION_RESTRICTION } from "../../lib/canvasVideoMode";
+import { modelOperationRestriction, videoModelCapabilities } from "../../lib/canvasModelCapabilities";
+import { PIXVERSE_PROFILE, pixverseRequestRestriction } from "../../lib/pixverse";
 import { verifyGenerationMaterials } from "../../lib/generationMaterialVerification";
 import { perTaskVideoUrlConnection, perTaskVideoUrlIssue } from "../../lib/perTaskVideo";
 import type {
@@ -439,6 +442,7 @@ import {
   isTerminalTaskStatus,
   isTextGenerationModel,
   isImageGenerationModel,
+  allowsConcurrentNodeGeneration,
   localAssetToItem,
   localPathFileName,
   markdownDocumentExportName,
@@ -1273,6 +1277,7 @@ type GenNodeCardSlotProps = {
   readonly onPromptFocusRequest: (nodeKey: string) => void;
   readonly onPromptFocusHandled: (nodeKey: string) => void;
   readonly onImageConfigChange: NonNullable<GenNodeCardProps["onImageConfigChange"]>;
+  readonly onStoryboardPresetSelect: GenNodeCardProps["onStoryboardPresetSelect"];
   readonly onOpenCharacterStudio: (key: string) => void;
   readonly onVideoConfigChange: NonNullable<GenNodeCardProps["onVideoConfigChange"]>;
   /** 音频节点配置（模型 / 语种 / 采样率 / 输出格式 / 三档滑杆）。 */
@@ -1687,6 +1692,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         onReorderInput={onReorderInput}
         onSizeChange={onSizeChange}
         onImageConfigChange={onImageConfigChange}
+        onStoryboardPresetSelect={props.onStoryboardPresetSelect}
         onOpenCharacterStudio={onOpenCharacterStudio}
         onRename={onRename}
         onVideoConfigChange={onVideoConfigChange}
@@ -7801,11 +7807,12 @@ export function WorkspaceApp({
         setNodeStartError(nodeKey, "批量镜头任务必须使用单次生成，请检查节点设置。");
         return;
       }
-      // 普通图片生成在本地建单后可继续提交。固定身份的批量任务、其他媒体和
-      // 自动查询已停止的任务仍需先核对在途记录。
+      // 普通图片和视频在本地建单后可继续提交。阶段式流程、固定身份批次
+      // 以及自动查询已停止的任务仍需先核对在途记录。
+      const concurrent = allowsConcurrentNodeGeneration(genNode) && options?.clientTaskId == null;
       const blockingTask = generationTasks.find(
         (task) => task.sourceNodeId === nodeKey && !isTerminalTaskStatus(task.status) &&
-          (genNode.kind !== "image" || options?.clientTaskId != null || isPollingStopped(task.id)),
+          (!concurrent || isPollingStopped(task.id)),
       );
       if (blockingTask != null) {
         setNodeStartError(
@@ -7823,6 +7830,8 @@ export function WorkspaceApp({
         return;
       }
       const isImageUpscale = genNode.kind === "image" && genNode.config.imageMode === "upscale";
+      const storyboardPreset = genNode.kind === "image" && !isImageUpscale
+        ? canvasStoryboardPreset(genNode.config.imagePreset?.scene) : undefined;
       const upscaleSelection = isImageUpscale ? resolveImageUpscaler(providerCatalog, genNode.config.upscaleProviderId) : null;
       if (isImageUpscale && !upscaleSelection) {
         setNodeStartError(nodeKey, "请先在全局设置中配置 Atlas Cloud 连接，再选择高清服务供应商。");
@@ -7870,6 +7879,14 @@ export function WorkspaceApp({
           connections.push({ key: `image-mark-source:${mark.id}`, name: mark.sourceName, kind: "image", target: mark.sourceTarget, role: "" });
         }
       }
+      if (storyboardPreset) {
+        const issue = storyboardPresetInputIssue(storyboardPreset, storyboardPromptInput(storedPromptDocument),
+          connections.some(input => input.target.mediaType === "image"));
+        if (issue) {
+          setNodeStartError(nodeKey, issue);
+          return;
+        }
+      }
       const hasMediaInput = connections.some(input => input.kind === "image" || input.kind === "video");
       const videoMode = genNode.kind === "video" ? genNode.config.videoMode ?? genNode.config.seedanceTaskMode : undefined;
       const promptDocument = storedPromptDocument && genNode.kind === "video"
@@ -7893,6 +7910,14 @@ export function WorkspaceApp({
         selection,
         providerCatalog,
       );
+      const selectedProvider = resolvedSelection?.provider ?? providerCatalog.find(entry => entry.provider.id === selection.providerId);
+      const selectedModel = resolvedSelection?.model ?? selectedProvider?.models.find(model => model.definitionId === selection.modelDefinitionId);
+      const operationRestriction = selectedProvider && selectedModel
+        ? modelOperationRestriction(selectedProvider.provider.adapterId, selectedModel.remoteModelId, operation) : undefined;
+      if (operationRestriction) {
+        setNodeStartError(nodeKey, operationRestriction);
+        return;
+      }
       if (!resolvedSelection) {
         setNodeStartError(
           nodeKey,
@@ -7904,7 +7929,13 @@ export function WorkspaceApp({
         );
         return;
       }
+      if (!resolvedSelection.model.operations.includes(operation)) {
+        setNodeStartError(nodeKey, "当前模型未启用本次生成需要的能力，请更换模型或调整素材。");
+        return;
+      }
 
+      const videoPolicy = genNode.kind === "video"
+        ? videoModelCapabilities(resolvedSelection.provider.provider.adapterId, resolvedSelection.model.remoteModelId) : undefined;
       if (genNode.kind === "video") {
         // Keep every configured input. Cached model profiles cannot veto the request,
         // and an adapter must report media it cannot represent rather than discard it.
@@ -7915,6 +7946,18 @@ export function WorkspaceApp({
           return;
         }
         connections = [...connections, ...publicUrlInputs.map(perTaskVideoUrlConnection)];
+        const inputs = seedanceTaskInputs(connections, promptDocument);
+        const videoSchema = resolvedSelection.model.operationSchema["video_generation"] as Record<string, unknown> | undefined;
+        const issue = videoSchema?.["requestProfileId"] === PIXVERSE_PROFILE
+          ? pixverseRequestRestriction(resolvedSelection.model.remoteModelId, genNode.config.parameterValues, inputs,
+              videoMode === "first_last_frame" || Object.values(genNode.config.mediaRoles ?? {}).includes("last_frame"))
+          : canvasVideoModeRestriction(videoPolicy, videoMode, inputs) ??
+            (veoRequiresEightSeconds(videoPolicy, videoMode, inputs, genNode.config.parameterValues) &&
+              Number(genNode.config.parameterValues["duration"] ?? 8) !== 8 ? VEO_DURATION_RESTRICTION : undefined);
+        if (issue) {
+          setNodeStartError(nodeKey, issue);
+          return;
+        }
       }
       if (genNode.kind === "audio") {
         /*
@@ -7947,7 +7990,7 @@ export function WorkspaceApp({
         resolvedSelection.model.remoteModelId,
       );
       const videoIntent = genNode.kind === "video" && genNode.config.videoMode
-        ? compileCanvasVideoMode(genNode.config.videoMode, connections, genNode.config.mediaRoles)
+        ? compileCanvasVideoMode(genNode.config.videoMode, connections, genNode.config.mediaRoles, videoPolicy)
         : null;
       if (videoIntent) connections = connections.map(connection => ({ ...connection, role: videoIntent.mediaRoles[connection.key] ?? connection.role ?? "" }));
       const greenScreen =
@@ -8107,6 +8150,12 @@ export function WorkspaceApp({
        * 那一项会被忽略），所以这里**不能**过 `generationParameters` 的能力白名单 ——
        * 白名单只保留模型 Schema 声明过的键，会把这六个全部筛掉。
        */
+      const parameterValues = storyboardImageParameterValues(
+        storyboardPreset,
+        parameterCapabilities,
+        genNode.config.parameterValues,
+        (resolvedSelection.model.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"],
+      );
       const parameters: Record<string, unknown> =
         genNode.kind === "audio"
           ? {
@@ -8131,7 +8180,7 @@ export function WorkspaceApp({
                       ...genNode.config.parameterValues,
                       ...preferredPanoramaParameters(parameterCapabilities),
                     }
-                  : genNode.config.parameterValues,
+                  : parameterValues,
                 connections.length > 0,
               );
       // GPT-Image 契约的模型支持 `n` 参数：一次请求生成 n 张图片，不再拆分任务。
@@ -8174,6 +8223,8 @@ export function WorkspaceApp({
       const preparedMaterials = genNode.kind === "video" && genNode.config.autoVerifyMaterials !== false
         ? verifyGenerationMaterials(promptSegments, explicitMedia, verificationProviderId, { providerConnectionId: selection.providerId, modelDefinitionId: selection.modelDefinitionId })
         : Promise.resolve({ prompt: promptSegments, explicitMedia });
+      const useOriginalCloudMedia = genNode.kind === "video" && seedanceTask?.enabled
+        && genNode.config.autoVerifyMaterials === false && genNode.config.useOriginalCloudMedia === true;
       let remaining = taskCount;
       const settleOne = () => {
         remaining -= 1;
@@ -8208,6 +8259,7 @@ export function WorkspaceApp({
             operation: "video_generation", providerConnectionId: selection.providerId, modelDefinitionId: selection.modelDefinitionId,
             prompt: materials.prompt, explicitMedia: materials.explicitMedia,
             parameters: { ...parameters, [durationParameter]: longSettings.segmentSeconds }, generationCount: 1,
+            ...(useOriginalCloudMedia ? { useOriginalCloudMedia: true } : {}),
           };
           const fingerprint = JSON.stringify({ settings: longSettings, durationParameter, generation });
           const requestId = currentNode.config.longVideoRequest?.fingerprint === fingerprint ? currentNode.config.longVideoRequest.id : crypto.randomUUID();
@@ -8244,6 +8296,7 @@ export function WorkspaceApp({
             prompt: materials.prompt,
             explicitMedia: materials.explicitMedia,
             parameters,
+            ...(useOriginalCloudMedia ? { useOriginalCloudMedia: true } : {}),
             ...(seedanceTask?.enabled ? { videoTaskType: seedanceTask.mode } : videoIntent ? { videoTaskType: videoIntent.taskMode } : {}),
             generationCount: 1,
             };
@@ -8254,7 +8307,7 @@ export function WorkspaceApp({
                   ...(isImageUpscale ? { upscaleScale: genNode.config.upscaleScale ?? 2 } : {}),
                   ...(!isImageUpscale && genNode.config.styleReference ? { styleReference: genNode.config.styleReference } : {}),
                   ...(genNode.config.imagePreset ? { preset: genNode.config.imagePreset } : {}),
-                  ...(genNode.config.cameraControl?.enabled === true ? { cameraControl: genNode.config.cameraControl } : {}),
+                  ...(!storyboardPreset && genNode.config.cameraControl?.enabled === true ? { cameraControl: genNode.config.cameraControl } : {}),
                   ...(genNode.config.panoramaEnabled ? { panorama: true } : {}),
                 })
               : generationClient.start(command);
@@ -10887,14 +10940,14 @@ export function WorkspaceApp({
     toast.success(`已导出 ${nodes.length} 项素材到画布`);
   }
 
-  function featureNodePlacement(entry: CanvasNodeEntry, kind: "image" | "video") {
+  const featureNodePlacement = useCallback((entry: CanvasNodeEntry, kind: "image" | "video") => {
     const bounds = liveCanvasNodeRect(entry);
     return nearestAvailableNodePosition({
       x: bounds.x + bounds.width + NEW_NODE_GAP,
       y: bounds.y,
       ...genNodeDimensions(kind),
     }, Object.values(canvasStore.getState().nodesById).map(liveCanvasNodeRect));
-  }
+  }, [canvasStore]);
 
   function openCanvasFeature(action: CanvasFeatureAction, key: string, label: string, assetPreview?: string | null) {
     if (!isDesktopRuntime()) {
@@ -10965,25 +11018,30 @@ export function WorkspaceApp({
     }
     if (action.kind === "video-draft") {
       const eligible = providerCatalog.flatMap(provider => provider.provider.enabled
-        ? provider.models.filter(model => model.operations.includes("video_generation") && isSeedance25VideoModel(model.remoteModelId))
+        ? provider.models.filter(model => model.operations.includes("video_generation") &&
+            videoModelCapabilities(provider.provider.adapterId, model.remoteModelId)?.modes.includes(action.mode))
           .map(model => ({ provider, model }))
         : []);
       const inputs = [{ key: fromKey, kind: "video" as const }];
       const compatible = eligible.find(({ model }) => {
+        if (!isSeedance25VideoModel(model.remoteModelId)) return false;
         const capabilities = modelParameterCapabilities(model.operationSchema, "video_generation", model.remoteModelId);
         return resolveSeedanceTask(model.remoteModelId, capabilities, { seedanceTaskMode: action.mode, parameterValues: {} },
           inputs, model.operationSchema).enabled;
-      });
+      }) ?? (action.mark ? undefined : eligible.find(({ model }) => isWan30VideoModel(model.remoteModelId)));
       if (!compatible) {
-        toast.error("请先启用支持视频编辑或延长的 Seedance 2.5 模型。");
+        toast.error(action.mark ? "请先启用支持标注编辑的 Seedance 2.5 模型。"
+          : "请先启用支持视频编辑或延长的 Seedance 2.5 或万相 3.0 模型。");
         return false;
       }
       const { model, provider } = compatible;
       const caps = modelParameterCapabilities(model.operationSchema, "video_generation", model.remoteModelId);
       const config = createVideoNodeConfig({ providerId: provider.provider.id, modelDefinitionId: model.definitionId }, providerCatalogLoaded);
+      const taskConfig = isSeedance25VideoModel(model.remoteModelId)
+        ? selectSeedanceTask(model.remoteModelId, caps, config, inputs, action.mode, model.operationSchema) : config;
       const node: GenNodeData = {
         key: genNodeKey(), kind: "video", name: label, ...featureNodePlacement(entry, "video"),
-        config: { ...selectSeedanceTask(model.remoteModelId, caps, config, inputs, action.mode, model.operationSchema), videoMode: action.mode },
+        config: { ...taskConfig, videoMode: action.mode },
       };
       if (insertSubgraph([{ type: "gen", data: node }], [{ id: fromKey + "->" + node.key, fromKey, toKey: node.key }],
         { selectNodeKey: node.key }) !== "applied") return false;
@@ -11327,6 +11385,46 @@ export function WorkspaceApp({
     },
     [canvasStore, selectEdge, selectNode],
   );
+  const selectStoryboardPreset = useCallback((key: string, scene: string) => {
+    const preset = canvasStoryboardPreset(scene);
+    const state = canvasStore.getState();
+    const source = state.nodesById[key];
+    if (!preset || source?.type !== "gen" || source.data.kind !== "image") return;
+    const result = latestGenerationPreviewFor(canvasReadModelOfState(state), key);
+    const configure = (config: ImageNodeConfig): ImageNodeConfig => {
+      const { providerId, modelDefinitionId } = config.modelSelection;
+      const selected = selectCanvasImagePreset(preset, [], config.parameterValues,
+        `${providerId}:${modelDefinitionId}`, config.imagePreset);
+      return { ...config, imagePreset: selected.selection, parameterValues: selected.parameterValues, imageMode: "auto", panoramaEnabled: false };
+    };
+    if (!result) {
+      patchNode("gen", key, node => node.kind === "image" ? { ...node, name: preset.label, config: configure(node.config) } : node);
+      setNodeStartError(key, null);
+      return;
+    }
+    if (!outputNodeReferenceTarget(result)) {
+      toast.info("原图保存完成后即可用作分镜参考。");
+      return;
+    }
+    const current = resolveGenerationSelection("image", source.data.config.modelSelection, providerCatalog);
+    const compatible = current?.model.operations.includes("image_to_image") ? current
+      : providerCatalog.filter(entry => entry.provider.enabled).flatMap(provider => provider.models
+        .filter(model => model.operations.includes("image_to_image")).map(model => ({ provider, model })))[0];
+    const selection = compatible
+      ? { providerId: compatible.provider.provider.id, modelDefinitionId: compatible.model.definitionId }
+      : source.data.config.modelSelection;
+    const node: GenNodeData = {
+      key: genNodeKey(),
+      kind: "image",
+      name: preset.label,
+      ...featureNodePlacement(source, "image"),
+      config: configure(createImageNodeConfig(selection, providerCatalogLoaded)),
+    };
+    const fromKey = result.key;
+    if (insertSubgraph([{ type: "gen", data: node }], [{ id: `${fromKey}->${node.key}`, fromKey, toKey: node.key }]) === "applied") {
+      openNodeEditor(node.key);
+    }
+  }, [canvasStore, featureNodePlacement, insertSubgraph, openNodeEditor, patchNode, providerCatalog, providerCatalogLoaded, setNodeStartError]);
   const singleSelectedNode = !nodeMarquee && selectedCanvasNodeKeys.size === 1 && selectedNodeKey
     ? canvasStore.getState().nodesById[selectedNodeKey] : null;
   const selectedImage = canvasImageActionTarget(singleSelectedNode ?? undefined);
@@ -11772,6 +11870,7 @@ export function WorkspaceApp({
             onPromptFocusHandled,
             registerPromptInput,
             updateImageNodeConfig,
+            selectStoryboardPreset,
             selectImageResult,
             handleEnhanceImage,
             handleEditImageRegion,
@@ -11828,6 +11927,7 @@ export function WorkspaceApp({
                 onPromptFocusRequest={onPromptFocusRequest}
                 onPromptFocusHandled={onPromptFocusHandled}
                 onImageConfigChange={updateImageNodeConfig}
+                onStoryboardPresetSelect={selectStoryboardPreset}
                 onOpenCharacterStudio={openCharacterStudio}
                 onRename={renameGenNode}
                 onSelectImageResult={selectImageResult}
@@ -11896,6 +11996,7 @@ export function WorkspaceApp({
       aliveCanvasNodeKeys,
       registerPromptInput,
       updateImageNodeConfig,
+      selectStoryboardPreset,
             openCharacterStudio,
       selectImageResult,
       renameGenNode,
