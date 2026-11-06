@@ -61,7 +61,7 @@ export function assertOnlineObjectKey(key) {
     if (relative === "latest.json" || /^backups\/[a-f0-9]{64}\.json$/.test(relative)) return key;
     const artifact =
       platform === "windows-x86_64"
-        ? `^无限画布_${VERSION}_${arch}-online-setup\\.exe(?:\\.sig)?$`
+        ? `^无限画布_${VERSION}_${arch}-online-(?:setup|update)\\.exe(?:\\.sig)?$`
         : `^无限画布_${VERSION}_${arch}-online(?:\\.app\\.tar\\.gz(?:\\.sig)?|\\.dmg|\\.pkg)$`;
     if (
       new RegExp(artifact).test(relative) ||

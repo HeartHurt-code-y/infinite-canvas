@@ -84,6 +84,11 @@ function updaterName(version, platform) {
     ? `无限画布_${version}_x64-online-setup.exe`
     : `无限画布_${version}_${platform === "darwin-aarch64" ? "aarch64" : "x64"}-online.app.tar.gz`;
 }
+export function windowsOnlineUpdateName(version) {
+  requireValue(VERSION.test(version), "Invalid Windows update version");
+  return `无限画布_${version}_x64-online-update.exe`;
+}
+
 function assertFeed(feed, version, platformId = COMPONENT_PLATFORM) {
   exactKeys(feed, ["version", "notes", "pub_date", "platforms"], "Online feed");
   requireValue(
@@ -97,9 +102,11 @@ function assertFeed(feed, version, platformId = COMPONENT_PLATFORM) {
   exactKeys(feed.platforms, [platformId], "Online feed platforms");
   const platform = feed.platforms[platformId];
   exactKeys(platform, ["url", "signature"], "Online feed platform");
+  const names = [updaterName(feed.version, platformId)];
+  if (platformId === "windows-x86_64") names.push(windowsOnlineUpdateName(feed.version));
   requireValue(
-    platform.url ===
-      `${tosUpdatesPublicBaseUrl()}/${platformId}-online/${encodeURIComponent(updaterName(feed.version, platformId))}` &&
+    names.some((name) => platform.url ===
+      `${tosUpdatesPublicBaseUrl()}/${platformId}-online/${encodeURIComponent(name)}`) &&
       typeof platform.signature === "string" &&
       platform.signature.length > 0 &&
       !platform.resourceManifest &&
@@ -373,6 +380,19 @@ export async function publishOnlineEdition({
     platform,
     verifyRelease,
   });
+  return publishVerifiedOnlinePlan({ plan, transportFactory, verifyRelease, dryRun, packageOnly, updaterOnly, onProgress });
+}
+
+export async function publishVerifiedOnlinePlan({
+  plan,
+  transportFactory = defaultTransportFactory,
+  verifyRelease,
+  dryRun = false,
+  packageOnly = false,
+  updaterOnly = false,
+  onProgress = () => {},
+}) {
+  assertFeed(JSON.parse(plan.feedBody), plan.applicationVersion, plan.platform);
   requireValue(!packageOnly || plan.platform.startsWith("darwin-"), "PKG-only publication requires macOS");
   requireValue(!(packageOnly && updaterOnly), "PKG-only and updater-only publication are mutually exclusive");
   requireValue(!updaterOnly || plan.platform.startsWith("darwin-"), "Updater-only publication requires macOS");
@@ -419,6 +439,12 @@ export async function publishOnlineEdition({
     maxBytes: JSON_BUDGET,
   });
   assertRemoteFeed(previous, plan.platform);
+  if (plan.requiredPreviousVersion) {
+    requireValue(
+      previous && (JSON.parse(previous.body).version === plan.requiredPreviousVersion || previous.body.equals(plan.feedBody)),
+      "The online feed is no longer on the verified incremental-update baseline",
+    );
+  }
   if (previous) {
     const comparison = compareVersions(plan.applicationVersion, JSON.parse(previous.body).version);
     requireValue(comparison >= 0, "Refusing to downgrade the online update channel");
