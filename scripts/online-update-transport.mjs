@@ -55,6 +55,13 @@ function isOnlineFeed(key) {
 export function assertOnlineObjectKey(key) {
   if (typeof key !== "string" || key.includes("\\") || key.includes("%"))
     throw new Error("Invalid online object key");
+  const deltaPrefix = `${TOS_UPDATES_PREFIX}/mac-delta/`;
+  if (key.startsWith(deltaPrefix)) {
+    const relative = key.slice(deltaPrefix.length);
+    if (/^objects\/[a-f0-9]{64}$/.test(relative) ||
+      /^\d+\.\d+\.\d+\/darwin-aarch64\/manifest\.json$/.test(relative)) return key;
+    throw new Error("Object is outside the macOS delta release scope");
+  }
   for (const [platform, arch] of Object.entries(ONLINE_PLATFORMS)) {
     const prefix = onlinePrefix(platform);
     const relative = key.startsWith(prefix) ? key.slice(prefix.length) : "";

@@ -41,9 +41,9 @@ on:
         type: boolean
         default: false
       updater_only:
-        description: Publish only the signed macOS updater archive and Apple Silicon feed
+        description: Publish the signed Apple Silicon delta and updater fallback, without standalone installers
         type: boolean
-        default: false
+        default: true
       package_only:
         description: Publish only the verified PKG installer, keeping other build artifacts internal
         type: boolean
@@ -274,8 +274,11 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           publish_args=()
-          if [ "$PKG_ONLY" = "true" ]; then publish_args+=(--package-only); fi
-          if [ "$UPDATER_ONLY" = "true" ]; then publish_args+=(--updater-only); fi
+          if [ "$PKG_ONLY" = "true" ]; then
+            publish_args+=(--package-only)
+          elif [ "$UPDATER_ONLY" = "true" ]; then
+            publish_args+=(--updater-only)
+          fi
           pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version" "${publish_args[@]}"
       - name: Report installation boundary
         run: |

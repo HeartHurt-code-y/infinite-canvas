@@ -956,7 +956,7 @@ export async function assertMacDeltaMatchesFullArchive(archivePath, manifest) {
   }
 }
 
-async function verifyStagedMacDeltaRelease({
+export async function verifyStagedMacDeltaRelease({
   manifestPath,
   version,
   expectedObjectBaseUrl,

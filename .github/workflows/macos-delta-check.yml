@@ -20,13 +20,20 @@ on:
       - "scripts/mac-delta-manifest.mjs"
       - ".github/workflows/macos-delta-check.yml"
   workflow_dispatch:
+    inputs:
+      baseline_feed_sha256:
+        description: SHA-256 of a published Apple Silicon baseline feed backup
+        type: string
+      target_version:
+        description: Published Apple Silicon target version for native delta verification
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   delta:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
@@ -38,7 +45,9 @@ jobs:
           node-version: 24
           package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
+        if: inputs.baseline_feed_sha256 == '' && inputs.target_version == ''
       - name: Prepare build-script resource directories
+        if: inputs.baseline_feed_sha256 == '' && inputs.target_version == ''
         run: mkdir -p src-tauri/resources/ffmpeg
       # 本工作流原先跑的是清单脚本的 node 用例与 delta 安装器的 cargo 用例——
       # 本质是单元测试运行器。项目已移除全部测试资产，这里改为不依赖测试框架的
@@ -46,4 +55,20 @@ jobs:
       - name: Check macOS delta manifest helper loads
         run: node --check scripts/mac-delta-manifest.mjs
       - name: Compile macOS delta installer
+        if: inputs.baseline_feed_sha256 == '' && inputs.target_version == ''
         run: cargo check --manifest-path src-tauri/Cargo.toml --locked
+      - uses: pnpm/action-setup@v4
+        if: inputs.baseline_feed_sha256 != '' || inputs.target_version != ''
+        with:
+          version: 12.5.1
+      - name: Install signing CLI
+        if: inputs.baseline_feed_sha256 != '' || inputs.target_version != ''
+        run: pnpm install --frozen-lockfile
+      - name: Reconstruct a published Apple Silicon release from signed delta inputs
+        if: inputs.baseline_feed_sha256 != '' || inputs.target_version != ''
+        env:
+          BASELINE_FEED_SHA256: ${{ inputs.baseline_feed_sha256 }}
+          TARGET_VERSION: ${{ inputs.target_version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node scripts/macos-online-delta.mjs --verify-published "$BASELINE_FEED_SHA256" "$TARGET_VERSION"

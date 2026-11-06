@@ -10,6 +10,7 @@ import {
   componentFileSha256,
 } from "./runtime-resources.mjs";
 import { verifyEditionRelease } from "./verify-edition-release.mjs";
+import { macOnlineDeltaManifestUrl, prepareMacOnlineDelta } from "./macos-online-delta.mjs";
 import { tosUpdatesObjectKey, tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -90,7 +91,18 @@ export function windowsOnlineUpdateName(version) {
 }
 
 function assertFeed(feed, version, platformId = COMPONENT_PLATFORM) {
-  exactKeys(feed, ["version", "notes", "pub_date", "platforms"], "Online feed");
+  const fields = ["version", "notes", "pub_date", "platforms"];
+  if (platformId === "darwin-aarch64" && Object.hasOwn(feed, "macDeltaManifest")) {
+    fields.push("macDeltaManifest");
+    const descriptor = feed.macDeltaManifest;
+    exactKeys(descriptor, ["url", "signature"], "macOS delta manifest");
+    requireValue(
+      descriptor.url === macOnlineDeltaManifestUrl(feed.version) &&
+      typeof descriptor.signature === "string" && descriptor.signature.length > 0,
+      "Online feed does not reference a signed macOS delta manifest",
+    );
+  }
+  exactKeys(feed, fields, "Online feed");
   requireValue(
     VERSION.test(feed.version) &&
       (!version || feed.version === version) &&
@@ -380,7 +392,16 @@ export async function publishOnlineEdition({
     platform,
     verifyRelease,
   });
-  return publishVerifiedOnlinePlan({ plan, transportFactory, verifyRelease, dryRun, packageOnly, updaterOnly, onProgress });
+  const macDelta = plan.platform === "darwin-aarch64" && !packageOnly
+    ? await prepareMacOnlineDelta(plan)
+    : null;
+  try {
+    return await publishVerifiedOnlinePlan({
+      plan: macDelta?.plan ?? plan, transportFactory, verifyRelease, dryRun, packageOnly, updaterOnly, onProgress,
+    });
+  } finally {
+    await macDelta?.dispose();
+  }
 }
 
 export async function publishVerifiedOnlinePlan({
@@ -396,13 +417,16 @@ export async function publishVerifiedOnlinePlan({
   requireValue(!packageOnly || plan.platform.startsWith("darwin-"), "PKG-only publication requires macOS");
   requireValue(!(packageOnly && updaterOnly), "PKG-only and updater-only publication are mutually exclusive");
   requireValue(!updaterOnly || plan.platform.startsWith("darwin-"), "Updater-only publication requires macOS");
-  const objects = packageOnly
+  requireValue(packageOnly || !plan.platform.startsWith("darwin-") || plan.macDelta,
+    "macOS online feed publication requires a verified Apple Silicon delta");
+  const nativeObjects = packageOnly
     ? plan.objects.filter((entry) => entry.localPath?.endsWith(".pkg"))
     : updaterOnly
       ? plan.objects.filter((entry) => /\.app\.tar\.gz(?:\.sig)?$/.test(entry.localPath ?? ""))
       : plan.objects;
-  requireValue(!updaterOnly || objects.length === 2, "Updater-only publication requires one archive and its signature");
-  requireValue(!packageOnly || objects.length === 1, "PKG-only publication requires exactly one verified installer");
+  requireValue(!updaterOnly || nativeObjects.length === 2, "Updater-only publication requires one archive and its signature");
+  requireValue(!packageOnly || nativeObjects.length === 1, "PKG-only publication requires exactly one verified installer");
+  const objects = [...nativeObjects, ...(plan.deltaObjects ?? [])];
   const report = {
     schemaVersion: 1,
     edition: plan.edition,
@@ -412,6 +436,7 @@ export async function publishVerifiedOnlinePlan({
     dryRun,
     packageOnly,
     updaterOnly,
+    ...(plan.macDelta ? { macDelta: plan.macDelta } : {}),
     objects: objects.map(({ objectKey, url, size, sha256 }) => ({
       objectKey,
       url,
@@ -439,6 +464,12 @@ export async function publishVerifiedOnlinePlan({
     maxBytes: JSON_BUDGET,
   });
   assertRemoteFeed(previous, plan.platform);
+  if (plan.requiredPreviousFeedSha256) {
+    requireValue(
+      previous && componentBytesSha256(previous.body) === plan.requiredPreviousFeedSha256,
+      "The macOS online feed changed after staging the delta",
+    );
+  }
   if (plan.requiredPreviousVersion) {
     requireValue(
       previous && (JSON.parse(previous.body).version === plan.requiredPreviousVersion || previous.body.equals(plan.feedBody)),
