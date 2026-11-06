@@ -1,0 +1,6 @@
+{
+  "image": ["图片", "参考图", "图", "image", "image_", "image ", "img", "img_", "img "],
+  "video": ["视频", "参考视频", "视", "video", "video_", "video "],
+  "audio": ["音频", "参考音频", "音", "audio", "audio_", "audio "],
+  "text": ["文档", "参考文档"]
+}

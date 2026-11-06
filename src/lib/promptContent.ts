@@ -23,6 +23,7 @@ import {
   type PromptReferenceRebind,
 } from "./promptReferences";
 import { resolveOrdinalMentions, type PromptUnboundMention } from "./promptOrdinalMentions";
+import { promptReferencePreview } from "./promptReferencePreview";
 import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
   appendStyledText,
@@ -254,6 +255,44 @@ export interface PromptContentConnection {
   readonly slotIndex?: number | undefined;
 }
 
+function appendPromptAttachments(
+  connections: readonly PromptContentConnection[],
+  items: readonly PromptContentItem[],
+): PromptContentConnection[] {
+  const inputs = [...connections];
+  for (const item of items) {
+    if (item.kind !== "attachment") continue;
+    const target = { ...item.target, canvasNodeKey: item.target.canvasNodeKey ?? `attachment:${item.attachmentId}` };
+    if (inputs.some(input => sameMediaReferenceTarget(target, input.target))) continue;
+    inputs.push({ key: target.canvasNodeKey, name: item.name, kind: target.mediaType,
+      target, role: item.mediaType === "document" ? "document" : "" });
+  }
+  return inputs;
+}
+
+/** Editing and submission use the same attachment identity and append order. */
+export function promptContentReferenceCandidates(
+  candidates: readonly PromptReferenceCandidate[],
+  attachments: readonly PromptContentAttachmentItem[],
+): readonly PromptReferenceCandidate[] {
+  const inputs = candidates.map(candidate => ({ key: candidate.canvasNodeKey, name: candidate.name,
+    kind: candidate.kind, target: candidateTarget(candidate) }));
+  const all = appendPromptAttachments(inputs, attachments);
+  const counters = new Map<MediaType, number>();
+  let contentIndex = 0;
+  for (const [index, candidate] of candidates.entries()) {
+    counters.set(candidate.kind, Math.max(counters.get(candidate.kind) ?? 0,
+      candidate.typePosition ?? (counters.get(candidate.kind) ?? 0) + 1));
+    contentIndex = Math.max(contentIndex, candidate.contentIndex ?? index + 1);
+  }
+  return [...candidates, ...all.slice(inputs.length).map(input => {
+    const typePosition = (counters.get(input.kind) ?? 0) + 1;
+    counters.set(input.kind, typePosition);
+    return referenceCandidateFromTarget({ canvasNodeKey: input.key, name: input.name,
+      target: input.target as MediaReferenceTarget, typePosition, contentIndex: ++contentIndex });
+  })];
+}
+
 export type PromptContentIssue =
   | {
       readonly kind: "pending_reference";
@@ -273,6 +312,7 @@ export type PromptContentIssue =
       readonly canvasNodeKey: string;
       readonly displayName: string;
     }
+  | { readonly kind: "unbound_ordinal_reference"; readonly text: string; readonly candidateCount: number }
   | { readonly kind: "empty_prompt" };
 
 export interface PromptContentView {
@@ -286,12 +326,18 @@ export interface PromptContentView {
   readonly issues: readonly PromptContentIssue[];
 }
 
+/** 新冻结的输入必须携带完整编号；历史请求 DTO 仍可兼容没有编号的旧数据。 */
+type NumberedExplicitMediaInput = ExplicitMediaInput & {
+  readonly typePosition: number;
+  readonly contentIndex: number;
+};
+
 export type PromptGenerationPreparation =
   | {
       readonly ok: true;
       readonly frozen: {
         readonly segments: readonly PromptSegment[];
-        readonly explicitMedia: readonly ExplicitMediaInput[];
+        readonly explicitMedia: readonly NumberedExplicitMediaInput[];
         readonly mentionedCanvasNodeKeys: ReadonlySet<string>;
         readonly plainText: string;
       };
@@ -850,6 +896,13 @@ function viewFromDocument(
   const plain: string[] = [];
   const issues: PromptContentIssue[] = [];
   const byKey = new Map(connections.map((connection) => [connection.key, connection] as const));
+  for (const item of document.items) {
+    if (item.kind === "attachment") {
+      const target = { ...item.target, canvasNodeKey: item.target.canvasNodeKey ?? `attachment:${item.attachmentId}` };
+      if (!byKey.has(target.canvasNodeKey)) byKey.set(target.canvasNodeKey, { key: target.canvasNodeKey, name: item.name,
+        kind: target.mediaType, target });
+    }
+  }
   let referenceCount = 0;
   let pendingCount = 0;
   let attachmentCount = 0;
@@ -1031,9 +1084,11 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private markReferencePresentation: ReadonlyMap<string, PromptMarkReferencePresentation> =
     new Map();
   private placeholder: string;
+  private readonly replaceable: boolean;
 
-  constructor(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER) {
+  constructor(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER, replaceable = false) {
     this.placeholder = placeholder;
+    this.replaceable = replaceable;
   }
   private pendingRestore: PromptContentDocumentV1 | null = null;
   /** 最近一次输入法组合提交的文本；输入法把 "@" 作为组合内容提交时，键盘事件里看不到它。 */
@@ -1108,7 +1163,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     if (element == null) return;
     this.editor = new Editor({
       element,
-      extensions: createPromptTiptapExtensions(() => this.placeholder),
+      extensions: createPromptTiptapExtensions(() => this.placeholder, this.replaceable),
       content: promptDocumentToTiptapJson(this.document, this.presentation()),
       injectCSS: false,
       editorProps: {
@@ -1168,6 +1223,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       referenceLabelsByKey: new Map(
         this.candidates.map((candidate, index) => [candidate.canvasNodeKey, aliases[index]!.label]),
       ),
+      referencePreviewsByKey: new Map(this.candidates.map(candidate => [candidate.canvasNodeKey,
+        { url: promptReferencePreview(candidate), kind: candidate.kind }])),
       markReferencesByMarkId: this.markReferencePresentation,
       freshMentionIds: this.freshMentionIds,
     };
@@ -1672,8 +1729,20 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     readonly allowMediaOnly: boolean;
     readonly autoLink?: boolean;
   }): PromptGenerationPreparation {
+    // One ordered plan supplies the alias catalog and the frozen request. URL
+    // inputs reserve positions; pasted files join after canvas/URL connections.
+    const effectiveConnections = appendPromptAttachments(context.connections, this.document.items);
+    const previewByKey = new Map(this.candidates.map(candidate => [candidate.canvasNodeKey, candidate.previewUrl]));
+    const positionByKey = new Map<string, { typePosition: number; contentIndex: number }>();
+    const kindCounts = new Map<MediaType, number>();
+    let contentIndex = 0;
+    for (const connection of effectiveConnections) {
+      const typePosition = (kindCounts.get(connection.kind) ?? 0) + 1;
+      kindCounts.set(connection.kind, typePosition);
+      positionByKey.set(connection.key, { typePosition, contentIndex: ++contentIndex });
+    }
     this.updateConnections(
-      context.connections.flatMap((connection) =>
+      effectiveConnections.flatMap((connection) =>
         connection.target.kind === "url"
           ? []
           : [
@@ -1681,15 +1750,29 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
                 canvasNodeKey: connection.key,
                 name: connection.name,
                 target: connection.target,
+                previewUrl: previewByKey.get(connection.key) ?? null,
+                ...positionByKey.get(connection.key),
                 ...(connection.slotIndex === undefined ? {} : { slotIndex: connection.slotIndex }),
               }),
             ],
       ),
     );
     this.autoResolve({ fresh: false, mode: context.autoLink ? "names" : "explicit" });
-    const view = viewFromDocument(this.document, context.connections);
+    // A numbered reference is explicit at submission even when automatic name
+    // linking is off. Bind it to identity before an order change can retarget it.
+    const numbered = resolveOrdinalMentions(this.document, this.candidates);
+    if (!this.isComposing() && !promptDocumentsEqual(numbered.document, this.document)) {
+      this.document = numbered.document;
+      this.applyDocument();
+    }
+    const view = viewFromDocument(this.document, effectiveConnections);
     const blocking = view.issues;
     if (blocking.length > 0) return { ok: false, issues: blocking };
+    const unbound = numbered.unbound.find(item => item.reason === "out-of-range" &&
+      !effectiveConnections.some(connection => connection.target.kind === "url" &&
+        (item.mediaType == null ? positionByKey.get(connection.key)?.contentIndex === item.position
+          : connection.kind === item.mediaType && positionByKey.get(connection.key)?.typePosition === item.position)));
+    if (unbound) return { ok: false, issues: [{ kind: "unbound_ordinal_reference", text: unbound.text, candidateCount: unbound.candidateCount }] };
     const hasContent =
       view.segments.some((segment) => segment.kind === "text" && Boolean(segment.text.trim())) ||
       view.referenceCount > 0 ||
@@ -1697,21 +1780,13 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       (context.connections.length > 0 && context.allowMediaOnly);
     if (!hasContent) return { ok: false, issues: [{ kind: "empty_prompt" }] };
 
-    // 统一媒体编号来源：按输入（连线）顺序，为每个连接分配
+    // 统一媒体编号来源：先按连线顺序，再按文档中的附件顺序分配
     //   typePosition = 同类序号（图片N 的 N，与 UI「图片1/图片2」提示完全一致）；
     //   contentIndex = 全局序号（决定请求体 metadata.content 数组顺序）。
     // 这样即使提示词书写顺序与连线顺序不同，UI 显示的编号与请求体中的
     // 「图片N」标签、content 数组位置三者始终一一对应，杜绝引用错位。
-    const positionByKey = new Map<string, { typePosition: number; contentIndex: number }>();
-    const kindCounts = new Map<MediaType, number>();
-    context.connections.forEach((connection, index) => {
-      const typePosition = (kindCounts.get(connection.kind) ?? 0) + 1;
-      kindCounts.set(connection.kind, typePosition);
-      positionByKey.set(connection.key, { typePosition, contentIndex: index + 1 });
-    });
-
     const connectionByKey = new Map(
-      context.connections.map((connection) => [connection.key, connection]),
+      effectiveConnections.map((connection) => [connection.key, connection]),
     );
     const segments = view.segments.map((segment) => {
       if (segment.kind !== "media_reference") return segment;
@@ -1732,27 +1807,15 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         item.kind === "media_reference" ? [item.canvasNodeKey] : [],
       ),
     );
-    const explicitMedia: ExplicitMediaInput[] = context.connections.map((connection) => {
-      const position = positionByKey.get(connection.key);
+    const explicitMedia: NumberedExplicitMediaInput[] = effectiveConnections.map((connection) => {
+      const position = positionByKey.get(connection.key)!;
       return {
         target: structuredClone(connection.target),
         role: connection.role ?? "",
         displayNameSnapshot: connection.name,
-        ...(position
-          ? { typePosition: position.typePosition, contentIndex: position.contentIndex }
-          : {}),
+        ...position,
       };
     });
-    // 附件不经过连线：直接追加进显式媒体输入，排在连线素材之后。
-    for (const item of this.document.items) {
-      if (item.kind !== "attachment") continue;
-      explicitMedia.push({
-        target: structuredClone(item.target),
-        role: item.mediaType === "document" ? "document" : "",
-        displayNameSnapshot: item.name,
-        contentIndex: explicitMedia.length + 1,
-      });
-    }
     return {
       ok: true,
       frozen: {
@@ -1766,6 +1829,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
 
   focusIssue(issue: PromptContentIssue): boolean {
     if (this.host == null) return false;
+    if (issue.kind === "unbound_ordinal_reference") return this.focus();
     const selector =
       issue.kind === "pending_reference"
         ? `[data-ambiguous-pattern="${CSS.escape(issue.normalizedPattern)}"]`
@@ -1862,8 +1926,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
 export function createPromptContentEditorSession(
   candidates: readonly PromptReferenceCandidate[] = [],
   placeholder: string = DEFAULT_PROMPT_PLACEHOLDER,
+  replaceable = false,
 ): PromptContentEditorSession {
-  const session = new PromptContentEditorSessionImplementation(placeholder);
+  const session = new PromptContentEditorSessionImplementation(placeholder, replaceable);
   session.updateConnections(candidates);
   return session;
 }

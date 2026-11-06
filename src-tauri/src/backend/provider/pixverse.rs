@@ -233,6 +233,9 @@ fn build_body_with_media(
                 | "audio_media_id"
                 | "source_video_id"
                 | "restyle_id"
+                | "reference_mode"
+                | "image_references"
+                | "video_references"
         ) {
             parameter.container = "metadata".into();
         }
@@ -249,10 +252,11 @@ fn build_body_with_media(
         .get("images")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
-    let metadata = body
-        .entry("metadata")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
+    let mut metadata = body
+        .remove("metadata")
+        .unwrap_or_else(|| json!({}))
+        .as_object()
+        .cloned()
         .ok_or_else(|| BackendError::validation("PixVerse metadata 字段冲突", json!({})))?;
     metadata.entry("quality").or_insert_with(|| json!("540p"));
     for field in [
@@ -266,7 +270,52 @@ fn build_body_with_media(
             metadata.insert(field.into(), encoded);
         }
     }
-    for (field, references) in [("video_media_id", videos), ("audio_media_id", audios)] {
+    if !metadata.contains_key("action") {
+        let action = if resolved.images.iter().any(|media| media.role == "last_frame") {
+            "transition"
+        } else if image_count > 1 || metadata.get("image_references").and_then(Value::as_array).is_some_and(|items| !items.is_empty())
+            || (model.eq_ignore_ascii_case("PixVerse-V6") && !videos.is_empty()) {
+            "fusion"
+        } else if image_count > 0 { "img" } else { "text" };
+        metadata.insert("action".into(), json!(action));
+    }
+    let action = metadata.get("action").and_then(Value::as_str).unwrap_or("text").to_string();
+    let omni = model.eq_ignore_ascii_case("PixVerse-V6") && action == "fusion"
+        && (metadata.get("reference_mode").and_then(Value::as_str) == Some("omni") || !videos.is_empty()
+            || metadata.get("video_references").and_then(Value::as_array).is_some_and(|items| !items.is_empty()));
+    if action == "fusion" {
+        let references = metadata.entry("image_references").or_insert_with(|| json!([]));
+        let references = references.as_array_mut().ok_or_else(|| BackendError::validation("图片参考须为数组。", json!({})))?;
+        for (media, id) in resolved.images.iter().zip(images) {
+            references.push(json!({"img_id": numeric_id(id), "ref_name": format!("image_{}", media.type_position)}));
+        }
+        // Names in the actual request match @ mentions from the prompt editor.
+        let prompt = resolved.content.iter().map(|item| match item {
+            super::CompiledContentItem::Text(text) => text.clone(),
+            super::CompiledContentItem::Media { media_type, type_position } => {
+                let label = match media_type { MediaType::Image => "image", MediaType::Video => "video", MediaType::Audio => "audio", MediaType::Text => "text" };
+                format!("@{label}_{type_position} ")
+            }
+        }).collect::<String>();
+        if !prompt.trim().is_empty() { body.insert("prompt".into(), json!(prompt)); }
+    }
+    if omni {
+        metadata.insert("reference_mode".into(), json!("omni"));
+        let manual_source = metadata.remove("source_video_id");
+        let manual_upload = metadata.remove("video_media_id");
+        let references = metadata.entry("video_references").or_insert_with(|| json!([]));
+        let references = references.as_array_mut().ok_or_else(|| BackendError::validation("视频参考须为数组。", json!({})))?;
+        if let Some(id) = manual_source { references.push(json!({"source_video_id": id, "ref_name": "source_video"})); }
+        if let Some(id) = manual_upload { references.push(json!({"video_media_id": id, "ref_name": "uploaded_video"})); }
+        for (media, id) in resolved.videos.iter().zip(videos) {
+            references.push(json!({"video_media_id": numeric_id(id), "ref_name": format!("video_{}", media.type_position)}));
+        }
+        if !references.is_empty() {
+            // The native Omni endpoint requires zero and uses the longest source.
+            metadata.remove("duration");
+        }
+    }
+    for (field, references) in [("video_media_id", if omni { &[][..] } else { videos }), ("audio_media_id", audios)] {
         if !references.is_empty() {
             // The provider decides media-count limits. Preserve every reference; for
             // multiple inputs send an array in the same field rather than dropping any.
@@ -286,25 +335,26 @@ fn build_body_with_media(
             metadata.insert(field.into(), value);
         }
     }
-    if !metadata.contains_key("action") {
-        if resolved
-            .images
-            .iter()
-            .any(|media| media.role == "last_frame")
-        {
-            metadata.insert("action".into(), json!("transition"));
-        } else if image_count > 1
-            || metadata
-                .get("image_references")
-                .and_then(Value::as_array)
-                .is_some_and(|items| !items.is_empty())
-        {
-            metadata.insert("action".into(), json!("fusion"));
-        }
-    }
+    // Hidden mode-specific controls must not leak their saved values or defaults.
+    for (field, applicable) in [
+        ("generate_multi_clip_switch", model.eq_ignore_ascii_case("PixVerse-V6") && matches!(action.as_str(), "text" | "img")),
+        ("generate_audio_switch", matches!(action.as_str(), "text" | "img" | "transition" | "fusion" | "extend")),
+        ("template_id", action == "img"),
+        ("restyle_id", action == "restyle"),
+        ("sound_effect_switch", action == "sound_effect"),
+        ("sound_effect_content", action == "sound_effect"),
+        ("lip_sync_tts_content", matches!(action.as_str(), "lip_sync" | "avatar") && audios.is_empty()),
+        ("lip_sync_tts_speaker_id", matches!(action.as_str(), "lip_sync" | "avatar") && audios.is_empty()),
+        ("reference_mode", omni),
+    ] { if !applicable { metadata.remove(field); } }
+    let source_duration = omni && metadata.get("video_references").and_then(Value::as_array).is_some_and(|items| !items.is_empty());
+    if source_duration { body.insert("duration".into(), json!(0)); }
+    if action == "fusion" { body.remove("images"); }
+    if !matches!(action.as_str(), "text" | "fusion") { body.remove("aspect_ratio"); }
     if !metadata.contains_key("duration") && !body.contains_key("duration") {
         body.insert("duration".into(), json!(5));
     }
+    body.insert("metadata".into(), Value::Object(metadata));
     Ok(Value::Object(body))
 }
 

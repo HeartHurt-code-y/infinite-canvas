@@ -133,6 +133,8 @@ trait AssetPort: Send + Sync {
     /// 两个凭据引用背后是不是同一把密钥（上游素材库的隔离边界）。
     fn credentials_match(&self, left: &str, right: &str) -> bool;
 
+    fn content_scope(&self, provider_connection_id: &str) -> BackendResult<String>;
+
     /// 素材库网关判定：给定 provider_connection_id 对应的 base_url 是否为海外平台。
     /// 海外平台（如 konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传。
     fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool>;
@@ -142,6 +144,7 @@ trait AssetPort: Send + Sync {
         task: TaskExecutionRecord,
         attempt_id: String,
         identity: CloudAssetIdentity,
+        generation_credentials: bool,
     ) -> PortFuture<RawProviderResponse>;
 
     fn download(&self, url: String) -> PortFuture<Vec<u8>>;
@@ -230,6 +233,14 @@ impl AssetPort for ProviderAssetAdapter {
         self.providers.credentials_match(left, right)
     }
 
+    fn content_scope(&self, provider_connection_id: &str) -> BackendResult<String> {
+        let context = self.providers.resolve_asset_library(provider_connection_id)?;
+        Ok(serde_json::to_string(&(
+            context.base_url.trim_end_matches('/'),
+            hex::encode(Sha256::digest(context.api_key.trim().as_bytes())),
+        ))?)
+    }
+
     fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool> {
         let context = self
             .providers
@@ -242,6 +253,7 @@ impl AssetPort for ProviderAssetAdapter {
         task: TaskExecutionRecord,
         attempt_id: String,
         identity: CloudAssetIdentity,
+        generation_credentials: bool,
     ) -> PortFuture<RawProviderResponse> {
         let providers = self.providers.clone();
         Box::pin(async move {
@@ -251,6 +263,7 @@ impl AssetPort for ProviderAssetAdapter {
                     &attempt_id,
                     &identity.provider_connection_id,
                     &identity.asset_id,
+                    generation_credentials,
                 )
                 .await?;
             Ok(RawProviderResponse {
@@ -369,6 +382,8 @@ pub enum AssetDelivery {
         /// 主密钥）。上游素材库按密钥隔离，交给生成端的 `asset://` 引用必须能被这把
         /// 密钥解析，否则上游会回「The specified asset ... is not found」。
         destination_credential_ref: String,
+        /// Seedance 的云素材必须保留审核身份，不能退回普通图片 URL。
+        preserve_asset_identity: bool,
     },
 }
 
@@ -619,6 +634,10 @@ impl AssetLibrary {
     /// 解析素材库连接的接口方言。
     fn dialect(&self, provider_connection_id: &str) -> BackendResult<AssetDialect> {
         self.port.dialect(provider_connection_id)
+    }
+
+    pub(super) fn content_scope(&self, provider_connection_id: &str) -> BackendResult<String> {
+        self.port.content_scope(provider_connection_id)
     }
 
     /// 真人素材 H5 授权契约仅存在于魔芋方言；火山引擎连接调用时返回明确错误。
@@ -1500,6 +1519,9 @@ impl AssetLibrary {
                 body: json!({ "Id": identity.asset_id }),
             })
             .await?;
+        if asset_response_missing(&response) {
+            return Err(missing_asset_error(&identity));
+        }
         if !(200..300).contains(&response.status) {
             return Err(BackendError::protocol(
                 format!(
@@ -2450,11 +2472,14 @@ impl AssetLibrary {
                 BackendError::Transport(error) => BackendError::Transport(error.without_url()),
                 other => other,
             })?;
-        if matches!(response.status, 404 | 410) {
+        if asset_response_missing(&response) {
             return Ok(missing_asset_observation(&response.body));
         }
         require_success("observe asset status", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
+        if asset_lookup_missing(&payload) {
+            return Ok(missing_asset_observation(&response.body));
+        }
         let data = payload.get("data").unwrap_or(&payload);
         let asset = parse_asset_entry(provider_connection_id, data, Some(id))
             .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
@@ -2475,7 +2500,7 @@ impl AssetLibrary {
                 body: json!({ "Id": id }),
             })
             .await?;
-        if matches!(response.status, 404 | 410) {
+        if asset_response_missing(&response) {
             return Ok(missing_asset_observation(&response.body));
         }
         require_success("observe ark asset status", &response)?;
@@ -2512,6 +2537,9 @@ impl AssetLibrary {
                 BackendError::Transport(error) => BackendError::Transport(error.without_url()),
                 other => other,
             })?;
+        if asset_response_missing(&response) {
+            return Err(missing_asset_error(&identity));
+        }
         // Preview failures must not expose signed media addresses or arbitrary upstream bodies.
         if !(200..300).contains(&response.status) {
             return Err(BackendError::protocol(
@@ -2523,6 +2551,9 @@ impl AssetLibrary {
             ));
         }
         let payload: Value = serde_json::from_str(&response.body)?;
+        if asset_lookup_missing(&payload) {
+            return Err(missing_asset_error(&identity));
+        }
         let data = payload.get("data").unwrap_or(&payload);
         let asset = parse_asset_entry(
             &identity.provider_connection_id,
@@ -2661,16 +2692,27 @@ impl AssetLibrary {
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
     /// The caller chooses intent; this implementation owns remote fields, status and content access.
     pub async fn resolve(&self, request: ResolveAsset<'_>) -> BackendResult<ResolvedAsset> {
+        let preserve_asset_identity = matches!(
+            &request.delivery,
+            AssetDelivery::RemoteReadable { preserve_asset_identity: true, .. }
+        );
         let response = self
             .port
             .get_recorded(
                 request.trace.task.clone(),
                 request.trace.attempt_id.to_string(),
                 request.identity.clone(),
+                preserve_asset_identity,
             )
             .await?;
+        if asset_response_missing(&response) {
+            return Err(missing_asset_error(&request.identity));
+        }
         require_success("resolve asset", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
+        if asset_lookup_missing(&payload) {
+            return Err(missing_asset_error(&request.identity));
+        }
         let data = payload.get("data").unwrap_or(&payload);
         let asset = parse_asset_entry(
             &request.identity.provider_connection_id,
@@ -2715,10 +2757,11 @@ impl AssetLibrary {
         match request.delivery {
             AssetDelivery::Bytes => {
                 let url = asset.preview_url.as_deref().ok_or_else(|| {
-                    BackendError::protocol(
-                        "ready asset has no readable URL",
+                    BackendError::validation(
+                        "云端素材没有可下载的原文件地址；请重新上传素材，或使用本地原件。",
                         json!({
                             "identity": identity,
+                            "assetUnavailable": true,
                             "readableUrlFields": ["url", "preview_url"],
                             "rawResponse": payload
                         }),
@@ -2744,7 +2787,19 @@ impl AssetLibrary {
             AssetDelivery::RemoteReadable {
                 destination_provider_connection_id,
                 destination_credential_ref,
+                preserve_asset_identity,
             } => {
+                if preserve_asset_identity {
+                    // 上面已经用本次生成冻结的地址与密钥实际查询，不能再根据
+                    // 素材库令牌是否相等来猜权限，也不能丢掉审核身份。
+                    return Ok(ResolvedAsset {
+                        mime_type: media_type_wildcard(request.expected_media_type).to_string(),
+                        byte_size: 0,
+                        sha256: String::new(),
+                        file_extension: fallback_extension,
+                        access: ResolvedAssetAccess::RemoteReference(format!("asset://{}", asset.id)),
+                    });
+                }
                 let same_provider_scope =
                     identity.provider_connection_id == destination_provider_connection_id;
                 // 上游素材库的隔离边界不是「连接」，而是「密钥」：Bearer 令牌网关按
@@ -2764,9 +2819,9 @@ impl AssetLibrary {
                     asset.preview_url.clone()
                 }
                 .ok_or_else(|| {
-                    BackendError::protocol(
-                        "ready asset has no remote-readable reference",
-                        json!({ "identity": identity, "rawResponse": payload }),
+                    BackendError::validation(
+                        "当前生成令牌无法使用该素材，素材库也没有返回可读取的文件地址；请重新上传素材，或恢复上传时使用的素材库令牌。",
+                        json!({ "identity": identity, "assetUnavailable": true, "rawResponse": payload }),
                     )
                 })?;
                 Ok(ResolvedAsset {
@@ -2948,6 +3003,12 @@ impl AssetLibrary {
                 continue;
             }
             let payload: Value = serde_json::from_str(&response.body)?;
+            if asset_lookup_missing(&payload) {
+                return Err(missing_asset_error(&CloudAssetIdentity {
+                    provider_connection_id: provider_connection_id.to_string(),
+                    asset_id: poll_id.to_string(),
+                }));
+            }
             let item = payload.get("data").unwrap_or(&payload);
             // 异步契约下轮询用的可能是审核任务 ID。完成后真实素材 ID 会写回 `id`，
             // 也可能留在 `id` 里的仍是 `task-…`，真正的素材 ID 在 `asset_id`。
@@ -3553,6 +3614,11 @@ fn parse_asset_entry(
     fallback_id: Option<&str>,
 ) -> Option<CloudAssetRecord> {
     let record = raw.as_object()?;
+    // HTTP 200 + code=success 也可能只表示查询成功，不能用 fallback_id
+    // 把 { exists: false } 伪造成一份状态 unknown 的图片素材。
+    if record.get("exists").and_then(Value::as_bool) == Some(false) {
+        return None;
+    }
     let id = canonical_asset_id(record, fallback_id).filter(|value| !value.is_empty())?;
     let db_id = record
         .get("db_id")
@@ -3890,6 +3956,59 @@ fn asset_lookup_id(id: &str) -> Value {
     json!(id)
 }
 
+pub(super) fn asset_lookup_missing(payload: &Value) -> bool {
+    fn missing(value: &Value, depth: usize) -> bool {
+        if depth > 6 { return false; }
+        if let Some(text) = value.as_str() {
+            let lower = text.to_ascii_lowercase();
+            return lower.contains("notfound.asset_id")
+                || (lower.contains("the specified asset ") && lower.contains(" is not found"))
+                || text.trim() == "素材不存在"
+                || serde_json::from_str::<Value>(text).is_ok_and(|nested| missing(&nested, depth + 1));
+        }
+        if value.get("exists").and_then(Value::as_bool) == Some(false) { return true; }
+        if let Some(code) = value.get("code").or_else(|| value.get("Code")).and_then(Value::as_str) {
+            if matches!(code.trim().to_ascii_lowercase().as_str(), "notfound.asset_id" | "asset_not_found" | "assetnotfound") { return true; }
+        }
+        ["message", "error", "data", "Message", "Error", "ResponseMetadata"].iter()
+            .filter_map(|key| value.get(*key)).any(|item| missing(item, depth + 1))
+    }
+    missing(payload, 0)
+}
+
+fn asset_response_missing(response: &RawProviderResponse) -> bool {
+    matches!(response.status, 404 | 410) ||
+        (!matches!(response.status, 401 | 403) && asset_lookup_missing(
+            &serde_json::from_str::<Value>(&response.body).unwrap_or_else(|_| Value::String(response.body.clone()))))
+}
+
+pub(super) fn verified_generation_asset_id(
+    response: &RawProviderResponse,
+    provider_id: &str,
+    asset_id: &str,
+    media_type: MediaType,
+) -> BackendResult<String> {
+    if asset_response_missing(response) {
+        return Err(BackendError::validation(
+            "素材已入库，但当前视频模型无法访问它：素材库与模型实际使用的令牌不共享素材，或平台素材已失效。本次没有提交生成。请检查模型绑定的令牌与素材库令牌，或在目标平台重新入库。",
+            json!({ "providerConnectionId": provider_id, "assetId": asset_id, "missing": true, "rawResponse": response.body }),
+        ));
+    }
+    require_success("verify generation asset access", response)?;
+    let payload: Value = serde_json::from_str(&response.body)?;
+    let asset = parse_asset_entry(provider_id, payload.get("data").unwrap_or(&payload), Some(asset_id))
+        .filter(|asset| asset.id == asset_id && asset.status == CloudAssetStatus::Ready && asset.kind == media_type && !is_review_task_id(&asset.id))
+        .ok_or_else(|| BackendError::validation("素材尚未在当前视频模型的令牌下就绪，本次没有提交生成。", json!({ "assetId": asset_id, "rawResponse": payload })))?;
+    Ok(asset.id)
+}
+
+fn missing_asset_error(identity: &CloudAssetIdentity) -> BackendError {
+    BackendError::validation(
+        "云端素材不存在，或当前素材库令牌无权访问；请重新上传该素材，或恢复上传时使用的素材库令牌。",
+        json!({ "identity": identity, "missing": true, "assetUnavailable": true }),
+    )
+}
+
 fn missing_asset_observation(body: &str) -> AssetStatusObservation {
     let reason = serde_json::from_str::<Value>(body)
         .ok()
@@ -3906,7 +4025,7 @@ fn missing_asset_observation(body: &str) -> AssetStatusObservation {
                         .and_then(nonempty_text)
                 })
         })
-        .unwrap_or_else(|| "云端没有返回该素材".to_string());
+        .unwrap_or_else(|| "云端素材不存在，或当前素材库令牌无权访问".to_string());
     AssetStatusObservation {
         status: CloudAssetStatus::Deleted,
         raw_status: "missing".to_string(),

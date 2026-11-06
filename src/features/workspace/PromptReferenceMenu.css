@@ -1,0 +1,62 @@
+.prompt-mention__menu.prompt-reference-menu {
+  display: flex;
+  flex-direction: column;
+  z-index: var(--z-popover, 500);
+  box-sizing: border-box;
+  width: 200px;
+  padding: 6px;
+  overflow: hidden;
+  color: var(--nt-text-default);
+  background: var(--canvas-controls-bg);
+  border: var(--rule-thin) solid var(--canvas-controls-border);
+  border-radius: 16px;
+  box-shadow: var(--canvas-shadow-menu);
+}
+.prompt-reference-menu__search {
+  flex-shrink: 0;
+  display: flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  color: var(--nt-text-muted);
+  border: var(--rule-thin) solid var(--border-default);
+  border-radius: 10px;
+}
+.prompt-reference-menu__search input {
+  width: 0;
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  padding: 0;
+  color: var(--nt-text-default);
+  font-size: 14px;
+  background: transparent;
+  border: 0;
+  outline: none;
+}
+.prompt-reference-menu__scroll { min-height: 0; max-height: min(358px, calc(100vh - 80px)); margin-top: 4px; overflow-y: auto; }
+.prompt-reference-menu__heading { display: flex; height: 30px; align-items: center; padding: 0 8px; color: var(--nt-text-muted); font-size: 12px; }
+.prompt-reference-menu__option {
+  display: flex;
+  width: 100%;
+  height: 36px;
+  min-height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  color: inherit;
+  font-size: 14px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.prompt-reference-menu__option > span:not(.prompt-reference-menu__thumb) { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prompt-reference-menu__option:is(:hover, :focus-visible, .is-active, [aria-expanded="true"]) { background: var(--canvas-controls-hover); }
+.prompt-reference-menu__thumb { display: flex; width: 20px; height: 20px; flex: 0 0 20px; align-items: center; justify-content: center; overflow: hidden; border: var(--rule-thin) solid var(--border-default); border-radius: 4px; }
+.prompt-reference-menu__thumb :is(img, video, .media-frame-host) { width: 100%; height: 100%; object-fit: cover; }
+.prompt-reference-menu__empty { display: flex; min-height: 64px; align-items: center; justify-content: center; padding: 8px 12px; color: var(--nt-text-muted); font-size: 14px; text-align: center; }
+.prompt-reference-menu--side { position: fixed; top: 0; left: 0; max-height: calc(100vh - 16px); overflow-y: auto !important; }

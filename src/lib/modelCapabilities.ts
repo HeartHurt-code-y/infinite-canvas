@@ -2,6 +2,10 @@ import type { GenerationOperation, ModelOperationSchema } from "./backend";
 import { perTaskVideoProfile } from "./perTaskVideo";
 import { isSeedanceDraftModel, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
 import { FZY_IMAGE_PROFILE, FZY_VIDEO_PROFILE } from "./providerAdapters";
+import { isSeedreamProImageModel } from "./seedreamPro";
+import { isNanoBanana21Model, nanoBanana21Parameters } from "./nanoBanana21";
+import { isMoyuKlingV4Model, klingV4Parameters } from "./klingV4";
+import { GPT_IMAGE_25_PROFILE, isGptImage25Model, gptImage25Parameters } from "./gptImage25";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -92,6 +96,8 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   hd: "高清 HD",
   auto: "自动",
   high: "高",
+  xhigh: "极高",
+  max: "最高",
   medium: "中",
   low: "低",
   small: "小",
@@ -152,6 +158,7 @@ function isParameterValue(value: unknown): value is ModelParameterValue {
 
 function optionLabel(value: ModelParameterValue, key: string): string {
   const raw = String(value);
+  if (key === "thinking_level") return ({ minimal: "快速", medium: "均衡", high: "深入" } as Record<string, string>)[raw] ?? raw;
   if (OPTION_LABELS[raw]) return OPTION_LABELS[raw];
   if (key === "duration" && typeof value === "number") return `${value} 秒`;
   if (key === "size") return raw.replace("x", " × ");
@@ -254,8 +261,8 @@ function parameterCapability(
 /**
  * Doubao Seedream 图片生成模型（如 doubao-seedream-5-0-260128（moyu 文档推荐）/
  * doubao-seedream-4-5-251128 / doubao-seedream-5-0-pro-260628）：走 moyu OpenAI
- * Images API，但契约与 dall-e/gpt-image 不同——`size` 只接受 `2K` 及 ≥2K 的像素
- * 尺寸，`quality` 仅 `standard`/`hd`，并支持 watermark、response_format
+ * Images API。普通版本沿用网关的 2K 基础参数；5.0 Pro 使用独立的
+ * 1K/1.5K/2K 与自定义尺寸契约，并支持 response_format
  * （url/b64_json）、组图（sequential_image_generation）与输出格式
  * （output_format：jpg/png/webp）等专属参数。
  * 与视频模型 seedance 名称不同（seedream 不含 seedance），互不干扰。
@@ -319,6 +326,19 @@ function seedreamTextToImageBaseParameters(): Record<string, unknown> {
       order: 9,
     },
   };
+}
+
+function seedreamProImageParameters(imageToImage: boolean): Record<string, unknown> {
+  const parameters: Record<string, unknown> = {
+    ...seedreamTextToImageBaseParameters(),
+    ...seedreamVersionParameters("5.0-pro", imageToImage),
+    size: { type: "string", label: "尺寸", default: "2K", format: "seedream_pro_size", description: "支持 1K、1.5K、2K 或宽×高像素；总像素 921,600～4,624,220，宽高比 1:16～16:1。", order: 0 },
+    quality: { type: "string", label: "网关质量", optional: true, enum: ["standard", "hd"], description: "魔芋网关扩展；留空沿用供应商默认质量。", order: 10 },
+    optimize_prompt_mode: { type: "string", label: "提示词优化", default: "standard", enum: ["standard", "fast"], description: "标准模式质量更高；快速模式耗时更短，效果略低。", order: 5 },
+    output_format: { type: "string", label: "输出格式", default: "jpeg", enum: ["jpeg", "png"], description: "Pro 支持 JPEG、PNG；透明背景必须使用 PNG。", order: 6 },
+  };
+  delete parameters["watermark"];
+  return parameters;
 }
 
 /** 通用 dall-e 契约（`/v1/images/generations`）的返回格式参数。
@@ -406,13 +426,14 @@ function seedreamVersionParameters(
   return parameters;
 }
 
-/** gpt-image-2.5（sunburst / flare）走异步任务接口：画幅和分辨率，而不是 size / quality。 */
+/** Other gateway aliases retain their task contract; official 2.5 uses native Images. */
 export function isAsyncImageTaskModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
-  return normalized.includes("gpt-image-2.5") || normalized.includes("gpt-image-2-5");
+  return !isGptImage25Model(modelId) && (normalized.includes("gpt-image-2.5") || normalized.includes("gpt-image-2-5"));
 }
 
 function textToImageParameters(modelId: string): Record<string, unknown> {
+  if (isGptImage25Model(modelId)) return gptImage25Parameters();
   if (isAsyncImageTaskModel(modelId)) {
     return {
       aspect_ratio: {
@@ -433,6 +454,7 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   }
   // Doubao Seedream 契约：2K 尺寸 / standard-hd 质量 / 水印 + 版本高级参数。
   if (isSeedreamImageModel(modelId)) {
+    if (isSeedreamProImageModel(modelId)) return seedreamProImageParameters(false);
     const version = seedreamImageVersion(modelId) ?? "generic";
     return {
       ...seedreamTextToImageBaseParameters(),
@@ -442,6 +464,7 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   // Gemini 图片生成契约：size 只接受画幅比例（1:1/16:9/…），不声明 quality，
   // 且接口忽略 n（多张走任务拆分）。
   if (isGeminiImageModel(modelId)) {
+    if (isNanoBanana21Model(modelId)) return nanoBanana21Parameters();
     return {
       size: {
         type: "string",
@@ -504,7 +527,9 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
  *  data URI 传入，声明画幅比例 `size`（与原生 imageConfig.aspectRatio 同义），
  *  不声明 quality，且接口忽略 n（多张走任务拆分）。 */
 function imageToImageParameters(modelId: string): Record<string, unknown> {
+  if (isGptImage25Model(modelId)) return gptImage25Parameters();
   if (isSeedreamImageModel(modelId)) {
+    if (isSeedreamProImageModel(modelId)) return seedreamProImageParameters(true);
     const version = seedreamImageVersion(modelId) ?? "generic";
     return {
       ...seedreamTextToImageBaseParameters(),
@@ -512,6 +537,7 @@ function imageToImageParameters(modelId: string): Record<string, unknown> {
     };
   }
   if (isGeminiImageModel(modelId)) {
+    if (isNanoBanana21Model(modelId)) return nanoBanana21Parameters();
     return {
       size: {
         type: "string",
@@ -593,16 +619,15 @@ export function isGptImageModel(modelId: string): boolean {
 }
 
 /**
- * Gemini 图片生成模型（如 gemini-2.5-flash-image / gemini-3-pro-image-preview）：
- * 走 OpenAI Images API，`size` 只接受画幅比例（1:1/16:9/…），不声明 quality，
- * 且上游忽略 `n`（一次只返回一张，多张由业务侧并发拆分任务）。
+ * Gemini 图片生成家族。旧型号使用 OpenAI Images 比例参数；Nano Banana 2.1
+ * 使用独立原生档案，避免丢失分辨率和思考配置。多张由业务侧拆分任务。
  */
 export function isGeminiImageModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
-  return normalized.includes("gemini") && normalized.split(/[^a-z0-9]+/).includes("image");
+  return isNanoBanana21Model(normalized) || (normalized.includes("gemini") && normalized.split(/[^a-z0-9]+/).includes("image"));
 }
 
-function isSeedance20VideoModel(modelId: string): boolean {
+export function isSeedance20VideoModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
   return normalized.includes("seedance-2-0") || normalized.includes("seedance-2.0");
 }
@@ -765,7 +790,7 @@ function pixverseVideoParameters(modelId: string): Record<string, unknown> {
       enum: Array.from({ length: 15 }, (_, index) => index + 1),
       order: 1,
     },
-    seed: { type: "integer", label: "随机种子", optional: true, order: 5 },
+    seed: { type: "integer", label: "随机种子", optional: true, minimum: 0, maximum: 2147483647, order: 5 },
     generate_audio_switch: {
       type: "boolean",
       label: "生成音频",
@@ -798,6 +823,11 @@ function pixverseVideoParameters(modelId: string): Record<string, unknown> {
       requestLocation: "metadata",
       order: 8,
     },
+    video_media_id: { type: "string", label: "已上传视频 ID", optional: true, requestLocation: "metadata", order: 8.1 },
+    audio_media_id: { type: "string", label: "已上传音频 ID", optional: true, requestLocation: "metadata", order: 10.1 },
+    sound_effect_content: { type: "string", label: "音效描述", optional: true, requestLocation: "metadata", order: 10.2 },
+    sound_effect_switch: { type: "boolean", label: "生成音效", default: true, requestLocation: "metadata", order: 10.3 },
+    ...(modelId.toLowerCase() === "pixverse-v6" ? { reference_mode: { type: "string", label: "参考模式", optional: true, enum: ["omni"], requestLocation: "metadata", order: 7.1 } } : {}),
     restyle_id: {
       type: "string",
       label: "重绘风格 ID",
@@ -881,6 +911,7 @@ function rdVideoParameters(modelId: string): Record<string, unknown> {
 
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  if (isMoyuKlingV4Model(modelId)) return klingV4Parameters();
   if (/^kling-(?:(?:video-)?v3(?:\.0)?|3\.0)(?:-omni)?$/i.test(modelId)) return {
     duration: { type: "integer", label: "时长", default: 5, enum: Array.from({ length: 13 }, (_, index) => index + 3), order: 0 },
     aspect_ratio: { type: "string", label: "画幅", default: "16:9", enum: ["16:9", "9:16", "1:1"], order: 1 },
@@ -1167,7 +1198,7 @@ function videoParameters(modelId: string): Record<string, unknown> {
         ? ["720p", "480p"]
         : ["720p", "480p", "1080p"]
       : seedance20
-        ? ["720p", "480p", "1080p", "4k"]
+        ? fast || mini ? ["720p", "480p"] : ["720p", "480p", "1080p", "4k"]
         : ["720p", "480p", "1080p"];
   const parameters: Record<string, unknown> = {
     ratio: {
@@ -1196,7 +1227,7 @@ function videoParameters(modelId: string): Record<string, unknown> {
   };
   // 联网搜索：Seedance 2.0 标准版，以及全部 Seedance 2.5（国内与海外）均支持，
   // 仅在无媒体输入的文生视频场景启用。
-  if ((seedance20 && !mini) || seedance25) {
+  if (seedance20 || seedance25) {
     parameters["web_search"] = {
       type: "boolean",
       label: "联网搜索",
@@ -1248,6 +1279,8 @@ function seedanceDraftVideoParameters(): Record<string, unknown> {
     },
     generate_audio: { type: "boolean", label: "生成音频", default: true },
     draft: { type: "boolean", label: "先生成草稿样片", default: false },
+    omni_reference_task_type: { type: "string", label: "任务类型", default: "auto", enum: ["auto", "reference", "edit", "extend"] },
+    output_format: { type: "string", label: "输出格式", default: "mp4", enum: ["mp4", "mov"] },
   };
 }
 
@@ -1258,10 +1291,10 @@ export function defaultModelOperationSchema(
   return Object.fromEntries(
     operations.map((operation) => {
       if (operation === "text_to_image") {
-        return [operation, { resultType: "image", parameters: textToImageParameters(modelId) }];
+        return [operation, { resultType: "image", parameters: textToImageParameters(modelId), ...(isGptImage25Model(modelId) ? { requestProfileId: GPT_IMAGE_25_PROFILE } : {}) }];
       }
       if (operation === "image_to_image") {
-        return [operation, { resultType: "image", parameters: imageToImageParameters(modelId) }];
+        return [operation, { resultType: "image", parameters: imageToImageParameters(modelId), ...(isGptImage25Model(modelId) ? { requestProfileId: GPT_IMAGE_25_PROFILE } : {}) }];
       }
       if (operation === "text_generation") {
         return [operation, { resultType: "text", parameters: {} }];
@@ -1354,6 +1387,7 @@ export function modelParameterCapabilities(
       isMinimaxH3VideoModel(modelId) ||
       isPixverseVideoModel(modelId) ||
       isRdVideoModel(modelId) ||
+      isMoyuKlingV4Model(modelId) ||
       /^kling-(?:(?:video-)?v3(?:\.0)?|3\.0)(?:-omni)?$/i.test(modelId) ||
       isGptImageModel(modelId) ||
       isGeminiImageModel(modelId) ||

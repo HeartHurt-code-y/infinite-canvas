@@ -1,0 +1,25 @@
+.reference-media-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: var(--z-tooltip, 600);
+  width: max-content;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+  overflow: hidden;
+  pointer-events: none;
+  border: var(--rule-thin) solid var(--border-default);
+  border-radius: 12px;
+  background: var(--canvas-controls-bg);
+  box-shadow: var(--canvas-shadow-menu);
+  backdrop-filter: blur(32px);
+}
+.reference-media-preview :is(img, video) {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(160px, calc(100vw - 24px));
+  max-height: min(160px, calc(100vh - 24px));
+  border-radius: 8px;
+  object-fit: contain;
+}

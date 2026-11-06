@@ -15,6 +15,7 @@ export async function verifyGenerationMaterials(
   prompt: readonly PromptSegment[],
   explicitMedia: readonly ExplicitMediaInput[],
   providerConnectionId: string | null,
+  generation: { providerConnectionId: string; modelDefinitionId: string },
 ): Promise<{ prompt: readonly PromptSegment[]; explicitMedia: readonly ExplicitMediaInput[] }> {
   const verified = new Map<string, Promise<MediaReferenceTarget>>();
   const verify = (target: ExplicitMediaTarget, displayName: string): Promise<ExplicitMediaTarget> => {
@@ -24,7 +25,7 @@ export async function verifyGenerationMaterials(
     let pending = verified.get(key);
     if (!pending) {
       pending = invokeDesktop("verify_generation_material", verificationSchema, {
-        command: { target, displayName, providerConnectionId },
+        command: { target, displayName, providerConnectionId, generationProviderConnectionId: generation.providerConnectionId, generationModelDefinitionId: generation.modelDefinitionId },
       }).then((result) => {
         const decoded = result.target;
         if (!decoded.providerConnectionId || !decoded.assetId || decoded.mediaType !== target.mediaType || (decoded.canvasNodeKey ?? null) !== (target.canvasNodeKey ?? null)) {

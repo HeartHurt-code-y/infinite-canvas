@@ -845,6 +845,8 @@ impl GenerationTaskService {
     pub fn query_remote_now(&self, task_id: &str) -> BackendResult<()> {
         info!("[generation] 用户手动触发视频任务状态查询: taskId={task_id}");
         let task = self.storage.get_task_execution(task_id)?;
+        let kling_transient = task.status == GenerationTaskStatus::Unknown
+            && task.remote_model_id_snapshot.as_deref().is_some_and(super::model_schema::is_moyu_kling_v4_model);
         let pollable = matches!(
             task.operation,
             GenerationOperation::VideoGeneration
@@ -856,10 +858,10 @@ impl GenerationTaskService {
                 .remote_task_id
                 .as_deref()
                 .is_none_or(|id| id.trim().is_empty())
-            || !matches!(
+            || (!kling_transient && !matches!(
                 task.status,
                 GenerationTaskStatus::Queued | GenerationTaskStatus::Running
-            )
+            ))
         {
             return Err(BackendError::validation(
                 "only a queued or running remote generation task with a remote task id can resume polling",
@@ -872,7 +874,9 @@ impl GenerationTaskService {
             slot.wake.notify_one();
             return Ok(());
         };
-        self.commit_fact(task_id, GenerationLifecycleFact::ManualObservationRequested)?;
+        self.commit_fact(task_id, if kling_transient {
+            GenerationLifecycleFact::RecoveryRemoteResumed { remote_task_id: task.remote_task_id.clone().unwrap_or_default() }
+        } else { GenerationLifecycleFact::ManualObservationRequested })?;
         let service = self.clone();
         let task_id = task_id.to_string();
         tauri::async_runtime::spawn(async move {
@@ -1190,7 +1194,8 @@ impl GenerationTaskService {
                     );
                     if !retryable || retry_index == MAX_AUTOMATIC_RETRIES {
                         let exhausted = retry_index == MAX_AUTOMATIC_RETRIES && retryable;
-                        let conclusion = if matches!(error, BackendError::Transport(_))
+                        let conclusion = if matches!(&error, BackendError::Transport(transport)
+                            if !super::provider::is_dispatch_failure(transport))
                             || matches!(&error, BackendError::Protocol { details, .. }
                                 if details.get("ambiguousPaidSubmission").and_then(Value::as_bool) == Some(true))
                             /*
@@ -1736,9 +1741,7 @@ impl GenerationTaskService {
                 "FAILURE" | "FAILED" | "CANCELED" | "CANCELLED" | "VIOLATION" | "EXPIRED" => {
                     let failure = json!({
                         "kind": "remote_generation_failure",
-                        "message": if remote_status == "EXPIRED" {
-                            format!("远端{kind}任务已过期，请查看原任务详情并确认结算状态后再决定是否重新生成。")
-                        } else { format!("远端{kind}任务失败，请展开完整报错查看原因。") },
+                        "message": super::provider::video_failure_message(kind, &remote_status, observation.failure.as_ref().unwrap_or(&serde_json::Value::Null), initial_task.resolved_request.as_ref().and_then(|request| request.get("parameters"))),
                         "remoteStatus": observation.remote_status,
                         "remote": observation.failure
                     });

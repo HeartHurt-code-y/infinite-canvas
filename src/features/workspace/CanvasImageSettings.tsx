@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { CanvasSelect } from "../../components/CanvasSelect";
 import type { ProviderCatalogEntry } from "../../lib/backend";
 import { resolvedParameterValue, type ModelParameterCapability } from "../../lib/modelCapabilities";
+import { seedreamProSummary } from "../../lib/seedreamPro";
+import { gptImage25Size } from "../../lib/gptImage25";
 import type { ImageNodeConfig } from "./workspaceModel";
 import { LibTVMediaIcon } from "./LibTVMediaIcon";
 import { VideoNodeSettingsControls } from "./VideoNodeSettingsControls";
@@ -12,14 +14,21 @@ import "./CanvasVideoEditor.css";
 const SUMMARY_KEYS = new Set(["aspect_ratio", "ratio", "size", "image_size", "quality", "resolution"]);
 
 /** 只把模型真正声明的枚举显示为选项；保存过的自定义值继续可见。 */
-export function CanvasImageParameterOptions({ capability, value, onChange }: {
+export function CanvasImageParameterOptions({ capability, value, onChange, ratioOptions = false }: {
   readonly capability: ModelParameterCapability;
   readonly value: string | number | boolean;
   readonly onChange: (value: string | number | boolean) => void;
+  readonly ratioOptions?: boolean;
 }) {
-  return <div className="canvas-video-parameter" data-tooltip={capability.description}><span>{capability.label}</span><div className="canvas-video-options" role="group" aria-label={capability.label}>
-    {capability.options.map(option => <button type="button" key={`${typeof option.value}:${String(option.value)}`} aria-pressed={value === option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}
-    {!capability.options.some(option => option.value === value) ? <button type="button" aria-pressed="true" onClick={() => onChange(value)}>{String(value) || "默认"}</button> : null}
+  return <div className="canvas-video-parameter" data-tooltip={capability.description}><span>{capability.label}</span><div className={`canvas-video-options${ratioOptions ? " canvas-image-ratio-options" : ""}`} role="group" aria-label={capability.label}>
+    {capability.optional ? <button type="button" aria-pressed={value === ""} onClick={() => onChange("")}>默认</button> : null}
+    {capability.options.map(option => {
+      const ratio = ratioOptions && typeof option.value === "string" && /^\d+:\d+$/.test(option.value) ? option.value.split(":").map(Number) : null;
+      return <button type="button" key={`${typeof option.value}:${String(option.value)}`} aria-pressed={value === option.value} onClick={() => onChange(option.value)}>
+        {ratio ? <i className="canvas-video-ratio-shape" aria-hidden="true" style={{width:20*Math.min(1,ratio[0]!/ratio[1]!),height:20*Math.min(1,ratio[1]!/ratio[0]!)}} /> : null}{option.label}
+      </button>;
+    })}
+    {!capability.options.some(option => option.value === value) && !(capability.optional && value === "") ? <button type="button" aria-pressed="true" onClick={() => onChange(value)}>{String(value) || "默认"}</button> : null}
   </div></div>;
 }
 
@@ -27,13 +36,15 @@ export function canvasImageHasOptionButtons(capability: ModelParameterCapability
   return capability.options.length > 0;
 }
 
-export function CanvasImageSettings({ config, active, advancedHostId, triggerHostId, modelLabel, capabilities, model, parameters, providerCatalog, onChange }: {
+export function CanvasImageSettings({ config, active, advancedHostId, triggerHostId, modelLabel, capabilities, model, parameters, providerCatalog, seedreamPro = false, gptImage25 = false, onChange }: {
   readonly config: ImageNodeConfig;
   readonly active: boolean;
   readonly advancedHostId: string;
   readonly triggerHostId: string;
   readonly modelLabel: string;
   readonly capabilities: readonly ModelParameterCapability[];
+  readonly seedreamPro?: boolean;
+  readonly gptImage25?: boolean;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly model: ReactNode;
   readonly parameters: ReactNode;
@@ -49,11 +60,12 @@ export function CanvasImageSettings({ config, active, advancedHostId, triggerHos
   const [triggerHost, setTriggerHost] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => { setHost(document.getElementById(advancedHostId)); }, [advancedHostId]);
   useLayoutEffect(() => { setTriggerHost(document.getElementById(triggerHostId)); }, [triggerHostId]);
-  const summary = capabilities.filter(capability => SUMMARY_KEYS.has(capability.key)).flatMap(capability => {
+  const summary = seedreamPro ? [seedreamProSummary(config.parameterValues)] : capabilities.filter(capability => SUMMARY_KEYS.has(capability.key)).flatMap(capability => {
     const value = resolvedParameterValue(capability, config.parameterValues);
     if (value === "" || value == null) return [];
     return [capability.options.find(option => option.value === value)?.label ?? String(value)];
   });
+  if (gptImage25) { const size = gptImage25Size(config.parameterValues); summary.unshift(size === "auto" ? "自动尺寸" : size.replace("x", " × ")); }
   const controls = <section className="canvas-video-advanced canvas-image-advanced" hidden={!active || upscale || !config.advancedOpen} aria-label="高级设置">
     <strong>高级设置</strong>
     <label className="canvas-video-switch" data-tooltip="自动匹配已连接素材的名称，并绑定成带素材身份的 @ 引用。">

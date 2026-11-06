@@ -978,7 +978,37 @@ const BACKEND_ERROR_KIND_PREFIX =
 
 function backendErrorMessageOf(error: unknown): string | null {
   if (error != null && typeof error === "object" && !(error instanceof Error)) {
-    const message = (error as Record<string, unknown>)["message"];
+    const payload = error as Record<string, unknown>;
+    const message = payload["message"];
+    // 旧任务只把通用包装消息放在顶层；仍要读出原始素材错误，不能要求用户
+    // 展开整段诊断才能知道哪份参考已失效。
+    if (typeof message === "string" && message.replace(BACKEND_ERROR_KIND_PREFIX, "").trim() === "media reference resolution failed") {
+      const details = payload["details"] as Record<string, unknown> | null | undefined;
+      const source = details?.["sourceError"] as Record<string, unknown> | null | undefined;
+      if (typeof source?.["message"] === "string") {
+        const sourceDetails = source["details"] as Record<string, unknown> | null | undefined;
+        let raw: unknown = sourceDetails?.["rawResponse"];
+        if (typeof raw === "string") {
+          try { raw = JSON.parse(raw) as unknown; } catch { raw = null; }
+        }
+        const body = raw != null && typeof raw === "object" ? raw as Record<string, unknown> : null;
+        const data = body?.["data"] ?? body;
+        const asset = data != null && typeof data === "object" ? data as Record<string, unknown> : null;
+        const missing = asset?.["exists"] === false;
+        const sourceMessage = source["message"].replace(BACKEND_ERROR_KIND_PREFIX, "");
+        const reason = missing
+          ? "云端素材不存在，或当前素材库令牌无权访问；请重新上传该素材，或恢复上传时使用的素材库令牌。"
+          : sourceMessage === "ready asset has no remote-readable reference"
+            ? "素材已就绪，但当前生成连接或令牌无法直接使用其 asset:// 引用，平台也未提供下载地址；请从本地上传原图，或使用与素材库一致的生成令牌。"
+            : sourceMessage;
+        const kind = details?.["mediaType"];
+        const label = kind === "image" ? "图片" : kind === "video" ? "视频" : kind === "audio" ? "音频" : "素材";
+        const position = typeof details?.["typePosition"] === "number" ? details["typePosition"] : "";
+        const displayName = details?.["displayName"] ?? asset?.["name"];
+        const name = typeof displayName === "string" ? `「${displayName}」` : "";
+        return `参考${label}${position}${name}解析失败：${reason}`;
+      }
+    }
     if (typeof message === "string") return message;
   }
   return null;
@@ -1764,9 +1794,9 @@ export interface ExplicitMediaInput {
   readonly target: ExplicitMediaTarget;
   readonly role: string;
   readonly displayNameSnapshot: string;
-  /** 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。 */
+  /** 前端先按连线、再按附件顺序分配的同类序号，即「图片N」中的 N。 */
   readonly typePosition?: number;
-  /** 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。 */
+  /** 与同类编号一起冻结的全局序号，用于确定 content 数组顺序。 */
   readonly contentIndex?: number;
 }
 

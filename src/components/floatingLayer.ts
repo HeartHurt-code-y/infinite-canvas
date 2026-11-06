@@ -41,6 +41,19 @@ export const FLOATING_LAYER_MARGIN = 8;
 /** 浮层与触发器之间的缝隙；对齐即梦实测的 7～8px。 */
 export const FLOATING_LAYER_GAP = 8;
 
+/** Measured side menu placement shared by canvas reference and media action menus. */
+export function placeSideMenu(parent: HTMLElement, anchor: HTMLElement, menu: HTMLElement) {
+  const parentBox = parent.getBoundingClientRect();
+  const anchorBox = anchor.getBoundingClientRect();
+  const box = menu.getBoundingClientRect();
+  const right = parentBox.right + 4;
+  return {
+    left: right + box.width <= document.documentElement.clientWidth - 8
+      ? right : Math.max(8, parentBox.left - box.width - 4),
+    top: Math.max(8, Math.min(anchorBox.top, window.innerHeight - box.height - 8)),
+  };
+}
+
 /** 说明气泡与视口边缘的最小留白。 */
 export const TOOLTIP_LAYER_MARGIN = 8;
 
@@ -75,6 +88,7 @@ export interface FloatingLayerPlacement {
 }
 
 export interface FloatingLayerOptions {
+  readonly maxWidth?: number | undefined;
   /** 水平贴靠方式；摄像机面板在触发器中心展开，其余浮层默认左对齐。 */
   readonly align?: "start" | "center" | "end" | undefined;
   /** 浮层最小宽度；最终宽度取触发器宽度与它的较大者。 */
@@ -126,7 +140,7 @@ export function placeFloatingLayer(
   const leftOffset = options.leftOffset ?? 0;
   const rect = anchor.getBoundingClientRect();
   const viewportWidth = document.documentElement.clientWidth;
-  const width = Math.min(Math.max(rect.width, minWidth), Math.max(0, viewportWidth - margin * 2));
+  const width = Math.min(Math.max(rect.width, minWidth), options.maxWidth ?? Infinity, Math.max(0, viewportWidth - margin * 2));
   const spaceBelow = window.innerHeight - rect.bottom - margin;
   const spaceAbove = rect.top - margin;
   /*
@@ -190,6 +204,7 @@ export interface TooltipPlacement {
 }
 
 export interface TooltipPlacementOptions {
+  readonly preferAbove?: boolean | undefined;
   /** 视口留白。 */
   readonly margin?: number | undefined;
   /** 说明与触发器之间的缝隙。 */
@@ -265,7 +280,9 @@ export function placeTooltip(
    * 但至少文字完整可读，不会被切成半行。
    */
   const side: TooltipSide =
-    spaceBelow < bubbleHeight && spaceAbove > spaceBelow ? "top" : "bottom";
+    options.preferAbove
+      ? spaceAbove >= bubbleHeight || spaceAbove > spaceBelow ? "top" : "bottom"
+      : spaceBelow < bubbleHeight && spaceAbove > spaceBelow ? "top" : "bottom";
 
   const top =
     side === "top"

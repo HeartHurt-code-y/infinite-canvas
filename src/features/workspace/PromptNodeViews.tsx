@@ -11,17 +11,21 @@ import {
 } from "../../lib/promptAttachments";
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
 import { PromptFloatingMenu } from "./promptFloatingMenu";
+import { PromptReferenceMenu, type ReferenceMenuNavigation } from "./PromptReferenceMenu";
+import { candidatePreview, useReferenceMediaPreview } from "./ReferenceMediaPreview";
+import { CanvasReferencePickingContext } from "./canvasReferencePicking";
 import "./PromptEditor.css";
 import {
   frontendLog,
@@ -51,12 +55,17 @@ import {
 } from "../../lib/perTaskVideo";
 import {
   createPromptContentEditorSession,
+  promptContentReferenceCandidates,
   describePromptContentCandidates,
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
   type PromptContentEditorSession,
+  type PromptContentModule,
+  type PromptContentAttachmentItem,
+  type PromptContentMediaReferenceItem,
   type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
-import { normalizePromptReferenceText } from "../../lib/promptReferences";
+import { candidateTarget } from "../../lib/promptReferences";
+import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
@@ -64,7 +73,14 @@ import type { GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
 import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
 import { CanvasVideoSettings } from "./CanvasVideoSettings";
+import { usePromptAttachmentInputs } from "./useNodePromptSummary";
 import { CanvasImageSettings, CanvasImageParameterOptions, canvasImageHasOptionButtons } from "./CanvasImageSettings";
+import { SeedreamProSizeSettings } from "./SeedreamProSizeSettings";
+import { GptImage25SizeSettings } from "./GptImage25SizeSettings";
+import { GPT_IMAGE_25_PROFILE } from "../../lib/gptImage25";
+import { isSeedreamProImageModel, seedreamProSizeInfo } from "../../lib/seedreamPro";
+import { NANO_BANANA_21_PROFILE } from "../../lib/nanoBanana21";
+import { isMoyuKlingV4Model, klingV4MediaRoles } from "../../lib/klingV4";
 
 import type {
   AssetKind,
@@ -255,16 +271,12 @@ function readyAutoMentionFeedback(
  * @ 下拉的统一候选：连线素材，或画面上的区域标注。
  * 两者共用同一个下拉与同一套键盘导航，避免为了非素材引用再造一个菜单。
  */
-type MentionMenuEntry =
-  | { readonly type: "media"; readonly candidate: MentionCandidate }
-  | { readonly type: "annotation"; readonly annotation: PromptMarkReferenceInput };
-
 /** 本次输入里是否插入了引用标记：半角 "@" 与输入法常用的全角 "＠"。 */
 const MENTION_MARKER_IN_TEXT = /[@\uff20]/u;
 
 export function PromptMentionInput({
   nodeKey,
-  candidates,
+  candidates: connectedCandidates,
   annotationMentions,
   aliveCanvasNodeKeys,
   registerInput,
@@ -284,7 +296,7 @@ export function PromptMentionInput({
   readonly annotationMentions?: readonly PromptMarkReferenceInput[];
   /**
    * 画布上仍然存在的节点 key。用来区分「素材节点被删掉」与「只是解除连线」：
-   * 前者按同源/同名素材自愈重连引用，后者保持灰化等用户决定。缺省时不做自愈。
+   * 前者只按同源身份重连引用，后者保持灰化等用户决定。缺省时不做自愈。
    */
   readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
   readonly registerInput: (nodeKey: string, session: PromptContentEditorSession | null) => void;
@@ -308,7 +320,17 @@ export function PromptMentionInput({
   readonly leadingContent?: ReactNode;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
-  const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
+  const referencePicking = useContext(CanvasReferencePickingContext);
+  const referencePreview = useReferenceMediaPreview();
+  const menuNavigationRef = useRef<ReferenceMenuNavigation | null>(null);
+  const [canvasMenuSources, setCanvasMenuSources] = useState<readonly MentionCandidate[]>([]);
+  const [promptSession] = useState(() => createPromptContentEditorSession(connectedCandidates, placeholder, referencePicking != null));
+  const attachmentToken = useSyncExternalStore(
+    useCallback(listener => promptSession.subscribeFormatChanges(listener), [promptSession]),
+    useCallback(() => JSON.stringify(promptSession.read().document.items.filter(item => item.kind === "attachment")), [promptSession]),
+  );
+  const candidates = useMemo(() => promptContentReferenceCandidates(connectedCandidates,
+    JSON.parse(attachmentToken) as PromptContentAttachmentItem[]), [connectedCandidates, attachmentToken]);
   useLayoutEffect(() => { promptSession.setPlaceholder(placeholder); }, [promptSession, placeholder]);
   const sessionRef = useRef(promptSession);
   useEffect(() => {
@@ -359,6 +381,8 @@ export function PromptMentionInput({
   }, []);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const fieldRef = useRef<HTMLDivElement | null>(null);
+  const swapAnchorRef = useRef<HTMLElement | null>(null);
+  const [swapReference, setSwapReference] = useState<PromptContentMediaReferenceItem | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreExpandFocusRef = useRef(false);
   const replaceTypedQueryOnSelectRef = useRef(false);
@@ -367,8 +391,8 @@ export function PromptMentionInput({
   // 跟踪最后一次 mousedown 的目标，用于判断 blur 是否由拖拽节点/点击下拉栏触发
   const lastMouseDownTargetRef = useRef<EventTarget | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuBlurTimerRef = useRef<number | null>(null);
   const [query, setQuery] = useState("");
-  const [activeIndex, setActiveIndex] = useState(0);
   const [expanded, setExpanded] = useState(false);
   const [characterCount, setCharacterCount] = useState(0);
   const [activeAmbiguity, setActiveAmbiguity] = useState<{
@@ -420,21 +444,6 @@ export function PromptMentionInput({
     () => describePromptContentCandidates(candidates, activeAmbiguity?.pattern),
     [activeAmbiguity?.pattern, candidates],
   );
-  const candidateAliases = candidateDescription.aliases;
-  const filtered = useMemo(() => candidateDescription.search(query), [candidateDescription, query]);
-  const menuEntries = useMemo<readonly MentionMenuEntry[]>(() => {
-    const media = filtered.map((candidate): MentionMenuEntry => ({ type: "media", candidate }));
-    if (annotationMentions == null || annotationMentions.length === 0) return media;
-    const normalized = normalizePromptReferenceText(query).replace(/^@/u, "");
-    const annotations = annotationMentions
-      .filter(
-        (entry) =>
-          !normalized ||
-          normalizePromptReferenceText(`${entry.label} ${entry.description}`).includes(normalized),
-      )
-      .map((annotation): MentionMenuEntry => ({ type: "annotation", annotation }));
-    return [...annotations, ...media];
-  }, [annotationMentions, filtered, query]);
   const candidateConnectionSignature = JSON.stringify(
     candidates.map((candidate) => [
       candidate.canvasNodeKey,
@@ -449,39 +458,71 @@ export function PromptMentionInput({
       candidate.slotIndex,
     ]),
   );
+  useEffect(() => {
+    if (menuOpen) setCanvasMenuSources(referencePicking?.readMentionSources(nodeKey) ?? []);
+  }, [menuOpen, referencePicking, nodeKey, candidateConnectionSignature]);
   const latestCandidatesRef = useRef(candidates);
   useEffect(() => {
     latestCandidatesRef.current = candidates;
   }, [candidates]);
   const ambiguityOptions = candidateDescription.ambiguityOptions;
 
-  const closeMenu = useCallback(() => {
+  const closeMenu = useCallback((restoreFocus = false) => {
+    const anchor = swapAnchorRef.current;
+    anchor?.setAttribute("aria-expanded", "false");
+    swapAnchorRef.current = null;
+    setSwapReference(null);
+    if (menuBlurTimerRef.current != null) window.clearTimeout(menuBlurTimerRef.current);
+    menuBlurTimerRef.current = null;
     replaceTypedQueryOnSelectRef.current = false;
     setMenuOpen(false);
     setQuery("");
-    setActiveIndex(0);
+    if (restoreFocus) {
+      if (anchor?.isConnected) anchor.focus({ preventScroll: true });
+      else sessionRef.current.focus();
+    }
   }, []);
+
+  function openReferenceSwap(target: EventTarget | null): boolean {
+    if (!referencePicking || sessionRef.current.isComposing() || !(target instanceof Element)) return false;
+    const chip = target.closest<HTMLElement>("[data-reference-swap][data-mention-id]");
+    if (!chip || !inputRef.current?.contains(chip)) return false;
+    const item = sessionRef.current.acceptNativeInput().document.items.find(reference =>
+      reference.kind === "media_reference" && reference.mentionId === chip.dataset["mentionId"]);
+    if (item?.kind !== "media_reference") return false;
+
+    closeMenu();
+    if (mentionSyncTimerRef.current != null) window.clearTimeout(mentionSyncTimerRef.current);
+    mentionSyncTimerRef.current = null;
+    swapAnchorRef.current = chip;
+    chip.setAttribute("aria-expanded", "true");
+    chip.focus({ preventScroll: true });
+    referencePreview.hide();
+    setAttachmentNotice(null);
+    setActiveAmbiguity(null);
+    setSwapReference(item);
+    setMenuOpen(true);
+    return true;
+  }
 
   // 全局监听 mousedown，记录最后一次点击目标，用于判断 blur 是否由拖拽节点/点击下拉栏触发
   useEffect(() => {
     const handleMouseDown = (event: MouseEvent) => {
       lastMouseDownTargetRef.current = event.target;
     };
-    document.addEventListener("mousedown", handleMouseDown);
-    return () => document.removeEventListener("mousedown", handleMouseDown);
+    document.addEventListener("mousedown", handleMouseDown, true);
+    return () => document.removeEventListener("mousedown", handleMouseDown, true);
   }, []);
 
   const openAmbiguityChip = useCallback(
     (pending: { readonly normalizedPattern: string; readonly displayText: string }) => {
-      setMenuOpen(false);
-      setQuery("");
-      setActiveIndex(0);
+      closeMenu();
       setActiveAmbiguity({
         pattern: pending.normalizedPattern,
         displayName: pending.displayText,
       });
     },
-    [],
+    [closeMenu],
   );
 
   const openFirstPendingAmbiguity = useCallback((): boolean => {
@@ -589,18 +630,23 @@ export function PromptMentionInput({
    */
   const syncMentionMenuFromCaret = useCallback(
     (options?: { readonly data?: string | undefined; readonly force?: boolean }) => {
+      const insertedMarker = MENTION_MARKER_IN_TEXT.test(options?.data ?? "");
+      if (swapAnchorRef.current) {
+        if (!insertedMarker && options?.force !== true) return;
+        closeMenu();
+      }
       const caretQuery = sessionRef.current?.mentionQueryAtCaret() ?? null;
       if (caretQuery == null) {
         closeMenu();
         return;
       }
-      const insertedMarker = MENTION_MARKER_IN_TEXT.test(options?.data ?? "");
       if (!menuOpen && options?.force !== true && !insertedMarker) return;
+      if (menuBlurTimerRef.current != null) window.clearTimeout(menuBlurTimerRef.current);
+      menuBlurTimerRef.current = null;
       setActiveAmbiguity(null);
       replaceTypedQueryOnSelectRef.current = true;
       setMenuOpen(true);
       setQuery(caretQuery);
-      setActiveIndex(0);
     },
     [closeMenu, menuOpen],
   );
@@ -812,13 +858,41 @@ export function PromptMentionInput({
     [closeMenu, nodeKey, removeActiveMentionQuery],
   );
 
-  const chooseMenuEntry = useCallback(
-    (entry: MentionMenuEntry) => {
-      if (entry.type === "annotation") insertAnnotationMention(entry.annotation);
-      else chooseMention(entry.candidate);
-    },
-    [chooseMention, insertAnnotationMention],
-  );
+  const chooseCanvasMention = useCallback((candidate: MentionCandidate) => {
+    try {
+      if (swapReference && referencePicking) {
+        if (sessionRef.current.isComposing()) return;
+        const next = referencePicking.replaceMention(nodeKey, swapReference, candidate);
+        sessionRef.current.updateConnections(next, { aliveCanvasNodeKeys });
+        latestCandidatesRef.current = next;
+        swapAnchorRef.current = inputRef.current?.querySelector<HTMLElement>(
+          `[data-reference-swap][data-mention-id="${CSS.escape(swapReference.mentionId)}"]`,
+        ) ?? null;
+        closeMenu(true);
+        return;
+      }
+      let live = latestCandidatesRef.current.find(item => item.canvasNodeKey === candidate.canvasNodeKey);
+      if (live && !sameMediaReferenceTarget(candidateTarget(live), candidateTarget(candidate))) {
+        throw new Error("素材已变化，请重新选择。");
+      }
+      if (!live) {
+        if (!referencePicking) throw new Error("请先将这份素材连接到当前节点。");
+        const fresh = referencePicking.connectMention(nodeKey, candidate);
+        if (replaceTypedQueryOnSelectRef.current) {
+          removeActiveMentionQuery(); replaceTypedQueryOnSelectRef.current = false;
+        }
+        const attachments = sessionRef.current.read().document.items.filter(item => item.kind === "attachment");
+        const next = promptContentReferenceCandidates(fresh, attachments);
+        sessionRef.current.updateConnections(next, { aliveCanvasNodeKeys });
+        latestCandidatesRef.current = next;
+        live = next.find(item => item.canvasNodeKey === candidate.canvasNodeKey);
+        if (!live) throw new Error("素材已连接，当前结果尚未就绪。");
+      }
+      chooseMention(live);
+    } catch (error) {
+      setAttachmentNotice({ message: error instanceof Error ? error.message : String(error), hint: "请检查素材与连线后重新选择。" });
+    }
+  }, [referencePicking, swapReference, nodeKey, aliveCanvasNodeKeys, closeMenu, removeActiveMentionQuery, chooseMention]);
 
   /**
    * 候选菜单关闭后补一次重扫。手打 @ 会打开菜单，期间自动识别被跳过
@@ -872,6 +946,7 @@ export function PromptMentionInput({
 
   useEffect(
     () => () => {
+      if (menuBlurTimerRef.current != null) window.clearTimeout(menuBlurTimerRef.current);
       if (autoDetectTimerRef.current != null) window.clearTimeout(autoDetectTimerRef.current);
       if (feedbackResetTimerRef.current != null) {
         window.clearTimeout(feedbackResetTimerRef.current);
@@ -883,7 +958,7 @@ export function PromptMentionInput({
 
   /**
    * 连线集合变化只同步候选和断线状态；既有待确认项继续要求用户选择。
-   * 被引用的素材节点已经不在画布上时，updateConnections 会按同源/同名素材自愈重连，
+   * 被引用的素材节点已经不在画布上时，updateConnections 只按同源身份重连，
    * 这里把重连处数报给用户：灰掉的 chip 变回高亮，说清楚是被谁接上的。
    */
   useEffect(() => {
@@ -907,12 +982,12 @@ export function PromptMentionInput({
         if (feedbackResetTimerRef.current != null) {
           window.clearTimeout(feedbackResetTimerRef.current);
         }
-        // 换图（原来占的位置被新素材顶上）与同名素材重连是两回事，回执要分开说。
+        // 显式换图与同源身份恢复分别说明，文件同名不能证明是同一份素材。
         const replaced = rebinds.filter((rebind) => rebind.matchedBy === "slot").length;
-        const renamed = rebinds.length - replaced;
+        const restored = rebinds.length - replaced;
         const parts = [
           ...(replaced > 0 ? [`已跟随换上的新素材更新 ${replaced} 处引用`] : []),
-          ...(renamed > 0 ? [`已按同名素材自动重连 ${renamed} 处引用`] : []),
+          ...(restored > 0 ? [`已恢复同一素材的 ${restored} 处引用`] : []),
         ];
         setAutoMentionFeedbackState({ kind: "success", message: parts.join("；") });
         feedbackResetTimerRef.current = window.setTimeout(() => {
@@ -1023,6 +1098,23 @@ export function PromptMentionInput({
           <div
             ref={attachInput}
             className="prompt-mention__editor"
+            onPointerOver={event => {
+              if (event.pointerType === "touch" || !(event.target instanceof Element)) return;
+              const chip = event.target.closest<HTMLElement>(".mention-chip[data-canvas-node-key]");
+              const candidate = candidates.find(item => item.canvasNodeKey === chip?.dataset["canvasNodeKey"]);
+              if (chip && candidate && !swapAnchorRef.current) referencePreview.show(chip, candidatePreview(candidate));
+            }}
+            onPointerOut={event => {
+              const chip = event.target instanceof Element ? event.target.closest(".mention-chip") : null;
+              if (!chip?.contains(event.relatedTarget as Node | null)) referencePreview.hide();
+            }}
+            onFocus={event => {
+              if (menuBlurTimerRef.current != null) window.clearTimeout(menuBlurTimerRef.current);
+              menuBlurTimerRef.current = null;
+              const chip = event.target instanceof Element ? event.target.closest<HTMLElement>(".mention-chip[data-canvas-node-key]") : null;
+              const candidate = candidates.find(item => item.canvasNodeKey === chip?.dataset["canvasNodeKey"]);
+              if (chip && candidate && !swapAnchorRef.current) referencePreview.show(chip, candidatePreview(candidate));
+            }}
             onInput={(event) => {
               if (
                 composingRef.current ||
@@ -1075,15 +1167,23 @@ export function PromptMentionInput({
               void ingestAttachmentFiles(files);
             }}
             onClick={(event) => {
+              if (openReferenceSwap(event.target)) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
               const pending = sessionRef.current?.pendingAt(event.target) ?? null;
               if (pending != null) {
                 openAmbiguityChip(pending);
               }
             }}
-            onBlur={() => {
+            onBlur={event => {
+              referencePreview.hide();
+              if (menuBlurTimerRef.current != null) window.clearTimeout(menuBlurTimerRef.current);
+              menuBlurTimerRef.current = null;
               // 检查最后一次 mousedown 的目标：如果是在节点或下拉栏内，不关闭下拉栏
               // （拖拽节点或点击下拉栏选项时，编辑器会失去焦点，但不应关闭下拉栏）
-              const target = lastMouseDownTargetRef.current;
+              const target = event.relatedTarget instanceof Element ? event.relatedTarget : lastMouseDownTargetRef.current;
               if (target instanceof Element) {
                 const isInMenu = target.closest(".prompt-mention__menu") != null;
                 const isInNode = target.closest(".react-flow__node") != null;
@@ -1092,11 +1192,22 @@ export function PromptMentionInput({
                   return;
                 }
               }
-              window.setTimeout(closeMenu, 120);
+              menuBlurTimerRef.current = window.setTimeout(() => {
+                menuBlurTimerRef.current = null;
+                const focused = document.activeElement;
+                if (focused instanceof Element && (fieldRef.current?.contains(focused) || focused.closest(".prompt-mention__menu"))) return;
+                closeMenu();
+              }, 120);
             }}
             onKeyDownCapture={(event) => {
               if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229)
                 return;
+              if (menuOpen && menuNavigationRef.current?.(event)) return;
+              if ((event.key === "Enter" || event.key === " ") && openReferenceSwap(event.target)) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
               const pending = sessionRef.current?.pendingAt(event.target) ?? null;
               if (pending != null && (event.key === "Enter" || event.key === " ")) {
                 event.preventDefault();
@@ -1115,31 +1226,6 @@ export function PromptMentionInput({
                 event.stopPropagation();
                 closeMenu();
                 return;
-              }
-              if (menuOpen && menuEntries.length > 0) {
-                if (event.key === "ArrowDown") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setActiveIndex((current) => (current + 1) % menuEntries.length);
-                  return;
-                }
-                if (event.key === "ArrowUp") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setActiveIndex(
-                    (current) => (current - 1 + menuEntries.length) % menuEntries.length,
-                  );
-                  return;
-                }
-                if (event.key === "Enter" || event.key === "Tab") {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const entry = menuEntries[activeIndex] ?? menuEntries[0];
-                  if (entry) {
-                    chooseMenuEntry(entry);
-                  }
-                  return;
-                }
               }
               if (event.key === "@") {
                 // 让 "@" 字符先落入输入框，再按光标打开候选下拉。
@@ -1204,96 +1290,22 @@ export function PromptMentionInput({
               onClick={() => {
                 const input = inputRef.current;
                 if (input == null) return;
+                if (swapAnchorRef.current) closeMenu();
                 input.focus();
                 // onMouseDown 保留编辑器当前选区，按钮与键入 @ 都在光标处插入。
                 replaceTypedQueryOnSelectRef.current = false;
                 setActiveAmbiguity(null);
                 setMenuOpen((open) => !open);
                 setQuery("");
-                setActiveIndex(0);
               }}
             >
               @
             </button>
           </div>
-          {menuOpen ? (
-            <PromptFloatingMenu
-              anchorRef={fieldRef}
-              className="prompt-mention__menu prompt-mention__menu--floating nodrag nopan nowheel"
-              role="listbox"
-              aria-label={
-                annotationMentions != null && annotationMentions.length > 0
-                  ? "引用候选"
-                  : "素材引用候选"
-              }
-            >
-              {menuEntries.length === 0 ? (
-                <span className="prompt-mention__empty">
-                  {annotationMentions != null && annotationMentions.length > 0
-                    ? "没有匹配的素材或画面标注。先在画面上框选或圈出要修改的区域，或改成其它关键字。"
-                    : "没有匹配素材。先从素材库拖素材到画布并连线，或在素材库中确认名称。"}
-                </span>
-              ) : (
-                menuEntries.map((entry, index) =>
-                  entry.type === "annotation" ? (
-                    <button
-                      key={`annotation-${entry.annotation.markId}`}
-                      type="button"
-                      className={`prompt-mention__option prompt-mention__option--annotation${index === activeIndex ? " is-active" : ""}`}
-                      role="option"
-                      aria-label={`${entry.annotation.label}，画面标注，${entry.annotation.description}`}
-                      aria-selected={index === activeIndex}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onMouseEnter={() => setActiveIndex(index)}
-                      onClick={() => chooseMenuEntry(entry)}
-                    >
-                      <span
-                        className={`prompt-mention__thumb prompt-mention__thumb--annotation${
-                          entry.annotation.thumbnail ? " prompt-mention__thumb--auto-size" : ""
-                        }`}
-                        style={{ "--annotation-color": entry.annotation.color } as CSSProperties}
-                        aria-hidden="true"
-                      >
-                        {entry.annotation.thumbnail ? (
-                          <img src={entry.annotation.thumbnail} alt="" />
-                        ) : null}
-                      </span>
-                      <span className="prompt-mention__option-copy">
-                        <strong>{entry.annotation.label}</strong>
-                        <small title={entry.annotation.description}>
-                          {entry.annotation.description}
-                        </small>
-                      </span>
-                    </button>
-                  ) : (
-                    <button
-                      key={`${entry.candidate.assetId}-${entry.candidate.canvasNodeKey}`}
-                      type="button"
-                      className={`prompt-mention__option${index === activeIndex ? " is-active" : ""}`}
-                      role="option"
-                      aria-label={`${entry.candidate.name}，已连线，素材 ID ${entry.candidate.assetId}，实例 ID ${entry.candidate.canvasNodeKey}`}
-                      aria-selected={index === activeIndex}
-                      onMouseDown={(event) => event.preventDefault()}
-                      onMouseEnter={() => setActiveIndex(index)}
-                      onClick={() => chooseMenuEntry(entry)}
-                    >
-                      <MentionOptionThumb candidate={entry.candidate} />
-                      <span className="prompt-mention__option-name">{entry.candidate.name}</span>
-                      <span className="prompt-mention__option-tag">
-                        {candidateAliases[
-                          candidates.findIndex(
-                            (candidate) =>
-                              candidate.canvasNodeKey === entry.candidate.canvasNodeKey,
-                          )
-                        ]?.label ?? "已连线"}
-                        {` · ${entry.candidate.canvasNodeKey.slice(-6)}`}
-                      </span>
-                    </button>
-                  ),
-                )
-              )}
-            </PromptFloatingMenu>
-          ) : null}
+          {menuOpen ? <PromptReferenceMenu key={swapReference?.mentionId ?? "insert"} anchorRef={swapReference ? swapAnchorRef : fieldRef}
+            connected={candidates} canvasSources={canvasMenuSources} replacing={swapReference != null}
+            annotations={swapReference ? undefined : annotationMentions} query={query} navigationRef={menuNavigationRef} onSelect={chooseCanvasMention}
+            onAnnotation={insertAnnotationMention} onClose={closeMenu} /> : null}
           {activeAmbiguity != null ? (
             <PromptFloatingMenu
               anchorRef={fieldRef}
@@ -1349,6 +1361,7 @@ export function PromptMentionInput({
           ) : null}
         </div>
 
+        {referencePreview.layer}
         <span id={autoMentionStatusId} className="sr-only" role="status" aria-live="polite">
           {autoMentionFeedback.message}
         </span>
@@ -1454,9 +1467,11 @@ export function ImageNodeSettings({
   const sequentialMode = String(
     config.parameterValues["sequential_image_generation"] ?? "disabled",
   );
+  const gptImage25 = (selectedModel?.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === GPT_IMAGE_25_PROFILE;
   const modelParameterCapabilitiesWithoutCount = parameterCapabilities.filter(
     (capability) =>
       capability.key !== "n" && capability.key !== "mask" && capability.key !== "mask_url" &&
+      !(gptImage25 && (capability.key === "size" || (capability.key === "output_compression" && config.parameterValues["output_format"] !== "jpeg"))) &&
       !(capability.key === "max_images" && sequentialMode !== "auto"),
   ).map((capability): ModelParameterCapability => capability.key === "background" && capability.options.length === 0 ? {
     ...capability,
@@ -1465,6 +1480,21 @@ export function ImageNodeSettings({
     options: [{ value: "auto", label: "自动" }, { value: "opaque", label: "保留" }, { value: "transparent", label: "透明" }],
   } : capability);
 
+  const seedreamPro = selectedModel != null && isSeedreamProImageModel(selectedModel.remoteModelId) &&
+    (selectedModel.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === "moyu_seedream_image_v1";
+  const nanoBanana21 = (selectedModel?.operationSchema[operation] as Record<string, unknown> | undefined)?.["requestProfileId"] === NANO_BANANA_21_PROFILE;
+  const changeParameter = (key: string, value: ModelParameterValue) => {
+    const next = { ...config.parameterValues, [key]: value };
+    if (gptImage25 && key === "size") { delete next["aspect_ratio"]; delete next["resolution"]; }
+    if (gptImage25 && key === "background" && value === "transparent") next["output_format"] = "png";
+    if (gptImage25 && key === "output_format" && value === "jpeg" && next["background"] === "transparent") next["background"] = "opaque";
+    if (seedreamPro && key === "background" && value === "transparent") next["output_format"] = "png";
+    if (seedreamPro && key === "layer_decomposition") {
+      const size = String(next["size"] ?? "2K");
+      next["size"] = value === true ? seedreamProSizeInfo(size).resolution : size === "auto" ? "2K" : size;
+    }
+    onChange({ ...config, parameterValues: next });
+  };
   const modelFields = (
     <>
       <div className="canvas-gen-node__field canvas-gen-node__field--provider">
@@ -1546,26 +1576,23 @@ export function ImageNodeSettings({
   );
   const parameterFields = (
     <>
-      {modelParameterCapabilitiesWithoutCount.map((capability) => presentation === "compact" && canvasImageHasOptionButtons(capability) ? (
-        <CanvasImageParameterOptions key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => onChange({ ...config, parameterValues: { ...config.parameterValues, [capability.key]: value } })} />
+      {gptImage25 ? <GptImage25SizeSettings key={selectedModel?.definitionId} values={config.parameterValues} onChange={value => changeParameter("size", value)} /> : null}
+      {seedreamPro ? <SeedreamProSizeSettings key={selectedModel?.definitionId} values={config.parameterValues} onChange={value => changeParameter("size", value)} /> : null}
+      {modelParameterCapabilitiesWithoutCount.filter(capability => !seedreamPro || (capability.key !== "size" && capability.key !== "watermark")).map((capability) => presentation === "compact" && canvasImageHasOptionButtons(capability) ? (
+        <CanvasImageParameterOptions key={capability.key} capability={capability} ratioOptions={nanoBanana21 && capability.key === "aspect_ratio"} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => changeParameter(capability.key, value)} />
       ) : (
         <GenerationParameterField
           key={capability.key}
           capability={capability}
           value={resolvedParameterValue(capability, config.parameterValues)}
           hasMediaInputs={hasMediaInputs}
-          onChange={(value) =>
-            onChange({
-              ...config,
-              parameterValues: { ...config.parameterValues, [capability.key]: value },
-            })
-          }
+          onChange={(value) => changeParameter(capability.key, value)}
         />
       ))}
       <div className="canvas-gen-node__field canvas-gen-node__field--count">
         <span>生成数量</span>
         {presentation === "compact" ? <span className="canvas-video-options" role="group" aria-label="图片数量">{[...new Set([1, 2, 4, config.generationCount])].filter(count => count >= 1 && count <= countMaximum).sort((a, b) => a - b).map(count => <button key={count} type="button" aria-pressed={config.generationCount === count} onClick={() => onChange({ ...config, generationCount: count })}>{count}张</button>)}</span> : null}
-        {presentation !== "compact" ? <input
+        {presentation !== "compact" || gptImage25 ? <input
           aria-label="图片生成数量"
           type="number"
           inputMode="numeric"
@@ -1590,6 +1617,8 @@ export function ImageNodeSettings({
         active={active}
         config={config}
         capabilities={modelParameterCapabilitiesWithoutCount}
+        seedreamPro={seedreamPro}
+        gptImage25={gptImage25}
         providerCatalog={providerCatalog}
         modelLabel={selectedModel?.displayName ?? "选择图片模型"}
         model={modelFields}
@@ -1712,6 +1741,8 @@ function GenerationParameterField({
         disabled={disabled}
         title={locked ? "由当前任务类型自动设置" : undefined}
         inputMode={numeric ? "numeric" : "text"}
+        min={numeric ? capability.minimum : undefined}
+        max={numeric ? capability.maximum : undefined}
         step={capability.step ?? (capability.type === "integer" ? 1 : undefined)}
         placeholder={
           capability.optional ? (capability.key === "seed" ? "随机" : "可选") : undefined
@@ -1738,6 +1769,8 @@ export function VideoNodeSettings({
   config,
   providerCatalog,
   mediaInputs,
+  promptContents,
+  nodeKey,
   onChange,
   active = true,
   advancedHostId,
@@ -1747,6 +1780,8 @@ export function VideoNodeSettings({
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
+  readonly promptContents?: PromptContentModule | undefined;
+  readonly nodeKey?: string | undefined;
   readonly onChange: (config: VideoNodeConfig) => void;
   readonly onGreenScreenGenerate?: (() => void) | undefined;
   readonly onGreenScreenUseResult?: ((key: string) => void) | undefined;
@@ -1769,6 +1804,7 @@ export function VideoNodeSettings({
   );
   const providerLabels = providerOptionLabels(availableProviders);
   const fzyVideo = isFzyVideoSchema(selectedModel?.operationSchema ?? {});
+  const klingV4 = isMoyuKlingV4Model(selectedModel?.remoteModelId ?? "");
   const perTaskProfile = fzyVideo ? null : perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
   const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
   const parameterCapabilities = selectedModel
@@ -1787,11 +1823,13 @@ export function VideoNodeSettings({
   const greenScreen = config.greenScreen?.enabled
     ? resolveGreenScreen(config.greenScreen, greenScreenInputs, selectedModel?.remoteModelId ?? "")
     : null;
+  const attachmentInputs = usePromptAttachmentInputs(promptContents, nodeKey ?? "");
+  const taskInputs = [...seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])), ...attachmentInputs];
   const taskState = resolveSeedanceTask(
     selectedModel?.remoteModelId ?? "",
     parameterCapabilities,
     greenScreen ? { ...config, seedanceTaskMode: greenScreen.taskMode } : config,
-    seedanceTaskInputs(greenScreen ? greenScreen.connections : (mediaInputs ?? [])),
+    taskInputs,
     selectedModel?.operationSchema,
   );
   const showSeedanceDraft = supportsSeedanceDraft(
@@ -1804,7 +1842,7 @@ export function VideoNodeSettings({
   const frameIntent = compileCanvasVideoMode(frameMode, mediaInputs ?? [], taskState.mediaRoles);
   const referenceFields = (
     <>
-          {(frameMode === "first_frame" || frameMode === "first_last_frame") &&
+          {!klingV4 && (frameMode === "first_frame" || frameMode === "first_last_frame") &&
           (mediaInputs?.length ?? 0) > 0 ? (
             <div className="canvas-gen-node__media-roles" aria-label="首尾帧素材">
               <ol className="canvas-gen-node__media-role-list">
@@ -1849,14 +1887,15 @@ export function VideoNodeSettings({
               ) : null}
             </div>
           ) : null}
-      {fzyVideo ||
+      {klingV4 || fzyVideo ||
       isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
       isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
         <VideoMediaRoleSection
           inputs={mediaInputs ?? []}
-          roles={config.mediaRoles ?? {}}
+          roles={klingV4 ? frameIntent.mediaRoles : config.mediaRoles ?? {}}
           pairedFrames={fzyVideo}
-          onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
+          klingV4={klingV4}
+          onChange={(roles) => onChange({ ...config, mediaRoles: roles, ...(klingV4 ? { videoMode: "auto", seedanceTaskMode: "auto" } as const : {}) })}
         />
       ) : null}
       {!fzyVideo &&
@@ -1886,7 +1925,7 @@ export function VideoNodeSettings({
         providerCatalog={providerCatalog}
         modelLabel={showSeedanceDraft ? (seedanceDraftEnabled ? "SD2.5(样片)" : "SD2.5") : selectedModel?.displayName ?? "选择视频模型"}
         capabilities={taskState.parameterCapabilities}
-        inputs={mediaInputs ?? []}
+        inputs={taskInputs}
         referenceSettings={referenceFields}
         model={<div className="canvas-video-model-list" aria-label="视频模型">
           {availableProviders.flatMap(entry => entry.models
@@ -1934,11 +1973,13 @@ function VideoMediaRoleSection({
   roles,
   onChange,
   pairedFrames = false,
+  klingV4 = false,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly roles: Readonly<Record<string, string>>;
   readonly onChange: (roles: Readonly<Record<string, string>>) => void;
   readonly pairedFrames?: boolean;
+  readonly klingV4?: boolean;
 }) {
   const issueId = useId();
   if (inputs.length === 0) return null;
@@ -1948,27 +1989,32 @@ function VideoMediaRoleSection({
     (role, index) =>
       role.startsWith("reference_") && (!pairedFrames || inputs[index]?.kind === "image"),
   );
-  const conflict = hasFrame && hasReference;
+  const conflict = !klingV4 && hasFrame && hasReference;
   const unpaired =
     pairedFrames &&
     hasFrame &&
     (!effectiveRoles.includes("first_frame") || !effectiveRoles.includes("last_frame"));
-  const issue = unpaired
+  const klingIssue = klingV4 ? inputs.some(input => input.kind === "audio") ? "此接口不接受音频文件，请使用音色 ID。"
+    : effectiveRoles.filter(role => role === "first_frame").length > 1 || effectiveRoles.filter(role => role === "last_frame").length > 1 ? "首帧和尾帧分别只能指定一张。"
+    : (effectiveRoles.includes("middle_frame") || effectiveRoles.includes("last_frame")) && !effectiveRoles.includes("first_frame") ? "中间帧和尾帧必须与首帧一起使用。"
+    : effectiveRoles.filter(role => role === "base_video").length > 1 ? "只能指定一段待编辑视频。"
+    : inputs.filter(input => input.kind === "image").length > 10 || inputs.filter(input => input.kind === "video").length > 5 ? "最多 10 张图片、5 段视频。" : null : null;
+  const issue = klingIssue ?? (unpaired
     ? "首尾帧需要成对使用。"
     : conflict
       ? "当前请求同时包含首尾帧与参考素材。"
-      : null;
+      : null);
   return (
     <div className="canvas-gen-node__media-roles" aria-label="素材角色">
       <div className="canvas-gen-node__section-title">
         <span>素材角色</span>
         <small>
-          {pairedFrames ? "首尾帧须成对，不能与参考图混用" : "首帧/首尾帧与参考素材不可混用"}
+          {klingV4 ? "关键帧按列表顺序使用；图片 ≤10，视频 ≤5" : pairedFrames ? "首尾帧须成对，不能与参考图混用" : "首帧/首尾帧与参考素材不可混用"}
         </small>
       </div>
       <ol className="canvas-gen-node__media-role-list">
         {inputs.map((input, index) => {
-          const options = wanMediaRolesForKind(input.kind);
+          const options = klingV4 ? klingV4MediaRoles(input.kind) : wanMediaRolesForKind(input.kind);
           const current = roles[input.key] ?? defaultWanMediaRole(input.kind);
           return (
             <li key={`${input.key}:${index}`} className="canvas-gen-node__media-role">
@@ -1976,7 +2022,7 @@ function VideoMediaRoleSection({
               <span className="canvas-gen-node__media-role-name" title={input.name}>
                 {input.name}
               </span>
-              <CanvasSelect
+              {options.length ? <CanvasSelect
                 className="canvas-gen-node__media-role-select"
                 ariaLabel={`${input.name} 的素材角色`}
                 ariaDescribedBy={issue ? issueId : undefined}
@@ -1989,7 +2035,7 @@ function VideoMediaRoleSection({
                   const nextRoles = { ...roles, [input.key]: next };
                   onChange(nextRoles);
                 }}
-              />
+              /> : <span>不支持</span>}
             </li>
           );
         })}
@@ -1999,7 +2045,7 @@ function VideoMediaRoleSection({
           id={issueId}
           error={issue}
           hint={
-            pairedFrames
+            klingV4 ? "调整素材角色后再生成；中间帧按当前素材顺序排列。" : pairedFrames
               ? "请分别指定首帧和尾帧，并移除其他参考图；或把所有图片都设为参考图。"
               : "请确认素材用途；当前输入将完整提交，支持范围由服务端返回。"
           }

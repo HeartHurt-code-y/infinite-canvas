@@ -861,7 +861,30 @@ impl StagingService {
         &self,
         asset_id: &str,
     ) -> BackendResult<Option<ImportedAssetSource>> {
-        let Some(job) = self.storage.find_asset_import_job_by_asset_id(asset_id)? else {
+        self.imported_asset_source_in_scope(asset_id, None)
+    }
+
+    pub(super) fn imported_asset_source_for_generation(
+        &self,
+        asset_id: &str,
+        provider_connection_id: &str,
+        media_type: MediaType,
+    ) -> BackendResult<Option<ImportedAssetSource>> {
+        Ok(self
+            .imported_asset_source_in_scope(asset_id, Some(provider_connection_id))?
+            .filter(|source| source.media_type == media_type))
+    }
+
+    fn imported_asset_source_in_scope(
+        &self,
+        asset_id: &str,
+        provider_connection_id: Option<&str>,
+    ) -> BackendResult<Option<ImportedAssetSource>> {
+        let job = match provider_connection_id {
+            Some(provider) => self.storage.find_asset_import_job_by_provider_asset_id(provider, asset_id)?,
+            None => self.storage.find_asset_import_job_by_asset_id(asset_id)?,
+        };
+        let Some(job) = job else {
             return Ok(None);
         };
         let path = PathBuf::from(job.local_path.trim());
@@ -1837,7 +1860,7 @@ impl StagingService {
         }
         let scope = match job.purpose.as_str() {
             "local_asset" | "asset_import" => {
-                Some(staging_content_scope(job, target_config.as_ref())?)
+                Some(staging_content_scope(job, target_config.as_ref(), &self.assets)?)
             }
             _ => None,
         };
@@ -1936,7 +1959,7 @@ impl StagingService {
             if candidate.import_target.is_none() && config.is_none() {
                 continue;
             }
-            if staging_content_scope(&candidate, config)? != scope {
+            if staging_content_scope(&candidate, config, &self.assets)? != scope {
                 continue;
             }
             if candidate.import_target.is_none() {
@@ -2827,12 +2850,14 @@ fn build_object_key(config: &TosStagingConfig, extension: &str) -> String {
 fn staging_content_scope(
     job: &StagingJobRecord,
     config: Option<&TosStagingConfig>,
+    assets: &AssetLibrary,
 ) -> BackendResult<String> {
     if let Some(target) = job.import_target.as_ref() {
         let group = target.group_id.as_deref().unwrap_or_default().trim();
         return Ok(serde_json::to_string(&(
             "cloud",
             target.provider_connection_id.trim(),
+            assets.content_scope(&target.provider_connection_id)?,
             group,
         ))?);
     }

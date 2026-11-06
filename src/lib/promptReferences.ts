@@ -6,6 +6,9 @@ import type {
 } from "./promptContent";
 import { appendStyledText, pickPromptTextStyle } from "./promptRichText";
 import { sameMediaReferenceTarget, sameMediaSourceIdentity } from "./promptReferenceTarget";
+import referenceAliases from "../../shared/prompt-reference-aliases.json";
+
+export const PROMPT_REFERENCE_LABELS: Readonly<Record<MediaType, readonly string[]>> = referenceAliases;
 
 /** 引用规则只处理候选和 canonical document，不读取编辑器 DOM。 */
 export interface PromptReferenceCandidate {
@@ -26,6 +29,9 @@ export interface PromptReferenceCandidate {
    * 引用会把这个位置记进自己的快照，用于判断「换图后是哪一处引用需要跟随新素材」。
    */
   readonly slotIndex?: number | undefined;
+  /** Frozen numbering can reserve URL inputs that are not eligible for @ chips. */
+  readonly typePosition?: number | undefined;
+  readonly contentIndex?: number | undefined;
 }
 
 export interface PromptReferencePattern {
@@ -60,12 +66,7 @@ export interface PromptReferenceResolutionResult {
   readonly freshMentionIds: readonly string[];
 }
 
-const LABELS = {
-  image: ["图片", "参考图", "图"],
-  video: ["视频", "参考视频", "视"],
-  audio: ["音频", "参考音频", "音"],
-  text: ["文档", "参考文档", "文档"],
-} as const;
+const LABELS = PROMPT_REFERENCE_LABELS;
 /**
  * 全角 "@"（U+FF20）。中文输入法在 macOS 上常把 Shift+2 提交成全角，
  * 用户心里它就是引用标记；与 greenScreen／whiteModelControl 的 NFKC 约定一致
@@ -138,8 +139,8 @@ export function buildReferenceCatalog<TCandidate extends PromptReferenceCandidat
     register(candidate.name, candidateIndex);
     const stem = nameStem(candidate.name);
     if (stem != null) register(stem, candidateIndex);
-    const ordinal = (counts.get(candidate.kind) ?? 0) + 1;
-    counts.set(candidate.kind, ordinal);
+    const ordinal = candidate.typePosition ?? (counts.get(candidate.kind) ?? 0) + 1;
+    counts.set(candidate.kind, Math.max(counts.get(candidate.kind) ?? 0, ordinal));
     const labels = LABELS[candidate.kind];
     aliases.push({ candidateIndex, label: `${labels[0]}${ordinal}` });
     for (const label of labels) register(`${label}${ordinal}`, candidateIndex);
@@ -214,6 +215,8 @@ export function referenceCandidateFromTarget(input: {
   readonly name: string;
   readonly previewUrl?: string | null;
   readonly slotIndex?: number | undefined;
+  readonly typePosition?: number | undefined;
+  readonly contentIndex?: number | undefined;
 }): PromptReferenceCandidate {
   const { target } = input;
   const shared = {
@@ -225,6 +228,8 @@ export function referenceCandidateFromTarget(input: {
     providerConnectionId: target.kind === "asset" ? target.providerConnectionId : "",
     ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
     ...(input.slotIndex === undefined ? {} : { slotIndex: input.slotIndex }),
+    ...(input.typePosition === undefined ? {} : { typePosition: input.typePosition }),
+    ...(input.contentIndex === undefined ? {} : { contentIndex: input.contentIndex }),
   };
   switch (target.kind) {
     case "asset":
@@ -419,10 +424,10 @@ export interface PromptReferenceRebind {
   readonly canvasNodeKey: string;
   readonly displayName: string;
   /**
-   * identity：同一份素材被重新投放；name：画布上只剩唯一同名素材；
+   * identity：同一份素材被重新投放；
    * slot：原来占的媒体位置被换上了另一份素材（换图回填空槽）。
    */
-  readonly matchedBy: "identity" | "name" | "slot";
+  readonly matchedBy: "identity" | "slot";
 }
 
 export interface PromptReferenceRebindResult {
@@ -430,17 +435,9 @@ export interface PromptReferenceRebindResult {
   readonly rebinds: readonly PromptReferenceRebind[];
 }
 
-/** 名称归一化后逐字相等，或文件主名相等（同名素材换了扩展名也算同一份）。 */
-function sameReferenceName(first: string, second: string): boolean {
-  const normalized = normalizePromptReferenceText(second);
-  if (!normalized) return false;
-  if (normalizePromptReferenceText(first) === normalized) return true;
-  return nameStem(first) === normalized;
-}
-
 /**
- * 先看来源身份（同一份素材重新投放），再看唯一同名；两处都不唯一时交还用户选择，
- * 不在这里另造隐藏优先级。
+ * Only a unique source identity can restore a deleted instance. A unique filename
+ * is not identity: it can belong to the other side of a multi-reference prompt.
  */
 function danglingReplacement(
   item: PromptContentMediaReferenceItem,
@@ -450,13 +447,10 @@ function danglingReplacement(
   readonly matchedBy: PromptReferenceRebind["matchedBy"];
 } | null {
   const identical: number[] = [];
-  const named: number[] = [];
   candidates.forEach((candidate, index) => {
     if (sameMediaSourceIdentity(candidateTarget(candidate), item.target)) identical.push(index);
-    if (sameReferenceName(candidate.name, item.displayNameSnapshot)) named.push(index);
   });
   if (identical.length === 1) return { candidateIndex: identical[0]!, matchedBy: "identity" };
-  if (named.length === 1) return { candidateIndex: named[0]!, matchedBy: "name" };
   return null;
 }
 
@@ -481,6 +475,7 @@ function slotReplacement(
     .filter(
       ({ candidate }) =>
         candidate.slotIndex === item.slotSnapshot &&
+        candidate.kind === item.target.mediaType &&
         !sameMediaSourceIdentity(candidateTarget(candidate), item.target),
     );
   return occupants.length === 1 ? { candidateIndex: occupants[0]!.index, matchedBy: "slot" } : null;
@@ -490,7 +485,7 @@ function slotReplacement(
  * 失效引用重绑到哪个候选。
  *
  * 实例仍在画布上（只是被解绑）时只认「原位置被换上的素材」：那是换图，不是同名猜测。
- * 实例已经不在画布上时按「同源 → 唯一同名 → 原位置被换上的素材」依次判断。
+ * 实例已经不在画布上时按「同源 → 原位置被同类型素材明确替换」判断，文件名不作为身份。
  */
 function referenceReplacement(
   item: PromptContentMediaReferenceItem,
@@ -506,9 +501,9 @@ function referenceReplacement(
 
 /**
  * 引用不再指向当前连着的那一份素材时，把它原地重绑到合适的候选：接入方式是
- * 「同源 → 唯一同名 → 原位置被换上的素材」，三者都不成立时交还用户处理。
+ * 「同源 → 原位置被同类型素材明确替换」，都不成立时交还用户处理。
  *
- * 实例已经不在画布上（素材节点被删掉后又连上新的）走完整三步；实例还在画布上时只认
+ * 实例已经不在画布上（素材节点被删掉后又连上新的）先检查同源；实例还在画布上时只认
  * 位置替换——解绑后原位置被另一份素材填上，或这个位置上的素材本身被换成了另一份，
  * 都是用户主动换图；解绑后位置空着则保持灰化，等他决定。
  * mentionId 原样保留，因此 DOM 身份、撤销栈与「已确认的同名引用」都不会被打断。

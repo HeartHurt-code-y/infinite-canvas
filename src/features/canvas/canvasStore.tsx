@@ -66,6 +66,7 @@ export interface CanvasNodeSize {
 export type CanvasStoreNodeChange =
   | { readonly type: "position"; readonly key: string; readonly position: CanvasPan }
   | { readonly type: "dimensions"; readonly key: string; readonly measured: CanvasNodeSize }
+  | { readonly type: "aspectRatio"; readonly key: string; readonly aspectRatio: number }
   | { readonly type: "select"; readonly key: string; readonly selected: boolean };
 
 /**
@@ -344,6 +345,10 @@ export interface CanvasStoreState {
    * 更新提示词快照。**必须在**对应的 `nodesById` 写入**之后**调用（见上）。
    */
   readonly setPromptDocuments: (documents: PromptContentDocumentMap) => void;
+  readonly commitPromptReferenceChange: (
+    graph: CanvasConnectionGraph,
+    documents: PromptContentDocumentMap,
+  ) => void;
   readonly zoom: number;
   readonly pan: CanvasPan;
   readonly selectedNodeKey: string | null;
@@ -799,6 +804,10 @@ function applyCanvasStoreNodeChanges(
     if (change.type === "position") {
       if (data.x === change.position.x && data.y === change.position.y) continue;
       nextData = withNodePosition(data, change.position);
+    } else if (change.type === "aspectRatio") {
+      if ((entry.type !== "asset" && entry.type !== "output") || !Number.isFinite(change.aspectRatio) || change.aspectRatio <= 0) continue;
+      if (Math.abs((entry.data.aspectRatio ?? 0) - change.aspectRatio) < 0.0001) continue;
+      nextData = { ...entry.data, aspectRatio: change.aspectRatio };
     } else {
       const current = data.measured;
       if (
@@ -1032,6 +1041,58 @@ export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNod
   return source.data.key !== target.data.key;
 }
 
+type CanvasConnectionGraph = Pick<CanvasStoreState, "nodesById" | "assetEdges" | "selectedEdgeId">;
+
+/** Validate a connection before changing the graph or its prompt documents. */
+export function planCanvasConnection(
+  state: CanvasStoreState,
+  fromKey: string,
+  toKey: string,
+  replace?: AssetEdgeData,
+): { readonly result: CanvasConnectResult; readonly graph: CanvasConnectionGraph } {
+  const rejected = (reason: Extract<CanvasConnectResult, { status: "rejected" }>["reason"]) => ({
+    result: { status: "rejected" as const, reason }, graph: state,
+  });
+  if (fromKey === toKey) return rejected("same-node");
+  const source = state.nodesById[fromKey];
+  const target = state.nodesById[toKey];
+  if (!source) return rejected("missing-source");
+  if (!target) return rejected("missing-target");
+  if (!isSupportedConnection(source, target)) return rejected("unsupported-connection");
+  if (replace && (replace.toKey !== toKey || !state.assetEdges.includes(replace))) return rejected("missing-source");
+
+  const edge = { id: fromKey + "->" + toKey, fromKey, toKey };
+  if (state.assetEdges.some(item => item.id === edge.id)) {
+    return { result: { status: "unchanged", edgeId: edge.id }, graph: state };
+  }
+  let nodesById = state.nodesById;
+  if (isGenerationMediaConsumer(target) && (replace || generationSourceOccupiesInputSlot(source))) {
+    const currentSlots = target.data.config.inputSlots ?? [];
+    const incoming = state.assetEdges.filter(item => item.toKey === toKey);
+    const occupyingKeys = occupyingGenerationInputKeys(incoming, key => state.nodesById[key]);
+    let slots = adoptMissingGenerationInputSlots(currentSlots, occupyingKeys);
+    if (replace) {
+      if (!slots.includes(replace.fromKey)) {
+        // Generated inputs from older documents may have a visible rank but no ledger entry.
+        const orderedKeys = canvasReadModelOfState(state).resolveInputs(toKey).media.map(input => input.sourceKey);
+        slots = adoptMissingGenerationInputSlots(slots, orderedKeys);
+      }
+      slots = slots.map(key => key === replace.fromKey ? fromKey : key === fromKey ? null : key);
+    } else {
+      slots = assignGenerationInputSlot(slots, fromKey);
+    }
+    nodesById = { ...nodesById, [toKey]: withGenerationInputSlots(target, slots) };
+  }
+  return {
+    result: { status: "connected", edge, replacedEdgeIds: replace ? [replace.id] : [] },
+    graph: {
+      nodesById,
+      assetEdges: replace ? state.assetEdges.map(item => item === replace ? edge : item) : [...state.assetEdges, edge],
+      selectedEdgeId: replace && state.selectedEdgeId === replace.id ? null : state.selectedEdgeId,
+    },
+  };
+}
+
 /** 历史栈上限：超出后丢弃最旧记录，防止长会话内存无界增长。 */
 const CANVAS_HISTORY_LIMIT = 200;
 /**
@@ -1117,6 +1178,25 @@ function createCanvasStore(initialZoom = 100): {
           promptDocuments: EMPTY_PROMPT_DOCUMENTS,
           setPromptDocuments: (documents) => {
             set({ promptDocuments: documents });
+          },
+          commitPromptReferenceChange: (graph, documents) => {
+            const { groups, nodesById, assetEdges, promptDocuments } = _get();
+            const wasCoalescing = coalescingHistory;
+            // Restoring the document can synchronously update a text node's mirrored prompt.
+            // Record the state before both writes, including a swap that only changes the document.
+            coalescingHistory = true;
+            try {
+              set({
+                nodesById: graph.nodesById,
+                assetEdges: graph.assetEdges,
+                selectedEdgeId: graph.selectedEdgeId,
+                promptDocuments: documents,
+              });
+            } finally {
+              coalescingHistory = wasCoalescing;
+            }
+            cancelPendingHistory();
+            pushHistoryRecord?.({ groups, nodesById, assetEdges, promptDocuments });
           },
           groupNodes: (keys, groupId, layout) => {
             let result: CanvasWriteResult = "unchanged";
@@ -1410,54 +1490,9 @@ function createCanvasStore(initialZoom = 100): {
             return removed;
           },
           connect: (fromKey, toKey) => {
-            let result: CanvasConnectResult = { status: "rejected", reason: "missing-source" };
-            set((state) => {
-              if (fromKey === toKey) {
-                result = { status: "rejected", reason: "same-node" };
-                return state;
-              }
-              const source = state.nodesById[fromKey];
-              if (source == null) return state;
-              const target = state.nodesById[toKey];
-              if (target == null) {
-                result = { status: "rejected", reason: "missing-target" };
-                return state;
-              }
-              if (!isSupportedConnection(source, target)) {
-                result = { status: "rejected", reason: "unsupported-connection" };
-                return state;
-              }
-              const edgeId = fromKey + "->" + toKey;
-              if (state.assetEdges.some((edge) => edge.id === edgeId)) {
-                result = { status: "unchanged", edgeId };
-                return state;
-              }
-              const edge = { id: edgeId, fromKey, toKey };
-              result = { status: "connected", edge, replacedEdgeIds: [] };
-              // 生成节点（图片/视频）维护 inputSlots：能贡献媒体的来源填充最小空槽，无空槽则追加。
-              // 只走文本/中转的来源（提示词、剧本）不占媒体位置——
-              // 让纯文本连线占一个槽位，会在参考清单里凭空多出一行空位，也会打乱图片编号。
-              // 先把已连上却没入账的来源按连线先后补进槽位（拖线建节点的旧文档），再给新线分配。
-              if (isGenerationMediaConsumer(target) && generationSourceOccupiesInputSlot(source)) {
-                const healed = adoptMissingGenerationInputSlots(
-                  target.data.config.inputSlots ?? [],
-                  occupyingGenerationInputKeys(
-                    state.assetEdges.filter((candidate) => candidate.toKey === toKey),
-                    (key) => state.nodesById[key],
-                  ),
-                );
-                const slots = assignGenerationInputSlot(healed, fromKey);
-                return {
-                  assetEdges: [...state.assetEdges, edge],
-                  nodesById: {
-                    ...state.nodesById,
-                    [toKey]: withGenerationInputSlots(target, slots),
-                  },
-                };
-              }
-              return { assetEdges: [...state.assetEdges, edge] };
-            });
-            return result;
+            const plan = planCanvasConnection(_get(), fromKey, toKey);
+            if (plan.result.status === "connected") set(plan.graph);
+            return plan.result;
           },
           disconnect: (edgeId) => {
             let result: CanvasWriteResult = "missing";
@@ -1686,9 +1721,7 @@ function createCanvasStore(initialZoom = 100): {
           promptDocuments: state.promptDocuments,
         }),
         // 各动作已保证"无变化返回原引用"，引用相等即可精确判断是否产生历史。
-        // 注意：**不比** promptDocuments —— 快照只是 canonical 的副本，它变了
-        // 不代表画布结构变了；让它参与判定会让「只有快照更新」也占一条历史，
-        // 把撤销栈填满。
+        // 普通快照只镜像 canonical。显式引用替换由命令记录完整的撤销快照。
         equality: (past, current) =>
           past.groups === current.groups &&
           past.nodesById === current.nodesById &&

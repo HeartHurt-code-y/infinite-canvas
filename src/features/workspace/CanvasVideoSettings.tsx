@@ -12,10 +12,14 @@ import {
   resolvedParameterValue,
   isFzyVideoSchema,
   isSeedance25VideoModel,
+  isSeedance20VideoModel,
   type ModelParameterCapability,
   type ModelParameterValue,
 } from "../../lib/modelCapabilities";
 import type { ProviderCatalogEntry } from "../../lib/backend";
+import { isMoyuKlingV4Model } from "../../lib/klingV4";
+import { resolveSeedanceTask, seedanceTaskInputs, selectSeedanceTask } from "../../lib/seedanceTasks";
+import { PIXVERSE_PROFILE, PIXVERSE_ACTIONS, pixverseIntent, pixverseFieldVisible, pixverseHint } from "../../lib/pixverse";
 import {
   resolveLongVideoSettings,
 } from "../../lib/longVideo";
@@ -83,7 +87,7 @@ function Parameter({
   const sliderMax = Math.max(sliderMin, capability.maximum != null && capability.maximum > 0 ? capability.maximum : numericChoices.length ? Math.max(...numericChoices) : 300);
   const automaticDuration = duration ? capability.options.find(option => Number(option.value) === -1) : undefined;
   const changeNumber = (next: number, snap = false) => {
-    const clamped = Math.max(sliderMin, Math.min(sliderMax, next));
+    const clamped = Math.max(sliderMin, Math.min(sliderMax, snap && capability.type === "integer" ? Math.round(next) : next));
     const option = duration && snap && numericChoices.length
       ? capability.options.filter(item => Number(item.value) > 0).reduce((closest, item) =>
           Math.abs(Number(item.value) - clamped) < Math.abs(Number(closest.value) - clamped) ? item : closest)
@@ -194,6 +198,7 @@ function Parameter({
         <input
           aria-label={label}
           value={String(value)}
+          placeholder={capability.optional ? /(?:media_id|video_id|restyle_id|speaker_id)$/.test(capability.key) ? "填写一个平台资源 ID" : "可选" : undefined}
           onChange={(event) => onChange(event.target.value)}
         />
       )}
@@ -228,18 +233,56 @@ export function CanvasVideoSettings({
   useLayoutEffect(() => {
     setHost(advancedHostId ? document.getElementById(advancedHostId) : null);
   }, [advancedHostId]);
-  const setParameter = (key: string, value: ModelParameterValue) =>
-    onChange({ ...config, parameterValues: {
+  const setParameter = (key: string, value: ModelParameterValue) => {
+    const next: Record<string, ModelParameterValue> = {
       ...config.parameterValues,
       [key]: value,
       ...(key === "resolution" && String(value).toLowerCase() === "1080p" && config.parameterValues["draft"] === true
         ? { draft: false } : {}),
-    } });
+    };
+    if (pixverse && value !== "") {
+      if (key === "source_video_id") delete next["video_media_id"];
+      if (key === "video_media_id") delete next["source_video_id"];
+      if (key === "audio_media_id") { delete next["lip_sync_tts_content"]; delete next["lip_sync_tts_speaker_id"]; }
+      if (key === "lip_sync_tts_content" || key === "lip_sync_tts_speaker_id") delete next["audio_media_id"];
+    }
+    onChange({ ...config, parameterValues: next });
+  };
   const mode = config.videoMode ?? config.seedanceTaskMode ?? "auto";
   const modeInputs = [...inputs, ...(config.perTaskUrlMedia ?? [])];
   const selectedModel = providerCatalog.find(entry => entry.provider.id === config.modelSelection.providerId)
     ?.models.find(model => model.definitionId === config.modelSelection.modelDefinitionId);
-  const supportsVideoTasks = !!selectedModel && !isFzyVideoSchema(selectedModel.operationSchema) && isSeedance25VideoModel(selectedModel.remoteModelId);
+  const klingV4 = isMoyuKlingV4Model(selectedModel?.remoteModelId ?? "");
+  const pixverse = (selectedModel?.operationSchema["video_generation"] as Record<string, unknown> | undefined)?.["requestProfileId"] === PIXVERSE_PROFILE;
+  const pixverseV6 = selectedModel?.remoteModelId.toLowerCase() === "pixverse-v6";
+  const pixverseState = pixverseIntent(selectedModel?.remoteModelId ?? "", config.parameterValues, modeInputs, Object.values(config.mediaRoles ?? {}).includes("last_frame"));
+  const pixverseActionValue = config.parameterValues["action"] ? pixverseState.omni ? "fusion_omni" : String(config.parameterValues["action"]) : "";
+  const setPixverseAction = (value: string) => {
+    const action = value === "fusion_omni" ? "fusion" : value;
+    const values = { ...config.parameterValues };
+    if (action) values["action"] = action; else delete values["action"];
+    if (value === "fusion_omni") { values["reference_mode"] = "omni"; values["aspect_ratio"] = "auto"; }
+    else { delete values["reference_mode"]; if (values["aspect_ratio"] === "auto") values["aspect_ratio"] = "16:9"; }
+    const videoMode = action === "transition" ? "first_last_frame" : action === "img" ? "first_frame" : action === "text" ? "text" : "reference";
+    const intent = compileCanvasVideoMode(videoMode, inputs, config.mediaRoles);
+    const nextIntent = pixverseIntent(selectedModel?.remoteModelId ?? "", values, modeInputs, action === "transition");
+    for (const key of Object.keys(values)) {
+      if (key !== "action" && key !== "reference_mode" && !pixverseFieldVisible(key, nextIntent)) delete values[key];
+    }
+    onChange({ ...config, parameterValues: values, videoMode: value ? videoMode : "auto", seedanceTaskMode: value ? intent.taskMode : "auto", mediaRoles: intent.mediaRoles });
+  };
+  const supportsVideoTasks = !!selectedModel && !isFzyVideoSchema(selectedModel.operationSchema) && (isSeedance25VideoModel(selectedModel.remoteModelId) || isSeedance20VideoModel(selectedModel.remoteModelId));
+  const taskInputs = seedanceTaskInputs(modeInputs.map((input, index) => ({ key: "key" in input ? input.key : `url-${index}`, kind: input.kind })));
+  const seedanceIntent = compileCanvasVideoMode(mode as CanvasVideoMode, taskInputs, config.mediaRoles);
+  const seedance = resolveSeedanceTask(selectedModel?.remoteModelId ?? "", capabilities,
+    { ...config, seedanceTaskMode: seedanceIntent.taskMode, mediaRoles: seedanceIntent.mediaRoles },
+    taskInputs, selectedModel?.operationSchema);
+  const effectiveValues = seedance.enabled ? seedance.parameterValues : config.parameterValues;
+  const followingRatio = seedance.mode === "first_frame" || seedance.mode === "first_last_frame" ? "跟随首帧画幅"
+    : seedance.mode === "edit" || seedance.mode === "extend" ? "跟随原片画幅" : "自适应画幅";
+  const modeOptions = canvasVideoModeOptions(mode, modeInputs, supportsVideoTasks, klingV4)
+    .map(option => supportsVideoTasks && option.value === "reference" ? { ...option, label: "参考生视频" } : option);
+  if (supportsVideoTasks) modeOptions.unshift({ value: "auto", label: "全参考 · 自动判断", disabled: taskInputs.length === 0 });
   const isLong = mode === "longVideo2video";
   const longSettings = resolveLongVideoSettings(config.longVideo, providerCatalog);
   // 调度参数保留在任务配置中；节点面板只编辑创作参数。
@@ -259,7 +302,9 @@ export function CanvasVideoSettings({
     );
   const parameterOrder = (key: string) => /^(ratio|aspect_ratio)$/.test(key) ? 0 : /resolution|quality/.test(key) ? 1 : /duration|seconds/.test(key) ? 2 : 3;
   const primary = capabilities.filter((capability) => PRIMARY_KEYS.has(capability.key) &&
-    (!isLong || !/duration|seconds/.test(capability.key)));
+    (!pixverse || pixverseFieldVisible(capability.key, pixverseState)) &&
+    (!isLong || !/duration|seconds/.test(capability.key))).map(capability => pixverse && pixverseState.omni && capability.key === "aspect_ratio"
+      ? { ...capability, options: [{ value: "auto", label: "自动跟随" }, ...capability.options] } : capability);
   if (isLong) primary.push(LONG_VIDEO_DURATION);
   primary.sort((left, right) => parameterOrder(left.key) - parameterOrder(right.key));
   const audioCapability = primary.find(capability => /^(generate_audio|audio|generate_audio_switch)$/.test(capability.key));
@@ -269,26 +314,36 @@ export function CanvasVideoSettings({
     ...primary
       .filter(
         (capability) =>
-          !/^(generate_audio|audio|generate_audio_switch)$/.test(capability.key),
+          !/^(generate_audio|audio|generate_audio_switch|multi_shot)$/.test(capability.key),
       )
       .map((capability) => {
         const value = isLong && capability === LONG_VIDEO_DURATION
           ? longSettings.targetSeconds
-          : resolvedParameterValue(capability, config.parameterValues);
+           : resolvedParameterValue(capability, effectiveValues);
+         if (seedance.lockedParameters.includes(capability.key)) return capability.key === "ratio" ? followingRatio : seedance.mode === "edit" ? "原片时长" : "智能时长";
         const label = optionLabel(capability, value);
         return /duration|seconds/.test(capability.key)
           ? `${value === -1 ? "自动" : value}${value === -1 ? "" : "s"}`
           : label;
       }),
+    ...(pixverse && pixverseState.durationFromVideo ? ["匹配参考时长"] : []),
     ...(isLong ? [] : [`${config.generationCount}个`]),
   ].join(" · ");
   const parameterFields = (
     <>
-      {primary.map((capability) => (
+      {seedance.enabled && !isLong ? <small className="canvas-video-duration-note" role="note">{seedance.hint}</small> : null}
+      {pixverse ? <small className="canvas-video-duration-note">{pixverseHint(pixverseState)}</small> : null}
+      {pixverseState.durationFromVideo && pixverse ? <div className="canvas-video-parameter"><span>视频时长</span><span>匹配最长参考视频</span></div> : null}
+      {primary.map((capability) => seedance.lockedParameters.includes(capability.key) && !isLong ? (
+          <div key={capability.key} className="canvas-video-parameter" data-tooltip={seedance.hint}>
+            <span>{capability.label}</span>
+            <span>{capability.key === "ratio" ? followingRatio : seedance.mode === "edit" ? "跟随原视频" : "智能时长"}</span>
+          </div>
+        ) : (
           <Parameter
             key={capability.key}
             capability={capability}
-            value={isLong && capability === LONG_VIDEO_DURATION ? longSettings.targetSeconds : resolvedParameterValue(capability, config.parameterValues)}
+            value={isLong && capability === LONG_VIDEO_DURATION ? longSettings.targetSeconds : resolvedParameterValue(capability, effectiveValues)}
             onChange={(value) => {
               if (isLong && capability === LONG_VIDEO_DURATION) {
                 if (value !== "" && Number.isFinite(Number(value))) setLong({ targetSeconds: Math.round(Number(value)) });
@@ -326,6 +381,28 @@ export function CanvasVideoSettings({
           </div>
         </div>
       ) : null}
+      {klingV4 ? <>
+        {capabilities.filter(capability => capability.key === "element_ids" || capability.key === "voice_ids").map(capability => (
+          <Parameter key={capability.key} capability={capability}
+            value={resolvedParameterValue(capability, config.parameterValues)}
+            onChange={value => setParameter(capability.key, value)} />
+        ))}
+        <small className="canvas-video-duration-note">主体和音色使用可灵已创建的 ID；所有图片、视频、主体和音色合计最多 15 项。</small>
+        <small className="canvas-video-duration-note">镜头安排请写在提示词中；当前模型不支持关闭多镜头。</small>
+      </> : null}
+      {pixverse ? <>
+        {capabilities.filter(capability => capability.key === "generate_multi_clip_switch" && pixverseState.multiClip).map(capability => <Parameter key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => setParameter(capability.key, value)} />)}
+        <details className="canvas-video-extra-parameters"><summary>更多参数</summary>
+          {capabilities.filter(capability => !PRIMARY_KEYS.has(capability.key) && capability.key !== "generate_multi_clip_switch" && pixverseFieldVisible(capability.key, pixverseState)).map(capability => <Parameter key={capability.key} capability={capability} value={resolvedParameterValue(capability, config.parameterValues)} onChange={value => setParameter(capability.key, value)} />)}
+          {pixverseState.videoInput && pixverseState.videos === 0 ? <small className="canvas-video-duration-note">视频任务 ID 与上传资源 ID 二选一；连接本地视频时无需填写。</small> : null}
+        </details>
+      </> : null}
+      {seedance.enabled && capabilities.some(capability => !PRIMARY_KEYS.has(capability.key) && !["omni_reference_task_type", "draft", "web_search"].includes(capability.key)) ?
+        <details className="canvas-video-extra-parameters"><summary>更多参数</summary>
+          {capabilities.filter(capability => !PRIMARY_KEYS.has(capability.key) && !["omni_reference_task_type", "draft", "web_search"].includes(capability.key)).map(capability => (
+            <Parameter key={capability.key} capability={capability} value={resolvedParameterValue(capability, effectiveValues)} onChange={value => setParameter(capability.key, value)} />
+          ))}
+        </details> : null}
       {referenceSettings}
     </>
   );
@@ -391,19 +468,28 @@ export function CanvasVideoSettings({
         parameterAccessory={audioCapability ? <span role="img" aria-label={audioEnabled ? "生成声音已开启" : "生成声音已关闭"}><LibTVMediaIcon name={audioEnabled ? "icon-volume-filled" : "icon-volume-off"} size={14} /></span> : null}
         model={model}
         parameters={parameterFields}
-        modeControl={
+        modeControl={pixverse ?
+          <CanvasSelect className="canvas-video-mode" ariaLabel="PixVerse 能力模式" value={pixverseActionValue}
+            options={[{value: "", label: `自动 · ${PIXVERSE_ACTIONS.find(([value]) => value === pixverseState.action)?.[1] ?? pixverseState.action}${pixverseState.omni ? "（Omni）" : ""}`}, ...PIXVERSE_ACTIONS.map(([value,label])=>({value,label})), ...(pixverseV6 ? [{value:"fusion_omni",label:"全能参考（V6 Omni）"}] : [])]}
+            onChange={setPixverseAction} /> :
           <CanvasSelect
             className="canvas-video-mode"
             ariaLabel="视频生成模式"
-            value={canvasVideoModeValue(mode, modeInputs)}
-            options={canvasVideoModeOptions(mode, modeInputs, supportsVideoTasks).map(option => ({ ...option, icon: <LibTVMediaIcon name={videoModeIcon(option.value)} size={16} /> }))}
+            value={supportsVideoTasks && mode === "auto" ? "auto" : canvasVideoModeValue(mode, modeInputs)}
+            options={modeOptions.map(option => ({ ...option, icon: <LibTVMediaIcon name={videoModeIcon(option.value)} size={16} /> }))}
             chevronIcon={<LibTVMediaIcon name="icon-chevron-down-small" size={12} />}
             selectedIcon={<LibTVMediaIcon name="check" size={12} />}
             onChange={(value) => {
               const videoMode = value as CanvasVideoMode;
               const intent = compileCanvasVideoMode(videoMode, inputs, config.mediaRoles);
+              if (klingV4 && videoMode === "edit") {
+                const source = inputs.find(input => input.kind === "video" && config.mediaRoles?.[input.key] === "base_video")
+                  ?? inputs.find(input => input.kind === "video");
+                if (source) intent.mediaRoles[source.key] = "base_video";
+              }
               onChange({
-                ...config,
+                ...(supportsVideoTasks && selectedModel ? selectSeedanceTask(selectedModel.remoteModelId, capabilities,
+                  config, taskInputs, intent.taskMode, selectedModel.operationSchema) : config),
                 videoMode,
                 seedanceTaskMode: intent.taskMode,
                 mediaRoles: intent.mediaRoles,

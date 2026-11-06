@@ -41,6 +41,7 @@ import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
 import type { HistoryDateRange } from "./historyDateRange";
 import { RegenerateGenerationDialog } from "./RegenerateGenerationDialog";
 import { IMAGE_REGION_EDIT_BINDING } from "../../lib/canvasImage";
+import { isMoyuKlingV4Model } from "../../lib/klingV4";
 import { frozenStartCommand, isRegenerableOperation } from "./regenerateGeneration";
 import {
   canPromoteSeedanceDraft,
@@ -247,7 +248,9 @@ function providerCallStatus(call: GenerationTaskDetail["calls"][number]): string
 function HistoryDiagnostic({ label, value }: { readonly label: string; readonly value: unknown }) {
   const normalized = normalizeEmbeddedJson(value);
   const message =
-    findDiagnosticMessage(normalized) ?? "没有可用的错误摘要，请展开查看完整技术详情。";
+    isUnknownRecord(normalized) && typeof normalized["message"] === "string"
+      ? backendErrorMessage(normalized)
+      : findDiagnosticMessage(normalized) ?? "没有可用的错误摘要，请展开查看完整技术详情。";
   const kind = diagnosticKind(normalized);
   return (
     <div className="history-diagnostic" role="group" aria-label={label}>
@@ -897,6 +900,20 @@ export function HistoryDialog({
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState<unknown>(null);
   const [cancelMessage, setCancelMessage] = useState<string | null>(null);
+  const [queryBusy, setQueryBusy] = useState(false);
+  const [queryError, setQueryError] = useState<unknown>(null);
+  const resumeKlingQuery = async () => {
+    if (queryBusy || detail == null) return;
+    setQueryBusy(true);
+    setQueryError(null);
+    try {
+      await client.queryVideoTaskNow(detail.summary.id);
+      setListRevision(value => value + 1);
+      setDetailRevision(value => value + 1);
+    } catch (error: unknown) {
+      setQueryError(error);
+    } finally { setQueryBusy(false); }
+  };
   const submitCancel = useCallback(async () => {
     if (cancelBusy || detail == null) return;
     setCancelBusy(true);
@@ -1438,6 +1455,17 @@ export function HistoryDialog({
                   </section>
                 ) : null}
 
+                {summary.status === "unknown" && summary.remoteTaskId && isMoyuKlingV4Model(summary.remoteModelIdSnapshot ?? "") ? (
+                  <section className="history-section">
+                    <h3>查询原任务</h3>
+                    <p className="history-regenerate__note">网关刚受理时可能短暂返回未知状态。继续查询会复用原任务号，不会重新生成或再次提交。</p>
+                    <button type="button" disabled={queryBusy} onClick={() => void resumeKlingQuery()}
+                      aria-describedby={queryError ? "history-kling-query-error" : undefined}>
+                      {queryBusy ? "正在恢复查询…" : "继续查询原任务"}
+                    </button>
+                    {queryError ? <ErrorAlert id="history-kling-query-error" error={queryError} /> : null}
+                  </section>
+                ) : null}
                 {canRegenerate ? (
                   <section className="history-section">
                     <h3>重新生成</h3>

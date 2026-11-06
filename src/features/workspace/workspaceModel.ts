@@ -2361,8 +2361,11 @@ export function formatTaskRawResponse(detail: {
   const call = [...detail.calls]
     .reverse()
     .find((item) => Boolean(item.rawResponse) || Boolean(item.runtimeError));
+  // 先呈现最终诊断，再保留完整供应商回执；否则前置校验、素材归属等
+  // 诊断会被上一条 HTTP 返回盖掉，甚至把校验失败显示成 HTTP 200。
+  const reason = detail.finalError == null ? null : backendErrorMessage(detail.finalError);
   if (call) {
-    const lines: string[] = [];
+    const lines: string[] = reason ? [reason] : [];
     if (call.httpStatus != null) lines.push(`HTTP ${call.httpStatus}`);
     if (call.rawResponse) lines.push(call.rawResponse);
     if (call.runtimeError) lines.push(JSON.stringify(call.runtimeError, null, 2));
@@ -2371,7 +2374,7 @@ export function formatTaskRawResponse(detail: {
   }
   if (detail.finalError != null) {
     const body = JSON.stringify(detail.finalError, null, 2);
-    if (body && body !== "null") return body;
+    if (body && body !== "null") return reason ? `${reason}\n\n${body}` : body;
   }
   return null;
 }

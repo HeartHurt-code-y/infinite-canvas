@@ -403,6 +403,8 @@ function describePreparationIssue(issue: PromptContentIssue): string {
       return "提示词不能为空，且至少需要保留一条素材。";
     case "pending_reference":
       return `提示词中存在无法确定的素材引用「${issue.displayText}」，请通过 @ 选择具体素材后再重新生成。`;
+    case "unbound_ordinal_reference":
+      return `「${issue.text}」没有对应素材（当前该类可引用 ${issue.candidateCount} 份），请检查编号或通过 @ 重新选择。`;
     case "disconnected_reference":
     case "reference_identity_changed":
       return `提示词中引用了已移除的素材「${issue.displayName}」，请删除对应引用后再重新生成。`;

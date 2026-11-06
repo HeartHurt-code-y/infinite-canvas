@@ -1,0 +1,14 @@
+.canvas-image-tools { position: fixed; top: 0; left: 0; z-index: var(--z-node-menu, 300); color: #e8e8e8; font-family: inherit; }
+.canvas-image-tools button { display: flex; align-items: center; gap: 8px; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
+.canvas-image-tools button:hover, .canvas-image-tools button:focus-visible, .canvas-image-tools button[aria-expanded="true"] { background: #393939; outline: none; }
+.canvas-image-tools button:focus-visible { box-shadow: inset 0 0 0 1px #999; }
+.canvas-image-tools button:disabled { opacity: .45; cursor: default; }
+.canvas-image-tools__bar { display: flex; align-items: center; padding: 4px 6px; max-width: calc(100vw - 24px); min-height: 40px; border: 1px solid #363636; border-radius: 16px; background: #242424; box-shadow: 0 4px 16px #0002; overflow-x: auto; scrollbar-width: none; font-size: 13px; }
+.canvas-image-tools__bar > button { flex-shrink: 0; height: 32px; padding: 0 8px; border-radius: 8px; }
+.canvas-image-tools__bar > button[aria-label] { padding: 0 8px; }
+.canvas-image-tools__divider { width: 1px; height: 20px; background: #404040; margin: 0 4px; flex-shrink: 0; }
+.canvas-image-tools__replace { width: 24px; height: 24px; padding: 5px; border-radius: 6px; background: #0006 !important; backdrop-filter: blur(10px); }
+.canvas-image-tools__menu { width: 170px; padding: 6px; border: 1px solid #3c3c3c; border-radius: 16px; background: #282828; box-shadow: 0 8px 24px #0004; font-size: 14px; overflow-y: auto; }
+.canvas-image-tools__menu > button { width: 100%; min-height: 36px; padding: 6px 8px; border-radius: 10px; text-align: left; }
+.canvas-image-tools__menu > button > span { flex: 1; }
+.canvas-image-tools__menu--side { width: 200px; max-height: calc(100vh - 24px); }

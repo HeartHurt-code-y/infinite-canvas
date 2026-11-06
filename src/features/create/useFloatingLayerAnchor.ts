@@ -79,7 +79,7 @@ export interface FloatingLayerAnchor<T extends HTMLElement = HTMLElement> {
 export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
   options: UseFloatingLayerAnchorOptions,
 ): FloatingLayerAnchor<T> {
-  const { open, anchorRef, minWidth, preferAbove, maxHeight, margin, leftOffset, gap, align, followAnchor } = options;
+  const { open, anchorRef, minWidth, maxWidth, preferAbove, maxHeight, margin, leftOffset, gap, align, followAnchor } = options;
   const layerRef = useRef<T | null>(null);
   const layerId = useId();
   /** 本浮层挂在谁下面（顶层为 null）。portal 不改 React 树，context 照样传得到。 */
@@ -108,6 +108,7 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
     const box = placeFloatingLayer(anchor, {
       ...(align === undefined ? {} : { align }),
       ...(minWidth === undefined ? {} : { minWidth }),
+      ...(maxWidth === undefined ? {} : { maxWidth }),
       ...(preferAbove === undefined ? {} : { preferAbove }),
       ...(maxHeight === undefined ? {} : { maxHeight }),
       ...(margin === undefined ? {} : { margin }),
@@ -119,7 +120,7 @@ export function useFloatingLayerAnchor<T extends HTMLElement = HTMLElement>(
     layer.style.left = `${box.left}px`;
     layer.style.width = `${box.width}px`;
     layer.style.maxHeight = `${box.maxHeight}px`;
-  }, [anchorRef, gap, leftOffset, margin, maxHeight, minWidth, preferAbove, align, followAnchor]);
+  }, [anchorRef, gap, leftOffset, margin, maxHeight, minWidth, maxWidth, preferAbove, align, followAnchor]);
 
   useLayoutEffect(() => {
     if (!open) {

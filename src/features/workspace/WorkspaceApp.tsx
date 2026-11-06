@@ -21,6 +21,7 @@ import { CanvasReferencePickingContext, useCanvasReferencePicking } from "./canv
 import { CanvasImageMarkingBar, CanvasImageMarkingContext, useCanvasImageMarking } from "./CanvasImageMarking";
 import "./CanvasReferencePicking.css";
 import { CanvasTextImagePicker, CanvasTextReading, CanvasTextResource } from "./CanvasTextResource";
+import { CanvasImageToolbar } from "./CanvasImageToolbar";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { canvasFeatureMediaType, type CanvasFeatureAction, type CanvasFeatureTarget, type CanvasInlineFeatureRequest } from "./canvasFeatureCatalog";
 import { CanvasFeatureMediaEditor, type CanvasFeatureMediaSession } from "./CanvasFeatureMediaEditor";
@@ -336,7 +337,7 @@ import { greenScreenPreparationOutputs, greenScreenNodeSignature } from "./green
 import { prefetchLocalAssetMedia, resetLocalAssetMediaRegistry } from "./localAssetMedia";
 import { prepareWhiteModelGeneration } from "../../lib/whiteModelControl";
 import { preferredPanoramaParameters, preparePanoramaGeneration } from "../../lib/panorama";
-import { appendVideoLocalEditPrompt, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
+import { appendVideoLocalEditPrompt, prepareCanvasMediaSource, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type {
   VideoLocalEditFrameResolution,
@@ -1901,6 +1902,9 @@ function writeCanvasNodeClipboard(copied: CanvasNodeClipboard): void {
 }
 
 function promptContentIssueMessage(issue: PromptContentIssue): string {
+  if (issue.kind === "unbound_ordinal_reference") {
+    return `提示词中的「${issue.text}」没有对应的参考素材（当前该类可引用 ${issue.candidateCount} 份）。请检查编号或使用 @ 重新选择。`;
+  }
   if (issue.kind === "pending_reference") {
     return `提示词中的 @${issue.displayText} 匹配到 ${issue.candidateCount} 个同名对象。请点击黄色“待确认”引用并选择具体素材后再生成。`;
   }
@@ -2690,6 +2694,17 @@ export function WorkspaceApp({
   const [previewOutputNodeKey, setPreviewOutputNodeKey] = useState<string | null>(null);
   const [previewAssetNodeKey, setPreviewAssetNodeKey] = useState<string | null>(null);
   const [previewAsset, setPreviewAsset] = useState<AssetItem | null>(null);
+  const [imageToolsBusy, setImageToolsBusy] = useState(false);
+  const [replaceImageSource, setReplaceImageSource] = useState<AssetNodeData | null>(null);
+  const replaceImageOwner = useRef<AssetNodeData | null>(null);
+  const replaceImageAbort = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (active) return;
+    replaceImageOwner.current = null;
+    replaceImageAbort.current?.abort();
+    setReplaceImageSource(null);
+  }, [active]);
+  useEffect(() => () => { replaceImageOwner.current = null; replaceImageAbort.current?.abort(); }, [canvasId]);
   const handleGenNodeSizeChange = useCallback((key: string, dimensions: CanvasNodeDimensions) => {
     setGenNodeSizes((current) => {
       const previous = current[key];
@@ -6339,13 +6354,9 @@ export function WorkspaceApp({
   /** 媒体加载完成后记录原始比例，卡片与连线端点随尺寸同步更新。 */
   const handleAssetAspectRatioChange = useCallback(
     (key: string, aspectRatio: number) => {
-      patchNode("asset", key, (node) => {
-        return Math.abs((node.aspectRatio ?? 0) - aspectRatio) < 0.0001
-          ? node
-          : { ...node, aspectRatio };
-      });
+      applyNodeChanges([{ type: "aspectRatio", key, aspectRatio }]);
     },
-    [patchNode],
+    [applyNodeChanges],
   );
 
   // 素材节点预览地址按稳定身份刷新：旧 TOS 本地素材续签，新 Base64 素材验证本机文件。
@@ -6398,13 +6409,9 @@ export function WorkspaceApp({
 
   const handleOutputAspectRatioChange = useCallback(
     (key: string, aspectRatio: number) => {
-      patchNode("output", key, (node) => {
-        return Math.abs((node.aspectRatio ?? 0) - aspectRatio) < 0.0001
-          ? node
-          : { ...node, aspectRatio };
-      });
+      applyNodeChanges([{ type: "aspectRatio", key, aspectRatio }]);
     },
-    [patchNode],
+    [applyNodeChanges],
   );
 
   /** 删除素材节点（连同其所有连线）。 */
@@ -7976,7 +7983,7 @@ export function WorkspaceApp({
               greenScreenPreparation
                 ? { ...genNode.config, seedanceTaskMode: greenScreenPreparation.taskMode }
                 : videoIntent ? { ...genNode.config, seedanceTaskMode: videoIntent.taskMode, mediaRoles: videoIntent.mediaRoles } : genNode.config,
-              seedanceTaskInputs(connections),
+              seedanceTaskInputs(connections, promptDocument),
               resolvedSelection.model.operationSchema,
             )
           : null;
@@ -8165,7 +8172,7 @@ export function WorkspaceApp({
         ? genNode.config.verificationProviderId ?? verificationLibraries.find(entry => entry.provider.id === selection.providerId)?.provider.id ?? verificationLibraries[0]?.provider.id ?? null
         : null;
       const preparedMaterials = genNode.kind === "video" && genNode.config.autoVerifyMaterials !== false
-        ? verifyGenerationMaterials(promptSegments, explicitMedia, verificationProviderId)
+        ? verifyGenerationMaterials(promptSegments, explicitMedia, verificationProviderId, { providerConnectionId: selection.providerId, modelDefinitionId: selection.modelDefinitionId })
         : Promise.resolve({ prompt: promptSegments, explicitMedia });
       let remaining = taskCount;
       const settleOne = () => {
@@ -10567,6 +10574,86 @@ export function WorkspaceApp({
     return sources;
   }
 
+  function closeReplaceImage() {
+    replaceImageOwner.current = null;
+    replaceImageAbort.current?.abort();
+    setReplaceImageSource(null);
+  }
+
+  function applyImageReplacement(owner: AssetNodeData, asset: AssetItem) {
+    if (cloudAssetAwaitingId({ ...asset, source: asset.source ?? "cloud" }) || asset.cloudStatus === "failed" || asset.cloudStatus === "deleted") {
+      throw new Error("所选素材尚未就绪，请选择可用的图片。");
+    }
+    if (asset.source !== "local" && !asset.providerConnectionId && !assetProvider?.id) throw new Error("这份素材的供应商连接已不可用，请重新选择。");
+    const current = canvasStore.getState().nodesById[owner.key];
+    const previousTarget = assetNodeReferenceTarget(owner);
+    if (!activeRef.current || replaceImageOwner.current !== owner || current?.type !== "asset" ||
+        current.data.kind !== "image" || asset.kind !== "image" ||
+        !sameMediaReferenceTarget(assetNodeReferenceTarget(current.data), previousTarget)) {
+      throw new Error("待替换的素材已变化，请重新选择。");
+    }
+    const next: AssetNodeData = {
+      key: owner.key, x: current.data.x, y: current.data.y, kind: "image",
+      ...(current.data.assetGroupId ? { assetGroupId: current.data.assetGroupId } : {}),
+      ...(current.data.libraryPickOrder != null ? { libraryPickOrder: current.data.libraryPickOrder } : {}),
+      assetId: asset.id, source: asset.source ?? "cloud",
+      providerConnectionId: asset.providerConnectionId ?? (asset.source === "local" ? "" : assetProvider?.id ?? ""),
+      name: asset.name, previewUrl: asset.previewUrl ?? null, videoUrl: null,
+    };
+    const target = { ...assetNodeReferenceTarget(next), canvasNodeKey: owner.key };
+    const before = promptContents.snapshotAll();
+    const after = Object.fromEntries(Object.entries(before).map(([key, document]) => [key, {
+      ...document, items: document.items.map(item => item.kind === "media_reference" && item.canvasNodeKey === owner.key &&
+        sameMediaReferenceTarget(item.target, previousTarget)
+        ? { ...item, target, displayNameSnapshot: next.name } : item),
+    }]));
+    // Include current canonical documents in the undo entry, including unmounted editors.
+    canvasStore.getState().setPromptDocuments(before);
+    if (patchNode("asset", owner.key, () => next, after) !== "applied") throw new Error("素材已移除，请重新选择。");
+    promptContents.restoreSubset(after);
+    scheduleCanvasSaveRef.current();
+    closeReplaceImage();
+  }
+
+  async function replaceImageFile(owner: AssetNodeData, path: string | null, signal: AbortSignal) {
+    const asset = await chooseFeatureFile("image", path, signal);
+    signal.throwIfAborted();
+    if (asset) applyImageReplacement(owner, asset);
+  }
+
+  function beginReplaceImage(key: string, mode: "local" | "history") {
+    const entry = canvasStore.getState().nodesById[key];
+    if (entry?.type !== "asset" || entry.data.kind !== "image" || entry.data.libraryResource) return;
+    closeReplaceImage();
+    const owner = entry.data;
+    replaceImageOwner.current = owner;
+    if (mode === "history") { setReplaceImageSource(owner); return; }
+    const controller = new AbortController();
+    replaceImageAbort.current = controller;
+    setImageToolsBusy(true);
+    void replaceImageFile(owner, null, controller.signal).catch(error => {
+      if (!controller.signal.aborted) toast.error("替换失败：" + backendErrorMessage(error));
+    }).finally(() => {
+      if (replaceImageAbort.current === controller) { replaceImageAbort.current = null; setImageToolsBusy(false); }
+    });
+  }
+
+  async function downloadSelectedImage(key: string) {
+    const entry = canvasStore.getState().nodesById[key];
+    const image = canvasImageActionTarget(entry);
+    if (!image?.src || imageToolsBusy) return;
+    setImageToolsBusy(true);
+    try {
+      if (image.localPath) await downloadCanvasImage(image);
+      else if (entry?.type === "asset") {
+        const prepared = await prepareCanvasMediaSource(assetNodeReferenceTarget(entry.data));
+        try { await exportArtifactToDesktop(prepared.path, artifactFileName(image.name, prepared.path)); }
+        finally { await prepared.release(); }
+      }
+    } catch (error) { toast.error("下载失败：" + backendErrorMessage(error)); }
+    finally { setImageToolsBusy(false); }
+  }
+
   function attachTextReference(nodeKey: string, source: string | AssetItem) {
     const state = canvasStore.getState();
     const node = state.nodesById[nodeKey];
@@ -11242,11 +11329,12 @@ export function WorkspaceApp({
   );
   const singleSelectedNode = !nodeMarquee && selectedCanvasNodeKeys.size === 1 && selectedNodeKey
     ? canvasStore.getState().nodesById[selectedNodeKey] : null;
+  const selectedImage = canvasImageActionTarget(singleSelectedNode ?? undefined);
   const editingNodeKey = singleSelectedNode?.type === "gen" && singleSelectedNode.data.kind === "prompt"
     ? textEditorKey === selectedNodeKey ? selectedNodeKey : null
     : singleSelectedNode?.data.key ?? null;
   const reference = useCanvasReferencePicking(canvasStore, canvasViewportRef,
-    active && !storyboardEnabled ? editingNodeKey : null);
+    active && !storyboardEnabled ? editingNodeKey : null, promptContents);
   const pickingReference = reference.session != null;
   const marking = useCanvasImageMarking({ store: canvasStore, viewport: canvasViewportRef,
     editorKey: active && !storyboardEnabled ? editingNodeKey : null, canvasId, providerCatalog, defaultModel: nodeModelSelections.prompt, promptContents });
@@ -12291,14 +12379,15 @@ export function WorkspaceApp({
   );
 
   // 旧图片自动卡片仅在已有引用或主动独立展示时保留；新图片结果不再创建 output 节点。
-  // 视频产物按原节点投影。音频只收起已在源节点播放器显示的那张结果卡。
+  // 视频与音频只收起已在源节点播放器显示的那张结果卡，其余任务各自保留。
   // 仅改变画布投影，不删除文件、结果记录或下游引用；源节点删除后产物自然独立显示。
   const embeddedOutputOwners = useCanvas(useShallow((state) => Object.fromEntries(
     state.nodes.output.flatMap(output => {
       const source = state.nodeByKey.gen.get(output.sourceNodeId);
       if (output.standalone || !source) return [];
       const embeddedVideo = output.mediaType === "video" && source.kind === "video" &&
-        (output.origin == null || output.origin === "generation" || output.origin === "long_video");
+        (output.origin == null || output.origin === "generation" || output.origin === "long_video") &&
+        latestGenerationPreviewFor(state, source.key)?.key === output.key;
       const embeddedAudio = output.mediaType === "audio" && source.kind === "audio" &&
         (output.origin == null || output.origin === "generation") &&
         latestGenerationPreviewFor(state, source.key)?.key === output.key;
@@ -13807,6 +13896,14 @@ export function WorkspaceApp({
           onCapture={(media, signal) => saveDirectorCaptures(directorEntry.data.key, media, signal)}
           onUndo={undoCanvasOperation} onRedo={redoCanvasOperation} />
       </Suspense> : null}
+      {replaceImageSource ? <CanvasTextImagePicker key={replaceImageSource.key}
+        targets={[]} listAssets={listFeatureAssets} hasCloud={assetProvider != null}
+        onBack={closeReplaceImage} onChoose={() => {}}
+        onChooseAsset={asset => {
+          try { applyImageReplacement(replaceImageSource, asset); }
+          catch (error) { toast.error("替换失败：" + backendErrorMessage(error)); }
+        }}
+        onChooseFile={(path, signal) => replaceImageFile(replaceImageSource, path, signal)} /> : null}
       {directorReferenceKey ? <CanvasTextImagePicker key={directorReferenceKey}
         targets={getFeatureSources({ kind: "image-hd" })} listAssets={listFeatureAssets} hasCloud={assetProvider != null}
         onBack={() => setDirectorReferenceKey(null)}
@@ -14410,6 +14507,15 @@ export function WorkspaceApp({
               ) : null}
             </LiveCanvasFlow>
             </CanvasVideoFrameCropContext.Provider>
+
+            {active && !storyboardEnabled && !pickingCanvas && singleSelectedNode && selectedImage?.src ?
+              <CanvasImageToolbar key={singleSelectedNode.data.key} nodeKey={singleSelectedNode.data.key} viewportRef={canvasViewportRef}
+                replaceable={singleSelectedNode.type === "asset" && !singleSelectedNode.data.libraryResource}
+                busy={imageToolsBusy}
+                onAction={(action, label) => openCanvasFeature(action, singleSelectedNode.data.key, label, selectedImage.src)}
+                onDownload={() => { void downloadSelectedImage(singleSelectedNode.data.key); }}
+                onPreview={() => singleSelectedNode.type === "asset" ? setPreviewAssetNodeKey(singleSelectedNode.data.key) : setPreviewOutputNodeKey(singleSelectedNode.data.key)}
+                onReplace={mode => beginReplaceImage(singleSelectedNode.data.key, mode)} /> : null}
 
             <CanvasReferenceLibraryContext.Provider value={referenceLibrary}>
               <CanvasReferencePickingContext.Provider value={reference.context}>

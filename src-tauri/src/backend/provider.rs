@@ -14,6 +14,12 @@ use uuid::Uuid;
 
 mod fzy;
 mod pixverse;
+mod gemini_image;
+mod gpt_image25;
+mod kling_v4;
+mod seedance;
+pub(crate) use seedance::normalize_task as normalize_seedance_task;
+pub(crate) use seedance::failure_message as video_failure_message;
 #[path = "provider/image_upscale.rs"]
 mod image_upscale;
 
@@ -35,7 +41,7 @@ use super::{
         is_atlascloud_midjourney_image_model, is_atlascloud_qwen_image_model,
         is_atlascloud_registered_image_model, is_atlascloud_vidu_video_model,
         is_gateway_tts_model, is_grsai_pixel_image_model, is_pixverse_video_model,
-        is_seedance_25_video_model, is_seedance_draft_video_model, operations_from_schema,
+        is_seedance_20_video_model, is_seedance_25_video_model, is_seedance_draft_video_model, operations_from_schema,
         provider_scoped_model_definition_id, schema_for_enabled_operations,
         seedance_reference_limits,
     },
@@ -1043,7 +1049,7 @@ fn read_token(container: &Value, keys: &[&str]) -> Option<u64> {
 /// 这些都发生在连接建立之后 —— 请求可能已经到达供应商并开始计费，守卫必须继续
 /// 把它们算作「已发出」。宁可把「可能已送达」多算成一次已送达（挡住重复提交，
 /// 用户去查原任务即可），也不能少算（放过重复提交 = 双倍扣费）。
-fn is_dispatch_failure(error: &reqwest::Error) -> bool {
+pub(crate) fn is_dispatch_failure(error: &reqwest::Error) -> bool {
     error.is_connect() || error.is_builder()
 }
 
@@ -1510,7 +1516,9 @@ impl ProviderRuntime {
         let context = self.resolve_frozen(task)?;
         match task.operation {
             GenerationOperation::TextToImage => {
-                let body = if resolved.operation_schema["requestProfileId"] == FZY_IMAGE_PROFILE {
+                let body = if resolved.operation_schema["requestProfileId"] == super::model_schema::NANO_BANANA_21_PROFILE {
+                    gemini_image::build_body(resolved)?
+                } else if resolved.operation_schema["requestProfileId"] == FZY_IMAGE_PROFILE {
                     build_fzy_image_body(task, resolved)?
                 } else if resolved.operation_schema["requestProfileId"] == GRSAI_IMAGE_PROFILE {
                     build_grsai_image_body(task, resolved)?
@@ -1553,6 +1561,7 @@ impl ProviderRuntime {
                         .and_then(Value::as_str)
                         .unwrap_or("seedream_image_urls");
                     let body = match media_encoding {
+                        "gemini_native_parts" => gemini_image::build_body(resolved)?,
                         "gemini_image_data_uri" => {
                             build_gemini_image_to_image_body(task, resolved)?
                         }
@@ -1686,6 +1695,33 @@ impl ProviderRuntime {
                         .await
                         .map_err(|error| ambiguous_paid_submission(&task.id, error))?
                 };
+                if super::model_schema::seedance_reference_limits(
+                    task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
+                ).is_some() {
+                    let asset_ids: Vec<_> = resolved.images.iter()
+                        .chain(&resolved.videos).chain(&resolved.audios)
+                        .filter_map(|media| media.remote_reference.as_deref())
+                        .filter_map(|reference| reference.strip_prefix("asset://"))
+                        .collect();
+                    // These references were just read with the frozen generation credentials.
+                    // An upstream NotFound now contradicts that receipt; re-uploading or
+                    // replaying a paid submission cannot repair the platform's routing.
+                    let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
+                    if !asset_ids.is_empty() && super::asset_library::asset_lookup_missing(&payload) {
+                        return Err(BackendError::protocol(
+                            "平台素材接口刚返回已就绪，但生成接口却报告素材不存在。请向平台核对素材与生成服务的归属和路由；本次不会自动重新入库或重发生成。",
+                            json!({
+                                "materialRoutingMismatch": true,
+                                "assetIds": asset_ids,
+                                "providerConnectionId": task.provider_connection_id,
+                                "model": task.remote_model_id_snapshot,
+                                "httpStatus": response.status,
+                                "rawResponse": response.body,
+                                "retryable": false,
+                            }),
+                        ));
+                    }
+                }
                 let task_id = match family {
                     Some(GatewayProfile::FzyVideo) => fzy::parse_task_id(&response)?,
                     Some(GatewayProfile::Sp25PerUse) => parse_sp25_video_task_id(&response)?,
@@ -2160,7 +2196,7 @@ impl ProviderRuntime {
                 },
             )
             .await?;
-        let observation = if image_task {
+        let mut observation = if image_task {
             parse_image_observation(&response)?
         } else if GatewayProfile::from_task(task) == Some(GatewayProfile::FzyVideo) {
             fzy::parse_observation(
@@ -2175,6 +2211,16 @@ impl ProviderRuntime {
         } else {
             parse_video_observation(&response)?
         };
+        // Kling's documented `unknown` is a transient post-submission state.
+        // Keep observing the accepted task; this must never cause a new POST.
+        if task.remote_model_id_snapshot.as_deref().is_some_and(super::model_schema::is_moyu_kling_v4_model)
+            && observation.remote_status.eq_ignore_ascii_case("unknown") {
+            let value: Value = serde_json::from_str(&response.body)?;
+            if value.get("id").and_then(Value::as_str) == task.remote_task_id.as_deref()
+                && value.get("error").is_none_or(Value::is_null) {
+                observation.remote_status = "QUEUED".to_string();
+            }
+        }
         Ok((observation, response))
     }
 
@@ -4040,8 +4086,13 @@ impl ProviderRuntime {
         attempt_id: &str,
         provider_connection_id: &str,
         asset_id: &str,
+        generation_credentials: bool,
     ) -> BackendResult<(CapturedHttpResponse, Value)> {
-        let context = self.resolve_asset_library(provider_connection_id)?;
+        let context = if generation_credentials {
+            self.resolve_frozen(task)?
+        } else {
+            self.resolve_asset_library(provider_connection_id)?
+        };
         let body = json!({ "id": asset_id });
         let response = self
             .captured_json(
@@ -4056,9 +4107,21 @@ impl ProviderRuntime {
                 },
             )
             .await?;
-        require_success(&response)?;
-        let value = serde_json::from_str(&response.body)?;
+        // 素材服务负责区分缺失（含 HTTP 404/410 与 200 exists=false）、
+        // 权限错误和未就绪；这里保留真实回执，不能先吞掉缺失分支。
+        let value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
         Ok((response, value))
+    }
+
+    pub(super) async fn generation_asset_get(
+        &self,
+        provider_connection_id: &str,
+        model_definition_id: &str,
+        asset_id: &str,
+    ) -> BackendResult<RawProviderResponse> {
+        let binding = self.storage.get_binding(provider_connection_id, model_definition_id)?;
+        let context = self.resolve_token_group(provider_connection_id, binding.token_group.as_deref())?;
+        self.send_raw_json_request(&context, Method::POST, "/v1/assets/get", &[], Some(&json!({ "id": asset_id })), &[]).await
     }
 
     pub fn client(&self) -> &reqwest::Client {
@@ -4135,12 +4198,16 @@ fn mapped_parameters(
     resolved: &ResolvedGeneration,
     fallback_container: &str,
 ) -> BackendResult<Vec<MappedParameter>> {
-    let values = resolved.parameters.as_object().ok_or_else(|| {
+    let native_values;
+    let values = if resolved.operation_schema.get("requestProfileId").and_then(Value::as_str) == Some(super::model_schema::GPT_IMAGE_25_PROFILE) {
+        native_values = gpt_image25::parameters(resolved)?;
+        &native_values
+    } else { resolved.parameters.as_object().ok_or_else(|| {
         BackendError::validation(
             "normalized generation parameters must be a JSON object",
             json!({ "parameters": resolved.parameters }),
         )
-    })?;
+    })? };
     let definitions = resolved
         .operation_schema
         .get("parameters")
@@ -4259,6 +4326,7 @@ fn build_text_to_image_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<Value> {
+    super::model_schema::validate_seedream_pro_references(task.remote_model_id_snapshot.as_deref(), &resolved.parameters, resolved.images.len())?;
     if !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty() {
         return Err(BackendError::validation(
             "text-to-image cannot encode media references",
@@ -4297,6 +4365,7 @@ fn build_seedream_image_to_image_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<Value> {
+    super::model_schema::validate_seedream_pro_references(task.remote_model_id_snapshot.as_deref(), &resolved.parameters, resolved.images.len())?;
     if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
         return Err(BackendError::validation(
             "seedream image-to-image only accepts image reference inputs",
@@ -6352,6 +6421,9 @@ fn build_video_body(
     let has_media =
         !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty();
     ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if resolved.operation_schema.pointer("/request/mediaEncoding").and_then(Value::as_str) == Some("kling_v4_inputs") {
+        return kling_v4::build_body(model, resolved);
+    }
     if matches!(model, "kling-v3" | "kling-v3-omni")
         && resolved.operation_schema.get("requestProfileId").and_then(Value::as_str)
             == Some("moyu_video_metadata_v1")
@@ -6487,14 +6559,11 @@ fn build_video_body(
     // 这里把渲染后的提示词作为 content 首个 text 条目写入（媒体项随后），并保持
     // 顶层 prompt 非空以满足平台校验；纯文生视频（无媒体）维持 content 为空，
     // 由平台按既有行为回退到顶层 prompt。
-    let prompt = seedance_task_prompt(model, resolved, video_prompt(resolved));
-    if seedance_draft {
-        body.insert(prompt_field.clone(), json!("占位"));
-    }
+    let prompt = seedance_task_prompt(model, resolved, seedance::prompt(model, resolved)?);
     if !prompt.trim().is_empty() {
-        if !seedance_draft {
-            body.insert(prompt_field, Value::String(prompt.clone()));
-        }
+        // Gateways may choose either prompt location. Both carry the same canonical
+        // instructions so a route change cannot replace the user's prompt with a placeholder.
+        body.insert(prompt_field, Value::String(prompt.clone()));
         if has_media || seedance_draft {
             content.insert(0, json!({ "type": "text", "text": prompt }));
         }
@@ -6589,7 +6658,7 @@ pub(crate) fn seedance_video_task_type(
 }
 
 fn seedance_task_prompt(model: &str, resolved: &ResolvedGeneration, prompt: String) -> String {
-    if !is_seedance_25_video_model(model) {
+    if !is_seedance_25_video_model(model) && !is_seedance_20_video_model(model) {
         return prompt;
     }
     match seedance_video_task_type(resolved.video_task_type, &resolved.parameters) {
@@ -6630,7 +6699,7 @@ fn validate_seedance_25_video_task(
     }
     if let Some(local_type) = resolved.video_task_type
         && let Some(remote_type) = resolved.parameters["omni_reference_task_type"].as_str()
-        && remote_type != local_type.omni_reference_task_type()
+        && remote_type != seedance::wire_task_type(resolved)
     {
         return Err(BackendError::validation(
             "视频任务类型与模型参数不一致，请重新选择任务类型",
@@ -7454,6 +7523,13 @@ fn parse_task_image_submission(
         return parse_atlascloud_image_submission(response);
     }
     if !is_fzy_image_task(task) {
+        if super::model_schema::is_nano_banana_21_model(task.remote_model_id_snapshot.as_deref().unwrap_or_default()) {
+            require_success(response)?;
+            if let Ok(value) = serde_json::from_str::<Value>(&response.body) {
+                let sources = gemini_image::image_sources(&value);
+                if !sources.is_empty() { return Ok(GenerationSubmission::Images(sources)); }
+            }
+        }
         return parse_image_submission(response);
     }
     if let Err(mut error) = require_success(response) {
@@ -7818,6 +7894,10 @@ fn sp25_response_error(status: u16, raw: &str, fallback: &str) -> BackendError {
 }
 
 fn seedance_ambiguous_submission_error(error: BackendError) -> BackendError {
+    // A failed connection/request construction cannot create a paid remote task.
+    if matches!(&error, BackendError::Transport(transport) if is_dispatch_failure(transport)) {
+        return error;
+    }
     if matches!(
         error,
         BackendError::Validation { .. } | BackendError::Url(_)
@@ -8415,6 +8495,7 @@ fn parse_video_observation(
 ///   `metadata.url` 等。
 fn extract_video_url(value: &Value) -> Option<String> {
     const PROBED_PATHS: &[&str] = &[
+        "/video_url",
         "/result_url",
         "/url",
         "/output/video_url",

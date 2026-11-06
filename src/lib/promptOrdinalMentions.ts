@@ -1,5 +1,5 @@
 import type { MediaType } from "./backend";
-import { createPromptReference, type PromptReferenceCandidate } from "./promptReferences";
+import { createPromptReference, PROMPT_REFERENCE_LABELS, type PromptReferenceCandidate } from "./promptReferences";
 import { pickPromptTextStyle } from "./promptRichText";
 // 文档形状只做类型引用；运行时依赖保持单向（promptContent → promptOrdinalMentions）。
 import type { PromptContentDocumentV1, PromptContentItem } from "./promptContent";
@@ -19,20 +19,21 @@ import type { PromptContentDocumentV1, PromptContentItem } from "./promptContent
 
 /** 关键词 → 序号标签词。左列写在正文里，右列是展示标签："图2" 与 "素材2" 指同一份输入。 */
 const KEYWORD_LABELS: readonly (readonly [readonly string[], string])[] = [
-  [["参考图", "图片", "图"], "图"],
-  [["参考视频", "视频"], "视频"],
-  [["参考音频", "音频"], "音频"],
+  [PROMPT_REFERENCE_LABELS.image, "图"],
+  [PROMPT_REFERENCE_LABELS.video.filter(label => label !== "视"), "视频"],
+  [PROMPT_REFERENCE_LABELS.audio.filter(label => label !== "音"), "音频"],
   [["参考素材", "素材"], "素材"],
 ];
 const KEYWORDS = KEYWORD_LABELS.flatMap(([words]) => words).sort(
   (first, second) => second.length - first.length,
 );
-const KEYWORD_PATTERN = KEYWORDS.join("|");
+const keywordPattern = (word: string) => word.endsWith(" ") ? `${word.trimEnd()}[ \\t]+` : word;
+const KEYWORD_PATTERN = KEYWORDS.map(keywordPattern).join("|");
 /**
  * 序号后面跟着的关键词，长写法优先（「第2张参考图」是参考图，不是「图」）：
  * 锚定式与相对式都用它把类型读出来，否则「第2张」只能猜类型。
  */
-const TRAILING_KEYWORD_PATTERN = [...KEYWORDS, "帧"].join("|");
+const TRAILING_KEYWORD_PATTERN = [...KEYWORDS, "帧"].map(keywordPattern).join("|");
 
 const CN_DIGITS: Readonly<Record<string, number>> = {
   〇: 0,
@@ -58,7 +59,7 @@ const CN_DIGITS: Readonly<Record<string, number>> = {
   玖: 9,
 };
 const CN_DIGIT_CLASS = Object.keys(CN_DIGITS).join("");
-const NUMBER = `\\d{1,2}|[${CN_DIGIT_CLASS}十]{1,3}`;
+const NUMBER = `\\d+|[${CN_DIGIT_CLASS}十]{1,3}`;
 const COUNTER = "位|个|张|幅|帧|条|段|份|号";
 
 /** 相对位置词：读得出排序意图，读不出确定序号。 */
@@ -93,7 +94,7 @@ const MENTION_PATTERN = new RegExp(
     `(?<keyword>${KEYWORD_PATTERN})(?<suffix>${NUMBER})(?:${COUNTER})?`,
     `(?<relative>(?:${RELATIVE_PATTERN})(?:${RELATIVE_QUANTIFIER})?)(?<relativeKeyword>${TRAILING_KEYWORD_PATTERN})?`,
   ].join("|"),
-  "gu",
+  "giu",
 );
 /** 紧邻命中区间的关键词（「图」「参考图」）；命中不到说明这段位置词没落到素材上。 */
 const TRAILING_KEYWORD_MATCHER = new RegExp(`^(?:${KEYWORD_PATTERN})`);
@@ -132,6 +133,8 @@ export interface PromptUnboundMention {
   readonly reason: "relative" | "out-of-range";
   /** 该类型已连接的素材数，用于说明「图3」为什么落空。 */
   readonly candidateCount: number;
+  readonly mediaType?: MediaType | null;
+  readonly position?: number;
 }
 
 export interface PromptOrdinalScan {
@@ -170,9 +173,9 @@ export function chineseNumber(value: string): number | null {
 export function ordinalValue(text: string): number | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
-  if (/^\d{1,2}$/u.test(trimmed)) {
+  if (/^\d+$/u.test(trimmed)) {
     const value = Number.parseInt(trimmed, 10);
-    return value >= 1 ? value : null;
+    return Number.isSafeInteger(value) && value >= 1 ? value : null;
   }
   return chineseNumber(trimmed);
 }
@@ -183,13 +186,15 @@ export function labelKeywordFor(kind: MediaType): string {
 }
 
 function keywordLabel(keyword: string): string {
-  return keyword === "参考图" || keyword === "图片" ? "图" : keyword;
+  const normalized = keyword.toLowerCase().trimEnd();
+  return KEYWORD_LABELS.find(([words]) => words.some(word => word.toLowerCase().trimEnd() === normalized))?.[1] ?? keyword;
 }
 
 function kindOfKeyword(keyword: string | undefined): MediaType | null {
   if (keyword == null) return null;
-  if (keyword.includes("视频")) return "video";
-  if (keyword.includes("音频")) return "audio";
+  if (keywordLabel(keyword) === "素材") return null;
+  if (keywordLabel(keyword) === "视频") return "video";
+  if (keywordLabel(keyword) === "音频") return "audio";
   return "image";
 }
 
@@ -200,10 +205,10 @@ export function kindOrdinals(
   const counters = new Map<MediaType, number>();
   const byKind = new Map<MediaType, number[]>();
   candidates.forEach((candidate, index) => {
-    const ordinal = (counters.get(candidate.kind) ?? 0) + 1;
-    counters.set(candidate.kind, ordinal);
+    const ordinal = candidate.typePosition ?? (counters.get(candidate.kind) ?? 0) + 1;
+    counters.set(candidate.kind, Math.max(counters.get(candidate.kind) ?? 0, ordinal));
     const indexes = byKind.get(candidate.kind) ?? [];
-    indexes.push(index);
+    indexes[ordinal - 1] = index;
     byKind.set(candidate.kind, indexes);
   });
   return byKind;
@@ -320,7 +325,7 @@ function indexAt(indexes: readonly number[] | undefined, position: number): numb
   if (indexes == null || indexes.length === 0) return null;
   const ordinal = position === -1 ? indexes.length : position;
   if (ordinal < 1 || ordinal > indexes.length) return null;
-  return indexes[ordinal - 1]!;
+  return indexes[ordinal - 1] ?? null;
 }
 
 /** 正文里所有可解析的位置词：能绑定的与读不出序号的（未绑定）分开回报。 */
@@ -334,29 +339,38 @@ export function scanOrdinalMentions(
     const byKind = kindOrdinals(candidates);
     for (const raw of dropOverlaps(rawMatches(text))) {
       if (!boundaryBefore(text, raw.from, raw.text.length)) continue;
+      const at = text[raw.from - 1];
+      const explicit = (at === "@" || at === "\uff20") && !/[a-z0-9_.@/\\-]/i.test(text[raw.from - 2] ?? "");
+      if (!explicit && raw.keyword && /^[a-z]/i.test(raw.keyword) && /[a-z0-9_.@/\\-]/i.test(text[raw.from - 1] ?? "")) continue;
+      const from = explicit ? raw.from - 1 : raw.from;
       if (!boundaryAfter(text, raw.to)) continue;
-      if (raw.kind == null) {
+      const generic = raw.keyword != null && keywordLabel(raw.keyword) === "素材";
+      if (raw.kind == null && !generic) {
         // 「第一张」：读不出类型，归到图片类之外——按当前候选说明它为什么没被绑定。
-        unbound.push({ text: raw.text, reason: "relative", candidateCount: candidates.length });
+        unbound.push({ text: text.slice(from, raw.to), reason: "relative", candidateCount: candidates.length });
         continue;
       }
-      const indexes = byKind.get(raw.kind);
+      const allIndexes: number[] = [];
+      if (generic) candidates.forEach((candidate, index) => { allIndexes[(candidate.contentIndex ?? index + 1) - 1] = index; });
+      const indexes = generic ? allIndexes : byKind.get(raw.kind!);
       const candidateIndex = indexAt(indexes, raw.position);
       if (candidateIndex == null) {
-        const count = indexes?.length ?? 0;
+        const count = indexes?.filter(index => index !== undefined).length ?? 0;
         unbound.push({
-          text: raw.text,
-          reason: count === 0 ? "relative" : "out-of-range",
+          text: text.slice(from, raw.to),
+          reason: "out-of-range",
           candidateCount: count,
+          mediaType: raw.kind,
+          position: raw.position,
         });
         continue;
       }
       matched.push({
-        from: raw.from,
+        from,
         to: raw.to,
-        text: raw.text,
+        text: text.slice(from, raw.to),
         ...(raw.keyword != null ? { keyword: raw.keyword } : {}),
-        label: `${raw.keyword != null ? keywordLabel(raw.keyword) : labelKeywordFor(raw.kind)}${
+        label: `${raw.keyword != null ? keywordLabel(raw.keyword) : labelKeywordFor(candidates[candidateIndex]!.kind)}${
           raw.position === -1 ? (indexes?.length ?? 1) : raw.position
         }`,
         position: raw.position === -1 ? (indexes?.length ?? 1) : raw.position,

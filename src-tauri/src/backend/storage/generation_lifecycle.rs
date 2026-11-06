@@ -1662,6 +1662,26 @@ fn decide_terminal_replay(
     current: &CurrentTaskState,
     transition: GenerationTaskTransition,
 ) -> BackendResult<NextTaskState> {
+    // A legacy Kling gateway UNKNOWN observation is transient, not a new
+    // generation. Resume only the same acknowledged remote identity and only
+    // this explicit observation error; other terminal tasks remain immutable.
+    if let GenerationTaskTransition::AcceptRemoteVideo { remote_task_id } = &transition
+        && current.status == GenerationTaskStatus::Unknown
+        && current.operation == GenerationOperation::VideoGeneration
+        && !remote_task_id.trim().is_empty()
+        && current.remote_task_id.as_deref() == Some(remote_task_id.as_str())
+        && current.final_error.as_ref().and_then(|error| error.get("kind")).and_then(Value::as_str) == Some("remote_generation_unknown") {
+        return Ok(NextTaskState {
+            status: GenerationTaskStatus::Queued, query_health: QueryHealth::Healthy,
+            remote_task_id: current.remote_task_id.clone(), progress: current.progress,
+            final_error: None, completed_at: None,
+            event: Some(PersistedTaskTransitionEvent::StateChanged {
+                from_status: current.status, status: GenerationTaskStatus::Queued,
+                from_query_health: current.query_health, query_health: QueryHealth::Healthy,
+                progress: current.progress, error: None,
+            }),
+        });
+    }
     let replayed_status = match &transition {
         GenerationTaskTransition::Succeed => Some(GenerationTaskStatus::Succeeded),
         GenerationTaskTransition::Fail { .. } => Some(GenerationTaskStatus::Failed),

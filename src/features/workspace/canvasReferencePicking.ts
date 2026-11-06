@@ -1,9 +1,12 @@
 import { createContext, useCallback, useLayoutEffect, useMemo, useState, type RefObject } from "react";
 import { useStore } from "zustand";
 import { useEscapeHandler } from "../../components/escapeArbiter";
-import { isSupportedConnection, type CanvasNodeEntry, type CanvasStore } from "../canvas/canvasStore";
+import { canvasReadModelOfState, isSupportedConnection, planCanvasConnection, type CanvasNodeEntry, type CanvasStore } from "../canvas/canvasStore";
+import { promptContentReferenceCandidates, type PromptContentMediaReferenceItem, type PromptContentModule } from "../../lib/promptContent";
+import { buildReferenceCatalog, candidateTarget, createPromptReference, type PromptReferenceCandidate } from "../../lib/promptReferences";
+import { sameMediaReferenceTarget, sameMediaSourceIdentity } from "../../lib/promptReferenceTarget";
 import { imageNodePreview } from "./imageNodeResults";
-import { cloudAssetAwaitingId, outputNodeReferenceTarget, type AssetItem, type AssetKind, type OutputNodeData } from "./workspaceModel";
+import { assetGenerationInput, outputGenerationInput, generationInputMentionCandidate, cloudAssetAwaitingId, outputNodeReferenceTarget, type AssetItem, type AssetKind, type OutputNodeData } from "./workspaceModel";
 
 export interface CanvasReferenceSession {
   readonly targetKey: string;
@@ -15,6 +18,13 @@ export interface CanvasReferenceSession {
 export const CanvasReferencePickingContext = createContext<{
   readonly session: CanvasReferenceSession | null;
   readonly setSession: (session: CanvasReferenceSession | null) => void;
+  readonly readMentionSources: (targetKey: string) => readonly PromptReferenceCandidate[];
+  readonly connectMention: (targetKey: string, source: PromptReferenceCandidate) => readonly PromptReferenceCandidate[];
+  readonly replaceMention: (
+    targetKey: string,
+    previous: PromptContentMediaReferenceItem,
+    source: PromptReferenceCandidate,
+  ) => readonly PromptReferenceCandidate[];
 } | null>(null);
 
 type Choice = { readonly sourceKey: string; readonly edgeIds: readonly string[] };
@@ -22,7 +32,7 @@ type State = Pick<ReturnType<CanvasStore["getState"]>, "nodesById" | "assetEdges
 
 export function acceptsReferenceMedia(target: CanvasNodeEntry | undefined, kind: AssetKind): boolean {
   return target?.type === "videoClip" || (target?.type === "gen" &&
-    (target.data.kind === "video" || target.data.kind === kind));
+    (target.data.kind === "video" || target.data.kind === kind || (target.data.kind === "prompt" && kind === "image")));
 }
 
 function choicesFor(state: State, targetKey: string): ReadonlyMap<string, Choice> {
@@ -91,6 +101,7 @@ export function useCanvasReferencePicking(
   store: CanvasStore,
   viewport: RefObject<HTMLDivElement | null>,
   editorKey: string | null,
+  promptContents: PromptContentModule,
 ) {
   const [requestedSession, setSession] = useState<CanvasReferenceSession | null>(null);
   const session = requestedSession?.targetKey === editorKey ? requestedSession : null;
@@ -224,6 +235,104 @@ export function useCanvasReferencePicking(
     };
   }, [selectedByNode, targetKey, viewport]);
 
-  const context = useMemo(() => ({ session, setSession }), [session]);
+  const readMentionSources = useCallback((targetKey: string) => {
+    const state = store.getState();
+    const model = canvasReadModelOfState(state);
+    const candidates: PromptReferenceCandidate[] = [];
+    const seen = new Set<string>();
+    for (const [key, choice] of choicesFor(state, targetKey)) {
+      const entry = state.nodesById[key];
+      if (!entry) continue;
+      let input = entry.type === "asset" ? assetGenerationInput(entry.data)
+        : entry.type === "output" ? outputGenerationInput(entry.data) : null;
+      if (entry.type === "gen") {
+        const output = entry.data.kind === "image" ? imageNodePreview(entry.data) ?? model.nodes.output.filter(output => output.sourceNodeId === key && output.mediaType === "image").at(-1)
+          : model.nodes.output.find(output => output.key === choice.sourceKey);
+        if (output) input = outputGenerationInput(output);
+      }
+      if (!input || seen.has(choice.sourceKey)) continue;
+      seen.add(choice.sourceKey);
+      candidates.push(generationInputMentionCandidate({ ...input, key: choice.sourceKey,
+        target: { ...input.target, canvasNodeKey: choice.sourceKey } }));
+    }
+    return candidates;
+  }, [store]);
+  const connectMention = useCallback((targetKey: string, source: PromptReferenceCandidate) => {
+    const current = readMentionSources(targetKey).find(item => item.canvasNodeKey === source.canvasNodeKey);
+    if (!current || !sameMediaReferenceTarget(candidateTarget(current), candidateTarget(source))) {
+      throw new Error("素材已变化，请重新选择。");
+    }
+    const result = store.getState().connect(current.canvasNodeKey, targetKey);
+    if (result.status === "rejected") throw new Error("这份素材暂时不能连接到当前节点。");
+    return canvasReadModelOfState(store.getState()).resolveInputs(targetKey).media.map(generationInputMentionCandidate);
+  }, [readMentionSources, store]);
+  const replaceMention = useCallback((targetKey: string, previous: PromptContentMediaReferenceItem, source: PromptReferenceCandidate) => {
+    if (editorKey !== targetKey) throw new Error("当前节点已切换，请重新选择素材。");
+    const before = promptContents.snapshotAll();
+    const document = before[targetKey];
+    const current = document?.items.find(item => item.kind === "media_reference" && item.mentionId === previous.mentionId);
+    if (!document || current?.kind !== "media_reference" || current.canvasNodeKey !== previous.canvasNodeKey ||
+        !sameMediaReferenceTarget(current.target, previous.target)) {
+      throw new Error("原引用已变化，请重新打开替换菜单。");
+    }
+
+    const state = store.getState();
+    const inputs = canvasReadModelOfState(state).resolveInputs(targetKey).media;
+    const attachments = document.items.filter(item => item.kind === "attachment");
+    const sourceTarget = candidateTarget(source);
+    let candidates = promptContentReferenceCandidates(inputs.map(generationInputMentionCandidate), attachments);
+    let replacement = candidates.find(item => item.canvasNodeKey === source.canvasNodeKey);
+    if (replacement && !sameMediaReferenceTarget(candidateTarget(replacement), sourceTarget)) {
+      throw new Error("素材已变化，请重新选择。");
+    }
+    if (replacement?.canvasNodeKey === current.canvasNodeKey && sameMediaReferenceTarget(current.target, sourceTarget)) {
+      return candidates;
+    }
+
+    let graph: Pick<State, "nodesById" | "assetEdges"> & { readonly selectedEdgeId: string | null } = state;
+    let replaceAllOccurrences = false;
+    if (!replacement) {
+      const liveSource = readMentionSources(targetKey).find(item => item.canvasNodeKey === source.canvasNodeKey);
+      if (!liveSource || !sameMediaReferenceTarget(candidateTarget(liveSource), sourceTarget)) {
+        throw new Error("素材已变化，请重新选择。");
+      }
+      const oldInput = inputs.find(input => input.key === current.canvasNodeKey && sameMediaReferenceTarget(input.target, current.target));
+      // Only exchange a direct edge that contributes exactly the reference being replaced.
+      const oldEdge = oldInput?.kind === liveSource.kind && inputs.filter(input => input.edgeId === oldInput.edgeId).length === 1
+        ? state.assetEdges.find(edge => edge.id === oldInput.edgeId && edge.toKey === targetKey && edge.fromKey === current.canvasNodeKey)
+        : undefined;
+      const plan = planCanvasConnection(state, liveSource.canvasNodeKey, targetKey, oldEdge);
+      if (plan.result.status === "rejected") throw new Error("这份素材暂时不能连接到当前节点。");
+      graph = plan.graph;
+      const projected = canvasReadModelOfState({ ...state, ...graph }).resolveInputs(targetKey).media;
+      const edgeId = plan.result.status === "connected" ? plan.result.edge.id : plan.result.edgeId;
+      const nextInput = projected.find(input => input.edgeId === edgeId && sameMediaSourceIdentity(input.target, sourceTarget));
+      if (!nextInput) throw new Error("所选素材尚未就绪，请重新选择。");
+      candidates = promptContentReferenceCandidates(projected.map(generationInputMentionCandidate), attachments);
+      replacement = candidates.find(item => item.canvasNodeKey === nextInput.key);
+      replaceAllOccurrences = plan.result.status === "connected" && plan.result.replacedEdgeIds.length > 0;
+    }
+    if (!replacement) throw new Error("所选素材尚未就绪，请重新选择。");
+
+    const alias = buildReferenceCatalog(candidates).aliases[candidates.indexOf(replacement)]!.label;
+    const reference = createPromptReference(replacement, { alias });
+    const items = document.items.map(item => {
+      if (item.kind !== "media_reference") return item;
+      const matchesOld = item.canvasNodeKey === current.canvasNodeKey && sameMediaReferenceTarget(item.target, current.target);
+      if (item.mentionId !== current.mentionId && !(replaceAllOccurrences && matchesOld)) return item;
+      return {
+        ...reference,
+        mentionId: item.mentionId,
+        ...(item.block === undefined ? {} : { block: item.block }),
+        ...(item.indent === undefined ? {} : { indent: item.indent }),
+        ...(item.trailing === undefined ? {} : { trailing: item.trailing }),
+      };
+    });
+    state.setPromptDocuments(before);
+    state.commitPromptReferenceChange(graph, { ...before, [targetKey]: { ...document, items } });
+    return candidates;
+  }, [editorKey, promptContents, readMentionSources, store]);
+  const context = useMemo(() => ({ session, setSession, readMentionSources, connectMention, replaceMention }),
+    [session, readMentionSources, connectMention, replaceMention]);
   return { context, session, selectedByNode, acceptsAsset, assetOrder, stop, toggleNodes, toggleAsset };
 }

@@ -1,5 +1,6 @@
 import { ImageLightbox } from "../../components/ImageLightbox";
 import { CanvasNodeActionsMenu } from "./CanvasNodeActionsMenu";
+import { useReferenceMediaPreview } from "./ReferenceMediaPreview";
 import { Icon } from "../../components/Icon";
 import { ErrorAlert } from "../../components/ErrorAlert";
 import { useModalFocusTrap } from "../../components/useModalFocusTrap";
@@ -22,6 +23,8 @@ import { saveCanvasCameraPreferences } from "../../lib/canvasCameraControl";
 import { canvasImagePreset, CANVAS_IMAGE_PROMPT_PLACEHOLDER } from "../../lib/canvasImagePresets";
 import { compileCanvasVideoMode } from "../../lib/canvasVideoMode";
 import { DEFAULT_LONG_VIDEO } from "../../lib/longVideo";
+import { isSeedreamProImageModel, seedreamProParameterIssue } from "../../lib/seedreamPro";
+import { GPT_IMAGE_25_PROFILE, gptImage25Size, gptImage25SizeIssue } from "../../lib/gptImage25";
 import { LongVideoProcess } from "./LongVideoProcess";
 import "./CanvasGenEditor.css";
 import {
@@ -171,7 +174,7 @@ export function CanvasGenNode({
   /** 直连素材在其槽位表里的位置；参考清单据此保留空位、不自动上移。 */
   readonly inputSlotPositions?: ReadonlyMap<string, number> | undefined;
   readonly mentionCandidates: readonly MentionCandidate[];
-  /** 画布上仍然存在的节点 key；用于把已删除素材的失效引用按同源/同名自愈重连。 */
+  /** 画布上仍然存在的节点 key；用于把已删除素材的失效引用按同源身份重连。 */
   readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
   readonly promptSourceName?: string | undefined;
   readonly registerPromptInput: (
@@ -237,6 +240,13 @@ export function CanvasGenNode({
       .map((input) => input.key),
   );
   const referenceInputCount = effectiveInputs.length;
+  const imageModel = !isVideo ? providerCatalog.find(entry => entry.provider.id === node.config.modelSelection.providerId)?.models.find(model => model.definitionId === node.config.modelSelection.modelDefinitionId) : undefined;
+  const seedreamProContract = imageModel && Object.values(imageModel.operationSchema).some(operation =>
+    (operation as Record<string, unknown> | undefined)?.["requestProfileId"] === "moyu_seedream_image_v1");
+  const imageParameterIssue = !isVideo && node.config.imageMode !== "upscale" && imageModel && seedreamProContract && isSeedreamProImageModel(imageModel.remoteModelId)
+    ? seedreamProParameterIssue(node.config.parameterValues)
+    : !isVideo && node.config.imageMode !== "upscale" && imageModel && Object.values(imageModel.operationSchema).some(operation => (operation as Record<string, unknown> | undefined)?.["requestProfileId"] === GPT_IMAGE_25_PROFILE)
+      ? gptImage25SizeIssue(gptImage25Size(node.config.parameterValues)) : null;
   const promptLabelId = `${node.kind}-prompt-label-${node.key}`;
   const promptHintId = `${node.kind}-prompt-hint-${node.key}`;
   const selectionReady = !isVideo && node.config.imageMode === "upscale"
@@ -407,6 +417,8 @@ export function CanvasGenNode({
             config={node.config}
             providerCatalog={providerCatalog}
             mediaInputs={effectiveInputs}
+            promptContents={promptContents}
+            nodeKey={node.key}
             onChange={(config) => onVideoConfigChange(node.key, config)}
           />
         ) : (
@@ -441,7 +453,8 @@ export function CanvasGenNode({
                     ? "提交新的图片生成任务"
                     : "点击开始图片生成"
             }
-            disabled={submissionBusy || !selectionReady}
+            data-tooltip={imageParameterIssue ?? undefined}
+            disabled={submissionBusy || !selectionReady || imageParameterIssue != null}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -571,16 +584,6 @@ function CanvasAssetNodeVideoVisual({
   readonly onLoadError?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const attachVideo = useCallback((video: HTMLVideoElement | null) => {
-    const previous = videoRef.current;
-    if (previous != null && previous !== video) {
-      // ref 在 DOM 移除前清理：主动释放正在解码的来源，不等待浏览器清理脱离的元素。
-      previous.pause();
-      previous.removeAttribute("src");
-      previous.load();
-    }
-    videoRef.current = video;
-  }, []);
   const wasPreviewingRef = useRef(false);
   const previewingRef = useRef(previewing);
   previewingRef.current = previewing;
@@ -599,6 +602,21 @@ function CanvasAssetNodeVideoVisual({
     (localTarget.kind === "local_base64_asset" || primarySrc == null || failedPrimarySrc === primarySrc);
   const fallback = needsLocalPreview && localPreview?.input === primarySrc ? localPreview : null;
   const proxiedVideoUrl = needsLocalPreview && !fallback ? null : fallback?.src ?? primarySrc;
+  const attachVideo = useCallback((video: HTMLVideoElement | null) => {
+    const previous = videoRef.current;
+    videoRef.current = video;
+    if (previous != null && previous !== video) {
+      // 先摘掉引用，再释放旧解码器，清理事件不能把当前预览标成失败。
+      previous.pause();
+      previous.removeAttribute("src");
+      previous.load();
+    }
+    // StrictMode 会清理 ref 后重挂同一个 DOM；React 不会重新写回被清理的 src。
+    if (video != null && proxiedVideoUrl != null && video.getAttribute("src") !== proxiedVideoUrl) {
+      video.setAttribute("src", proxiedVideoUrl);
+      video.load();
+    }
+  }, [proxiedVideoUrl]);
   const coverReady = proxiedVideoUrl != null && readyVideoUrl === proxiedVideoUrl;
   const videoFailed = proxiedVideoUrl != null ? failedVideoUrl === proxiedVideoUrl
     : needsLocalPreview ? fallback != null : true;
@@ -730,7 +748,11 @@ function CanvasAssetNodeVideoVisual({
                   seekToCover(event.currentTarget);
                 }
               }}
-              onError={() => markVideoFailed(proxiedVideoUrl)}
+              onError={(event) => {
+                if (videoRef.current === event.currentTarget && event.currentTarget.getAttribute("src") === proxiedVideoUrl) {
+                  markVideoFailed(proxiedVideoUrl);
+                }
+              }}
             />
           ) : null}
         </>
@@ -1025,7 +1047,7 @@ export function CanvasAssetNode({
           </button>
         </CanvasNodeActionsMenu>
       ) : null}
-      {onSaveToLibrary && !awaitingCloudId ? (
+      {onSaveToLibrary && !awaitingCloudId && !(mediaCard && node.kind === "image") ? (
         <CanvasMediaSaveMenu
           triggerLabel={`保存素材：${node.name}`}
           onSave={(destination) => onSaveToLibrary(node.key, destination)}
@@ -2161,14 +2183,11 @@ function referenceAssetIdentity(
 /**
  * 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。
  *
- * 清单按槽位位置逐行展开：某个位置上的素材被解绑或删除后，其余素材不整体上移，
- * 该位置留一行「空位」，新素材连进来就填回这个空位；用户仍可主动调整直连素材顺序。
- * 每行的编号是该素材实际被提交的序号（即请求体里的「图片N」）；空位没有素材，用「—」占位。
+ * 缩略图只显示现有素材。持久化槽位仍负责身份与排序，界面编号与供应商的分类编号一致。
  */
 export function GenerationInputChips({
   inputs,
   imageOnly = false,
-  positions,
   onUnlink,
   onInsertReference,
   reorderableKeys,
@@ -2188,6 +2207,7 @@ export function GenerationInputChips({
   readonly onReorder?: (sourceKey: string, targetKey: string) => void;
 }) {
   const [dragSourceKey, setDragSourceKey] = useState<string | null>(null);
+  const referencePreview = useReferenceMediaPreview();
   const pointerDragRef = useRef<{
     pointerId: number;
     sourceKey: string;
@@ -2211,57 +2231,15 @@ export function GenerationInputChips({
       ? key
       : null;
   };
-  // 每个素材落在哪一行：直连素材按槽位位置落座——被解绑/删除的素材留下空槽，位置留着，
-  // 其余素材不顶上来，新连线填回空槽后拿回原来的位置。没有槽位记录的素材（随提示词继承、
-  // 旧文档残留连线）接在最后一行之后，不会插进前面的空槽（那会让它的编号小于后面的素材）。
-  const rowByIndex = new Map<number, number>();
-  let nextRow = 0;
-  inputs.forEach((input, index) => {
-    const position = positions?.get(input.key);
-    const row = position != null && position >= 0 ? position : nextRow;
-    rowByIndex.set(row, index);
-    nextRow = Math.max(nextRow, row + 1);
-  });
-  // 修复落行冲突：前面的素材占了空槽后，后面素材的槽位号可能与它相同
-  // （例如槽位表 [A, B, C] 删掉 B 后，C 仍在槽位 2，而新素材填回槽位 1）。
-  // 从后往前让位，保证清单自上而下的顺序与提交顺序一致。
-  const rowOrder = [...rowByIndex.keys()].sort((left, right) => right - left);
-  const claimed = new Set<number>();
-  for (const row of rowOrder) {
-    let target = row;
-    while (claimed.has(target)) target += 1;
-    const index = rowByIndex.get(row)!;
-    rowByIndex.delete(row);
-    rowByIndex.set(target, index);
-    claimed.add(target);
-  }
-  const lastRow = rowOrder.length ? Math.max(...claimed) : -1;
-  // 末尾的空槽不渲染：只剩一条连线时解绑不该在清单里留下常驻空行。
-  const rowCount = Math.max(inputs.length, lastRow + 1);
-  // 编号即实际提交顺序：inputs 已由 canvasInputs 按槽位排好序，就是交给生成请求的顺序。
-  // 槽位号只负责落行位置，不参与编号——空槽不占编号，避免与请求体的「图片N」错位。
-  const orderByIndex = new Map(inputs.map((input, index) => [input.key, index + 1]));
+  const counters = new Map<AssetKind, number>();
+  const orderByIndex = new Map(inputs.map(input => {
+    const ordinal = (counters.get(input.kind) ?? 0) + 1;
+    counters.set(input.kind, ordinal);
+    return [input.key, ordinal];
+  }));
   return (
-    <ol className="node-media-inputs" aria-label="生成参考素材，按传入顺序排列">
-      {Array.from({ length: rowCount }, (_, row) => {
-        const index = rowByIndex.get(row);
-        if (index == null) {
-          // 空位没有素材，也就没有提交编号：只标出位置，编号留给填进来的素材。
-          return (
-            <li
-              key={`empty-slot:${row}`}
-              className="node-media-chip is-empty-slot"
-              aria-label={`参考素材第 ${row + 1} 位为空位`}
-              title={`第 ${row + 1} 位空着：新连接的素材会填回这个位置`}
-            >
-              <span className="node-media-chip__order" aria-hidden="true">
-                —
-              </span>
-              <span className="node-media-chip__name">空位 · 新连线填回此处</span>
-            </li>
-          );
-        }
-        const input = inputs[index]!;
+    <><ol className="node-media-inputs" aria-label="生成参考素材，按传入顺序排列">
+      {inputs.map(input => {
         const inherited = "promptNodeKey" in input;
         const isOutput = !inherited && input.sourceLabel === "产物";
         const orderNumber = orderByIndex.get(input.key)!;
@@ -2289,7 +2267,12 @@ export function GenerationInputChips({
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
             className={`node-media-chip${!imageOnly && inherited ? " is-inherited" : ""}${!imageOnly && isOutput ? " is-output" : ""}${canReorder ? " is-reorderable nodrag nopan" : ""}${dragSourceKey === input.key ? " is-dragging" : ""}${dropTargetKey === input.key ? " is-drop-target" : ""}`}
             data-media-input-key={input.key}
-            data-tooltip={input.name}
+            onPointerEnter={event => { if (event.pointerType !== "touch") referencePreview.show(event.currentTarget,
+              { key: input.key, name: input.name, kind: input.kind, url: input.previewUrl, assetId: identity?.assetId }); }}
+            onPointerLeave={referencePreview.hide}
+            onFocus={event => referencePreview.show(event.currentTarget,
+              { key: input.key, name: input.name, kind: input.kind, url: input.previewUrl, assetId: identity?.assetId })}
+            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) referencePreview.hide(); }}
             draggable={false}
             /*
              * 原站 liblib 的参考缩略图是 48×48 方块，靠拖拽排序，没有上移/下移按钮；
@@ -2297,7 +2280,7 @@ export function GenerationInputChips({
              * （方块可聚焦，↑ / ↓ 调整顺序）。排序使用指针捕获，避免 Windows
              * WebView2 的原生文件拖放接管 HTML5 拖放；本机文件拖入仍保持原路径。
              */
-            tabIndex={canReorder ? 0 : undefined}
+            tabIndex={0}
             onKeyDown={(event) => {
               if (!canReorder || event.target !== event.currentTarget || event.nativeEvent.isComposing || event.keyCode === 229 || event.ctrlKey || event.metaKey || event.altKey) return;
               if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
@@ -2308,6 +2291,7 @@ export function GenerationInputChips({
               onReorder?.(input.key, target);
             }}
             onPointerDown={canReorder ? (event) => {
+              referencePreview.hide();
               event.stopPropagation();
               if (event.button !== 0 || (event.target instanceof Element && event.target.closest("button"))) return;
               event.preventDefault();
@@ -2338,8 +2322,7 @@ export function GenerationInputChips({
           >
             <span
               className="node-media-chip__order"
-              aria-label={`参考素材传入顺序 ${orderNumber}`}
-              title={`第 ${orderNumber} 个传入生成请求的参考素材`}
+              aria-label={`${ASSET_KIND_LABELS[input.kind]} ${orderNumber}`}
             >
               {orderNumber}
             </span>
@@ -2389,6 +2372,6 @@ export function GenerationInputChips({
           </li>
         );
       })}
-    </ol>
+    </ol>{referencePreview.layer}</>
   );
 }

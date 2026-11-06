@@ -1,4 +1,5 @@
 import { Node, type Extensions, type JSONContent } from "@tiptap/core";
+import type { DOMOutputSpec } from "@tiptap/pm/model";
 import StarterKit from "@tiptap/starter-kit";
 import { Placeholder, UndoRedo } from "@tiptap/extensions";
 import type { MediaReferenceTarget, MediaType } from "./backend";
@@ -146,6 +147,7 @@ export interface PromptTiptapPresentation {
   readonly freshMentionIds?: ReadonlySet<string>;
   readonly invalidMentionIds?: ReadonlySet<string>;
   readonly referenceLabelsByKey?: ReadonlyMap<string, string>;
+  readonly referencePreviewsByKey?: ReadonlyMap<string, { readonly url: string | null; readonly kind: string }>;
   readonly markReferencesByMarkId?: ReadonlyMap<string, PromptMarkReferencePresentation>;
 }
 
@@ -246,13 +248,17 @@ export function promptReferenceTargetFromElement(
     : null;
 }
 
-const MediaReference = Node.create({
+const MediaReference = Node.create<{ replaceable: boolean }>({
   name: PROMPT_TIPTAP_MEDIA_REFERENCE_NODE,
   group: "inline",
   inline: true,
   atom: true,
   selectable: true,
   draggable: false,
+
+  addOptions() {
+    return { replaceable: false };
+  },
 
   addAttributes() {
     return {
@@ -264,6 +270,8 @@ const MediaReference = Node.create({
       aliasSnapshot: { default: null },
       slotSnapshot: { default: null },
       referenceLabel: { default: null, rendered: false },
+      referencePreview: { default: null, rendered: false },
+      referenceMediaKind: { default: null, rendered: false },
       fresh: { default: false, rendered: false },
       stale: { default: false, rendered: false },
     };
@@ -301,26 +309,17 @@ const MediaReference = Node.create({
     const target = decodeMediaReferenceTarget(node.attrs["target"]);
     const displayName = String(node.attrs["displayNameSnapshot"] ?? "");
     const alias = String(node.attrs["referenceLabel"] ?? node.attrs["aliasSnapshot"] ?? "");
+    const replaceable = this.options.replaceable;
     const attrs: Record<string, string> = {
       class: `mention-chip${node.attrs["fresh"] ? " is-fresh" : ""}${node.attrs["stale"] ? " is-stale" : ""}`,
       contenteditable: "false",
       "data-mention-id": String(node.attrs["mentionId"] ?? ""),
       "data-canvas-node-key": String(node.attrs["canvasNodeKey"] ?? ""),
       "data-display-name": displayName,
-      title: `${displayName}${alias ? ` · ${alias}` : ""} · ${
-        target?.kind === "asset"
-          ? target.assetId
-          : target?.kind === "local_asset"
-            ? target.stagingJobId
-            : target?.kind === "local_base64_asset"
-              ? target.assetId
-              : target?.kind === "local_file"
-                ? target.path
-                : target
-                  ? `${target.generationTaskId}#${target.resultIndex}`
-                  : ""
-      } · ${String(node.attrs["canvasNodeKey"] ?? "")}`,
+      "aria-label": `${replaceable ? "替换引用，" : ""}${alias || "素材引用"}：${displayName}${node.attrs["stale"] ? "，已断开" : ""}`,
+      tabindex: "0",
     };
+    if (replaceable) Object.assign(attrs, { role: "button", "aria-haspopup": "dialog", "aria-expanded": "false", "data-reference-swap": "" });
     if (target) Object.assign(attrs, datasetForTarget(target));
     if (node.attrs["fresh"]) attrs["data-auto"] = "true";
     if (typeof node.attrs["learnedPattern"] === "string" && node.attrs["learnedPattern"])
@@ -330,7 +329,18 @@ const MediaReference = Node.create({
     if (typeof node.attrs["slotSnapshot"] === "number")
       attrs["data-slot-snapshot"] = String(node.attrs["slotSnapshot"]);
     if (alias) attrs["data-reference-label"] = alias;
-    return ["span", attrs, `@${displayName}${alias ? ` · ${alias}` : ""}`];
+    const preview = node.attrs["referencePreview"];
+    const kind = String(node.attrs["referenceMediaKind"] ?? target?.mediaType ?? "image");
+    const thumbnail: DOMOutputSpec = typeof preview === "string" && preview
+      ? kind === "video" ? ["video", { src: preview, muted: "", playsinline: "", preload: "metadata", draggable: "false" }]
+        : ["img", { src: preview, alt: "", draggable: "false", loading: "lazy" }]
+      : ["span", { class: `mention-chip__media-icon mention-chip__media-icon--${kind}` }, kind === "video" ? "▶" : kind === "audio" ? "≋" : "▧"];
+    const swapIcon: DOMOutputSpec = ["span", { class: "mention-chip__swap" },
+      ["http://www.w3.org/2000/svg svg", { viewBox: "0 0 19.8 17.8", width: "12", height: "12" },
+        ["path", { fill: "currentColor", d: "M18.9 11.62a.9.9 0 0 1 .64 1.54l-4.38 4.38a.9.9 0 0 1-1.27-1.28l2.84-2.83H.9a.9.9 0 0 1 0-1.8zM4.64.26A.9.9 0 0 1 5.9 1.54L3.07 4.37H18.9a.9.9 0 0 1 0 1.8H.9a.9.9 0 0 1-.64-1.53z" }]]];
+    return ["span", attrs,
+      ["span", { class: "mention-chip__thumb", "aria-hidden": "true" }, thumbnail, ...(replaceable ? [swapIcon] : [])],
+      ["span", { class: "mention-chip__label" }, (alias || displayName).replace(/(\D)(\d+)$/u, "$1 $2")]];
   },
 
   renderText({ node }) {
@@ -484,12 +494,12 @@ const MarkReference = Node.create({
   },
 });
 
-export function createPromptTiptapExtensions(placeholder: string | (() => string)): Extensions {
+export function createPromptTiptapExtensions(placeholder: string | (() => string), replaceable = false): Extensions {
   return [
     // StarterKit 覆盖段落/文本/硬换行与全部富格式标记（标题、列表、引用、代码块、
     // 粗斜下划删除线等）；undoRedo 关闭——会话统一使用 @tiptap/extensions 的 UndoRedo。
     StarterKit.configure({ undoRedo: false }),
-    MediaReference,
+    MediaReference.configure({ replaceable }),
     PendingReference,
     MarkReference,
     Attachment,
@@ -527,6 +537,8 @@ export function promptReferenceToTiptapNode(
       aliasSnapshot: item.aliasSnapshot ?? null,
       slotSnapshot: item.slotSnapshot ?? null,
       referenceLabel: presentation.referenceLabelsByKey?.get(item.canvasNodeKey) ?? null,
+      referencePreview: presentation.referencePreviewsByKey?.get(item.canvasNodeKey)?.url ?? null,
+      referenceMediaKind: presentation.referencePreviewsByKey?.get(item.canvasNodeKey)?.kind ?? item.target.mediaType,
       fresh: presentation.freshMentionIds?.has(item.mentionId) ?? false,
       stale:
         presentation.invalidMentionIds?.has(item.mentionId) ??

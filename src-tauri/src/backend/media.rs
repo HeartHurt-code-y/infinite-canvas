@@ -21,7 +21,7 @@ use super::{
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
     media_source,
     media_proxy::MAX_MEDIA_FULL_BYTES,
-    model_schema::{is_seedream_image_model, seedance_reference_limits},
+    model_schema::{is_moyu_kling_v4_model, is_seedream_image_model, seedance_reference_limits},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
         redact_request_value, redact_url_string,
@@ -384,7 +384,7 @@ impl MediaResolver {
         let probe_duration = seedance_reference_limits(
             task.remote_model_id_snapshot.as_deref().unwrap_or_default(),
         )
-        .is_some();
+        .is_some() || is_moyu_kling_v4_model(task.remote_model_id_snapshot.as_deref().unwrap_or_default());
         for input in inputs {
             let (resolved, lease) = self
                 .resolve_target(
@@ -408,17 +408,32 @@ impl MediaResolver {
                             PromptSegment::MediaReference { mention_id, .. } => mention_id,
                             PromptSegment::Text { .. } => unreachable!("planned media reference"),
                         };
-                        BackendError::protocol(
-                            "media reference resolution failed",
-                            json!({
+                        let source = error.payload();
+                        let reason = source.message
+                            .strip_prefix("validation error: ")
+                            .or_else(|| source.message.strip_prefix("protocol error: "))
+                            .unwrap_or(&source.message);
+                        let message = format!(
+                            "参考{}{}「{}」解析失败：{}",
+                            input.target.media_type().position_label(),
+                            input.type_position,
+                            input.display_name,
+                            reason,
+                        );
+                        let details = json!({
                                 "mentionId": mention_id,
                                 "segmentIndex": segment_index,
                                 "mediaType": input.target.media_type(),
                                 "typePosition": input.type_position,
+                                "displayName": input.display_name,
                                 "target": input.target,
                                 "sourceError": error.runtime_record()
-                            }),
-                        )
+                            });
+                        if source.kind == "validation" {
+                            BackendError::validation(message, details)
+                        } else {
+                            BackendError::protocol(message, details)
+                        }
                     } else {
                         error
                     }
@@ -446,7 +461,7 @@ impl MediaResolver {
         videos.sort_by_key(|media| media.type_position);
         audios.sort_by_key(|media| media.type_position);
 
-        Ok(ResolvedGeneration {
+        let mut resolved = ResolvedGeneration {
             rendered_prompt,
             content,
             images,
@@ -455,7 +470,9 @@ impl MediaResolver {
             parameters,
             video_task_type: command.video_task_type,
             operation_schema,
-        })
+        };
+        super::provider::normalize_seedance_task(task.remote_model_id_snapshot.as_deref().unwrap_or_default(), &mut resolved)?;
+        Ok(resolved)
     }
 
     async fn resolve_target(
@@ -481,7 +498,9 @@ impl MediaResolver {
                 media_type,
                 canvas_node_key,
             } => {
-                let resolved =
+                let preserve_asset_identity = task.operation == GenerationOperation::VideoGeneration
+                    && seedance_reference_limits(task.remote_model_id_snapshot.as_deref().unwrap_or_default()).is_some();
+                let resolution =
                     with_transport_retry("云端素材解析", ASSET_RESOLVE_RETRIES, || {
                         self.assets.resolve(ResolveAsset {
                             identity: super::types::CloudAssetIdentity {
@@ -497,12 +516,54 @@ impl MediaResolver {
                                         .provider_connection_id
                                         .clone(),
                                     destination_credential_ref: task.api_key_ref_snapshot.clone(),
+                                    preserve_asset_identity,
                                 }
                             },
                             trace: AssetReadTrace { task, attempt_id },
                         })
                     })
-                    .await?;
+                    .await;
+                let resolved = match resolution {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        let unavailable = matches!(
+                            &error,
+                            BackendError::Validation { details, .. }
+                                if details.get("assetUnavailable").and_then(serde_json::Value::as_bool) == Some(true)
+                        );
+                        if unavailable && !preserve_asset_identity {
+                            if let Some(source) = self.staging.imported_asset_source_for_generation(
+                                asset_id, provider_connection_id, *media_type,
+                            )? {
+                                // 云端身份已失效时，只复用该连接、该素材的导入原件。
+                                // 沿用 LocalFile 的类型/大小校验与临时租约回收，不重建云素材。
+                                let local_target = MediaReferenceTarget::LocalFile {
+                                    path: source.local_path,
+                                    media_type: *media_type,
+                                    canvas_node_key: canvas_node_key.clone(),
+                                };
+                                let (mut media, lease) = Box::pin(self.resolve_target(
+                                    task, attempt_id,
+                                    ResolveTargetRequest {
+                                        target: &local_target, type_position, role, display_name,
+                                        prompt_segment_index, content_index,
+                                        needs_local_bytes, probe_duration,
+                                    },
+                                )).await?;
+                                media.stable_identity = json!({
+                                    "kind": "asset",
+                                    "providerConnectionId": provider_connection_id,
+                                    "assetId": asset_id,
+                                    "canvasNodeKey": canvas_node_key,
+                                    "resolvedFrom": "local_original",
+                                });
+                                info!("[resolve] 云素材不可读取，改用同一素材的本地导入原件: taskId={}, assetId={}", task.id, asset_id);
+                                return Ok((media, lease));
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
                 let (bytes, remote_reference) = match resolved.access {
                     ResolvedAssetAccess::Bytes(bytes) => (Some(bytes), None),
                     ResolvedAssetAccess::RemoteReference(reference) => {

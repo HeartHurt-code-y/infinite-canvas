@@ -1,6 +1,6 @@
 import type { SeedanceTaskMode } from "./seedanceTasks";
 
-export type CanvasVideoMode = "auto" | "text" | "reference" | "first_frame" | "first_last_frame" | "image_reference" | "video_reference" | "audio_reference" | "edit" | "extend" | "longVideo2video";
+export type CanvasVideoMode = "auto" | "text" | "reference" | "first_frame" | "first_last_frame" | "multi_frame" | "image_reference" | "video_reference" | "audio_reference" | "edit" | "extend" | "longVideo2video";
 export const CANVAS_VIDEO_MODES: readonly { value: CanvasVideoMode; label: string }[] = [
   { value: "text", label: "文生视频" },
   { value: "reference", label: "全能参考" },
@@ -12,6 +12,7 @@ export const CANVAS_VIDEO_MODES: readonly { value: CanvasVideoMode; label: strin
 // LibTV 469850：视频编辑、延长属于模型能力，并非退役模式。
 // 这些意图只有已接入对应提交协议的模型才提供新入口。
 const ADDITIONAL_MODE_LABELS: Readonly<Record<string, string>> = {
+  multi_frame: "多关键帧",
   longVideo2video: "超长视频",
   video_reference: "视频参考",
   audio_reference: "音频参考",
@@ -19,7 +20,7 @@ const ADDITIONAL_MODE_LABELS: Readonly<Record<string, string>> = {
   extend: "视频延长",
 };
 
-export function canvasVideoModeOptions(mode: CanvasVideoMode, inputs: readonly { kind: string }[], supportsVideoTasks = false) {
+export function canvasVideoModeOptions(mode: CanvasVideoMode, inputs: readonly { kind: string }[], supportsVideoTasks = false, klingV4 = false) {
   const imageCount = inputs.filter(input => input.kind === "image").length;
   const videoCount = inputs.filter(input => input.kind === "video").length;
   const hasMedia = inputs.some(input => input.kind === "image" || input.kind === "video" || input.kind === "audio");
@@ -30,6 +31,10 @@ export function canvasVideoModeOptions(mode: CanvasVideoMode, inputs: readonly {
       : option.value === "first_frame" || option.value === "image_reference" ? imageCount === 0
       : option.value === "text" && hasMedia,
   }));
+  if (klingV4) {
+    options.push({ value: "multi_frame", label: "多关键帧", disabled: imageCount < 2 });
+    options.push({ value: "edit", label: "视频编辑", disabled: videoCount === 0 });
+  }
   if (supportsVideoTasks) for (const value of ["edit", "extend"] as const) {
     options.push({ value, label: ADDITIONAL_MODE_LABELS[value]!, disabled: videoCount === 0 });
   }
@@ -61,6 +66,15 @@ export function compileCanvasVideoMode(
   if (mode === "longVideo2video") return { mediaRoles, taskMode: "auto" };
   if (!mode || mode === "auto") return { mediaRoles, taskMode: "auto" };
   mode = canvasVideoModeValue(mode, mediaInputs);
+  if (mode === "multi_frame") {
+    const images = mediaInputs.filter(input => input.kind === "image");
+    const first = images.find(input => originalRoles[input.key] === "first_frame") ?? images[0];
+    const last = images.find(input => input.key !== first?.key && originalRoles[input.key] === "last_frame") ?? images.at(-1);
+    for (const input of mediaInputs) mediaRoles[input.key] = input.kind === "image"
+      ? input.key === first?.key ? "first_frame" : input.key === last?.key ? "last_frame" : "middle_frame"
+      : `reference_${input.kind}`;
+    return { mediaRoles, taskMode: "auto" };
+  }
   if (mode === "first_frame" || mode === "first_last_frame") {
     const images = mediaInputs.filter(item => item.kind === "image");
     const first = images.find(item => originalRoles[item.key] === "first_frame") ?? images[0];
@@ -71,7 +85,8 @@ export function compileCanvasVideoMode(
     return { mediaRoles, taskMode: mode };
   }
   if (mode !== "text") for (const input of mediaInputs) {
-    mediaRoles[input.key] = `reference_${input.kind}`;
+    mediaRoles[input.key] = mode === "edit" && originalRoles[input.key] === "base_video" && input.kind === "video"
+      ? "base_video" : `reference_${input.kind}`;
   }
   return { mediaRoles, taskMode: mode === "edit" || mode === "extend" ? mode : mode === "text" ? "auto" : "reference" };
 }

@@ -341,6 +341,15 @@ fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
         GenerationOperation::ImageToImage,
     ] {
         changed |= apply_image_operation_dialect(schema, identity, dialect, operation);
+        if dialect == RequestDialect::VolcengineArk
+            && seedream_image_version(identity) == Some("5.0-pro")
+            && let Some(parameters) = operation_object_mut(schema, operation)
+                .and_then(|definition| definition.get_mut("parameters"))
+                .and_then(Value::as_object_mut)
+        {
+            // quality is a Moyu extension, absent from the native Pro API.
+            changed |= parameters.remove("quality").is_some();
+        }
     }
     changed
 }
@@ -549,7 +558,7 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
             "requestLocation": "metadata", "order": 3
         },
         "seed": {
-            "type": "integer", "label": "随机种子", "optional": true, "order": 5
+            "type": "integer", "label": "随机种子", "optional": true, "minimum": 0, "maximum": 2147483647, "order": 5
         },
         "template_id": {
             "type": "integer", "label": "特效模板 ID", "optional": true,
@@ -565,6 +574,10 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
             "type": "string", "label": "源视频任务 ID", "optional": true,
             "requestLocation": "metadata", "order": 8
         },
+        "video_media_id": {"type": "string", "label": "已上传视频 ID", "optional": true, "requestLocation": "metadata", "order": 8.1},
+        "audio_media_id": {"type": "string", "label": "已上传音频 ID", "optional": true, "requestLocation": "metadata", "order": 10.1},
+        "sound_effect_content": {"type": "string", "label": "音效描述", "optional": true, "requestLocation": "metadata", "order": 10.2},
+        "sound_effect_switch": {"type": "boolean", "label": "生成音效", "default": true, "requestLocation": "metadata", "order": 10.3},
         "restyle_id": {
             "type": "string", "label": "重绘风格 ID", "optional": true,
             "requestLocation": "metadata", "order": 9
@@ -579,6 +592,7 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
         }
     });
     if model_id.eq_ignore_ascii_case("PixVerse-V6") {
+        parameters["reference_mode"] = json!({"type": "string", "label": "参考模式", "optional": true, "enum": ["omni"], "requestLocation": "metadata", "order": 7.1});
         parameters["generate_multi_clip_switch"] = json!({
             "type": "boolean", "label": "多镜头", "default": false,
             "requestLocation": "metadata", "order": 4
@@ -599,7 +613,7 @@ fn pixverse_video_operation_schema(model_id: &str) -> Option<Value> {
     }))
 }
 
-fn is_seedance_20_video_model(model_id: &str) -> bool {
+pub(crate) fn is_seedance_20_video_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
     identity.contains("seedance-2-0") || identity.contains("seedance-2.0")
 }
@@ -739,6 +753,13 @@ fn apply_seedance_draft_video_dialect(
                     },
                     "draft": {
                         "type": "boolean", "label": "生成草稿样片", "default": false
+                    },
+                    "omni_reference_task_type": {
+                        "type": "string", "label": "任务类型", "default": "auto",
+                        "enum": ["auto", "reference", "edit", "extend"]
+                    },
+                    "output_format": {
+                        "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"]
                     }
                 }
             })
@@ -1064,20 +1085,38 @@ fn is_image_model_identity(identity: &str) -> bool {
             && contains_identity_token(identity, "image"))
 }
 
-/// Gemini 图片生成模型（如 `gemini-2.5-flash-image`、`gemini-3-pro-image-preview`）。
-/// 走 OpenAI Images API（`POST /v1/images/generations`），但 `size` 使用画幅比例
-/// （`1:1`/`16:9`/…）而非像素尺寸，不声明 `quality`；上游忽略 `n`（一次只返回
-/// 一张，多张需业务侧并发调用）。
+/// Gemini 图片生成家族。旧型号使用 OpenAI Images 比例参数；Nano Banana 2.1
+/// 使用独立原生档案传递分辨率和思考配置。多张由业务侧拆分调用。
 fn is_gemini_image_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
-    identity.contains("gemini") && contains_identity_token(&identity, "image")
+    is_nano_banana_21_model(&identity)
+        || (identity.contains("gemini") && contains_identity_token(&identity, "image"))
+}
+
+pub(crate) const NANO_BANANA_21_PROFILE: &str = "gemini_native_image_v1";
+pub(crate) const NANO_BANANA_21_RATIOS: &[&str] = &["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9", "1:4", "4:1", "1:8", "8:1"];
+
+pub(crate) fn is_nano_banana_21_model(model_id: &str) -> bool {
+    model_id.eq_ignore_ascii_case("gemini-nano-banana-2.1")
+}
+
+fn nano_banana_21_operation_schema() -> Value {
+    json!({
+        "resultType": "image", "requestProfileId": NANO_BANANA_21_PROFILE, "profileVersion": 1,
+        "request": {"path": "/v1beta/models/gemini-nano-banana-2.1:generateContent", "encoding": "json", "parameterContainer": "root", "mediaEncoding": "gemini_native_parts"},
+        "parameters": {
+            "aspect_ratio": {"type": "string", "label": "画幅", "default": "1:1", "enum": NANO_BANANA_21_RATIOS, "order": 0},
+            "resolution": {"type": "string", "label": "分辨率", "default": "1K", "enum": ["1K", "2K", "4K"], "order": 1},
+            "thinking_level": {"type": "string", "label": "思考强度", "default": "medium", "enum": ["minimal", "medium", "high"], "description": "快速模式延迟更低；深入模式投入更多推理，耗时与费用可能增加。", "order": 2}
+        }
+    })
 }
 
 /// Doubao Seedream 图片生成模型（如 `doubao-seedream-5-0-260128`（moyu 文档
 /// 推荐）、`doubao-seedream-4-5-251128`、`doubao-seedream-5-0-pro-260628`）。
 /// moyu 聚合平台走 OpenAI Images API（`POST /v1/images/generations`），但契约与
-/// dall-e/gpt-image 不同：`size` 只接受 `2K` 及 ≥2K 的像素尺寸（`2048x2048`/
-/// `2848x1600`，低于 3686400 像素会被上游拒绝），`quality` 仅 `standard`/`hd`，
+/// dall-e/gpt-image 不同：普通版本沿用网关 2K 基础参数；5.0 Pro 独立支持
+/// 1K/1.5K/2K 及自定义像素尺寸，不能套用普通版本的最低像素限制。
 /// 并支持 `watermark`、`response_format`（url/b64_json）、组图模式
 /// （`sequential_image_generation`）与输出格式（`output_format`：jpg/png/webp）
 /// 等 Seedream 专属参数。与视频模型 seedance 名称不同（`seedream` 不含
@@ -1244,6 +1283,7 @@ pub fn schema_for_enabled_operations(
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
     refresh_sp25_per_use_video_defaults(&mut schema, model_id);
     refresh_rd_video_defaults(&mut schema, model_id);
+    refresh_moyu_kling_v4_defaults(&mut schema, model_id);
     refresh_seedream_image_parameter_defaults(&mut schema, model_id);
     refresh_async_image_task_defaults(&mut schema, model_id);
     // 端点属于供应商连接：上面按模型名推导出的契约（以及供应商下发的自定义契约）
@@ -1291,6 +1331,14 @@ pub fn normalize_parameters(operation_schema: &Value, supplied: &Value) -> Backe
             && let Some(value) = definition.get("default")
         {
             normalized.insert(key.clone(), value.clone());
+        }
+    }
+    if definitions.get("size").and_then(|value| value.get("format")).and_then(Value::as_str)
+        == Some("seedream_pro_size")
+    {
+        normalize_seedream_pro_parameters(&mut normalized)?;
+        if operation_schema.pointer("/request/path").and_then(Value::as_str) == Some(ARK_IMAGE_PATH) {
+            normalized.remove("quality");
         }
     }
     Ok(Value::Object(normalized))
@@ -1468,10 +1516,12 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     refresh_minimax_h3_video_defaults(&mut complete, model_id);
     refresh_sp25_per_use_video_defaults(&mut complete, model_id);
     refresh_pixverse_video_defaults(&mut complete, model_id);
+    refresh_moyu_kling_v4_defaults(&mut complete, model_id);
+    refresh_gpt_image_25_defaults(&mut complete, model_id);
     complete
 }
 
-/// Seedream 文生图基础参数：`size` 走 2K 契约（`2K`/`2048x2048`/`2848x1600`，
+/// 普通 Seedream 文生图基础参数（Pro 使用独立参数表）：`size` 走 2K 契约（`2K`/`2048x2048`/`2848x1600`，
 /// 低于 3686400 像素会被上游拒绝）、`quality` 仅 `standard`/`hd`、`watermark`
 /// 控制水印（应用侧默认无水印；文档 API 默认值为 true）、`response_format`
 /// 控制返回链接或 Base64。
@@ -1511,6 +1561,82 @@ fn seedream_text_to_image_parameters() -> Value {
             "order": 9
         }
     })
+}
+
+fn seedream_pro_image_parameters(image_to_image: bool) -> Value {
+    let mut parameters = seedream_text_to_image_parameters();
+    let fields = parameters.as_object_mut().expect("Seedream parameter object");
+    seedream_append_version_parameters(fields, Some("5.0-pro"), image_to_image);
+    fields.remove("watermark");
+    fields.insert("size".into(), json!({
+        "type": "string", "label": "尺寸", "default": "2K", "format": "seedream_pro_size",
+        "description": "支持 1K、1.5K、2K 或宽×高像素；总像素 921,600～4,624,220，宽高比 1:16～16:1。", "order": 0
+    }));
+    fields.insert("quality".into(), json!({
+        "type": "string", "label": "网关质量", "optional": true, "enum": ["standard", "hd"],
+        "description": "魔芋网关扩展；留空沿用供应商默认质量。", "order": 10
+    }));
+    fields.insert("optimize_prompt_mode".into(), json!({
+        "type": "string", "label": "提示词优化", "default": "standard", "enum": ["standard", "fast"],
+        "description": "标准模式质量更高；快速模式耗时更短，效果略低。",
+        "requestField": "optimize_prompt_options", "transform": "optimize_prompt_mode_object", "order": 5
+    }));
+    fields.insert("output_format".into(), json!({
+        "type": "string", "label": "输出格式", "default": "jpeg", "enum": ["jpeg", "png"],
+        "description": "Pro 支持 JPEG、PNG；透明背景必须使用 PNG。", "order": 6
+    }));
+    if image_to_image {
+        fields["layer_decomposition"]["description"] = json!("仅支持一张参考图；输出一张底图及最多 16 个透明 PNG 图层，画幅沿用原图。");
+        fields["background"]["description"] = json!("透明背景仅支持一张带透明通道的 PNG 参考图，且输出格式必须为 PNG。");
+    }
+    parameters
+}
+
+fn normalize_seedream_pro_parameters(parameters: &mut Map<String, Value>) -> BackendResult<()> {
+    // The product always generates without a watermark, including old saved choices.
+    parameters.insert("watermark".into(), json!(false));
+    let size = parameters.get("size").and_then(Value::as_str).unwrap_or("2K");
+    let layers = parameters.get("layer_decomposition").and_then(Value::as_bool) == Some(true);
+    let tier = matches!(size, "1K" | "1.5K" | "2K");
+    let issue = if layers && !tier && size != "auto" {
+        Some("图层拆分请选择自动、1K、1.5K 或 2K，输出画幅沿用原图。")
+    } else if !layers && !tier {
+        let dimensions = size.split_once('x').and_then(|(w, h)| Some((w.parse::<u64>().ok()?, h.parse::<u64>().ok()?)));
+        match dimensions {
+            Some((w, h)) if w.checked_mul(h).is_some_and(|pixels| (921_600..=4_624_220).contains(&pixels))
+                && h > 0 && (1.0 / 16.0..=16.0).contains(&(w as f64 / h as f64)) => None,
+            _ => Some("图片总像素须在 921,600～4,624,220 之间，宽高比须在 1:16～16:1 之间。"),
+        }
+    } else { None };
+    if let Some(issue) = issue {
+        return Err(BackendError::validation(issue, json!({ "size": size })));
+    }
+    if parameters.get("output_format").and_then(Value::as_str) == Some("jpg") {
+        parameters.insert("output_format".into(), json!("jpeg"));
+    }
+    if !matches!(parameters.get("output_format").and_then(Value::as_str), Some("jpeg" | "png")) {
+        return Err(BackendError::validation("Seedream 5.0 Pro 仅支持 JPEG 或 PNG 输出。", json!({ "parameter": "output_format" })));
+    }
+    if parameters.get("background").and_then(Value::as_str) == Some("transparent")
+        && parameters.get("output_format").and_then(Value::as_str) != Some("png")
+    {
+        return Err(BackendError::validation("透明背景请使用 PNG 输出。", json!({ "parameter": "output_format" })));
+    }
+    if parameters.get("quality").and_then(Value::as_str) == Some("") { parameters.remove("quality"); }
+    Ok(())
+}
+
+pub(crate) fn validate_seedream_pro_references(model_id: Option<&str>, parameters: &Value, image_count: usize) -> BackendResult<()> {
+    if model_id.and_then(seedream_image_version) != Some("5.0-pro") { return Ok(()); }
+    let layers = parameters.get("layer_decomposition").and_then(Value::as_bool) == Some(true);
+    let transparent = parameters.get("background").and_then(Value::as_str) == Some("transparent");
+    if (layers || transparent) && image_count != 1 {
+        return Err(BackendError::validation(
+            if layers { "图层拆分需要且仅支持一张参考图。" } else { "透明背景需要且仅支持一张带透明通道的 PNG 参考图。" },
+            json!({ "imageCount": image_count }),
+        ));
+    }
+    Ok(())
 }
 
 /// 按 Seedream 能力版本向参数表追加高级参数（moyu 文档参数表）：
@@ -1616,13 +1742,44 @@ fn seedream_append_version_parameters(
     }
 }
 
-/// `gpt-image-2.5`（sunburst / flare）走异步任务接口：
-/// `POST /v1/images/generations` 只换回任务号，结果再查
-/// `GET /v1/images/tasks/{id}`。请求体是 `aspect_ratio` + `resolution`，
-/// 不是上一代 gpt-image 的 `size` / `quality`。
+pub(crate) const GPT_IMAGE_25_PROFILE: &str = "openai_gpt25_images_v1";
+
+fn is_gpt_image_25_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    ["gpt-image-2.5-sunburst", "gpt-image-2.5-flare"].iter().any(|name| {
+        identity == *name || identity.strip_prefix(&format!("{name}-")).is_some_and(|date| {
+            date.len() == 10 && date.bytes().enumerate().all(|(i, b)| if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() })
+        })
+    })
+}
+
+fn gpt_image_25_operation_schema(operation: GenerationOperation) -> Value {
+    let editing = operation == GenerationOperation::ImageToImage;
+    json!({
+        "resultType": "image", "requestProfileId": GPT_IMAGE_25_PROFILE, "profileVersion": 1,
+        "request": {
+            "path": if editing { "/v1/images/edits" } else { "/v1/images/generations" },
+            "encoding": if editing { "multipart" } else { "json" },
+            "parameterContainer": if editing { "multipart" } else { "root" },
+            "imageField": "image[]"
+        },
+        "parameters": {
+            "size": {"type": "string", "label": "尺寸", "default": "auto", "order": 1},
+            "quality": {"type": "string", "label": "质量", "default": "auto", "enum": ["auto", "low", "medium", "high", "xhigh", "max"], "order": 2},
+            "background": {"type": "string", "label": "背景", "default": "auto", "enum": ["auto", "opaque", "transparent"], "order": 3},
+            "output_format": {"type": "string", "label": "输出格式", "default": "png", "enum": ["png", "jpeg"], "order": 4},
+            "output_compression": {"type": "integer", "label": "JPEG 质量", "description": "仅对 JPEG 生效；数值越高，保留细节越多，文件通常越大。", "default": 100, "minimum": 0, "maximum": 100, "step": 1, "order": 5},
+            "moderation": {"type": "string", "label": "内容审核", "default": "auto", "enum": ["auto", "low"], "optional": true, "order": 6},
+            "n": {"type": "integer", "label": "生成数量", "default": 1, "minimum": 1, "maximum": 10, "order": 7}
+        }
+    })
+}
+
+/// Other gateway aliases retain their task contract. The two official 2.5
+/// models use native Images JSON / multipart (Konjac verified 2026-11-05).
 fn is_async_image_task_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
-    identity.contains("gpt-image-2.5") || identity.contains("gpt-image-2-5")
+    !is_gpt_image_25_model(model_id) && (identity.contains("gpt-image-2.5") || identity.contains("gpt-image-2-5"))
 }
 
 fn async_image_task_parameters() -> Value {
@@ -2761,6 +2918,47 @@ pub fn is_atlascloud_kling_video_model(model_id: &str) -> bool {
         .starts_with(ATLASCLOUD_KLING_VIDEO_PREFIX)
 }
 
+pub fn is_moyu_kling_v4_model(model_id: &str) -> bool {
+    model_id.eq_ignore_ascii_case("kling-v4")
+}
+
+/// https://doc.moyu.info/9606564m0.md; 21:9 verified separately against the gateway.
+fn moyu_kling_v4_operation_schema() -> Value {
+    json!({
+        "resultType": "video", "requestProfileId": "moyu_video_metadata_v1", "profileVersion": 2,
+        "request": {
+            "path": "/v1/video/generations", "encoding": "json", "parameterContainer": "root",
+            "mediaEncoding": "kling_v4_inputs", "observePath": "/v1/videos/{task_id}"
+        },
+        "parameters": {
+            "aspect_ratio": {"type": "string", "label": "画幅", "default": "auto", "enum": ["auto", "16:9", "9:16", "1:1", "21:9"], "order": 0,
+                "description": "自动时跟随首帧或上游判断；纯文生默认横屏。"},
+            "resolution": {"type": "string", "label": "分辨率", "default": "1080p", "enum": ["720p", "1080p"], "order": 1},
+            "duration": {"type": "integer", "label": "时长", "default": 10, "minimum": 3, "maximum": 30, "step": 1, "order": 2},
+            "element_ids": {"type": "string", "label": "主体 ID", "optional": true, "order": 4,
+                "description": "引用可灵已创建的主体，最多 7 个，以逗号或换行分隔；须同时提供参考图、视频或音色。"},
+            "voice_ids": {"type": "string", "label": "音色 ID", "optional": true, "order": 5,
+                "description": "引用可灵已创建的音色，最多 3 个，以逗号或换行分隔；不是本地音频文件。"}
+        }
+    })
+}
+
+fn refresh_moyu_kling_v4_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_moyu_kling_v4_model(model_id) { return false; }
+    let Some(operation) = schema.get_mut("video_generation").and_then(Value::as_object_mut) else { return false; };
+    let profile = operation.get("requestProfileId").and_then(Value::as_str);
+    if profile.is_some_and(|profile| profile != "moyu_video_metadata_v1") { return false; }
+    let current = operation.get("request").and_then(Value::as_object);
+    if current.and_then(|request| request.get("path")).and_then(Value::as_str)
+        .is_some_and(|path| path != "/v1/video/generations") { return false; }
+    if current.and_then(|request| request.get("mediaEncoding")).and_then(Value::as_str) == Some("kling_v4_inputs")
+        && operation.get("profileVersion").and_then(Value::as_u64) == Some(2)
+        && operation.get("parameters").and_then(Value::as_object).is_some_and(|parameters| !parameters.is_empty()) { return false; }
+    let replacement = moyu_kling_v4_operation_schema();
+    for (key, value) in replacement.as_object().expect("Kling schema object") { operation.insert(key.clone(), value.clone()); }
+    true
+}
+
 /// Kling 4.0 参考生视频成员的契约参数。
 ///
 /// 全部取自平台文档的输入参数表（不是推测）：
@@ -2995,6 +3193,12 @@ fn gpt_image_text_to_image_parameters_with_response_format() -> Value {
 }
 
 fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> Value {
+    if is_gpt_image_25_model(model_id) && matches!(operation, GenerationOperation::TextToImage | GenerationOperation::ImageToImage) {
+        return gpt_image_25_operation_schema(operation);
+    }
+    if is_nano_banana_21_model(model_id) && matches!(operation, GenerationOperation::TextToImage | GenerationOperation::ImageToImage) {
+        return nano_banana_21_operation_schema();
+    }
     match operation {
         GenerationOperation::SpeechGeneration => speech_operation_schema(model_id),
         GenerationOperation::TextGeneration => {
@@ -3034,13 +3238,13 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                     "parameters": async_image_task_parameters()
                 });
             }
-            // Doubao Seedream 契约（moyu 聚合平台）：`size` 只接受 `2K` 及 ≥2K 的
-            // 像素尺寸（低于 3686400 像素会被上游拒绝），`quality` 仅 standard/hd，
+            // Doubao Seedream 契约按版本生成：Pro 支持 1K/1.5K/2K 和自定义尺寸；
+            // 其他版本保留现有网关基础参数，
             // 并支持 watermark 与按版本区分的组图/提示词优化/联网搜索/输出格式参数。
             if is_seedream_image_model(model_id) {
                 let version = seedream_image_version(model_id);
-                let mut parameters = seedream_text_to_image_parameters();
-                if let Some(parameters_object) = parameters.as_object_mut() {
+                let mut parameters = if version == Some("5.0-pro") { seedream_pro_image_parameters(false) } else { seedream_text_to_image_parameters() };
+                if version != Some("5.0-pro") && let Some(parameters_object) = parameters.as_object_mut() {
                     seedream_append_version_parameters(parameters_object, version, false);
                 }
                 // 文生图端点按 OpenAI 兼容网关声明；方舟连接由
@@ -3152,8 +3356,8 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             // 基础参数与文生图一致，5.0 pro 额外支持透明背景与图层拆分。
             if is_seedream_image_model(model_id) {
                 let version = seedream_image_version(model_id);
-                let mut parameters = seedream_text_to_image_parameters();
-                if let Some(parameters_object) = parameters.as_object_mut() {
+                let mut parameters = if version == Some("5.0-pro") { seedream_pro_image_parameters(true) } else { seedream_text_to_image_parameters() };
+                if version != Some("5.0-pro") && let Some(parameters_object) = parameters.as_object_mut() {
                     seedream_append_version_parameters(parameters_object, version, true);
                 }
                 return json!({
@@ -3217,6 +3421,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
         }
         GenerationOperation::VideoGeneration => {
             let identity = model_id.to_ascii_lowercase();
+            if is_moyu_kling_v4_model(model_id) {
+                return moyu_kling_v4_operation_schema();
+            }
             if let Some(schema) = pixverse_video_operation_schema(model_id) {
                 return schema;
             }
@@ -3564,7 +3771,7 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             } else if seedance_25 {
                 json!(["720p", "480p", "1080p"])
             } else if seedance_20 {
-                json!(["720p", "480p", "1080p", "4k"])
+                if fast_or_mini { json!(["720p", "480p"]) } else { json!(["720p", "480p", "1080p", "4k"]) }
             } else {
                 Value::Array(Vec::new())
             };
@@ -3594,7 +3801,7 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             }
             // 联网搜索：Seedance 2.0 标准版，以及全部 Seedance 2.5（国内与海外）均支持，
             // 仅在无媒体输入的文生视频场景启用。
-            if (seedance_20 && !identity.contains("mini")) || seedance_25 {
+            if seedance_20 || seedance_25 {
                 parameters.insert(
                     "web_search".into(),
                     json!({
@@ -3920,6 +4127,20 @@ pub fn refresh_seedance_20_video_defaults(schema: &mut Value, model_id: &str) ->
 /// - 非空档案：原位补齐缺失的 `1080p` 分辨率与 `web_search` 定义，
 ///   不覆盖服务商下发的自定义参数。
 pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if is_seedance_20_video_model(model_id) && !is_dreamina_seedance_video_model(model_id) {
+        let defaults = default_operation_schema(model_id, GenerationOperation::VideoGeneration);
+        let Some(parameters) = schema.pointer_mut("/video_generation/parameters").and_then(Value::as_object_mut) else { return false; };
+        let mut changed = false;
+        // Upgrade known official controls without discarding provider-specific parameters.
+        for key in ["resolution", "web_search"] {
+            if let Some(definition) = defaults.pointer(&format!("/parameters/{key}"))
+                && parameters.get(key) != Some(definition) {
+                parameters.insert(key.to_string(), definition.clone());
+                changed = true;
+            }
+        }
+        return changed;
+    }
     if is_seedance_draft_video_model(model_id)
         && schema
             .pointer("/video_generation/requestProfileId")
@@ -4179,6 +4400,9 @@ pub fn refresh_minimax_h3_video_defaults(schema: &mut Value, model_id: &str) -> 
 /// 已保存的 gpt-image-2.5 若仍是上一代 `size` / `quality` 契约，改写成异步任务契约。
 /// 供应商另外声明的参数保留；`size` / `quality` / `n` / `response_format` 不再发送。
 fn refresh_async_image_task_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if is_gpt_image_25_model(model_id) {
+        return refresh_gpt_image_25_defaults(schema, model_id);
+    }
     if !is_async_image_task_model(model_id) {
         return false;
     }
@@ -4275,7 +4499,23 @@ fn legacy_text_to_image_parameters() -> Value {
 /// `refresh_seedream_image_parameter_defaults`），这里显式让出，避免互相覆盖。
 /// 也把 gpt-image 图生图的历史空参数（旧契约不支持 size/quality/n）刷新为当前契约。
 /// 返回是否发生了替换。
+fn refresh_gpt_image_25_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_gpt_image_25_model(model_id) { return false; }
+    let mut changed = false;
+    for (key, operation) in [("text_to_image", GenerationOperation::TextToImage), ("image_to_image", GenerationOperation::ImageToImage)] {
+        let Some(definition) = schema.get_mut(key).and_then(Value::as_object_mut) else { continue; };
+        let profile = definition.get("requestProfileId").and_then(Value::as_str);
+        if !matches!(profile, None | Some("openai_images_v1" | "openai_image_edits_v1" | "openai_image_tasks_v1" | GPT_IMAGE_25_PROFILE)) { continue; }
+        let replacement = gpt_image_25_operation_schema(operation).as_object().expect("GPT Image schema").clone();
+        if *definition != replacement { *definition = replacement; changed = true; }
+    }
+    changed
+}
+
 pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if is_gpt_image_25_model(model_id) {
+        return refresh_gpt_image_25_defaults(schema, model_id);
+    }
     if is_gemini_image_model(model_id) || is_seedream_image_model(model_id) {
         return false;
     }
@@ -4342,6 +4582,24 @@ pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &st
 pub fn refresh_gemini_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
     if !is_gemini_image_model(model_id) {
         return false;
+    }
+    if is_nano_banana_21_model(model_id) {
+        let mut changed = false;
+        let generic = default_operation_schema("legacy-unknown-image", GenerationOperation::TextToImage)["parameters"].clone();
+        let old_gemini = json!({"size": gemini_image_size_parameter()});
+        let legacy = legacy_text_to_image_parameters();
+        for key in ["text_to_image", "image_to_image"] {
+            let Some(definition) = schema.get_mut(key).and_then(Value::as_object_mut) else { continue; };
+            let parameters = definition.get("parameters");
+            let known_default = parameters == Some(&generic) || parameters == Some(&legacy) || parameters == Some(&old_gemini)
+                || parameters.and_then(Value::as_object).is_none_or(Map::is_empty);
+            let known_profile = matches!(definition.get("requestProfileId").and_then(Value::as_str), None | Some("openai_images_v1" | "openai_image_edits_v1"));
+            if known_default && known_profile {
+                *definition = nano_banana_21_operation_schema().as_object().expect("Nano Banana operation").clone();
+                changed = true;
+            }
+        }
+        return changed;
     }
     let mut changed = false;
     let legacy = legacy_text_to_image_parameters();
@@ -4513,6 +4771,14 @@ fn previous_seedream_image_parameters(version: Option<&str>, image_to_image: boo
     Value::Object(parameters)
 }
 
+fn legacy_seedream_pro_parameters(image_to_image: bool) -> Value {
+    let mut parameters = seedream_text_to_image_parameters();
+    if let Some(fields) = parameters.as_object_mut() {
+        seedream_append_version_parameters(fields, Some("5.0-pro"), image_to_image);
+    }
+    parameters
+}
+
 /// Seedream 图片模型的契约变更：历史版本按 dall-e 通用契约把像素尺寸
 /// （`1024x1024` 等）与 `quality`（`standard`/`hd`）持久化进了 `model_definitions`，
 /// 而 moyu 的 Seedream 图片接口只接受 2K 及以上的尺寸（`2K`/`2048x2048`/
@@ -4545,6 +4811,7 @@ pub fn refresh_seedream_image_parameter_defaults(schema: &mut Value, model_id: &
             .is_none_or(Map::is_empty);
         if definition.get("parameters") == Some(&legacy)
             || definition.get("parameters") == Some(&previous)
+            || (version == Some("5.0-pro") && definition.get("parameters") == Some(&legacy_seedream_pro_parameters(false)))
             || parameters_empty
         {
             if let Some(parameters) = current_parameters(GenerationOperation::TextToImage) {
@@ -4563,7 +4830,9 @@ pub fn refresh_seedream_image_parameter_defaults(schema: &mut Value, model_id: &
             .get("parameters")
             .and_then(Value::as_object)
             .is_none_or(Map::is_empty);
-        if definition.get("parameters") == Some(&previous) || parameters_empty {
+        if definition.get("parameters") == Some(&previous)
+            || (version == Some("5.0-pro") && definition.get("parameters") == Some(&legacy_seedream_pro_parameters(true)))
+            || parameters_empty {
             if let Some(parameters) = current_parameters(GenerationOperation::ImageToImage) {
                 definition.insert("parameters".into(), parameters);
                 changed = true;
