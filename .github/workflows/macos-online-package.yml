@@ -48,6 +48,10 @@ on:
         description: Publish only the verified PKG installer, keeping other build artifacts internal
         type: boolean
         default: false
+      verify_live_upgrade:
+        description: Run the published 1.2.3 to 2.0.0 Apple Silicon upgrade on a disposable runner
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -57,11 +61,30 @@ concurrency:
   cancel-in-progress: ${{ inputs.replace_existing || false }}
 
 jobs:
+  native-upgrade:
+    if: inputs.verify_live_upgrade
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Verify the published delta in the installed Apple Silicon client
+        run: node scripts/verify-macos-live-upgrade-2.0.0.mjs
+      - name: Retain native upgrade evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-2.0.0-native-delta-upgrade
+          path: ${{ runner.temp }}/ic-live-upgrade-evidence/
+          if-no-files-found: error
+
   build:
     permissions:
       contents: read
       actions: read
-    if: inputs.platform != 'windows'
+    if: '!inputs.verify_live_upgrade && inputs.platform != ''windows'''
     runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || inputs.arm64_runner || 'macos-15' }}
     timeout-minutes: 180
     env:
@@ -351,7 +374,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   windows:
-    if: inputs.platform == 'windows'
+    if: '!inputs.verify_live_upgrade && inputs.platform == ''windows'''
     runs-on: windows-latest
     timeout-minutes: 180
     permissions:
