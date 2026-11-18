@@ -236,17 +236,8 @@ jobs:
           if env -u IC_RELEASE_SNAPSHOT_KEY bash scripts/build-macos-online.sh > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
             grep -E '^Verified macOS |^Native one-command PKG installation|^    Finished .+profile' "$RUNNER_TEMP/ic-native-build.log" || true
           else
-            node --input-type=module <<'NODE'
-            import { createCipheriv, randomBytes } from 'node:crypto';
-            import { readFileSync, writeFileSync } from 'node:fs';
-            import path from 'node:path';
-            const root = process.env.RUNNER_TEMP;
-            const key = Buffer.from(process.env.IC_RELEASE_SNAPSHOT_KEY.trim(), 'hex');
-            const iv = randomBytes(12);
-            const cipher = createCipheriv('aes-256-gcm', key, iv);
-            const encrypted = Buffer.concat([cipher.update(readFileSync(path.join(root,'ic-native-build.log'))),cipher.final()]);
-            writeFileSync(path.join(root,'ic-native-build.log.enc'),Buffer.concat([iv,cipher.getAuthTag(),encrypted]));
-            NODE
+            git show "$GITHUB_SHA:scripts/encrypt-release-diagnostic.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
+            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
             exit 1
           fi
       - name: Retain encrypted Mac build diagnostics
