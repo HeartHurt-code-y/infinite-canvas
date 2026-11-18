@@ -29,7 +29,7 @@ on:
         type: boolean
         default: false
       prebuilt_run:
-        description: Reuse a signed Windows artifact from this repository run (source hashes must match)
+        description: Reuse signed native artifacts from this repository run (source hashes must match)
         type: string
         default: ""
       validated_installer_sha256:
@@ -40,6 +40,10 @@ on:
         description: Publish verified artifacts and the independent online update feed
         type: boolean
         default: false
+      updater_only:
+        description: Publish the signed Apple Silicon delta and updater fallback, without standalone installers
+        type: boolean
+        default: true
       package_only:
         description: Publish only the verified PKG installer, keeping other build artifacts internal
         type: boolean
@@ -54,6 +58,9 @@ concurrency:
 
 jobs:
   build:
+    permissions:
+      contents: read
+      actions: read
     if: inputs.platform != 'windows'
     runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || inputs.arm64_runner || 'macos-15' }}
     timeout-minutes: 180
@@ -66,6 +73,43 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          ref: e5a19b05aafe354d73a662d8296b524a68c7c322
+      - name: Restore signed-build source snapshot
+        env:
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_2_0_1_SNAPSHOT_KEY }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          for i in 0 1 2 3; do
+            git show "$GITHUB_SHA:.github/release-input/2.0.1-source.enc.$i" >> "$RUNNER_TEMP/ic-release-source.enc"
+          done
+          mkdir "$RUNNER_TEMP/ic-release-source"
+          node --input-type=module <<'NODE'
+          import { createDecipheriv, createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import path from 'node:path';
+          const root = process.env.RUNNER_TEMP;
+          const key = process.env.IC_RELEASE_SNAPSHOT_KEY.trim();
+          if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Missing release snapshot key');
+          const bytes = readFileSync(path.join(root, 'ic-release-source.enc'));
+          const decipher = createDecipheriv('aes-256-gcm', Buffer.from(key, 'hex'), bytes.subarray(0,12));
+          decipher.setAuthTag(bytes.subarray(12,28));
+          const archive = Buffer.concat([decipher.update(bytes.subarray(28)),decipher.final()]);
+          if (createHash('sha256').update(archive).digest('hex') !== '46e2718b5a5f87af601f15c066f305b53c0af8d173d64762bc6511802adf599e') throw new Error('Source snapshot hash mismatch');
+          writeFileSync(path.join(root,'ic-release-source.tar.gz'),archive,{mode:0o600});
+          NODE
+          tar -xzf "$RUNNER_TEMP/ic-release-source.tar.gz" -C "$RUNNER_TEMP/ic-release-source"
+          node --input-type=module <<'NODE'
+          import { cpSync, readFileSync, rmSync } from 'node:fs';
+          import path from 'node:path';
+          const source = path.join(process.env.RUNNER_TEMP,'ic-release-source');
+          for (const entry of JSON.parse(readFileSync(path.join(source,'removed.json'),'utf8'))) {
+            if (path.isAbsolute(entry) || entry.split('/').some(part=>!part || part==='..' || part==='.git')) throw new Error('Unsafe source removal');
+            rmSync(path.resolve(entry),{force:true});
+          }
+          cpSync(path.join(source,'files'), process.cwd(), {recursive:true});
+          NODE
+          test "$(node -p "require('./package.json').version")" = 2.0.1
       - name: Free runner disk space
         run: |
           sudo rm -rf /opt/hostedtoolcache "$HOME/Library/Developer/CoreSimulator" /usr/local/lib/android
@@ -120,11 +164,99 @@ jobs:
             echo '- Preparation and integrity checks always run; unchanged verified resources are reused.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Restore and verify signed Apple Silicon release
+        id: restored-build
+        if: inputs.prebuilt_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREBUILT_RUN: ${{ inputs.prebuilt_run }}
+        run: |
+          [[ "$PREBUILT_RUN" =~ ^[0-9]+$ ]]
+          test "$(node -p 'process.arch')" = 'arm64'
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREBUILT_RUN" --jq '.conclusion')" = 'success'
+          name="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PREBUILT_RUN/artifacts" --jq '.artifacts[] | select(.name | startswith("infinite-canvas-macos-online-arm64-")) | .name')"
+          test -n "$name"
+          test "$(printf '%s\n' "$name" | wc -l | tr -d ' ')" = '1'
+          download="$RUNNER_TEMP/prebuilt-macos"
+          gh run download "$PREBUILT_RUN" --repo "$GITHUB_REPOSITORY" --name "$name" --dir "$download"
+          export IC_PREBUILT_MAC_DOWNLOAD="$download"
+          node --input-type=module <<'NODE'
+          import {readFile, mkdir, cp, writeFile} from 'node:fs/promises';
+          import {execFileSync} from 'node:child_process';
+          import path from 'node:path';
+          import {verifyUpdaterSignature} from './scripts/verify-updater-signature.mjs';
+          import {verifyEditionRelease} from './scripts/verify-edition-release.mjs';
+          import {assertEditionBuildSourceFreshness} from './scripts/edition-source-fingerprint.mjs';
+          import {editionBuildPlan, writeEditionTargetMarker} from './scripts/tauri-build-edition.mjs';
+          import {inventoryMacApp, assertMacAppInventories} from './scripts/verify-macos-edition.mjs';
+          const root=process.cwd();
+          const config=JSON.parse(await readFile('src-tauri/tauri.conf.json','utf8'));
+          const version=config.version;
+          const directory=path.join(root,'.cache/tauri-editions/online/artifacts',version);
+          const download=process.env.IC_PREBUILT_MAC_DOWNLOAD;
+          let artifactRoot=download;
+          try { await readFile(path.join(artifactRoot,'distribution.json')); }
+          catch(error) { if(error.code!=='ENOENT')throw error;artifactRoot=path.join(download,version); }
+          await mkdir(path.dirname(directory),{recursive:true});
+          await cp(artifactRoot,directory,{recursive:true,preserveTimestamps:true});
+          const record=JSON.parse(await readFile(path.join(directory,'build-source.json'),'utf8'));
+          const appName=config.productName+'.app';
+          const parent=path.join(root,'.cache/tauri-editions/online/target/release/bundle/macos');
+          const app=path.join(parent,appName);
+          const executable=path.join(app,'Contents/MacOS/infinite-canvas');
+          if(record.nativeExecutable.path!==path.relative(root,executable).split(path.sep).join('/'))throw new Error('Unexpected frozen Apple Silicon native path');
+          const archive=path.join(directory,'macos',config.productName+'_'+version+'_aarch64-online.app.tar.gz');
+          await verifyUpdaterSignature(archive,archive+'.sig',config.plugins.updater.pubkey);
+          await mkdir(parent,{recursive:true});
+          execFileSync('/usr/bin/tar',['-xzf',archive,'-C',parent],{stdio:'inherit'});
+          await assertEditionBuildSourceFreshness(record,{root,edition:'online',applicationVersion:version,executablePath:executable});
+          await cp(path.join(app,'Contents/Resources/ffmpeg'),path.join(root,'src-tauri/resources/ffmpeg'),{recursive:true,preserveTimestamps:true});
+          await writeEditionTargetMarker(editionBuildPlan('online'),version);
+          const manifestPath=path.join(directory,'publish-manifest.json');
+          const manifest=JSON.parse(await readFile(manifestPath,'utf8'));
+          for(const item of manifest.artifacts)item.localPath=path.join(directory,item.path);
+          manifest.feed.localPath=path.join(directory,'latest.json');
+          await writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');
+          console.log(JSON.stringify(await verifyEditionRelease({distributionDirectory:directory,requireSourceFreshness:true})));
+          const expected=await inventoryMacApp(app);
+          const pkg=path.join(directory,'pkg',config.productName+'_'+version+'_aarch64-online.pkg');
+          execFileSync('sudo',['/usr/sbin/installer','-pkg',pkg,'-target','/'],{stdio:'inherit'});
+          const installed=path.join('/Applications',appName);
+          assertMacAppInventories(await inventoryMacApp(installed),expected,'Restored PKG installation');
+          execFileSync('/usr/bin/codesign',['--verify','--deep','--strict',installed],{stdio:'inherit'});
+          console.log('Original signed Apple Silicon release restored, source verified and PKG reinstalled.');
+          NODE
       - name: Build and verify online DMG and updater
         id: verified-build
+        if: inputs.prebuilt_run == ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/build-macos-online.sh
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_2_0_1_SNAPSHOT_KEY }}
+        run: |
+          if env -u IC_RELEASE_SNAPSHOT_KEY bash scripts/build-macos-online.sh > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
+            grep -E '^Verified macOS |^Native one-command PKG installation|^    Finished .+profile' "$RUNNER_TEMP/ic-native-build.log" || true
+          else
+            node --input-type=module <<'NODE'
+            import { createCipheriv, randomBytes } from 'node:crypto';
+            import { readFileSync, writeFileSync } from 'node:fs';
+            import path from 'node:path';
+            const root = process.env.RUNNER_TEMP;
+            const key = Buffer.from(process.env.IC_RELEASE_SNAPSHOT_KEY.trim(), 'hex');
+            const iv = randomBytes(12);
+            const cipher = createCipheriv('aes-256-gcm', key, iv);
+            const encrypted = Buffer.concat([cipher.update(readFileSync(path.join(root,'ic-native-build.log'))),cipher.final()]);
+            writeFileSync(path.join(root,'ic-native-build.log.enc'),Buffer.concat([iv,cipher.getAuthTag(),encrypted]));
+            NODE
+            exit 1
+          fi
+      - name: Retain encrypted Mac build diagnostics
+        if: failure() && steps.verified-build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-2.0.1-build-diagnostics
+          path: ${{ runner.temp }}/ic-native-build.log.enc
+          if-no-files-found: error
+          retention-days: 3
       - name: Launch installed application
         run: |
           version="$(node -p "require('./package.json').version")"
@@ -195,15 +327,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Publish requested installation artifacts
-        if: inputs.publish && steps.verified-build.outcome == 'success'
+        if: inputs.publish && (steps.verified-build.outcome == 'success' || steps.restored-build.outcome == 'success')
         env:
           TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
           TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
           PKG_ONLY: ${{ inputs.package_only }}
+          UPDATER_ONLY: ${{ inputs.updater_only }}
         run: |
           version="$(node -p "require('./package.json').version")"
           publish_args=()
-          if [ "$PKG_ONLY" = "true" ]; then publish_args+=(--package-only); fi
+          if [ "$PKG_ONLY" = "true" ]; then
+            publish_args+=(--package-only)
+          elif [ "$UPDATER_ONLY" = "true" ]; then
+            publish_args+=(--updater-only)
+          fi
           pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version" "${publish_args[@]}"
       - name: Report installation boundary
         run: |
