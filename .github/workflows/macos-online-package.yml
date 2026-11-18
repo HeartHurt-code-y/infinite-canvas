@@ -57,14 +57,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.platform == 'windows' && 'windows-online-x64' || format('macos-online-{0}', inputs.architecture) }}
+  group: ${{ inputs.verify_live_upgrade && 'macos-native-upgrade-2.0.1' || inputs.platform == 'windows' && 'windows-online-x64' || format('macos-online-{0}', inputs.architecture) }}
   cancel-in-progress: ${{ inputs.replace_existing || false }}
 
 jobs:
   native-upgrade:
     if: inputs.verify_live_upgrade
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

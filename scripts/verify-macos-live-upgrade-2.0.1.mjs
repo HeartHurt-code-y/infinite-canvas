@@ -16,12 +16,14 @@ const root = path.join(process.env.RUNNER_TEMP, 'ic-live-upgrade-2.0.1');
 const output = path.join(process.env.RUNNER_TEMP, 'ic-live-upgrade-evidence');
 const run = (file, args, options = {}) => execFileSync(file, args, { encoding: 'utf8', ...options });
 const curl = (url, file) => run('/usr/bin/curl', ['-fSs', '--retry', '2', '--max-time', '720', '--output', file, url]);
+const hash = (bytes) => createHash('sha256').update(bytes).digest('hex');
 await mkdir(root);
 await mkdir(output);
 const feedFile = path.join(root, 'previous.json');
-curl(`${channel}/backups/${backupHash}.json`, feedFile);
+curl(`${channel}/latest.json`, feedFile);
+if (hash(await readFile(feedFile)) !== backupHash) curl(`${channel}/backups/${backupHash}.json`, feedFile);
 const previousBytes = await readFile(feedFile);
-assert.equal(createHash('sha256').update(previousBytes).digest('hex'), backupHash);
+assert.equal(hash(previousBytes), backupHash);
 const previous = JSON.parse(previousBytes);
 assert.equal(previous.version, '2.0.0');
 const asset = previous.platforms['darwin-aarch64'];
@@ -35,10 +37,16 @@ const app = path.join(root, appName);
 const version = () => run('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleShortVersionString', path.join(app, 'Contents/Info.plist')]).trim();
 assert.equal(version(), '2.0.0');
 run('/usr/bin/codesign', ['--verify', '--deep', '--strict', app]);
+console.log('Signed native 2.0.0 baseline verified');
 
 const live = path.join(root, 'live.json');
-curl(`${channel}/latest.json`, live);
-const feed = JSON.parse(await readFile(live, 'utf8'));
+let feed;
+for (let deadline = Date.now() + 26 * 60_000; Date.now() < deadline;) {
+  curl(`${channel}/latest.json`, live);
+  feed = JSON.parse(await readFile(live, 'utf8'));
+  if (feed.version !== '2.0.0') break;
+  await delay(15000);
+}
 assert.equal(feed.version, '2.0.1');
 const descriptor = feed.macDeltaManifest;
 assert.equal(descriptor.url, 'https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/mac-delta/2.0.1/darwin-aarch64/manifest.json');
