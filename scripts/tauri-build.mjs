@@ -5,6 +5,7 @@
 // tauri.conf.json 不打开该开关，由这里按密钥是否存在再合并 tauri.updater.conf.json。
 import { spawn } from "node:child_process";
 import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
+import { availableParallelism, totalmem } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { verifyGeneratedNsisEditionResources } from "./verify-nsis-edition-resources.mjs";
@@ -13,6 +14,9 @@ const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
 export const DEFAULT_UPDATER_KEY_PATH = path.join(REPO_ROOT, "src-tauri", ".updater-key");
 export const UPDATER_CONFIG_PATH = path.join(REPO_ROOT, "src-tauri", "tauri.updater.conf.json");
+const GIB = 1024 ** 3;
+const BUILD_MEMORY_HEADROOM = 2 * GIB;
+const MEMORY_PER_BUILD_JOB = 1.25 * GIB;
 
 /**
  * @param {{
@@ -116,6 +120,31 @@ export function resolveUpdaterSigningEnv(env, defaultKeyPath) {
   return next;
 }
 
+export function resolveReleaseCargoEnv(environment, passthrough) {
+  const desktop = process.platform === "win32" || process.platform === "darwin";
+  if (!desktop || passthrough.includes("--debug") || passthrough.includes("-d")) return environment;
+
+  const cpus = availableParallelism();
+  const availableBytes = Math.min(process.availableMemory(), totalmem());
+  const memoryJobs = Math.floor((availableBytes - BUILD_MEMORY_HEADROOM) / MEMORY_PER_BUILD_JOB);
+  const jobs = Math.max(1, Math.min(cpus, memoryJobs));
+  // Cargo's jobserver limits concurrent work. Keep the codegen layout stable
+  // on this machine so changes in available memory can reuse release artifacts.
+  const env = {
+    ...environment,
+    CARGO_BUILD_JOBS: environment.CARGO_BUILD_JOBS?.trim() || String(jobs),
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS:
+      environment.CARGO_PROFILE_RELEASE_CODEGEN_UNITS?.trim() || String(cpus),
+    CARGO_PROFILE_RELEASE_LTO: environment.CARGO_PROFILE_RELEASE_LTO?.trim() || "thin",
+  };
+  console.log(
+    `[tauri-build] Cargo release jobs=${env.CARGO_BUILD_JOBS}, ` +
+      `codegen-units=${env.CARGO_PROFILE_RELEASE_CODEGEN_UNITS}, lto=${env.CARGO_PROFILE_RELEASE_LTO} ` +
+      `(${cpus} CPUs, ${(availableBytes / GIB).toFixed(1)} GiB available)`,
+  );
+  return env;
+}
+
 function runTauri(args, env) {
   return new Promise((resolve, reject) => {
     const child = spawn("pnpm", ["exec", "tauri", ...args], {
@@ -149,7 +178,7 @@ async function main() {
   });
   const code = await runTauri(
     buildTauriCliArgs({ enableUpdaterArtifacts, passthrough, singleEditionConfig }),
-    env,
+    resolveReleaseCargoEnv(env, passthrough),
   );
   if (code !== 0) {
     process.exitCode = code;

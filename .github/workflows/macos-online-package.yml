@@ -132,6 +132,7 @@ jobs:
           }
           cpSync(path.join(source,'files'), process.cwd(), {recursive:true});
           NODE
+          git show "$GITHUB_SHA:scripts/tauri-build.mjs" > scripts/tauri-build.mjs
           test "$(node -p "require('./package.json').version")" = 2.0.1
       - name: Free runner disk space
         run: |
