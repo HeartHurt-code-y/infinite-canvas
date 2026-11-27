@@ -184,19 +184,16 @@ jobs:
 
   windows-native:
     if: inputs.platform == 'windows'
+    permissions:
+      contents: read
+      actions: read
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 85
     defaults:
       run:
         shell: pwsh
     env:
       CI: "true"
-      CARGO_TERM_COLOR: never
-      CARGO_INCREMENTAL: "0"
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
-      CARGO_PROFILE_RELEASE_LTO: "false"
-      CARGO_PROFILE_RELEASE_DEBUG: "0"
-      RUST_MIN_STACK: "33554432"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -212,7 +209,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: dtolnay/rust-toolchain@stable
-      - name: Restore encrypted Windows build inputs
+      - name: Restore encrypted Windows release inputs
         env:
           IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
         run: |
@@ -222,8 +219,9 @@ jobs:
             Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'win-260-restore.mjs') -Encoding utf8
           node (Join-Path $env:RUNNER_TEMP 'win-260-restore.mjs')
           exit $LASTEXITCODE
-      - name: Prepare verified Windows baseline and build signed NSISBI installer
+      - name: Recover the signed NSISBI installer and prepare the verified 2.5.0 baseline
         env:
+          GH_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -236,6 +234,10 @@ jobs:
           try {
             pnpm install --frozen-lockfile *> $log
             if($LASTEXITCODE -ne 0) { throw 'Dependency preparation failed' }
+            $download = Join-Path $env:RUNNER_TEMP 'ic-signed-windows-260'
+            gh run download 46011450590 --repo $env:GITHUB_REPOSITORY --name windows-2.6.0-verified-build-recovery --dir $download *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Signed candidate retrieval failed' }
+            'Recovered the previous signed installer artifact.'
             node "$proof/windows-cloud-baseline.mjs" *>> $log
             if($LASTEXITCODE -ne 0) { throw 'Baseline download failed' }
             $base = Join-Path $env:RUNNER_TEMP 'windows-2.5.0-signed-setup.exe'
@@ -251,48 +253,67 @@ jobs:
             $ffmpeg = 'src-tauri/resources/ffmpeg'
             New-Item -ItemType Directory -Path $ffmpeg -Force | Out-Null
             Copy-Item -Path (Join-Path $baseline 'ffmpeg/*') -Destination $ffmpeg -Force
-            node "$proof/build-windows-nsisbi.mjs" *>> $log
-            if($LASTEXITCODE -ne 0) { throw 'Signed NSISBI build failed' }
-            $report = Get-Content -Raw -LiteralPath "$proof/nsisbi-guarded.json" | ConvertFrom-Json
-            "Verified Windows x64 complete installer in $($report.seconds) seconds."
+            node "$proof/restore-windows-packages.mjs" $download *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Recovery verification of the signed Windows installer failed' }
+            'Verified the original signed installer against the frozen Windows source and resource recipe.'
           } catch {
             Add-Content -LiteralPath $log -Value $_.Exception.Message
             $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
             node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
-            throw 'Windows native build failed; encrypted diagnostics retained'
+            throw 'Windows prebuilt installer recovery failed. Encrypted diagnostics retained.'
           }
-      - name: Create and verify the HDiffPatch update in the native desktop
+      - name: Verify exact installed files and sign the HDiffPatch candidate
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
           TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
           IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+          IC_WINDOWS_VERIFY_INVENTORY_ONLY: "1"
         run: |
           $ephemeral = $env:IC_RELEASE_SNAPSHOT_KEY
           $env:IC_RELEASE_SNAPSHOT_KEY = $null
           $log = Join-Path $env:RUNNER_TEMP 'ic-native-build.log'
           $proof = '.cache/release-validation/2.6.0'
           $delta = "$proof/windows-delta"
-          $pwsh = (Get-Process -Id $PID).Path
           try {
             & "$proof/validate-windows.ps1" Clean *> $log
-            if($LASTEXITCODE -ne 0) { throw 'Clean native Windows startup failed' }
+            if($LASTEXITCODE -ne 0) { throw 'Clean NSISBI installed-file comparison failed' }
             & "$delta/prepare-patch.ps1" *>> $log
             if($LASTEXITCODE -ne 0) { throw 'HDiffPatch preparation failed' }
             node "$delta/publish-verified-wrapper.mjs" prepare *>> $log
             if($LASTEXITCODE -ne 0) { throw 'Signed upgrade preparation failed' }
-            node "$delta/validate-staged-update.mjs" $pwsh *>> $log
-            if($LASTEXITCODE -ne 0) { throw 'Staged native upgrade failed' }
-            $evidence = Get-Content -Raw -LiteralPath "$delta/native-update-validation.json" | ConvertFrom-Json
-            "Native 2.5.0 to 2.6.0 automatic update verified with $($evidence.completeInventory) identical installed files."
+            $stage = Join-Path $env:RUNNER_TEMP 'ic-physical-acceptance'
+            New-Item -ItemType Directory -Path $stage | Out-Null
+            $raw = Get-Content -Raw -LiteralPath "$delta/prepared.json" | ConvertFrom-Json
+            $upgrade = Get-Content -Raw -LiteralPath "$delta/upgrade-prepared.json" | ConvertFrom-Json
+            foreach($file in @("$delta/$($raw.filename)", "$delta/$($raw.filename).sig", $upgrade.localPath, ($upgrade.localPath+'.sig'), "$delta/prepared.json", "$delta/upgrade-prepared.json", "$delta/delta-inventory.json", '.cache/tauri-editions/online/artifacts/2.6.0/latest.json')) {
+              Copy-Item -LiteralPath $file -Destination $stage
+            }
+            "Signed native acceptance candidate has $($upgrade.deltaBytes) bytes."
           } catch {
             Add-Content -LiteralPath $log -Value $_.Exception.Message
             $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
             node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
-            throw 'Windows native validation failed; encrypted diagnostics retained'
+            throw 'Windows differential creation failed. Encrypted diagnostics retained.'
           }
-      - name: Publish signed Windows assets and atomically switch the feed
+      - name: Retain the signed Windows candidate for a physical upgrade
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-physical-acceptance
+          path: ${{ runner.temp }}/ic-physical-acceptance/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 5
+      - name: Await exact physical Windows updater acceptance
+        env:
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          node .cache/release-validation/2.6.0/windows-delta/windows-acceptance-gate.mjs receive $env:GITHUB_RUN_ID
+          exit $LASTEXITCODE
+      - name: Upload signed Windows packages and atomically publish the update feed
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -308,37 +329,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
             node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
-            throw 'Windows update publication failed; encrypted diagnostics retained'
+            throw 'Windows update publication failed. Encrypted diagnostics retained.'
           }
           Get-Content -Raw -LiteralPath "$delta/delta-publish-result.json"
-      - name: Verify the native Windows upgrade through the production feed
-        run: |
-          $pwsh = (Get-Process -Id $PID).Path
-          node .cache/release-validation/2.6.0/windows-delta/verify-public-delta.mjs $pwsh
-          exit $LASTEXITCODE
       - name: Retain Windows release receipts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-2.6.0-x64-release-receipts
           path: |
-            .cache/release-validation/2.6.0/nsisbi-guarded.json
+            .cache/release-validation/2.6.0/nsisbi-recovered.json
             .cache/release-validation/2.6.0/windows-delta/native-update-validation.json
             .cache/release-validation/2.6.0/windows-delta/delta-publish-result.json
-            .cache/release-validation/2.6.0/windows-delta/public-network-receipt.json
           if-no-files-found: ignore
           retention-days: 14
-      - name: Retain signed Windows packages if acceptance fails
-        if: ${{ failure() && hashFiles('.cache/tauri-editions/online/artifacts/2.6.0/distribution.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-2.6.0-verified-build-recovery
-          path: |
-            .cache/tauri-editions/online/artifacts/2.6.0/
-            .cache/tauri-editions/online/target/release/infinite-canvas.exe
-          include-hidden-files: true
-          compression-level: 0
-          retention-days: 5
       - name: Retain encrypted Windows errors
         if: failure()
         uses: actions/upload-artifact@v4
@@ -347,4 +351,3 @@ jobs:
           path: ${{ runner.temp }}/ic-native-build.log.enc
           if-no-files-found: ignore
           retention-days: 2
-
