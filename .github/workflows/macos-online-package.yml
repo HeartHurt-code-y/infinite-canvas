@@ -6,7 +6,7 @@ on:
       platform:
         description: Native release platform
         type: choice
-        options: [macos, windows]
+        options: [macos, windows, windows-relay]
         default: macos
 
 permissions:
@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   apple-silicon:
-    if: inputs.platform != 'windows'
+    if: inputs.platform == 'macos'
     permissions:
       contents: read
       actions: read
@@ -344,6 +344,149 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
       - name: Retain encrypted Windows errors
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-encrypted-errors
+          path: ${{ runner.temp }}/ic-native-build.log.enc
+          if-no-files-found: ignore
+          retention-days: 2
+
+  windows-relay:
+    if: inputs.platform == 'windows-relay'
+    permissions:
+      contents: read
+      actions: read
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: e5a19b05aafe354d73a662d8296b524a68c7c322
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Restore encrypted 2.6.0 source
+        env:
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          mkdir "$RUNNER_TEMP/ic-release-source"
+          git show "$GITHUB_SHA:.github/release-input/mac-260-index.json" > "$RUNNER_TEMP/ic-release-source.json"
+          node --input-type=module <<'NODE'
+          import { createDecipheriv, createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          import path from 'node:path';
+          const temp = process.env.RUNNER_TEMP;
+          const key = process.env.IC_RELEASE_SNAPSHOT_KEY?.trim() ?? '';
+          if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Missing encrypted source key');
+          const index = JSON.parse(readFileSync(path.join(temp, 'ic-release-source.json'), 'utf8'));
+          if (index.base !== 'e5a19b05aafe354d73a662d8296b524a68c7c322' || !Array.isArray(index.parts) ||
+              !index.parts.every(name => /^mac-260-source\.enc\.[0-9]+$/.test(name)))
+            throw new Error('Invalid source snapshot descriptor');
+          const bytes = Buffer.concat(index.parts.map(name => execFileSync('git',
+            ['show', process.env.GITHUB_SHA + ':.github/release-input/' + name], { maxBuffer: 60 * 1024 ** 2 })));
+          const decipher = createDecipheriv('aes-256-gcm', Buffer.from(key, 'hex'), bytes.subarray(0,12));
+          decipher.setAuthTag(bytes.subarray(-16));
+          const archive = Buffer.concat([decipher.update(bytes.subarray(12,-16)),decipher.final()]);
+          if (createHash('sha256').update(archive).digest('hex') !== index.sourceSha256)
+            throw new Error('Source snapshot digest mismatch');
+          writeFileSync(path.join(temp, 'ic-release-source.tar.gz'), archive, {mode:0o600});
+          const helper = execFileSync('git',['show',process.env.GITHUB_SHA+':.github/release-input/mac-260-archive-helper.enc']);
+          const runner = createDecipheriv('aes-256-gcm', Buffer.from(key,'hex'), helper.subarray(0,12));
+          runner.setAuthTag(helper.subarray(-16));
+          writeFileSync(path.join(temp,'mac-260-archive-helper.mjs'),Buffer.concat([runner.update(helper.subarray(12,-16)),runner.final()]),{mode:0o600});
+          NODE
+          tar -xzf "$RUNNER_TEMP/ic-release-source.tar.gz" -C "$RUNNER_TEMP/ic-release-source"
+          node --input-type=module <<'NODE'
+          import { cpSync, readFileSync, rmSync } from 'node:fs';
+          import path from 'node:path';
+          const source = path.join(process.env.RUNNER_TEMP, 'ic-release-source');
+          for (const entry of JSON.parse(readFileSync(path.join(source, 'removed.json'), 'utf8'))) {
+            if (path.isAbsolute(entry) || entry.split('/').some(part => !part || part === '..' || part === '.git'))
+              throw new Error('Unsafe source removal');
+            rmSync(path.resolve(entry), {force:true});
+          }
+          cpSync(path.join(source, 'files'), process.cwd(), {recursive:true});
+          NODE
+          cp "$RUNNER_TEMP/mac-260-archive-helper.mjs" scripts/macos-online-delta.mjs
+          git show "$GITHUB_SHA:.github/release-input/mac-260-seed-runtime.mjs" > scripts/mac-260-seed-runtime.mjs
+          git show "$GITHUB_SHA:.github/release-input/mac-260-seal-log.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
+          git show "$GITHUB_SHA:.github/release-input/mac-260-live-upgrade.mjs" > scripts/verify-macos-live-upgrade-2.6.0.mjs
+          git show "$GITHUB_SHA:.github/release-input/mac-260-restore-packages.mjs" > scripts/mac-260-restore-packages.mjs
+          test "$(node -p "require('./package.json').version")" = 2.6.0
+          test "$(uname -m)" = arm64 && test "$(node -p 'process.arch')" = arm64
+          rm -rf "$RUNNER_TEMP/ic-release-source"
+          rm -f "$RUNNER_TEMP/ic-release-source.tar.gz"
+          echo 'Encrypted build inputs restored on native arm64.'
+      - name: Retrieve the exact accepted Windows installer and delta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { createDecipheriv } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          import path from 'node:path';
+          const key = Buffer.from(process.env.IC_RELEASE_SNAPSHOT_KEY.trim(), 'hex');
+          const filename = path.join(process.env.RUNNER_TEMP,'ic-win-relay.tar.gz');
+          const data = execFileSync('git',['show',process.env.GITHUB_SHA+':.github/release-input/win-260-relay.enc']);
+          const decipher = createDecipheriv('aes-256-gcm',key,data.subarray(0,12));
+          decipher.setAuthTag(data.subarray(-16));
+          writeFileSync(filename,Buffer.concat([decipher.update(data.subarray(12,-16)),decipher.final()]),{mode:0o600});
+          NODE
+          tar -xzf "$RUNNER_TEMP/ic-win-relay.tar.gz"
+          gh run download 46011450590 --repo "$GITHUB_REPOSITORY" --name windows-2.6.0-verified-build-recovery --dir "$RUNNER_TEMP/ic-win-signed-build" &
+          build=$!
+          gh run download 46011450590 --repo "$GITHUB_REPOSITORY" --name windows-2.6.0-x64-release-receipts --dir "$RUNNER_TEMP/ic-win-native-receipts" &
+          native=$!
+          gh run download 46017589865 --repo "$GITHUB_REPOSITORY" --name windows-2.6.0-physical-acceptance --dir "$RUNNER_TEMP/ic-win-signed-update" &
+          update=$!
+          node .cache/release-validation/2.6.0/windows-delta/windows-acceptance-gate.mjs receive 46017589865
+          wait "$build"
+          wait "$native"
+          wait "$update"
+          echo "Recovered the unmodified Windows installer, native verification, signed differential and physical acceptance."
+      - name: Publish the accepted Windows release via the proven macOS route
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "$(gh run view 46017589865 --repo "$GITHUB_REPOSITORY" --json status --jq .status)" != completed ]; then
+            echo "::error::The previous Windows publisher is still active"
+            exit 1
+          fi
+          git show "$GITHUB_SHA:.github/release-input/mac-260-seal-log.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
+          proof=.cache/release-validation/2.6.0/windows-delta
+          if env -u IC_RELEASE_SNAPSHOT_KEY -u GH_TOKEN node "$proof/publish-windows-via-relay.mjs" \
+            "$RUNNER_TEMP/ic-win-signed-build" "$RUNNER_TEMP/ic-win-native-receipts" "$RUNNER_TEMP/ic-win-signed-update" \
+            > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
+            cat "$proof/delta-publish-result.json"
+          else
+            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
+            exit 1
+          fi
+      - name: Retain the Windows release receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-x64-release-receipts
+          path: |
+            .cache/release-validation/2.6.0/windows-delta/native-update-validation.json
+            .cache/release-validation/2.6.0/windows-delta/delta-publish-result.json
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain encrypted relay diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
