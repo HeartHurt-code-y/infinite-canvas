@@ -2,16 +2,23 @@ name: macOS Online Package
 
 on:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: Native release platform
+        type: choice
+        options: [macos, windows]
+        default: macos
 
 permissions:
   contents: read
 
 concurrency:
-  group: macos-online-arm64
+  group: native-online-260-${{ inputs.platform }}
   cancel-in-progress: false
 
 jobs:
   apple-silicon:
+    if: inputs.platform != 'windows'
     runs-on: macos-15
     timeout-minutes: 160
     env:
@@ -195,6 +202,161 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: macos-2.6.0-encrypted-errors
+          path: ${{ runner.temp }}/ic-native-build.log.enc
+          if-no-files-found: ignore
+          retention-days: 2
+
+  windows-native:
+    if: inputs.platform == 'windows'
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CI: "true"
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      RUST_MIN_STACK: "33554432"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: e5a19b05aafe354d73a662d8296b524a68c7c322
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.5.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore encrypted Windows build inputs
+        env:
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          git fetch --no-tags --depth=1 origin $env:GITHUB_SHA
+          if($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git show "$($env:GITHUB_SHA):.github/release-input/win-260-restore.mjs" |
+            Set-Content -LiteralPath (Join-Path $env:RUNNER_TEMP 'win-260-restore.mjs') -Encoding utf8
+          node (Join-Path $env:RUNNER_TEMP 'win-260-restore.mjs')
+          exit $LASTEXITCODE
+      - name: Prepare verified Windows baseline and build signed NSISBI installer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          $ephemeral = $env:IC_RELEASE_SNAPSHOT_KEY
+          $env:IC_RELEASE_SNAPSHOT_KEY = $null
+          $log = Join-Path $env:RUNNER_TEMP 'ic-native-build.log'
+          $proof = '.cache/release-validation/2.6.0'
+          try {
+            pnpm install --frozen-lockfile *> $log
+            if($LASTEXITCODE -ne 0) { throw 'Dependency preparation failed' }
+            node "$proof/windows-cloud-baseline.mjs" *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Baseline download failed' }
+            $base = Join-Path $env:RUNNER_TEMP 'windows-2.5.0-signed-setup.exe'
+            $baseline = Join-Path (Resolve-Path -LiteralPath '.').Path '.cache/release-validation/2.5.0/clean-27e51408'
+            New-Item -ItemType Directory -Path $baseline -Force | Out-Null
+            $installer = Start-Process -FilePath $base -ArgumentList @('/S','/NS',"/D=$baseline") -WindowStyle Hidden -PassThru
+            if (!$installer.WaitForExit(180000) -or $installer.ExitCode -ne 0) { throw 'The signed Windows baseline failed to install' }
+            $oldExe = Join-Path $baseline 'infinite-canvas.exe'
+            if ((Get-FileHash -LiteralPath $oldExe).Hash.ToLowerInvariant() -ne '5e16ceaafd1417a761f7fd91c5a0ae38a3c63437283185270c511d45cad421e5') {
+              throw 'The Windows baseline is not byte-identical to the verified installation'
+            }
+            Copy-Item -LiteralPath $oldExe -Destination '.\infinite-canvas.exe'
+            $ffmpeg = 'src-tauri/resources/ffmpeg'
+            New-Item -ItemType Directory -Path $ffmpeg -Force | Out-Null
+            Copy-Item -Path (Join-Path $baseline 'ffmpeg/*') -Destination $ffmpeg -Force
+            node "$proof/build-windows-nsisbi.mjs" *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Signed NSISBI build failed' }
+            $report = Get-Content -Raw -LiteralPath "$proof/nsisbi-guarded.json" | ConvertFrom-Json
+            "Verified Windows x64 complete installer in $($report.seconds) seconds."
+          } catch {
+            Add-Content -LiteralPath $log -Value $_.Exception.Message
+            $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
+            node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
+            throw 'Windows native build failed; encrypted diagnostics retained'
+          }
+      - name: Create and verify the HDiffPatch update in the native desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          $ephemeral = $env:IC_RELEASE_SNAPSHOT_KEY
+          $env:IC_RELEASE_SNAPSHOT_KEY = $null
+          $log = Join-Path $env:RUNNER_TEMP 'ic-native-build.log'
+          $proof = '.cache/release-validation/2.6.0'
+          $delta = "$proof/windows-delta"
+          $pwsh = (Get-Process -Id $PID).Path
+          try {
+            & "$proof/validate-windows.ps1" Clean *> $log
+            if($LASTEXITCODE -ne 0) { throw 'Clean native Windows startup failed' }
+            & "$delta/prepare-patch.ps1" *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'HDiffPatch preparation failed' }
+            node "$delta/publish-verified-wrapper.mjs" prepare *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Signed upgrade preparation failed' }
+            node "$delta/validate-staged-update.mjs" $pwsh *>> $log
+            if($LASTEXITCODE -ne 0) { throw 'Staged native upgrade failed' }
+            $evidence = Get-Content -Raw -LiteralPath "$delta/native-update-validation.json" | ConvertFrom-Json
+            "Native 2.5.0 to 2.6.0 automatic update verified with $($evidence.completeInventory) identical installed files."
+          } catch {
+            Add-Content -LiteralPath $log -Value $_.Exception.Message
+            $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
+            node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
+            throw 'Windows native validation failed; encrypted diagnostics retained'
+          }
+      - name: Publish signed Windows assets and atomically switch the feed
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          $ephemeral = $env:IC_RELEASE_SNAPSHOT_KEY
+          $env:IC_RELEASE_SNAPSHOT_KEY = $null
+          $log = Join-Path $env:RUNNER_TEMP 'ic-native-build.log'
+          $delta = '.cache/release-validation/2.6.0/windows-delta'
+          node "$delta/publish-verified-wrapper.mjs" publish *> $log
+          if ($LASTEXITCODE -ne 0) {
+            $env:IC_RELEASE_SNAPSHOT_KEY = $ephemeral
+            node (Join-Path $env:RUNNER_TEMP 'ic-seal-build-log.mjs')
+            throw 'Windows update publication failed; encrypted diagnostics retained'
+          }
+          Get-Content -Raw -LiteralPath "$delta/delta-publish-result.json"
+      - name: Verify the native Windows upgrade through the production feed
+        run: |
+          $pwsh = (Get-Process -Id $PID).Path
+          node .cache/release-validation/2.6.0/windows-delta/verify-public-delta.mjs $pwsh
+          exit $LASTEXITCODE
+      - name: Retain Windows release receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-x64-release-receipts
+          path: |
+            .cache/release-validation/2.6.0/nsisbi-guarded.json
+            .cache/release-validation/2.6.0/windows-delta/native-update-validation.json
+            .cache/release-validation/2.6.0/windows-delta/delta-publish-result.json
+            .cache/release-validation/2.6.0/windows-delta/public-network-receipt.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain encrypted Windows errors
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-encrypted-errors
           path: ${{ runner.temp }}/ic-native-build.log.enc
           if-no-files-found: ignore
           retention-days: 2
