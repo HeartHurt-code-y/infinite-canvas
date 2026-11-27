@@ -19,6 +19,9 @@ concurrency:
 jobs:
   apple-silicon:
     if: inputs.platform != 'windows'
+    permissions:
+      contents: read
+      actions: read
     runs-on: macos-15
     timeout-minutes: 160
     env:
@@ -89,6 +92,7 @@ jobs:
           git show "$GITHUB_SHA:.github/release-input/mac-260-seed-runtime.mjs" > scripts/mac-260-seed-runtime.mjs
           git show "$GITHUB_SHA:.github/release-input/mac-260-seal-log.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
           git show "$GITHUB_SHA:.github/release-input/mac-260-live-upgrade.mjs" > scripts/verify-macos-live-upgrade-2.6.0.mjs
+          git show "$GITHUB_SHA:.github/release-input/mac-260-restore-packages.mjs" > scripts/mac-260-restore-packages.mjs
           test "$(node -p "require('./package.json').version")" = 2.6.0
           test "$(uname -m)" = arm64 && test "$(node -p 'process.arch')" = arm64
           rm -rf "$RUNNER_TEMP/ic-release-source"
@@ -96,34 +100,15 @@ jobs:
           echo 'Encrypted build inputs restored on native arm64.'
       - name: Restore verified native FFmpeg from the signed baseline
         run: node scripts/mac-260-seed-runtime.mjs
-      - name: Prepare dependencies and check compilers
+      - name: Restore the previously verified and signed 2.6.0 packages
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
         run: |
           if env -u IC_RELEASE_SNAPSHOT_KEY bash -e -c \
-            'pnpm install --frozen-lockfile && pnpm ffmpeg:prepare && pnpm typecheck && pnpm rust:check' \
+            'pnpm install --frozen-lockfile && gh run download 46004376682 --repo "$GITHUB_REPOSITORY" --name macos-2.6.0-arm64-native-packages --dir "$RUNNER_TEMP/ic-verified-mac-260" && node scripts/mac-260-restore-packages.mjs' \
             > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
-            echo 'TypeScript and Rust compiler checks passed on Apple Silicon.'
-          else
-            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
-            exit 1
-          fi
-      - name: Build signed installer and verify native installation
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
-        run: |
-          started=$(date +%s)
-          if env -u IC_RELEASE_SNAPSHOT_KEY bash -e -c \
-            'bash scripts/prepare-macos-online-signing.sh && bash scripts/build-macos-online.sh' \
-            > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
-            echo "Native build and installation verified in $(( $(date +%s) - started )) seconds."
-            grep -E 'Verified macOS|Finished .*release|Native one-command PKG' "$RUNNER_TEMP/ic-native-build.log" || true
+            grep 'Recovered the exact signed' "$RUNNER_TEMP/ic-native-build.log"
           else
             node "$RUNNER_TEMP/ic-seal-build-log.mjs"
             exit 1
@@ -187,15 +172,6 @@ jobs:
             ${{ runner.temp }}/mac-260-publish.json
             ${{ runner.temp }}/ic-live-upgrade-evidence/native-delta-upgrade.json
           if-no-files-found: ignore
-          retention-days: 14
-      - name: Retain verified native packages
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-2.6.0-arm64-native-packages
-          path: .cache/tauri-editions/online/artifacts/2.6.0/
-          if-no-files-found: ignore
-          compression-level: 0
           retention-days: 14
       - name: Retain encrypted diagnostics
         if: failure()
