@@ -61,6 +61,10 @@ jobs:
           if (createHash('sha256').update(archive).digest('hex') !== index.sourceSha256)
             throw new Error('Source snapshot digest mismatch');
           writeFileSync(path.join(temp, 'ic-release-source.tar.gz'), archive, {mode:0o600});
+          const helper = execFileSync('git',['show',process.env.GITHUB_SHA+':.github/release-input/mac-260-archive-helper.enc']);
+          const runner = createDecipheriv('aes-256-gcm', Buffer.from(key,'hex'), helper.subarray(0,12));
+          runner.setAuthTag(helper.subarray(-16));
+          writeFileSync(path.join(temp,'mac-260-archive-helper.mjs'),Buffer.concat([runner.update(helper.subarray(12,-16)),runner.final()]),{mode:0o600});
           NODE
           tar -xzf "$RUNNER_TEMP/ic-release-source.tar.gz" -C "$RUNNER_TEMP/ic-release-source"
           node --input-type=module <<'NODE'
@@ -74,6 +78,8 @@ jobs:
           }
           cpSync(path.join(source, 'files'), process.cwd(), {recursive:true});
           NODE
+          cp "$RUNNER_TEMP/mac-260-archive-helper.mjs" scripts/macos-online-delta.mjs
+          git show "$GITHUB_SHA:.github/release-input/mac-260-seed-runtime.mjs" > scripts/mac-260-seed-runtime.mjs
           git show "$GITHUB_SHA:.github/release-input/mac-260-seal-log.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
           git show "$GITHUB_SHA:.github/release-input/mac-260-live-upgrade.mjs" > scripts/verify-macos-live-upgrade-2.6.0.mjs
           test "$(node -p "require('./package.json').version")" = 2.6.0
@@ -81,6 +87,8 @@ jobs:
           rm -rf "$RUNNER_TEMP/ic-release-source"
           rm -f "$RUNNER_TEMP/ic-release-source.tar.gz"
           echo 'Encrypted build inputs restored on native arm64.'
+      - name: Restore verified native FFmpeg from the signed baseline
+        run: node scripts/mac-260-seed-runtime.mjs
       - name: Prepare dependencies and check compilers
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -122,6 +130,7 @@ jobs:
           TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
           IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
         run: |
+          export IC_MAC_BASELINE_ARCHIVE="$RUNNER_TEMP/ic-baseline-2.0.1.tar.gz"
           if env -u IC_RELEASE_SNAPSHOT_KEY node --input-type=module > "$RUNNER_TEMP/ic-native-build.log" 2>&1 <<'NODE'
           import assert from 'node:assert/strict';
           import { writeFileSync } from 'node:fs';
@@ -159,7 +168,9 @@ jobs:
             exit 1
           fi
       - name: Verify automatic upgrade from the published feed
-        run: node scripts/verify-macos-live-upgrade-2.6.0.mjs
+        run: |
+          export IC_MAC_BASELINE_ARCHIVE="$RUNNER_TEMP/ic-baseline-2.0.1.tar.gz"
+          node scripts/verify-macos-live-upgrade-2.6.0.mjs
       - name: Retain release receipts
         if: always()
         uses: actions/upload-artifact@v4

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { validateMacDeltaManifest } from './mac-delta-manifest.mjs';
@@ -29,7 +29,8 @@ assert.equal(previous.version, '2.0.1');
 const asset = previous.platforms['darwin-aarch64'];
 assert.equal(asset.url, `${channel}/${encodeURIComponent('无限画布_2.0.1_aarch64-online.app.tar.gz')}`);
 const base = path.join(root, 'base.tar.gz');
-curl(asset.url, base);
+if (process.env.IC_MAC_BASELINE_ARCHIVE) await copyFile(process.env.IC_MAC_BASELINE_ARCHIVE,base);
+else curl(asset.url, base);
 await writeFile(`${base}.sig`, asset.signature);
 await verifyUpdaterSignature(base, `${base}.sig`, pubkey);
 run('/usr/bin/tar', ['-xpf', base, '-C', root]);
