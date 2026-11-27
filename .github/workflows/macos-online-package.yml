@@ -497,7 +497,7 @@ jobs:
 
   macos-pkg-only-check:
     if: inputs.platform == 'macos-pkg-only-check'
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
