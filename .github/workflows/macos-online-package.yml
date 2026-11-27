@@ -328,6 +328,17 @@ jobs:
             .cache/release-validation/2.6.0/windows-delta/public-network-receipt.json
           if-no-files-found: ignore
           retention-days: 14
+      - name: Retain signed Windows packages if acceptance fails
+        if: ${{ failure() && hashFiles('.cache/tauri-editions/online/artifacts/2.6.0/distribution.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-2.6.0-verified-build-recovery
+          path: |
+            .cache/tauri-editions/online/artifacts/2.6.0/
+            .cache/tauri-editions/online/target/release/infinite-canvas.exe
+          include-hidden-files: true
+          compression-level: 0
+          retention-days: 5
       - name: Retain encrypted Windows errors
         if: failure()
         uses: actions/upload-artifact@v4
