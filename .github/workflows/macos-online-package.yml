@@ -1,417 +1,190 @@
-name: Native Online Package
+name: macOS Online Package
 
 on:
   workflow_dispatch:
-    inputs:
-      platform:
-        description: Native package platform
-        type: choice
-        options:
-          - macos
-          - windows
-        default: macos
-      architecture:
-        description: Native Mac architecture
-        type: choice
-        options:
-          - arm64
-          - x64
-        default: arm64
-      arm64_runner:
-        description: Native Apple Silicon runner image
-        type: choice
-        options:
-          - macos-15
-          - macos-26
-        default: macos-15
-      replace_existing:
-        description: Cancel the previous run for this architecture (stalled releases only)
-        type: boolean
-        default: false
-      prebuilt_run:
-        description: Reuse a signed Windows artifact from this repository run (source hashes must match)
-        type: string
-        default: ""
-      validated_installer_sha256:
-        description: Exact installer SHA256 after native desktop acceptance outside the hosted runner
-        type: string
-        default: ""
-      publish:
-        description: Publish verified artifacts and the independent online update feed
-        type: boolean
-        default: false
-      package_only:
-        description: Publish only the verified PKG installer, keeping other build artifacts internal
-        type: boolean
-        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.platform == 'windows' && 'windows-online-x64' || format('macos-online-{0}', inputs.architecture) }}
-  cancel-in-progress: ${{ inputs.replace_existing || false }}
+  group: macos-online-arm64
+  cancel-in-progress: false
 
 jobs:
-  build:
-    if: inputs.platform != 'windows'
-    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || inputs.arm64_runner || 'macos-15' }}
-    timeout-minutes: 180
+  apple-silicon:
+    runs-on: macos-15
+    timeout-minutes: 160
     env:
       CI: "true"
-      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /opt/hostedtoolcache "$HOME/Library/Developer/CoreSimulator" /usr/local/lib/android
-          df -h /
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 12.5.1
-      - name: Set up Node
-        id: setup-node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: pnpm
-      - name: Confirm native architecture and version
-        env:
-          EXPECTED_ARCH: ${{ inputs.architecture }}
-        run: |
-          test "$(node -p 'process.arch')" = "$EXPECTED_ARCH"
-          node --input-type=module -e 'import {readFileSync} from "node:fs"; const p=JSON.parse(readFileSync("package.json")); const t=JSON.parse(readFileSync("src-tauri/tauri.conf.json")); if(p.version!==t.version) throw Error("Package and Tauri versions differ");'
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Check distribution prerequisites
-        run: |
-          export IC_PYTHON_INTERPRETER="$(command -v python3)"
-          "$IC_PYTHON_INTERPRETER" -c 'import sqlite3; import sys; assert sys.version_info >= (3, 9)'
-      - name: Prepare optional signing identity
-        run: bash scripts/prepare-macos-online-signing.sh
-      # Cache the prepared native runtime resources (the bundled FFmpeg engine),
-      # not application-version catalogs or installers. Every prepare command
-      # still validates the files it restores.
-      - name: Restore prepared runtime resources
-        id: runtime-resources-cache
-        uses: actions/cache/restore@v5
-        with:
-          path: |
-            src-tauri/resources/ffmpeg
-          # Some legacy preparers only validate existing bytes, rather than their
-          # complete recipe identity. Exact keys prevent restoring an older recipe.
-          key: macos-online-resources-v1-${{ runner.os }}-${{ inputs.architecture }}-${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('pnpm-lock.yaml', 'scripts/prepare-*.mjs', 'scripts/*runtime*.mjs', 'scripts/macos-runtime-signature.mjs', '!scripts/**/*.test.mjs', '!tools/**/*.test.mjs') }}
-      - name: Report runtime resource cache
-        env:
-          CACHE_HIT: ${{ steps.runtime-resources-cache.outputs.cache-hit }}
-          CACHE_MATCHED_KEY: ${{ steps.runtime-resources-cache.outputs.cache-matched-key }}
-        run: |
-          {
-            echo '### Prepared runtime resource cache'
-            echo "- Exact input match: ${CACHE_HIT:-false}"
-            echo "- Restored key: ${CACHE_MATCHED_KEY:-none}"
-            echo '- Preparation and integrity checks always run; unchanged verified resources are reused.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Build and verify online DMG and updater
-        id: verified-build
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bash scripts/build-macos-online.sh
-      - name: Launch installed application
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          validation_dir="$PWD/.cache/release-validation/$version"
-          mkdir -p "$validation_dir"
-          export IC_MAC_VALIDATION_DIR="$validation_dir"
-          app_name="$(node -p "require('./src-tauri/tauri.conf.json').productName")"
-          open -n "/Applications/$app_name.app"
-          swift - <<'SWIFT'
-          import Foundation
-          import CoreGraphics
-          let output = URL(fileURLWithPath: ProcessInfo.processInfo.environment["IC_MAC_VALIDATION_DIR"]!)
-          var applicationWindow: [String: Any]?
-          for _ in 0..<30 {
-              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-              applicationWindow = windows.first { window in
-                  let owner = window[kCGWindowOwnerName as String] as? String ?? ""
-                  let bounds = window[kCGWindowBounds as String] as? [String: Any] ?? [:]
-                  return (owner == "infinite-canvas" || owner == "无限画布") &&
-                      (bounds["Width"] as? Double ?? 0) >= 600 && (bounds["Height"] as? Double ?? 0) >= 400
-              }
-              if applicationWindow != nil { break }
-              Thread.sleep(forTimeInterval: 1)
-          }
-          guard let window = applicationWindow, let windowID = window[kCGWindowNumber as String] as? Int else {
-              fatalError("Installed application did not show its main window")
-          }
-          Thread.sleep(forTimeInterval: 8)
-          let evidence = try JSONSerialization.data(withJSONObject: window, options: [.prettyPrinted, .sortedKeys])
-          try evidence.write(to: output.appendingPathComponent("installed-window.json"))
-          let capture = Process()
-          capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-          capture.arguments = ["-x", "-l", String(windowID), output.appendingPathComponent("installed-app.png").path]
-          try capture.run()
-          capture.waitUntilExit()
-          guard capture.terminationStatus == 0 else { fatalError("Could not capture installed application window") }
-          print("Installed application launched with a visible main window; screenshot recorded.")
-          SWIFT
-      # Save immediately after native verification, so a later publication or
-      # artifact-upload failure does not discard successfully prepared resources.
-      - name: Save verified runtime resources
-        if: steps.verified-build.outcome == 'success' && steps.runtime-resources-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: |
-            src-tauri/resources/ffmpeg
-          key: ${{ steps.runtime-resources-cache.outputs.cache-primary-key }}
-      - name: Upload installation artifacts
-        # Preserve materialized packages when verification fails, for diagnosis.
-        # Only the verified-build success path below can publish them publicly.
-        if: ${{ !cancelled() && hashFiles('.cache/tauri-editions/online/artifacts/*/distribution.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-macos-online-${{ inputs.architecture }}-${{ github.sha }}
-          path: |
-            .cache/tauri-editions/online/artifacts/*/
-          include-hidden-files: true
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-      - name: Upload application launch evidence
-        if: ${{ !cancelled() && hashFiles('.cache/release-validation/*/installed-app.png') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-macos-launch-${{ inputs.architecture }}-${{ github.sha }}
-          path: .cache/release-validation/*/
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 14
-      - name: Publish requested installation artifacts
-        if: inputs.publish && steps.verified-build.outcome == 'success'
-        env:
-          TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
-          TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
-          PKG_ONLY: ${{ inputs.package_only }}
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          publish_args=()
-          if [ "$PKG_ONLY" = "true" ]; then publish_args+=(--package-only); fi
-          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version" "${publish_args[@]}"
-      - name: Report installation boundary
-        run: |
-          {
-            echo 'macOS online PKG, DMG and updater signature verified. The PKG was actually installed with the system installer.'
-            echo 'Installation scripts are embedded. Install the PKG with: sudo installer -pkg <downloaded.pkg> -target /'
-            echo 'Apple notarization is not performed. Gatekeeper may block first installation; the PKG embeds install-macos.sh and runs it automatically.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  windows:
-    if: inputs.platform == 'windows'
-    runs-on: windows-latest
-    timeout-minutes: 180
-    permissions:
-      contents: read
-      actions: read
-    env:
-      CI: "true"
+      CARGO_TERM_COLOR: never
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "8"
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
       RUST_MIN_STACK: "33554432"
     steps:
-      - name: Keep checkout source bytes stable
-        shell: pwsh
-        run: |
-          git config --global core.autocrlf false
-          git config --global core.eol lf
-      - name: Checkout
-        uses: actions/checkout@v5
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: e5a19b05aafe354d73a662d8296b524a68c7c322
+      - uses: pnpm/action-setup@v4
         with:
           version: 12.5.1
-      - name: Set up Node
-        uses: actions/setup-node@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
-          cache: pnpm
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: Cache native build dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> ../.cache/tauri-editions/online/target
-          cache-on-failure: true
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Restore signed Windows artifact and verify frozen source identity
-        if: inputs.prebuilt_run != ''
+          package-manager-cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Restore encrypted 2.6.0 source
         env:
-          GH_TOKEN: ${{ github.token }}
-          PREBUILT_RUN: ${{ inputs.prebuilt_run }}
-          VALIDATED_INSTALLER_SHA256: ${{ inputs.validated_installer_sha256 }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        shell: pwsh
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
         run: |
-          if ($env:PREBUILT_RUN -notmatch '^[0-9]+$') { throw 'Invalid source run' }
-          $version = node -p "require('./package.json').version"
-          $distribution = Join-Path $PWD ".cache/tauri-editions/online/artifacts/$version"
-          $download = Join-Path $env:RUNNER_TEMP 'prebuilt-download'
-          $names = @(gh api "repos/$env:GITHUB_REPOSITORY/actions/runs/$env:PREBUILT_RUN/artifacts" --jq '.artifacts[]|select(.name|startswith("infinite-canvas-windows-online-"))|.name')
-          if ($LASTEXITCODE -ne 0 -or $names.Count -ne 1) { throw 'Expected one signed Windows artifact' }
-          gh run download $env:PREBUILT_RUN --repo $env:GITHUB_REPOSITORY --name $names[0] --dir $download
-          if ($LASTEXITCODE -ne 0) { throw 'Could not download the signed artifact' }
-          $artifactRoot = if (Test-Path (Join-Path $download 'distribution.json')) { $download } else { Join-Path $download $version }
-          if (-not (Test-Path (Join-Path $artifactRoot 'distribution.json'))) { throw 'Unexpected artifact layout' }
-          New-Item -ItemType Directory -Path $distribution -Force | Out-Null
-          foreach ($name in @('distribution.json','build-source.json','publish-manifest.json','latest.json')) {
-            Copy-Item -LiteralPath (Join-Path $artifactRoot $name) -Destination (Join-Path $distribution $name)
-          }
-          Copy-Item -LiteralPath (Join-Path $artifactRoot 'nsis') -Destination $distribution -Recurse
-          pnpm ffmpeg:prepare
-          if ($LASTEXITCODE -ne 0) { throw 'Runtime preparation failed' }
-          $installers = @(Get-ChildItem -LiteralPath (Join-Path $distribution 'nsis') -Filter '*.exe' -File)
-          if ($installers.Count -ne 1) { throw 'Expected one verified installer' }
-          $extracted = Join-Path $env:RUNNER_TEMP 'prebuilt-extracted'
-          & 'C:\Program Files\7-Zip\7z.exe' x $installers[0].FullName 'infinite-canvas.exe' "-o$extracted" -y -bso0 -bsp0
-          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the frozen executable' }
-          $native = Join-Path $PWD '.cache/tauri-editions/online/target/release/infinite-canvas.exe'
-          New-Item -ItemType Directory -Path (Split-Path $native) -Force | Out-Null
-          Copy-Item -LiteralPath (Join-Path $extracted 'infinite-canvas.exe') -Destination $native -Force
-          node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises';import path from 'node:path';import {editionBuildPlan,writeEditionTargetMarker} from './scripts/tauri-build-edition.mjs';import {assertEditionBuildSourceFreshness} from './scripts/edition-source-fingerprint.mjs';import {verifyEditionRelease} from './scripts/verify-edition-release.mjs';const root=process.cwd();const version=JSON.parse(await readFile('package.json','utf8')).version;const directory=path.join(root,'.cache/tauri-editions/online/artifacts',version);const record=JSON.parse(await readFile(path.join(directory,'build-source.json'),'utf8'));const native=path.join(root,'.cache/tauri-editions/online/target/release/infinite-canvas.exe');const bytes=await readFile(native);const bundled=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_NSS');const compiled=Buffer.from('__TAURI_BUNDLE_TYPE_VAR_UNK');const {createHash}=await import('node:crypto');const offsets=[];for(let offset=bytes.indexOf(bundled);offset>=0;offset=bytes.indexOf(bundled,offset+1))offsets.push(offset);if(offsets.length<1||offsets.length>8)throw new Error('Unexpected Tauri bundle markers');const candidates=offsets.map(offset=>{const candidate=Buffer.from(bytes);compiled.copy(candidate,offset);return candidate;}).filter(candidate=>createHash('sha256').update(candidate).digest('hex')===record.nativeExecutable.sha256);if(candidates.length!==1)throw new Error('No unique original compiled executable matches the frozen hash');await writeFile(native,candidates[0]);await assertEditionBuildSourceFreshness(record,{root,edition:'online',applicationVersion:version,executablePath:path.join(root,'.cache/tauri-editions/online/target/release/infinite-canvas.exe')});const {writeEditionOverrideConfig}=await import('./scripts/tauri-build-edition.mjs');await writeEditionOverrideConfig(editionBuildPlan('online'),root);await writeEditionTargetMarker(editionBuildPlan('online'),version);"
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen native source verification failed' }
-          $env:CARGO_TARGET_DIR = Join-Path $PWD '.cache/tauri-editions/online/target'
-          $env:IC_DISTRIBUTION_EDITION = 'online'
-          pnpm tauri bundle --bundles nsis --config .cache/tauri-editions/online/tauri-edition.generated.json --ci
-          if ($LASTEXITCODE -ne 0) { throw 'NSIS recipe regeneration failed' }
-          node --input-type=module -e "import {readFile,writeFile} from 'node:fs/promises';import path from 'node:path';import {verifyEditionRelease} from './scripts/verify-edition-release.mjs';const root=process.cwd();const version=JSON.parse(await readFile('package.json','utf8')).version;const directory=path.join(root,'.cache/tauri-editions/online/artifacts',version);const manifestPath=path.join(directory,'publish-manifest.json');const manifest=JSON.parse(await readFile(manifestPath,'utf8'));for(const item of manifest.artifacts)item.localPath=path.join(directory,item.path);if(manifest.feed)manifest.feed.localPath=path.join(directory,'latest.json');await writeFile(manifestPath,JSON.stringify(manifest,null,2)+'\n');console.log(JSON.stringify(await verifyEditionRelease({distributionDirectory:directory,requireSourceFreshness:true})));"
-          if ($LASTEXITCODE -ne 0) { throw 'Frozen artifact verification failed' }
-          if ($env:VALIDATED_INSTALLER_SHA256) {
-            if ($env:VALIDATED_INSTALLER_SHA256 -notmatch '^[a-f0-9]{64}$') { throw 'Invalid desktop acceptance hash' }
-            $actual = (Get-FileHash -LiteralPath $installers[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $env:VALIDATED_INSTALLER_SHA256) { throw 'Desktop acceptance belongs to a different installer' }
-            Write-Host "Desktop accepted installer SHA256: $actual"
-          }
-      - name: Build signed Windows online installer
-        if: inputs.prebuilt_run == ''
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: pnpm tauri:build:online --bundles nsis
-      - name: Launch packaged application and create media nodes
-        if: inputs.validated_installer_sha256 == '' || inputs.prebuilt_run == ''
-        shell: pwsh
-        run: |
-          $validation = Join-Path $env:RUNNER_TEMP 'canvas-release-validation'
-          New-Item -ItemType Directory -Path $validation -Force | Out-Null
-          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9438'
-          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $validation 'webview'
-          $version = node -p "require('./package.json').version"
-          $installers = @(Get-ChildItem -LiteralPath ".cache/tauri-editions/online/artifacts/$version/nsis" -Filter '*.exe' -File)
-          if ($installers.Count -ne 1) { throw 'Expected one signed installer' }
-          $installed = Join-Path $validation 'installed'
-          $setup = Start-Process -FilePath $installers[0].FullName -ArgumentList @('/S', "/D=$installed") -WindowStyle Hidden -Wait -PassThru
-          if ($setup.ExitCode -notin @(0,3010)) { throw "Installer failed with exit $($setup.ExitCode)" }
-          $executable = Join-Path $installed 'infinite-canvas.exe'
-          $application = Start-Process -FilePath $executable -WorkingDirectory $installed -WindowStyle Normal -PassThru
-          try {
-            @'
-          import { writeFile } from 'node:fs/promises';
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          mkdir "$RUNNER_TEMP/ic-release-source"
+          git show "$GITHUB_SHA:.github/release-input/mac-260-index.json" > "$RUNNER_TEMP/ic-release-source.json"
+          node --input-type=module <<'NODE'
+          import { createDecipheriv, createHash } from 'node:crypto';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
           import path from 'node:path';
-          let targets;
-          for (let n = 0; n < 40; n++) {
-            try { targets = await fetch('http://127.0.0.1:9438/json').then(r => r.json()); if (targets.some(p => p.type === 'page' && p.url.includes('tauri.localhost'))) break; } catch {}
-            await new Promise(r => setTimeout(r, 500));
+          const temp = process.env.RUNNER_TEMP;
+          const key = process.env.IC_RELEASE_SNAPSHOT_KEY?.trim() ?? '';
+          if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Missing encrypted source key');
+          const index = JSON.parse(readFileSync(path.join(temp, 'ic-release-source.json'), 'utf8'));
+          if (index.base !== 'e5a19b05aafe354d73a662d8296b524a68c7c322' || !Array.isArray(index.parts) ||
+              !index.parts.every(name => /^mac-260-source\.enc\.[0-9]+$/.test(name)))
+            throw new Error('Invalid source snapshot descriptor');
+          const bytes = Buffer.concat(index.parts.map(name => execFileSync('git',
+            ['show', process.env.GITHUB_SHA + ':.github/release-input/' + name], { maxBuffer: 60 * 1024 ** 2 })));
+          const decipher = createDecipheriv('aes-256-gcm', Buffer.from(key, 'hex'), bytes.subarray(0,12));
+          decipher.setAuthTag(bytes.subarray(-16));
+          const archive = Buffer.concat([decipher.update(bytes.subarray(12,-16)),decipher.final()]);
+          if (createHash('sha256').update(archive).digest('hex') !== index.sourceSha256)
+            throw new Error('Source snapshot digest mismatch');
+          writeFileSync(path.join(temp, 'ic-release-source.tar.gz'), archive, {mode:0o600});
+          NODE
+          tar -xzf "$RUNNER_TEMP/ic-release-source.tar.gz" -C "$RUNNER_TEMP/ic-release-source"
+          node --input-type=module <<'NODE'
+          import { cpSync, readFileSync, rmSync } from 'node:fs';
+          import path from 'node:path';
+          const source = path.join(process.env.RUNNER_TEMP, 'ic-release-source');
+          for (const entry of JSON.parse(readFileSync(path.join(source, 'removed.json'), 'utf8'))) {
+            if (path.isAbsolute(entry) || entry.split('/').some(part => !part || part === '..' || part === '.git'))
+              throw new Error('Unsafe source removal');
+            rmSync(path.resolve(entry), {force:true});
           }
-          const target = targets?.find(p => p.type === 'page' && p.url.includes('tauri.localhost'));
-          if (!target) throw new Error('Packaged application did not expose its main WebView');
-          const socket = new WebSocket(target.webSocketDebuggerUrl);
-          await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
-          let sequence = 0;
-          const pending = new Map();
-          const errors = [];
-          socket.addEventListener('message', event => {
-            const message = JSON.parse(event.data);
-            if (message.method === 'Runtime.exceptionThrown') errors.push(message.params.exceptionDetails.text);
-            const request = pending.get(message.id);
-            if (request) { pending.delete(message.id); clearTimeout(request.timer); message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result); }
-          });
-          const call = (method, params = {}) => new Promise((resolve, reject) => {
-            const id = ++sequence;
-            const timer = setTimeout(() => { pending.delete(id); reject(new Error(`WebView command timed out: ${method}`)); }, 15000);
-            pending.set(id, { resolve, reject, timer });
-            socket.send(JSON.stringify({ id, method, params }));
-          });
-          const run = async fn => {
-            const result = await call('Runtime.evaluate', { expression: `(${fn.toString()})()`, returnByValue: true, awaitPromise: true });
-            if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
-            return result.result.value;
-          };
-          await call('Runtime.enable');
-          const version = await run(async () => {
-            const wait = async predicate => { for (let n = 0; n < 100; n++) { if (predicate()) return; await new Promise(r => setTimeout(r, 100)); } throw new Error('Workspace did not become ready'); };
-            await wait(() => document.querySelector('button[aria-label="新建画布"]'));
-            [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '跳过' && b.getBoundingClientRect().width)?.click();
-            await wait(() => document.querySelector('.canvas-empty-hint button'));
-            [...document.querySelectorAll('.canvas-empty-hint button')].find(b => b.textContent.includes('图片生成')).click();
-            await wait(() => [...document.querySelectorAll('[contenteditable="true"]')].some(e => e.getBoundingClientRect().width));
-            [...document.querySelectorAll('[contenteditable="true"]')].find(e => e.getBoundingClientRect().width).focus();
-            return window.__TAURI__.core.invoke('plugin:app|version');
-          });
-          await call('Input.insertText', { text: 'Native release validation' });
-          await run(async () => {
-            document.querySelector('button[aria-label="添加节点"]').click();
-            for (let n = 0; n < 50; n++) {
-              const button = [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '视频' && b.getBoundingClientRect().width);
-              if (button) { button.click(); return; }
-              await new Promise(r => setTimeout(r, 100));
-            }
-            throw new Error('Video node menu did not open');
-          });
-          await new Promise(r => setTimeout(r, 1500));
-          const state = await run(() => ({ nodes: document.querySelectorAll('.react-flow__node').length, renderLoop: document.body.innerText.includes('Maximum update depth') }));
-          const expected = JSON.parse(await import('node:fs').then(fs => fs.readFileSync('package.json', 'utf8'))).version;
-          if (version !== expected || state.nodes !== 2 || state.renderLoop || errors.length) throw new Error('Packaged media node acceptance failed');
-          const capture = await call('Page.captureScreenshot', { format: 'png' });
-          await writeFile(path.join(process.env.RUNNER_TEMP, 'canvas-release-validation', 'installed-app.png'), Buffer.from(capture.data, 'base64'));
-          console.log(JSON.stringify({ version, ...state, runtimeErrors: errors.length }));
-          socket.close();
-          '@ | Set-Content -LiteralPath (Join-Path $validation 'acceptance.mjs') -Encoding utf8
-            node (Join-Path $validation 'acceptance.mjs')
-            if ($LASTEXITCODE -ne 0) { throw 'Native application acceptance failed' }
-          } finally {
-            Stop-Process -Id $application.Id -ErrorAction SilentlyContinue
-          }
-      - name: Upload installation artifacts
-        if: ${{ !cancelled() && hashFiles('.cache/tauri-editions/online/artifacts/*/distribution.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-windows-online-${{ github.sha }}
-          path: .cache/tauri-editions/online/artifacts/*/
-          include-hidden-files: true
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-      - name: Upload application launch evidence
-        if: ${{ !cancelled() && hashFiles(format('{0}/canvas-release-validation/installed-app.png', runner.temp)) != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: infinite-canvas-windows-launch-${{ github.sha }}
-          path: ${{ runner.temp }}/canvas-release-validation/installed-app.png
-          if-no-files-found: error
-          retention-days: 14
-      - name: Publish verified Windows online update
-        if: inputs.publish
+          cpSync(path.join(source, 'files'), process.cwd(), {recursive:true});
+          NODE
+          git show "$GITHUB_SHA:.github/release-input/mac-260-seal-log.mjs" > "$RUNNER_TEMP/ic-seal-build-log.mjs"
+          git show "$GITHUB_SHA:.github/release-input/mac-260-live-upgrade.mjs" > scripts/verify-macos-live-upgrade-2.6.0.mjs
+          test "$(node -p "require('./package.json').version")" = 2.6.0
+          test "$(uname -m)" = arm64 && test "$(node -p 'process.arch')" = arm64
+          rm -rf "$RUNNER_TEMP/ic-release-source"
+          rm -f "$RUNNER_TEMP/ic-release-source.tar.gz"
+          echo 'Encrypted build inputs restored on native arm64.'
+      - name: Prepare dependencies and check compilers
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          if env -u IC_RELEASE_SNAPSHOT_KEY bash -e -c \
+            'pnpm install --frozen-lockfile && pnpm ffmpeg:prepare && pnpm typecheck && pnpm rust:check' \
+            > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
+            echo 'TypeScript and Rust compiler checks passed on Apple Silicon.'
+          else
+            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
+            exit 1
+          fi
+      - name: Build signed installer and verify native installation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
+        run: |
+          started=$(date +%s)
+          if env -u IC_RELEASE_SNAPSHOT_KEY bash -e -c \
+            'bash scripts/prepare-macos-online-signing.sh && bash scripts/build-macos-online.sh' \
+            > "$RUNNER_TEMP/ic-native-build.log" 2>&1; then
+            echo "Native build and installation verified in $(( $(date +%s) - started )) seconds."
+            grep -E 'Verified macOS|Finished .*release|Native one-command PKG' "$RUNNER_TEMP/ic-native-build.log" || true
+          else
+            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
+            exit 1
+          fi
+      - name: Stage, reconstruct and publish the signed macOS delta
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
           TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
-        shell: pwsh
+          IC_RELEASE_SNAPSHOT_KEY: ${{ secrets.IC_RELEASE_MAC_260_SOURCE_KEY }}
         run: |
-          $version = node -p "require('./package.json').version"
-          pnpm update:publish:online --distribution-dir ".cache/tauri-editions/online/artifacts/$version"
+          if env -u IC_RELEASE_SNAPSHOT_KEY node --input-type=module > "$RUNNER_TEMP/ic-native-build.log" 2>&1 <<'NODE'
+          import assert from 'node:assert/strict';
+          import { writeFileSync } from 'node:fs';
+          import path from 'node:path';
+          import { prepareOnlinePublication, publishVerifiedOnlinePlan } from './scripts/publish-online-updates.mjs';
+          import { prepareMacOnlineDelta } from './scripts/macos-online-delta.mjs';
+          import { verifyEditionRelease } from './scripts/verify-edition-release.mjs';
+          const plan = await prepareOnlinePublication({distributionDirectory:'.cache/tauri-editions/online/artifacts/2.6.0'});
+          assert.equal(plan.platform,'darwin-aarch64');
+          const candidate = await prepareMacOnlineDelta(plan);
+          try {
+            assert.equal(candidate.plan.requiredPreviousFeedSha256,'35f8cd607dcd6d343f4522994e811e810acfdb87073af741fa4b4061a99262be');
+            assert.equal(candidate.plan.macDelta.baseVersion,'2.0.1');
+            const report = await publishVerifiedOnlinePlan({
+              plan:candidate.plan, verifyRelease:verifyEditionRelease, updaterOnly:true,
+              onProgress: item => {
+                if (item.phase === 'feed-committed' || item.phase === 'uploaded') console.log(JSON.stringify(item));
+              },
+            });
+            assert.equal(report.published,true);
+            assert.equal(report.publicObjectsVerified,true);
+            writeFileSync(path.join(process.env.RUNNER_TEMP,'mac-260-publish.json'), JSON.stringify({
+              version:report.applicationVersion, ...report.macDelta,
+              feed:report.feed, objects:report.objects, previousBackup:report.previousFeedBackup,
+              nativeReconstructionVerified:true, publicObjectsVerified:true,
+            },null,2) + '\n');
+          } finally {
+            await candidate.dispose();
+          }
+          NODE
+          then
+            cat "$RUNNER_TEMP/mac-260-publish.json"
+          else
+            node "$RUNNER_TEMP/ic-seal-build-log.mjs"
+            exit 1
+          fi
+      - name: Verify automatic upgrade from the published feed
+        run: node scripts/verify-macos-live-upgrade-2.6.0.mjs
+      - name: Retain release receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-2.6.0-arm64-release-receipts
+          path: |
+            ${{ runner.temp }}/mac-260-publish.json
+            ${{ runner.temp }}/ic-live-upgrade-evidence/native-delta-upgrade.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain verified native packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-2.6.0-arm64-native-packages
+          path: .cache/tauri-editions/online/artifacts/2.6.0/
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 14
+      - name: Retain encrypted diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-2.6.0-encrypted-errors
+          path: ${{ runner.temp }}/ic-native-build.log.enc
+          if-no-files-found: ignore
+          retention-days: 2
+

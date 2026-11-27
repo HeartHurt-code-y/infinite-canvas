@@ -1,0 +1,16 @@
+{
+  "base": "e5a19b05aafe354d73a662d8296b524a68c7c322",
+  "changedFiles": 4841,
+  "removedFiles": 110,
+  "sourceBytes": 247644474,
+  "sourceSha256": "9786a50cda4250b406e13e8673bb96b8214102910f9292bb15471915a80cdad5",
+  "parts": [
+    "mac-260-source.enc.0",
+    "mac-260-source.enc.1",
+    "mac-260-source.enc.2",
+    "mac-260-source.enc.3",
+    "mac-260-source.enc.4",
+    "mac-260-source.enc.5",
+    "mac-260-source.enc.6"
+  ]
+}
